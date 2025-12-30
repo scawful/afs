@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <utility>
 #include <optional>
@@ -175,6 +176,88 @@ std::filesystem::path ResolveTrainingDataPath(const std::string& filename,
     }
   }
   return {};
+}
+
+struct MountSpec {
+  std::string name;
+  std::string path;
+};
+
+std::optional<std::filesystem::path> ResolveScawfulMountsPath(
+    const std::filesystem::path& plugin_root,
+    const DataLoader::PathExists& exists) {
+  const char* env_path = std::getenv("AFS_SCAWFUL_MOUNTS");
+  if (env_path && env_path[0] != '\0') {
+    auto candidate = studio::core::FileSystem::ResolvePath(env_path);
+    if (exists(candidate.string())) {
+      return candidate;
+    }
+  }
+
+  const std::filesystem::path candidates[] = {
+      plugin_root / "config" / "mounts.json",
+      studio::core::FileSystem::ResolvePath("~/.config/afs/afs_scawful/mounts.json"),
+      studio::core::FileSystem::ResolvePath(
+          "~/.config/afs/plugins/afs_scawful/config/mounts.json"),
+  };
+
+  for (const auto& candidate : candidates) {
+    if (exists(candidate.string())) {
+      return candidate;
+    }
+  }
+
+  return std::nullopt;
+}
+
+std::vector<MountSpec> LoadScawfulMounts(
+    const std::filesystem::path& config_path,
+    const DataLoader::FileReader& file_reader) {
+  std::vector<MountSpec> mounts;
+  if (config_path.empty()) {
+    return mounts;
+  }
+
+  std::string content;
+  std::string read_error;
+  if (!file_reader(config_path.string(), &content, &read_error) || content.empty()) {
+    LOG_WARN("DataLoader: Failed to read mounts config: " + config_path.string());
+    return mounts;
+  }
+
+  try {
+    json data = json::parse(content);
+    if (!data.contains("mounts") || !data["mounts"].is_array()) {
+      return mounts;
+    }
+
+    std::set<std::string> seen;
+    for (const auto& entry : data["mounts"]) {
+      if (!entry.is_object()) {
+        continue;
+      }
+      if (entry.contains("enabled") && entry["enabled"].is_boolean() &&
+          !entry["enabled"].get<bool>()) {
+        continue;
+      }
+      std::string name = entry.value("name", "");
+      if (name.empty()) {
+        name = entry.value("label", "");
+      }
+      std::string path = entry.value("path", "");
+      if (name.empty() || path.empty()) {
+        continue;
+      }
+      if (!seen.insert(name).second) {
+        continue;
+      }
+      mounts.push_back({name, path});
+    }
+  } catch (const json::exception& e) {
+    LOG_WARN(std::string("DataLoader: Failed to parse mounts config: ") + e.what());
+  }
+
+  return mounts;
 }
 
 constexpr float kTrendDeltaThreshold = 0.05f;
@@ -399,11 +482,13 @@ bool DataLoader::Refresh() {
   auto plugin_root = ResolveHafsScawfulRoot();
   if (plugin_root) {
     add_mount("AFS Plugin", plugin_root->string());
-  }
-  const char* extra_mount = std::getenv("AFS_EXTRA_MOUNT");
-  if (extra_mount && extra_mount[0] != '\0') {
-    const char* label = std::getenv("AFS_EXTRA_MOUNT_LABEL");
-    add_mount(label && label[0] != '\0' ? label : "Extra Mount", extra_mount);
+    auto mounts_path = ResolveScawfulMountsPath(*plugin_root, path_exists_);
+    if (mounts_path) {
+      auto extra_mounts = LoadScawfulMounts(*mounts_path, file_reader_);
+      for (const auto& mount : extra_mounts) {
+        add_mount(mount.name, mount.path);
+      }
+    }
   }
   add_mount("AFS Context", ResolveContextRoot().string());
   add_mount("AFS Training", ResolveTrainingRoot().string());
