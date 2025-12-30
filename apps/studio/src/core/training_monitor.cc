@@ -10,23 +10,158 @@
 namespace afs {
 namespace studio {
 
+namespace {
+
+std::optional<std::filesystem::path> ResolveTrainingMonitorConfigPath() {
+  const char* env_path = std::getenv("AFS_TRAINING_MONITOR_CONFIG");
+  if (env_path && env_path[0] != '\0') {
+    auto candidate = core::FileSystem::ResolvePath(env_path);
+    if (core::FileSystem::Exists(candidate)) {
+      return candidate;
+    }
+  }
+
+  const char* env_mounts = std::getenv("AFS_SCAWFUL_MOUNTS");
+  if (env_mounts && env_mounts[0] != '\0') {
+    auto candidate = core::FileSystem::ResolvePath(env_mounts);
+    if (core::FileSystem::Exists(candidate)) {
+      return candidate;
+    }
+  }
+
+  const std::filesystem::path candidates[] = {
+      core::FileSystem::ResolvePath("~/.config/afs/afs_scawful/mounts.json"),
+      core::FileSystem::ResolvePath("~/.config/afs/afs_scawful/training_monitor.json"),
+      core::FileSystem::ResolvePath("~/.config/afs/plugins/afs_scawful/config/mounts.json"),
+      core::FileSystem::ResolvePath(
+          "~/.config/afs/plugins/afs_scawful/config/training_monitor.json"),
+  };
+
+  for (const auto& candidate : candidates) {
+    if (core::FileSystem::Exists(candidate)) {
+      return candidate;
+    }
+  }
+
+  return std::nullopt;
+}
+
+std::filesystem::path NormalizeWindowsSubpath(const std::string& raw_path) {
+  if (raw_path.empty()) {
+    return {};
+  }
+
+  std::string cleaned = raw_path;
+  std::replace(cleaned.begin(), cleaned.end(), '\\', '/');
+  auto colon = cleaned.find(':');
+  if (colon != std::string::npos) {
+    cleaned = cleaned.substr(colon + 1);
+  }
+  while (!cleaned.empty() && (cleaned.front() == '/' || cleaned.front() == '\\')) {
+    cleaned.erase(cleaned.begin());
+  }
+  return std::filesystem::path(cleaned);
+}
+
+bool LoadTrainingMonitorConfig(const std::filesystem::path& config_path,
+                               TrainingMonitorConfig* config,
+                               bool allow_mount_override,
+                               bool* use_training_dir) {
+  if (!config || !use_training_dir) {
+    return false;
+  }
+
+  std::ifstream file(config_path);
+  if (!file.is_open()) {
+    return false;
+  }
+
+  try {
+    nlohmann::json data = nlohmann::json::parse(file);
+    if (data.contains("training_monitor") && data["training_monitor"].is_object()) {
+      data = data["training_monitor"];
+    }
+    if (!data.is_object()) {
+      return false;
+    }
+
+    if (allow_mount_override && data.contains("windows_mount_path") &&
+        data["windows_mount_path"].is_string()) {
+      config->windows_mount_path =
+          core::FileSystem::ResolvePath(data["windows_mount_path"].get<std::string>());
+    }
+
+    if (data.contains("windows_training_dir") && data["windows_training_dir"].is_string()) {
+      config->windows_training_dir = data["windows_training_dir"].get<std::string>();
+      *use_training_dir = !config->windows_training_dir.empty();
+    }
+
+    if (data.contains("ssh_host") && data["ssh_host"].is_string()) {
+      config->ssh_host = data["ssh_host"].get<std::string>();
+    }
+    if (data.contains("ssh_user") && data["ssh_user"].is_string()) {
+      config->ssh_user = data["ssh_user"].get<std::string>();
+    }
+
+    if (data.contains("auto_refresh") && data["auto_refresh"].is_boolean()) {
+      config->auto_refresh = data["auto_refresh"].get<bool>();
+    }
+    if (data.contains("refresh_interval_seconds") &&
+        data["refresh_interval_seconds"].is_number_integer()) {
+      config->refresh_interval_seconds =
+          data["refresh_interval_seconds"].get<int>();
+    }
+
+    if (data.contains("watched_paths") && data["watched_paths"].is_array()) {
+      config->watched_paths.clear();
+      for (const auto& entry : data["watched_paths"]) {
+        if (entry.is_string()) {
+          config->watched_paths.push_back(entry.get<std::string>());
+        }
+      }
+    }
+
+    return true;
+  } catch (const nlohmann::json::exception& e) {
+    LOG_WARN(std::string("TrainingMonitor: Failed to parse config: ") + e.what());
+  }
+
+  return false;
+}
+
+}  // namespace
+
 TrainingMonitor::TrainingMonitor() {
+  bool allow_mount_override = true;
   // Default Windows mount (optional).
   const char* env_mount = std::getenv("AFS_WINDOWS_MOUNT");
   if (env_mount && env_mount[0] != '\0') {
     config_.windows_mount_path = core::FileSystem::ResolvePath(env_mount);
-    return;
+    allow_mount_override = false;
   }
 
   const char* home = std::getenv("HOME");
-  if (home) {
+  if (allow_mount_override && home) {
     config_.windows_mount_path =
         std::filesystem::path(home) / "Mounts" / "windows-training";
+  }
+
+  const char* env_training_dir = std::getenv("AFS_WINDOWS_TRAINING_DIR");
+  if (env_training_dir && env_training_dir[0] != '\0') {
+    config_.windows_training_dir = env_training_dir;
+    use_training_dir_ = true;
+  }
+
+  auto config_path = ResolveTrainingMonitorConfigPath();
+  if (config_path) {
+    LoadTrainingMonitorConfig(*config_path, &config_, allow_mount_override,
+                              &use_training_dir_);
   }
 }
 
 TrainingMonitor::TrainingMonitor(const TrainingMonitorConfig& config)
-    : config_(config) {}
+    : config_(config),
+      use_training_dir_(!config.windows_training_dir.empty()) {}
 
 std::filesystem::path TrainingMonitor::ResolveWindowsMount() const {
   // Check if mount is accessible
@@ -78,7 +213,14 @@ bool TrainingMonitor::Poll(std::string* error) {
   std::filesystem::path mount = ResolveWindowsMount();
   if (!mount.empty()) {
     // Look for active training dirs
-    std::filesystem::path models_dir = mount / "models";
+    std::filesystem::path models_dir = mount;
+    if (use_training_dir_ && !config_.windows_training_dir.empty()) {
+      auto subdir = NormalizeWindowsSubpath(config_.windows_training_dir);
+      if (!subdir.empty()) {
+        models_dir /= subdir;
+      }
+    }
+    models_dir /= "models";
     if (core::FileSystem::Exists(models_dir)) {
       // Find the most recently modified model directory
       std::filesystem::path latest_model;

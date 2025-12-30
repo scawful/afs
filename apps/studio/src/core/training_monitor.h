@@ -86,7 +86,7 @@ struct TrainingState {
 struct TrainingMonitorConfig {
   // Windows mount point
   std::filesystem::path windows_mount_path;
-  std::string windows_training_dir = "D:/afs_training";
+  std::string windows_training_dir;
 
   // SSH config (fallback if mount not available)
   std::string ssh_host;
@@ -127,7 +127,10 @@ class TrainingMonitor {
 
   // Configuration
   const TrainingMonitorConfig& GetConfig() const { return config_; }
-  void SetConfig(const TrainingMonitorConfig& config) { config_ = config; }
+  void SetConfig(const TrainingMonitorConfig& config) {
+    config_ = config;
+    use_training_dir_ = !config_.windows_training_dir.empty();
+  }
 
   // Error handling
   const std::string& GetLastError() const { return last_error_; }
@@ -139,6 +142,7 @@ class TrainingMonitor {
   std::filesystem::path ResolveWindowsMount() const;
 
   TrainingMonitorConfig config_;
+  bool use_training_dir_ = false;
   TrainingState state_;
   std::chrono::steady_clock::time_point last_poll_time_;
   std::string last_error_;
