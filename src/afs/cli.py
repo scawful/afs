@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .config import load_config_model
+from .core import find_root, resolve_context_root
 from .plugins import discover_plugins, load_plugins
 from .schema import AFSConfig, GeneralConfig, WorkspaceDirectory
 
@@ -128,6 +129,27 @@ def _plugins_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _status_command(args: argparse.Namespace) -> int:
+    start_dir = Path(args.start_dir).expanduser().resolve() if args.start_dir else None
+    root = find_root(start_dir)
+    config = load_config_model()
+    context_root = resolve_context_root(config, root)
+
+    print(f"context_root: {context_root}")
+    print(f"linked_root: {root if root else '(none)'}")
+
+    missing = []
+    for name in AFS_DIRS:
+        if not (context_root / name).exists():
+            missing.append(name)
+    if missing:
+        print("missing_dirs: " + ", ".join(missing))
+    else:
+        print("missing_dirs: (none)")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="afs")
     subparsers = parser.add_subparsers(dest="command")
@@ -146,6 +168,10 @@ def build_parser() -> argparse.ArgumentParser:
     plugins_parser.add_argument("--config", help="Config path for plugin discovery.")
     plugins_parser.add_argument("--load", action="store_true", help="Attempt to import plugins.")
     plugins_parser.set_defaults(func=_plugins_command)
+
+    status_parser = subparsers.add_parser("status", help="Show context root status.")
+    status_parser.add_argument("--start-dir", help="Directory to search from.")
+    status_parser.set_defaults(func=_status_command)
 
     return parser
 
