@@ -26,3 +26,9 @@ def test_service_render_contains_execstart() -> None:
     manager = ServiceManager(config=AFSConfig(), platform_name="linux")
     unit = manager.render_unit("orchestrator")
     assert "ExecStart=" in unit
+
+
+def test_service_render_launchd_contains_label() -> None:
+    manager = ServiceManager(config=AFSConfig(), platform_name="darwin")
+    payload = manager.render_unit("orchestrator")
+    assert "\"Label\"" in payload

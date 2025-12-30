@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import platform
 import sys
 from pathlib import Path
@@ -10,6 +9,9 @@ from typing import Iterable
 
 from ..config import load_config_model
 from ..schema import AFSConfig, ServiceConfig
+from .adapters.base import ServiceAdapter
+from .adapters.launchd import LaunchdAdapter
+from .adapters.systemd import SystemdAdapter
 from .models import ServiceDefinition, ServiceState, ServiceStatus, ServiceType
 
 
@@ -26,6 +28,7 @@ class ServiceManager:
         self.config = config or load_config_model()
         self.service_root = service_root or Path.home() / ".config" / "afs" / "services"
         self.platform_name = platform_name or platform.system().lower()
+        self._adapter = self._build_adapter(self.platform_name)
 
     def list_definitions(self) -> list[ServiceDefinition]:
         definitions = self._builtin_definitions()
@@ -40,11 +43,7 @@ class ServiceManager:
         definition = self.get_definition(name)
         if not definition:
             raise KeyError(f"Unknown service: {name}")
-
-        if self.platform_name.startswith("darwin"):
-            payload = render_launchd_plist(definition)
-            return json.dumps(payload, indent=2)
-        return render_systemd_unit(definition)
+        return self._adapter.render(definition)
 
     def status(self, name: str) -> ServiceStatus:
         definition = self.get_definition(name)
@@ -117,6 +116,14 @@ class ServiceManager:
             ),
         }
 
+    def _build_adapter(self, platform_name: str) -> ServiceAdapter:
+        platform_name = platform_name.lower()
+        if platform_name.startswith("darwin") or platform_name.startswith("mac"):
+            return LaunchdAdapter()
+        if platform_name.startswith("linux"):
+            return SystemdAdapter()
+        return SystemdAdapter()
+
     def _resolve_python_executable(self) -> str:
         if self.config.general.python_executable:
             return str(self.config.general.python_executable)
@@ -158,41 +165,3 @@ def _merge_definition(
         run_at_load=override.auto_start,
     )
 
-
-def render_launchd_plist(definition: ServiceDefinition) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "Label": f"afs.{definition.name}",
-        "ProgramArguments": list(definition.command),
-        "RunAtLoad": bool(definition.run_at_load),
-        "KeepAlive": bool(definition.keep_alive),
-    }
-    if definition.working_directory:
-        payload["WorkingDirectory"] = str(definition.working_directory)
-    if definition.environment:
-        payload["EnvironmentVariables"] = dict(definition.environment)
-    return payload
-
-
-def render_systemd_unit(definition: ServiceDefinition) -> str:
-    lines = [
-        "[Unit]",
-        f"Description={definition.label}",
-        "",
-        "[Service]",
-        f"ExecStart={' '.join(definition.command)}",
-    ]
-    if definition.working_directory:
-        lines.append(f"WorkingDirectory={definition.working_directory}")
-    if definition.environment:
-        for key, value in definition.environment.items():
-            lines.append(f"Environment={key}={value}")
-    if definition.service_type == ServiceType.ONESHOT:
-        lines.append("Type=oneshot")
-    if definition.keep_alive:
-        lines.append("Restart=on-failure")
-    lines.extend([
-        "",
-        "[Install]",
-        "WantedBy=default.target",
-    ])
-    return "\n".join(lines)
