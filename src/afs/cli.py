@@ -12,7 +12,9 @@ from .discovery import discover_contexts, get_project_stats
 from .graph import build_graph, default_graph_path, write_graph
 from .manager import AFSManager
 from .models import MountType
+from .orchestration import Orchestrator, TaskRequest
 from .plugins import discover_plugins, load_plugins
+from .services import ServiceManager
 from .schema import AFSConfig, GeneralConfig, WorkspaceDirectory
 from .validator import AFSValidator
 
@@ -158,6 +160,40 @@ def _plugins_command(args: argparse.Namespace) -> int:
     else:
         for name in plugin_names:
             print(name)
+    return 0
+
+
+def _services_list_command(args: argparse.Namespace) -> int:
+    manager = ServiceManager()
+    for definition in manager.list_definitions():
+        print(f"{definition.name}\t{definition.label}")
+    return 0
+
+
+def _services_render_command(args: argparse.Namespace) -> int:
+    manager = ServiceManager()
+    print(manager.render_unit(args.name))
+    return 0
+
+
+def _orchestrator_list_command(args: argparse.Namespace) -> int:
+    orchestrator = Orchestrator()
+    for agent in orchestrator.list_agents():
+        tags = ",".join(agent.tags) if agent.tags else "-"
+        print(f"{agent.name}\t{agent.role}\t{agent.backend}\t{tags}")
+    return 0
+
+
+def _orchestrator_plan_command(args: argparse.Namespace) -> int:
+    orchestrator = Orchestrator()
+    request = TaskRequest(summary=args.summary, tags=args.tag or [], role=args.role)
+    plan = orchestrator.plan(request)
+    if plan.notes:
+        for note in plan.notes:
+            print(f"note: {note}")
+    for agent in plan.agents:
+        tags = ",".join(agent.tags) if agent.tags else "-"
+        print(f"{agent.name}\t{agent.role}\t{agent.backend}\t{tags}")
     return 0
 
 
@@ -522,6 +558,28 @@ def build_parser() -> argparse.ArgumentParser:
     plugins_parser.add_argument("--load", action="store_true", help="Attempt to import plugins.")
     plugins_parser.set_defaults(func=_plugins_command)
 
+    services_parser = subparsers.add_parser("services", help="Service definitions.")
+    services_sub = services_parser.add_subparsers(dest="services_command")
+
+    services_list = services_sub.add_parser("list", help="List service definitions.")
+    services_list.set_defaults(func=_services_list_command)
+
+    services_render = services_sub.add_parser("render", help="Render service unit.")
+    services_render.add_argument("name", help="Service name.")
+    services_render.set_defaults(func=_services_render_command)
+
+    orch_parser = subparsers.add_parser("orchestrator", help="Orchestrator helpers.")
+    orch_sub = orch_parser.add_subparsers(dest="orchestrator_command")
+
+    orch_list = orch_sub.add_parser("list", help="List configured agents.")
+    orch_list.set_defaults(func=_orchestrator_list_command)
+
+    orch_plan = orch_sub.add_parser("plan", help="Plan agent routing.")
+    orch_plan.add_argument("summary", help="Task summary.")
+    orch_plan.add_argument("--tag", action="append", help="Tag to match.")
+    orch_plan.add_argument("--role", help="Role to match.")
+    orch_plan.set_defaults(func=_orchestrator_plan_command)
+
     status_parser = subparsers.add_parser("status", help="Show context root status.")
     status_parser.add_argument("--start-dir", help="Directory to search from.")
     status_parser.set_defaults(func=_status_command)
@@ -711,6 +769,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         parser.print_help()
         return 1
     if args.command == "graph" and not getattr(args, "graph_command", None):
+        parser.print_help()
+        return 1
+    if args.command == "services" and not getattr(args, "services_command", None):
+        parser.print_help()
+        return 1
+    if args.command == "orchestrator" and not getattr(args, "orchestrator_command", None):
         parser.print_help()
         return 1
     return args.func(args)

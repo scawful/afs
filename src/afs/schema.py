@@ -183,6 +183,110 @@ class PluginsConfig:
 
 
 @dataclass
+class AgentConfig:
+    name: str
+    role: str = "general"
+    backend: str = "local"
+    description: str = ""
+    tags: list[str] = field(default_factory=list)
+    auto_start: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AgentConfig":
+        tags = data.get("tags", [])
+        if isinstance(tags, list):
+            tags = [tag for tag in tags if isinstance(tag, str)]
+        else:
+            tags = []
+        return cls(
+            name=str(data.get("name", "")).strip(),
+            role=str(data.get("role", "general")).strip() or "general",
+            backend=str(data.get("backend", "local")).strip() or "local",
+            description=str(data.get("description", "")).strip(),
+            tags=tags,
+            auto_start=bool(data.get("auto_start", False)),
+        )
+
+
+@dataclass
+class OrchestratorConfig:
+    enabled: bool = False
+    max_agents: int = 5
+    default_agents: list[AgentConfig] = field(default_factory=list)
+    auto_routing: bool = True
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "OrchestratorConfig":
+        agents_raw = data.get("default_agents", [])
+        agents = [
+            AgentConfig.from_dict(item)
+            for item in agents_raw
+            if isinstance(item, dict)
+        ]
+        max_agents = data.get("max_agents", cls().max_agents)
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            max_agents=int(max_agents) if isinstance(max_agents, int) else cls().max_agents,
+            default_agents=agents,
+            auto_routing=bool(data.get("auto_routing", True)),
+        )
+
+
+@dataclass
+class ServiceConfig:
+    name: str
+    enabled: bool = True
+    auto_start: bool = False
+    command: list[str] = field(default_factory=list)
+    working_directory: Path | None = None
+    environment: dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ServiceConfig":
+        command = data.get("command", [])
+        if isinstance(command, list):
+            command = [str(item) for item in command]
+        else:
+            command = []
+        env = data.get("environment", {})
+        if isinstance(env, dict):
+            environment = {str(key): str(value) for key, value in env.items()}
+        else:
+            environment = {}
+        working_directory = data.get("working_directory")
+        return cls(
+            name=str(data.get("name", "")).strip(),
+            enabled=bool(data.get("enabled", True)),
+            auto_start=bool(data.get("auto_start", False)),
+            command=command,
+            working_directory=_as_path(working_directory)
+            if working_directory
+            else None,
+            environment=environment,
+        )
+
+
+@dataclass
+class ServicesConfig:
+    enabled: bool = False
+    services: dict[str, ServiceConfig] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ServicesConfig":
+        enabled = bool(data.get("enabled", False))
+        raw_services = data.get("services", {})
+        parsed: dict[str, ServiceConfig] = {}
+        if isinstance(raw_services, dict):
+            for name, payload in raw_services.items():
+                if not isinstance(payload, dict):
+                    continue
+                payload = dict(payload)
+                payload.setdefault("name", name)
+                parsed[name] = ServiceConfig.from_dict(payload)
+        return cls(enabled=enabled, services=parsed)
+
+
+@dataclass
 class CognitiveConfig:
     enabled: bool = False
     record_emotions: bool = False
@@ -207,6 +311,8 @@ class AFSConfig:
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
     directories: list[DirectoryConfig] = field(default_factory=default_directory_configs)
     cognitive: CognitiveConfig = field(default_factory=CognitiveConfig)
+    orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
+    services: ServicesConfig = field(default_factory=ServicesConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "AFSConfig":
@@ -215,11 +321,15 @@ class AFSConfig:
         plugins = PluginsConfig.from_dict(data.get("plugins", {}))
         directories = _parse_directory_config(data)
         cognitive = CognitiveConfig.from_dict(data.get("cognitive", {}))
+        orchestrator = OrchestratorConfig.from_dict(data.get("orchestrator", {}))
+        services = ServicesConfig.from_dict(data.get("services", {}))
         return cls(
             general=general,
             plugins=plugins,
             directories=directories,
             cognitive=cognitive,
+            orchestrator=orchestrator,
+            services=services,
         )
 
 
