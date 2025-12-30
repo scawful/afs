@@ -62,7 +62,7 @@ class PluginsConfig:
     plugin_dirs: list[Path] = field(default_factory=list)
     auto_discover: bool = True
     auto_discover_prefixes: list[str] = field(
-        default_factory=lambda: ["afs_plugin"]
+        default_factory=lambda: ["afs_plugin", "afs_scawful"]
     )
 
     @classmethod
@@ -90,13 +90,34 @@ class PluginsConfig:
 
 
 @dataclass
+class CognitiveConfig:
+    enabled: bool = False
+    record_emotions: bool = False
+    record_metacognition: bool = False
+    record_goals: bool = False
+    record_epistemic: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CognitiveConfig":
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            record_emotions=bool(data.get("record_emotions", False)),
+            record_metacognition=bool(data.get("record_metacognition", False)),
+            record_goals=bool(data.get("record_goals", False)),
+            record_epistemic=bool(data.get("record_epistemic", False)),
+        )
+
+
+@dataclass
 class AFSConfig:
     general: GeneralConfig = field(default_factory=GeneralConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
+    cognitive: CognitiveConfig = field(default_factory=CognitiveConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "AFSConfig":
         data = data or {}
         general = GeneralConfig.from_dict(data.get("general", {}))
         plugins = PluginsConfig.from_dict(data.get("plugins", {}))
-        return cls(general=general, plugins=plugins)
+        cognitive = CognitiveConfig.from_dict(data.get("cognitive", {}))
+        return cls(general=general, plugins=plugins, cognitive=cognitive)
