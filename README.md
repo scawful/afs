@@ -22,5 +22,7 @@ Quickstart:
 - `python -m afs context discover --path ~/src/trunk`
 - `python -m afs context ensure-all --path ~/src/trunk`
 - `python -m afs graph export --path ~/src/trunk`
+- `python -m afs services list`
+- `python -m afs orchestrator list`
 
 Discovery skips directory names in `general.discovery_ignore` (default: legacy, archive, archives).

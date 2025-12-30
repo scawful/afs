@@ -5,12 +5,13 @@
 - Context manager (init/ensure/mount/list) + discovery + graph export
 - Plugin discovery + load hooks
 - AFS Studio port (ImGui app)
+- Service definitions + render preview
+- Orchestrator routing skeleton
+- Test harness for core modules
 
 ## Planned
-- Service config + minimal service manager (no auto-start by default)
-- Orchestrator config + routing skeleton
 - TUI starter (status + context browsing)
-- Test harness for core modules
+- Service adapters (dry-run launchd/systemd)
 
 ## Ideas
 - Idea: Full orchestration pipeline (plan/execute/verify) with adapters
