@@ -11,11 +11,17 @@ namespace afs {
 namespace studio {
 
 TrainingMonitor::TrainingMonitor() {
-  // Default Windows mount for medical-mechanica D:
+  // Default Windows mount (optional).
+  const char* env_mount = std::getenv("AFS_WINDOWS_MOUNT");
+  if (env_mount && env_mount[0] != '\0') {
+    config_.windows_mount_path = core::FileSystem::ResolvePath(env_mount);
+    return;
+  }
+
   const char* home = std::getenv("HOME");
   if (home) {
     config_.windows_mount_path =
-        std::filesystem::path(home) / "Mounts" / "mm-d" / "afs_training";
+        std::filesystem::path(home) / "Mounts" / "windows-training";
   }
 }
 

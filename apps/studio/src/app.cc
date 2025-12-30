@@ -53,8 +53,13 @@ App::App(const std::string& data_path)
   LlamaConfig llama_config;
   llama_config.llama_cli_path = "~/llama.cpp/build/bin/llama-cli";
   llama_config.model_path = "~/llama.cpp/models/tinyllama-1.1b.Q4_K_M.gguf";
-  llama_config.rpc_servers = "100.104.53.21:50052";
-  llama_config.use_rpc = true;
+  const char* rpc_env = std::getenv("AFS_LLM_RPC_SERVERS");
+  if (rpc_env && rpc_env[0] != '\0') {
+    llama_config.rpc_servers = rpc_env;
+    llama_config.use_rpc = true;
+  } else {
+    llama_config.use_rpc = false;
+  }
   llama_config.context_size = 4096;
   llama_config.n_predict = 256;
   llama_config.temperature = 0.7f;

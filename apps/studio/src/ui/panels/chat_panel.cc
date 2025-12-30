@@ -68,7 +68,11 @@ void RenderChatPanel(AppState& state,
     }
 
     ImGui::SetNextItemWidth(200);
-    static char rpc_servers[256] = "100.104.53.21:50052";
+    static char rpc_servers[256] = "";
+    if (rpc_servers[0] == '\0' && !config.rpc_servers.empty()) {
+      strncpy(rpc_servers, config.rpc_servers.c_str(), sizeof(rpc_servers) - 1);
+      rpc_servers[sizeof(rpc_servers) - 1] = '\0';
+    }
     if (ImGui::InputText("RPC Servers", rpc_servers, sizeof(rpc_servers))) {
       config.rpc_servers = rpc_servers;
       config_changed = true;

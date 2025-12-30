@@ -89,8 +89,8 @@ struct TrainingMonitorConfig {
   std::string windows_training_dir = "D:/afs_training";
 
   // SSH config (fallback if mount not available)
-  std::string ssh_host = "medical-mechanica";
-  std::string ssh_user = "Administrator";
+  std::string ssh_host;
+  std::string ssh_user;
 
   // Auto-refresh
   bool auto_refresh = true;

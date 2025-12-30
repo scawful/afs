@@ -391,23 +391,19 @@ bool DataLoader::Refresh() {
       mounts_.push_back({name, path, path_exists_(path)});
   };
 
-  add_mount("Code", "~/Code");
+  add_mount("Home", "~");
   auto trunk_root = ResolveTrunkRoot();
   if (trunk_root) {
-    add_mount("Trunk", trunk_root->string());
+    add_mount("Workspace", trunk_root->string());
   }
-  auto scawful_root = ResolveHafsScawfulRoot();
-  if (scawful_root) {
-    add_mount("afs_scawful", scawful_root->string());
+  auto plugin_root = ResolveHafsScawfulRoot();
+  if (plugin_root) {
+    add_mount("AFS Plugin", plugin_root->string());
   }
-  add_mount("usdasm", "~/Code/usdasm");
-  add_mount("Medical Mechanica (D)", "/Users/scawful/Mounts/mm-d/afs_training");
-  if (trunk_root) {
-    add_mount("Oracle-of-Secrets", (trunk_root.value() / "scawful/retro/oracle-of-secrets").string());
-    add_mount("yaze", (trunk_root.value() / "scawful/retro/yaze").string());
-  } else {
-    add_mount("Oracle-of-Secrets", "~/Code/Oracle-of-Secrets");
-    add_mount("yaze", "~/Code/yaze");
+  const char* extra_mount = std::getenv("AFS_EXTRA_MOUNT");
+  if (extra_mount && extra_mount[0] != '\0') {
+    const char* label = std::getenv("AFS_EXTRA_MOUNT_LABEL");
+    add_mount(label && label[0] != '\0' ? label : "Extra Mount", extra_mount);
   }
   add_mount("AFS Context", ResolveContextRoot().string());
   add_mount("AFS Training", ResolveTrainingRoot().string());
