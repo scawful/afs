@@ -100,6 +100,7 @@ def load_config(config_path: Path | None = None, merge_user: bool = True) -> dic
             explicit_raw = tomllib.load(f)
         config_data = _deep_merge(config_data, explicit_raw)
 
+    _merge_workspace_registry(config_data)
     _expand_config_paths(config_data)
     return config_data
 
@@ -111,3 +112,44 @@ def load_config_model(
     """Load configuration and return a typed model."""
     data = load_config(config_path=config_path, merge_user=merge_user)
     return AFSConfig.from_dict(data)
+
+
+def _merge_workspace_registry(config_data: dict[str, Any]) -> None:
+    general = config_data.setdefault("general", {})
+    raw_context_root = general.get("context_root", Path.home() / ".context")
+    context_root = _expand_path(raw_context_root)
+    registry_path = context_root / "workspaces.toml"
+    if not registry_path.exists():
+        return
+
+    try:
+        with open(registry_path, "rb") as f:
+            registry = tomllib.load(f)
+    except Exception:
+        return
+
+    entries = registry.get("workspaces", [])
+    if not isinstance(entries, list):
+        return
+
+    existing = general.get("workspace_directories")
+    if not isinstance(existing, list):
+        existing = []
+
+    merged = list(existing)
+    seen = {
+        item.get("path")
+        for item in merged
+        if isinstance(item, dict) and item.get("path")
+    }
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        if not path or path in seen:
+            continue
+        merged.append(entry)
+        seen.add(path)
+
+    general["workspace_directories"] = merged

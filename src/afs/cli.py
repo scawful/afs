@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 from typing import Iterable
 
-from .config import load_config_model
+from .config import load_config, load_config_model
 from .core import find_root, resolve_context_root
 from .plugins import discover_plugins, load_plugins
 from .schema import AFSConfig, GeneralConfig, WorkspaceDirectory
@@ -150,6 +149,48 @@ def _status_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _workspace_registry_path() -> Path:
+    config = load_config_model()
+    return config.general.context_root / "workspaces.toml"
+
+
+def _load_workspaces_from_registry(path: Path) -> list[WorkspaceDirectory]:
+    if not path.exists():
+        return []
+    data = load_config(config_path=path, merge_user=False)
+    entries = data.get("workspaces", [])
+    workspaces: list[WorkspaceDirectory] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        ws_path = entry.get("path")
+        if not ws_path:
+            continue
+        label = entry.get("description") or entry.get("name")
+        workspaces.append(
+            WorkspaceDirectory(
+                path=Path(ws_path).expanduser().resolve(),
+                description=label,
+            )
+        )
+    return workspaces
+
+
+def _write_workspace_registry(path: Path, workspaces: list[WorkspaceDirectory]) -> None:
+    lines = [
+        "# AFS workspace registry",
+        "# Auto-generated; safe to edit.",
+        "",
+    ]
+    for ws in sorted(workspaces, key=lambda item: str(item.path).lower()):
+        lines.append("[[workspaces]]")
+        lines.append(f"path = \"{ws.path}\"")
+        if ws.description:
+            lines.append(f"description = \"{ws.description}\"")
+        lines.append("")
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
 def _load_config_for_workspace(config_path: Path) -> AFSConfig:
     if config_path.exists():
         return load_config_model(config_path=config_path, merge_user=False)
@@ -157,21 +198,21 @@ def _load_config_for_workspace(config_path: Path) -> AFSConfig:
 
 
 def _write_workspace_config(config_path: Path, config: AFSConfig) -> None:
-    if config_path.exists():
-        existing = config_path.read_text(encoding="utf-8")
-        if existing.strip():
-            pass
     _write_config(config_path, config)
 
 
 def _workspace_add_command(args: argparse.Namespace) -> int:
-    config_path = Path(args.config) if args.config else Path.cwd() / "afs.toml"
+    config_path = Path(args.config) if args.config else None
     workspace_path = Path(args.path).expanduser().resolve() if args.path else Path.cwd()
-    config = _load_config_for_workspace(config_path)
+    if config_path:
+        config = _load_config_for_workspace(config_path)
+        updated = list(config.general.workspace_directories)
+    else:
+        registry_path = _workspace_registry_path()
+        updated = _load_workspaces_from_registry(registry_path)
 
-    updated = []
     replaced = False
-    for ws in config.general.workspace_directories:
+    for ws in updated:
         if ws.path == workspace_path:
             if args.force:
                 updated.append(
@@ -186,8 +227,11 @@ def _workspace_add_command(args: argparse.Namespace) -> int:
     if not any(ws.path == workspace_path for ws in updated):
         updated.append(WorkspaceDirectory(path=workspace_path, description=args.name))
 
-    config.general.workspace_directories = updated
-    _write_workspace_config(config_path, config)
+    if config_path:
+        config.general.workspace_directories = updated
+        _write_workspace_config(config_path, config)
+    else:
+        _write_workspace_registry(registry_path, updated)
 
     action = "updated" if replaced else "added"
     print(f"{action} workspace: {workspace_path}")
@@ -195,29 +239,42 @@ def _workspace_add_command(args: argparse.Namespace) -> int:
 
 
 def _workspace_list_command(args: argparse.Namespace) -> int:
-    config_path = Path(args.config) if args.config else Path.cwd() / "afs.toml"
-    config = _load_config_for_workspace(config_path)
-    if not config.general.workspace_directories:
+    config_path = Path(args.config) if args.config else None
+    if config_path:
+        config = _load_config_for_workspace(config_path)
+        workspaces = config.general.workspace_directories
+    else:
+        registry_path = _workspace_registry_path()
+        workspaces = _load_workspaces_from_registry(registry_path)
+    if not workspaces:
         print("(no workspaces)")
         return 0
-    for ws in config.general.workspace_directories:
+    for ws in workspaces:
         label = f" ({ws.description})" if ws.description else ""
         print(f"{ws.path}{label}")
     return 0
 
 
 def _workspace_remove_command(args: argparse.Namespace) -> int:
-    config_path = Path(args.config) if args.config else Path.cwd() / "afs.toml"
+    config_path = Path(args.config) if args.config else None
     workspace_path = Path(args.path).expanduser().resolve()
-    config = _load_config_for_workspace(config_path)
-    original = list(config.general.workspace_directories)
-    config.general.workspace_directories = [
-        ws for ws in original if ws.path != workspace_path
-    ]
-    if len(config.general.workspace_directories) == len(original):
-        print(f"workspace not found: {workspace_path}")
-        return 1
-    _write_workspace_config(config_path, config)
+    if config_path:
+        config = _load_config_for_workspace(config_path)
+        original = list(config.general.workspace_directories)
+        updated = [ws for ws in original if ws.path != workspace_path]
+        if len(updated) == len(original):
+            print(f"workspace not found: {workspace_path}")
+            return 1
+        config.general.workspace_directories = updated
+        _write_workspace_config(config_path, config)
+    else:
+        registry_path = _workspace_registry_path()
+        original = _load_workspaces_from_registry(registry_path)
+        updated = [ws for ws in original if ws.path != workspace_path]
+        if len(updated) == len(original):
+            print(f"workspace not found: {workspace_path}")
+            return 1
+        _write_workspace_registry(registry_path, updated)
     print(f"removed workspace: {workspace_path}")
     return 0
 
@@ -248,20 +305,20 @@ def build_parser() -> argparse.ArgumentParser:
     workspace_parser = subparsers.add_parser("workspace", help="Manage workspace links.")
     workspace_sub = workspace_parser.add_subparsers(dest="workspace_command")
 
-    ws_add = workspace_sub.add_parser("add", help="Add a workspace to afs.toml.")
+    ws_add = workspace_sub.add_parser("add", help="Add a workspace to registry or afs.toml.")
     ws_add.add_argument("--path", help="Workspace path (default: cwd).")
     ws_add.add_argument("--name", help="Workspace label/description.")
-    ws_add.add_argument("--config", help="Config path to update (default: ./afs.toml).")
+    ws_add.add_argument("--config", help="Config path to update (default: registry).")
     ws_add.add_argument("--force", action="store_true", help="Overwrite existing entry.")
     ws_add.set_defaults(func=_workspace_add_command)
 
     ws_list = workspace_sub.add_parser("list", help="List configured workspaces.")
-    ws_list.add_argument("--config", help="Config path to read (default: ./afs.toml).")
+    ws_list.add_argument("--config", help="Config path to read (default: registry).")
     ws_list.set_defaults(func=_workspace_list_command)
 
     ws_remove = workspace_sub.add_parser("remove", help="Remove a workspace by path.")
     ws_remove.add_argument("--path", required=True, help="Workspace path to remove.")
-    ws_remove.add_argument("--config", help="Config path to update (default: ./afs.toml).")
+    ws_remove.add_argument("--config", help="Config path to update (default: registry).")
     ws_remove.set_defaults(func=_workspace_remove_command)
 
     return parser
