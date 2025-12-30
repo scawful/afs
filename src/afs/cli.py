@@ -8,8 +8,13 @@ from typing import Iterable
 
 from .config import load_config, load_config_model
 from .core import find_root, resolve_context_root
+from .discovery import discover_contexts, get_project_stats
+from .graph import build_graph, default_graph_path, write_graph
+from .manager import AFSManager
+from .models import MountType
 from .plugins import discover_plugins, load_plugins
 from .schema import AFSConfig, GeneralConfig, WorkspaceDirectory
+from .validator import AFSValidator
 
 
 AFS_DIRS = [
@@ -22,6 +27,34 @@ AFS_DIRS = [
     "global",
     "items",
 ]
+
+
+def _parse_mount_type(value: str) -> MountType:
+    try:
+        return MountType(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"Unknown mount type: {value}") from exc
+
+
+def _load_manager(config_path: Path | None) -> AFSManager:
+    config = load_config_model(config_path=config_path, merge_user=True)
+    return AFSManager(config=config)
+
+
+def _resolve_context_paths(
+    args: argparse.Namespace, manager: AFSManager
+) -> tuple[Path, Path, Path | None, str | None]:
+    project_path = Path(args.path).expanduser().resolve() if args.path else Path.cwd()
+    context_root = (
+        Path(args.context_root).expanduser().resolve() if args.context_root else None
+    )
+    context_dir = args.context_dir if args.context_dir else None
+    context_path = manager.resolve_context_path(
+        project_path,
+        context_root=context_root,
+        context_dir=context_dir,
+    )
+    return project_path, context_path, context_root, context_dir
 
 
 def _ensure_context_root(root: Path) -> None:
@@ -146,6 +179,197 @@ def _status_command(args: argparse.Namespace) -> int:
     else:
         print("missing_dirs: (none)")
 
+    return 0
+
+
+def _context_init_command(args: argparse.Namespace) -> int:
+    config_path = Path(args.config) if args.config else None
+    manager = _load_manager(config_path)
+    project_path, _context_path, context_root, context_dir = _resolve_context_paths(
+        args, manager
+    )
+    context = manager.init(
+        path=project_path,
+        context_root=context_root,
+        context_dir=context_dir,
+        link_context=args.link_context,
+        force=args.force,
+    )
+    print(f"context_path: {context.path}")
+    print(f"project: {context.project_name}")
+    return 0
+
+
+def _context_ensure_command(args: argparse.Namespace) -> int:
+    config_path = Path(args.config) if args.config else None
+    manager = _load_manager(config_path)
+    project_path, _context_path, context_root, context_dir = _resolve_context_paths(
+        args, manager
+    )
+    context = manager.ensure(
+        path=project_path,
+        context_root=context_root,
+        context_dir=context_dir,
+        link_context=args.link_context,
+    )
+    print(f"context_path: {context.path}")
+    print(f"project: {context.project_name}")
+    return 0
+
+
+def _context_list_command(args: argparse.Namespace) -> int:
+    config_path = Path(args.config) if args.config else None
+    manager = _load_manager(config_path)
+    _project_path, context_path, _context_root, _context_dir = _resolve_context_paths(
+        args, manager
+    )
+    context = manager.list_context(context_path=context_path)
+    print(f"context_path: {context.path}")
+    print(f"project: {context.project_name}")
+    if not context.mounts:
+        print("mounts: (none)")
+        return 0
+    for mount_type in MountType:
+        mounts = context.mounts.get(mount_type, [])
+        if not mounts:
+            continue
+        print(f"{mount_type.value}:")
+        for mount in mounts:
+            suffix = " (link)" if mount.is_symlink else ""
+            print(f"- {mount.name} -> {mount.source}{suffix}")
+    return 0
+
+
+def _context_mount_command(args: argparse.Namespace) -> int:
+    config_path = Path(args.config) if args.config else None
+    manager = _load_manager(config_path)
+    _project_path, context_path, _context_root, _context_dir = _resolve_context_paths(
+        args, manager
+    )
+    mount_type = _parse_mount_type(args.mount_type)
+    source = Path(args.source).expanduser().resolve()
+    mount = manager.mount(
+        source=source,
+        mount_type=mount_type,
+        alias=args.alias,
+        context_path=context_path,
+    )
+    print(f"mounted {mount.name} in {mount.mount_type.value}: {mount.source}")
+    return 0
+
+
+def _context_unmount_command(args: argparse.Namespace) -> int:
+    config_path = Path(args.config) if args.config else None
+    manager = _load_manager(config_path)
+    _project_path, context_path, _context_root, _context_dir = _resolve_context_paths(
+        args, manager
+    )
+    mount_type = _parse_mount_type(args.mount_type)
+    removed = manager.unmount(
+        alias=args.alias,
+        mount_type=mount_type,
+        context_path=context_path,
+    )
+    if not removed:
+        print(f"mount not found: {args.alias}")
+        return 1
+    print(f"unmounted {args.alias} from {mount_type.value}")
+    return 0
+
+
+def _context_validate_command(args: argparse.Namespace) -> int:
+    config_path = Path(args.config) if args.config else None
+    manager = _load_manager(config_path)
+    _project_path, context_path, _context_root, _context_dir = _resolve_context_paths(
+        args, manager
+    )
+    validator = AFSValidator(context_path, afs_directories=manager.config.directories)
+    status = validator.check_integrity()
+    missing = ", ".join(status.get("missing", [])) or "(none)"
+    errors = status.get("errors", [])
+    print(f"valid: {status.get('valid', False)}")
+    print(f"missing: {missing}")
+    if errors:
+        print(f"errors: {', '.join(errors)}")
+    return 0 if status.get("valid", False) else 1
+
+
+def _context_discover_command(args: argparse.Namespace) -> int:
+    config_path = Path(args.config) if args.config else None
+    config = load_config_model(config_path=config_path, merge_user=True)
+    search_paths = None
+    if args.path:
+        search_paths = [Path(path).expanduser() for path in args.path]
+    ignore_names = args.ignore if args.ignore else None
+    projects = discover_contexts(
+        search_paths=search_paths,
+        max_depth=args.max_depth,
+        ignore_names=ignore_names,
+        config=config,
+    )
+    if not projects:
+        print("(no contexts)")
+        return 0
+    for project in projects:
+        label = project.project_name
+        print(f"{label}\t{project.path}")
+    if args.stats:
+        stats = get_project_stats(projects)
+        pairs = [f"{key}={value}" for key, value in stats.items()]
+        print("stats: " + ", ".join(pairs))
+    return 0
+
+
+def _context_ensure_all_command(args: argparse.Namespace) -> int:
+    config_path = Path(args.config) if args.config else None
+    config = load_config_model(config_path=config_path, merge_user=True)
+    search_paths = None
+    if args.path:
+        search_paths = [Path(path).expanduser() for path in args.path]
+    ignore_names = args.ignore if args.ignore else None
+    projects = discover_contexts(
+        search_paths=search_paths,
+        max_depth=args.max_depth,
+        ignore_names=ignore_names,
+        config=config,
+    )
+    if not projects:
+        print("(no contexts)")
+        return 0
+
+    manager = AFSManager(config=config)
+    for project in projects:
+        if args.dry_run:
+            print(f"would ensure: {project.project_name}\t{project.path}")
+            continue
+        context = manager.ensure(
+            path=project.path.parent,
+            context_root=project.path,
+        )
+        print(f"ensured: {context.project_name}\t{context.path}")
+    return 0
+
+
+def _graph_export_command(args: argparse.Namespace) -> int:
+    config_path = Path(args.config) if args.config else None
+    config = load_config_model(config_path=config_path, merge_user=True)
+    search_paths = None
+    if args.path:
+        search_paths = [Path(path).expanduser() for path in args.path]
+    ignore_names = args.ignore if args.ignore else None
+    graph = build_graph(
+        search_paths=search_paths,
+        max_depth=args.max_depth,
+        ignore_names=ignore_names,
+        config=config,
+    )
+    output_path = (
+        Path(args.output).expanduser().resolve()
+        if args.output
+        else default_graph_path(config)
+    )
+    write_graph(graph, output_path)
+    print(f"graph: {output_path}")
     return 0
 
 
@@ -302,6 +526,156 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--start-dir", help="Directory to search from.")
     status_parser.set_defaults(func=_status_command)
 
+    context_parser = subparsers.add_parser(
+        "context", help="Manage per-project .context directories."
+    )
+    context_sub = context_parser.add_subparsers(dest="context_command")
+
+    ctx_init = context_sub.add_parser("init", help="Initialize a project context.")
+    ctx_init.add_argument("--path", help="Project path (default: cwd).")
+    ctx_init.add_argument("--context-root", help="Context root path override.")
+    ctx_init.add_argument("--context-dir", help="Context directory name.")
+    ctx_init.add_argument(
+        "--link-context",
+        action="store_true",
+        help="Link project context to the specified context root.",
+    )
+    ctx_init.add_argument("--force", action="store_true", help="Overwrite existing context.")
+    ctx_init.add_argument("--config", help="Config path for directory policies.")
+    ctx_init.set_defaults(func=_context_init_command)
+
+    ctx_ensure = context_sub.add_parser("ensure", help="Ensure a project context exists.")
+    ctx_ensure.add_argument("--path", help="Project path (default: cwd).")
+    ctx_ensure.add_argument("--context-root", help="Context root path override.")
+    ctx_ensure.add_argument("--context-dir", help="Context directory name.")
+    ctx_ensure.add_argument(
+        "--link-context",
+        action="store_true",
+        help="Link project context to the specified context root.",
+    )
+    ctx_ensure.add_argument("--config", help="Config path for directory policies.")
+    ctx_ensure.set_defaults(func=_context_ensure_command)
+
+    ctx_list = context_sub.add_parser("list", help="List mounts for a project context.")
+    ctx_list.add_argument("--path", help="Project path (default: cwd).")
+    ctx_list.add_argument("--context-root", help="Context root path override.")
+    ctx_list.add_argument("--context-dir", help="Context directory name.")
+    ctx_list.add_argument("--config", help="Config path for directory policies.")
+    ctx_list.set_defaults(func=_context_list_command)
+
+    ctx_mount = context_sub.add_parser("mount", help="Mount a resource into a context.")
+    ctx_mount.add_argument("source", help="Source path to mount.")
+    ctx_mount.add_argument(
+        "--mount-type",
+        required=True,
+        choices=[m.value for m in MountType],
+        help="Target mount type.",
+    )
+    ctx_mount.add_argument("--alias", help="Alias for the mount point.")
+    ctx_mount.add_argument("--path", help="Project path (default: cwd).")
+    ctx_mount.add_argument("--context-root", help="Context root path override.")
+    ctx_mount.add_argument("--context-dir", help="Context directory name.")
+    ctx_mount.add_argument("--config", help="Config path for directory policies.")
+    ctx_mount.set_defaults(func=_context_mount_command)
+
+    ctx_unmount = context_sub.add_parser("unmount", help="Remove a mounted resource.")
+    ctx_unmount.add_argument("alias", help="Alias of the mount point to remove.")
+    ctx_unmount.add_argument(
+        "--mount-type",
+        required=True,
+        choices=[m.value for m in MountType],
+        help="Mount type containing the alias.",
+    )
+    ctx_unmount.add_argument("--path", help="Project path (default: cwd).")
+    ctx_unmount.add_argument("--context-root", help="Context root path override.")
+    ctx_unmount.add_argument("--context-dir", help="Context directory name.")
+    ctx_unmount.add_argument("--config", help="Config path for directory policies.")
+    ctx_unmount.set_defaults(func=_context_unmount_command)
+
+    ctx_validate = context_sub.add_parser("validate", help="Validate context structure.")
+    ctx_validate.add_argument("--path", help="Project path (default: cwd).")
+    ctx_validate.add_argument("--context-root", help="Context root path override.")
+    ctx_validate.add_argument("--context-dir", help="Context directory name.")
+    ctx_validate.add_argument("--config", help="Config path for directory policies.")
+    ctx_validate.set_defaults(func=_context_validate_command)
+
+    ctx_discover = context_sub.add_parser(
+        "discover", help="Discover .context directories."
+    )
+    ctx_discover.add_argument(
+        "--path",
+        action="append",
+        help="Search root path (repeatable). Defaults to workspace directories.",
+    )
+    ctx_discover.add_argument(
+        "--max-depth",
+        type=int,
+        default=3,
+        help="Maximum directory depth to scan.",
+    )
+    ctx_discover.add_argument(
+        "--ignore",
+        action="append",
+        help="Directory name to ignore (repeatable).",
+    )
+    ctx_discover.add_argument("--stats", action="store_true", help="Print summary stats.")
+    ctx_discover.add_argument("--config", help="Config path for directory policies.")
+    ctx_discover.set_defaults(func=_context_discover_command)
+
+    ctx_ensure_all = context_sub.add_parser(
+        "ensure-all", help="Ensure all discovered contexts exist."
+    )
+    ctx_ensure_all.add_argument(
+        "--path",
+        action="append",
+        help="Search root path (repeatable). Defaults to workspace directories.",
+    )
+    ctx_ensure_all.add_argument(
+        "--max-depth",
+        type=int,
+        default=3,
+        help="Maximum directory depth to scan.",
+    )
+    ctx_ensure_all.add_argument(
+        "--ignore",
+        action="append",
+        help="Directory name to ignore (repeatable).",
+    )
+    ctx_ensure_all.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List contexts without writing.",
+    )
+    ctx_ensure_all.add_argument("--config", help="Config path for directory policies.")
+    ctx_ensure_all.set_defaults(func=_context_ensure_all_command)
+
+    graph_parser = subparsers.add_parser("graph", help="Export AFS graph data.")
+    graph_sub = graph_parser.add_subparsers(dest="graph_command")
+
+    graph_export = graph_sub.add_parser("export", help="Export graph JSON.")
+    graph_export.add_argument(
+        "--path",
+        action="append",
+        help="Search root path (repeatable). Defaults to workspace directories.",
+    )
+    graph_export.add_argument(
+        "--max-depth",
+        type=int,
+        default=3,
+        help="Maximum directory depth to scan.",
+    )
+    graph_export.add_argument(
+        "--ignore",
+        action="append",
+        help="Directory name to ignore (repeatable).",
+    )
+    graph_export.add_argument(
+        "--output",
+        help="Output path for graph JSON (default: context_root/index/afs_graph.json).",
+    )
+    graph_export.add_argument("--config", help="Config path for directory policies.")
+    graph_export.set_defaults(func=_graph_export_command)
+
     workspace_parser = subparsers.add_parser("workspace", help="Manage workspace links.")
     workspace_sub = workspace_parser.add_subparsers(dest="workspace_command")
 
@@ -331,6 +705,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         parser.print_help()
         return 1
     if args.command == "workspace" and not getattr(args, "workspace_command", None):
+        parser.print_help()
+        return 1
+    if args.command == "context" and not getattr(args, "context_command", None):
+        parser.print_help()
+        return 1
+    if args.command == "graph" and not getattr(args, "graph_command", None):
         parser.print_help()
         return 1
     return args.func(args)
