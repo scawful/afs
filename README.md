@@ -13,4 +13,6 @@ Docs:
 - `docs/NARRATIVE.md`
 
 Quickstart:
-- `python -m afs init --context-root ~/path/to/context --workspace-name trunk`
+- `python -m afs init --context-root ~/src/context --workspace-name trunk`
+- `python -m afs status`
+- `python -m afs workspace add --path ~/src/trunk --name trunk`

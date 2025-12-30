@@ -150,6 +150,78 @@ def _status_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_config_for_workspace(config_path: Path) -> AFSConfig:
+    if config_path.exists():
+        return load_config_model(config_path=config_path, merge_user=False)
+    return AFSConfig()
+
+
+def _write_workspace_config(config_path: Path, config: AFSConfig) -> None:
+    if config_path.exists():
+        existing = config_path.read_text(encoding="utf-8")
+        if existing.strip():
+            pass
+    _write_config(config_path, config)
+
+
+def _workspace_add_command(args: argparse.Namespace) -> int:
+    config_path = Path(args.config) if args.config else Path.cwd() / "afs.toml"
+    workspace_path = Path(args.path).expanduser().resolve() if args.path else Path.cwd()
+    config = _load_config_for_workspace(config_path)
+
+    updated = []
+    replaced = False
+    for ws in config.general.workspace_directories:
+        if ws.path == workspace_path:
+            if args.force:
+                updated.append(
+                    WorkspaceDirectory(path=workspace_path, description=args.name)
+                )
+                replaced = True
+            else:
+                updated.append(ws)
+        else:
+            updated.append(ws)
+
+    if not any(ws.path == workspace_path for ws in updated):
+        updated.append(WorkspaceDirectory(path=workspace_path, description=args.name))
+
+    config.general.workspace_directories = updated
+    _write_workspace_config(config_path, config)
+
+    action = "updated" if replaced else "added"
+    print(f"{action} workspace: {workspace_path}")
+    return 0
+
+
+def _workspace_list_command(args: argparse.Namespace) -> int:
+    config_path = Path(args.config) if args.config else Path.cwd() / "afs.toml"
+    config = _load_config_for_workspace(config_path)
+    if not config.general.workspace_directories:
+        print("(no workspaces)")
+        return 0
+    for ws in config.general.workspace_directories:
+        label = f" ({ws.description})" if ws.description else ""
+        print(f"{ws.path}{label}")
+    return 0
+
+
+def _workspace_remove_command(args: argparse.Namespace) -> int:
+    config_path = Path(args.config) if args.config else Path.cwd() / "afs.toml"
+    workspace_path = Path(args.path).expanduser().resolve()
+    config = _load_config_for_workspace(config_path)
+    original = list(config.general.workspace_directories)
+    config.general.workspace_directories = [
+        ws for ws in original if ws.path != workspace_path
+    ]
+    if len(config.general.workspace_directories) == len(original):
+        print(f"workspace not found: {workspace_path}")
+        return 1
+    _write_workspace_config(config_path, config)
+    print(f"removed workspace: {workspace_path}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="afs")
     subparsers = parser.add_subparsers(dest="command")
@@ -173,6 +245,25 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--start-dir", help="Directory to search from.")
     status_parser.set_defaults(func=_status_command)
 
+    workspace_parser = subparsers.add_parser("workspace", help="Manage workspace links.")
+    workspace_sub = workspace_parser.add_subparsers(dest="workspace_command")
+
+    ws_add = workspace_sub.add_parser("add", help="Add a workspace to afs.toml.")
+    ws_add.add_argument("--path", help="Workspace path (default: cwd).")
+    ws_add.add_argument("--name", help="Workspace label/description.")
+    ws_add.add_argument("--config", help="Config path to update (default: ./afs.toml).")
+    ws_add.add_argument("--force", action="store_true", help="Overwrite existing entry.")
+    ws_add.set_defaults(func=_workspace_add_command)
+
+    ws_list = workspace_sub.add_parser("list", help="List configured workspaces.")
+    ws_list.add_argument("--config", help="Config path to read (default: ./afs.toml).")
+    ws_list.set_defaults(func=_workspace_list_command)
+
+    ws_remove = workspace_sub.add_parser("remove", help="Remove a workspace by path.")
+    ws_remove.add_argument("--path", required=True, help="Workspace path to remove.")
+    ws_remove.add_argument("--config", help="Config path to update (default: ./afs.toml).")
+    ws_remove.set_defaults(func=_workspace_remove_command)
+
     return parser
 
 
@@ -180,6 +271,9 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):
+        parser.print_help()
+        return 1
+    if args.command == "workspace" and not getattr(args, "workspace_command", None):
         parser.print_help()
         return 1
     return args.func(args)

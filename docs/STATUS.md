@@ -1,7 +1,7 @@
 # STATUS
 
 Stage: Prototype
-Now: package stub; guardrails; minimal config + plugin discovery.
-Not yet: CLI/services; full configuration schema validation.
+Now: init/status/workspace commands; minimal config + plugin discovery.
+Not yet: service runtime; full configuration schema validation.
 Next: one small utility; smoke-test stub.
 Issues: no runtime yet.
