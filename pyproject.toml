@@ -1,0 +1,13 @@
+[project]
+name = "afs"
+version = "0.0.0"
+description = "AFS research package"
+requires-python = ">=3.11"
+license = {text = "All rights reserved"}
+authors = [
+  {name = "scawful"}
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
