@@ -11,6 +11,7 @@ Docs:
 - `docs/ROADMAP.md`
 - `docs/REPO_FACTS.json`
 - `docs/NARRATIVE.md`
+- `docs/PORTING_MAP.md`
 
 Quickstart:
 - `python -m afs init --context-root ~/src/context --workspace-name trunk`

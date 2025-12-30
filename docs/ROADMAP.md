@@ -1,13 +1,18 @@
 # ROADMAP
 
 ## Committed
-- Minimal module layout + package stubs
-- One small utility
+- Core config + schema + CLI
+- Context manager (init/ensure/mount/list) + discovery + graph export
+- Plugin discovery + load hooks
+- AFS Studio port (ImGui app)
 
 ## Planned
-- Configuration schema
-- Basic CLI entry point
+- Service config + minimal service manager (no auto-start by default)
+- Orchestrator config + routing skeleton
+- TUI starter (status + context browsing)
+- Test harness for core modules
 
 ## Ideas
-- Idea: Status TUI
-- Idea: Plugin discovery via ~/.config/afs/plugins
+- Idea: Full orchestration pipeline (plan/execute/verify) with adapters
+- Idea: Context window builder + token budgeting helpers
+- Idea: Service adapters for launchd/systemd with dry-run previews
