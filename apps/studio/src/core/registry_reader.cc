@@ -2,7 +2,34 @@
 #include "logger.h"
 #include "filesystem.h"
 
+#include <cstdlib>
 #include <fstream>
+
+namespace {
+
+std::filesystem::path ResolveContextRoot() {
+  const char* env_root = std::getenv("AFS_CONTEXT_ROOT");
+  if (env_root && env_root[0] != '\0') {
+    auto path = afs::studio::core::FileSystem::ResolvePath(env_root);
+    if (afs::studio::core::FileSystem::Exists(path)) {
+      return path;
+    }
+  }
+
+  auto preferred = afs::studio::core::FileSystem::ResolvePath("~/src/context");
+  if (afs::studio::core::FileSystem::Exists(preferred)) {
+    return preferred;
+  }
+
+  auto fallback = afs::studio::core::FileSystem::ResolvePath("~/.context");
+  if (afs::studio::core::FileSystem::Exists(fallback)) {
+    return fallback;
+  }
+
+  return preferred;
+}
+
+}  // namespace
 
 namespace afs {
 namespace studio {
@@ -13,7 +40,7 @@ RegistryReader::RegistryReader(const std::filesystem::path& registry_path)
     : registry_path_(registry_path) {}
 
 std::filesystem::path RegistryReader::ResolveDefaultPath() const {
-  return core::FileSystem::ResolvePath("~/.context/models/registry.json");
+  return ResolveContextRoot() / "models" / "registry.json";
 }
 
 bool RegistryReader::Exists() const {

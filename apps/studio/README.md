@@ -18,9 +18,10 @@ cmake --build build --target afs_studio
 
 ## Data sources
 
-- Training data path: `~/src/training` if present, otherwise `~/.context/training` (override with CLI arg).
+- Training data path: `AFS_TRAINING_ROOT` if set, otherwise `~/src/training` or `~/.context/training` (override with CLI arg).
 - Context graph: `AFS_GRAPH_PATH` or `${AFS_CONTEXT_ROOT}/index/afs_graph.json` (defaults to `~/src/context` or `~/.context`).
 - Dataset registry: `AFS_DATASET_REGISTRY` or `${AFS_TRAINING_ROOT}/index/dataset_registry.json`.
+- Resource index: `AFS_RESOURCE_INDEX` or `${AFS_TRAINING_ROOT}/index/resource_index.json`.
 
 ## Features
 

@@ -151,6 +151,7 @@ struct AppState {
   std::vector<std::string> compared_run_ids;
   int selected_generator_index = -1;
   std::string selected_generator_name;
+  int selected_dataset_index = -1;
   PlotKind focus_plot = PlotKind::None;
   std::map<std::string, bool> domain_visibility;
   Workspace current_workspace = Workspace::Dashboard;
@@ -206,6 +207,7 @@ struct AppState {
   std::array<char, 128> log_filter{};
   std::array<char, 96> run_filter{};
   std::array<char, 96> generator_filter{};
+  std::array<char, 96> dataset_filter{};
   std::array<char, 256> chat_input{};
   std::array<char, 1024> system_prompt{};
   std::array<char, 1024> user_prompt{};

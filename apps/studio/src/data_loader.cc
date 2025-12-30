@@ -36,9 +36,12 @@ std::optional<std::filesystem::path> ResolveHafsScawfulRoot() {
     return plugin_path;
   }
 
-  auto legacy_path = studio::core::FileSystem::ResolvePath("~/src/trunk/scawful/research/afs_scawful");
-  if (studio::core::FileSystem::Exists(legacy_path)) {
-    return legacy_path;
+  auto trunk_root = ResolveTrunkRoot();
+  if (trunk_root) {
+    auto candidate = *trunk_root / "scawful" / "research" / "afs_scawful";
+    if (studio::core::FileSystem::Exists(candidate)) {
+      return candidate;
+    }
   }
 
   return std::nullopt;
@@ -121,6 +124,57 @@ std::filesystem::path ResolveDatasetRegistryPath() {
   return ResolveTrainingRoot() / "index" / "dataset_registry.json";
 }
 
+std::filesystem::path ResolveResourceIndexPath(const std::string& data_root,
+                                               const DataLoader::PathExists& exists) {
+  const char* env_path = std::getenv("AFS_RESOURCE_INDEX");
+  if (env_path && env_path[0] != '\0') {
+    return studio::core::FileSystem::ResolvePath(env_path);
+  }
+
+  std::vector<std::filesystem::path> candidates;
+  auto training_root = ResolveTrainingRoot();
+  if (!training_root.empty()) {
+    candidates.push_back(training_root / "index" / "resource_index.json");
+    candidates.push_back(training_root / "resource_index.json");
+  }
+  if (!data_root.empty()) {
+    auto data_path = std::filesystem::path(data_root);
+    candidates.push_back(data_path / "index" / "resource_index.json");
+    candidates.push_back(data_path / "resource_index.json");
+  }
+
+  for (const auto& candidate : candidates) {
+    if (exists(candidate.string())) {
+      return candidate;
+    }
+  }
+  return {};
+}
+
+std::filesystem::path ResolveTrainingDataPath(const std::string& filename,
+                                              const std::string& data_root,
+                                              const DataLoader::PathExists& exists) {
+  std::vector<std::filesystem::path> candidates;
+  if (!data_root.empty()) {
+    auto data_path = std::filesystem::path(data_root);
+    candidates.push_back(data_path / filename);
+    candidates.push_back(data_path / "index" / filename);
+  }
+
+  auto training_root = ResolveTrainingRoot();
+  if (!training_root.empty()) {
+    candidates.push_back(training_root / filename);
+    candidates.push_back(training_root / "index" / filename);
+  }
+
+  for (const auto& candidate : candidates) {
+    if (exists(candidate.string())) {
+      return candidate;
+    }
+  }
+  return {};
+}
+
 constexpr float kTrendDeltaThreshold = 0.05f;
 
 bool IsWhitespaceOnly(const std::string& s) {
@@ -168,14 +222,20 @@ bool DataLoader::Refresh() {
   last_error_.clear();
   last_status_ = LoadStatus{};
 
-  if (!path_exists_(data_path_)) {
+  const bool base_exists = !data_path_.empty() && path_exists_(data_path_);
+  const auto training_root = ResolveTrainingRoot();
+  const bool training_exists = !training_root.empty() && path_exists_(training_root.string());
+  if (!base_exists && !training_exists) {
     last_error_ = "Data path does not exist: " + data_path_;
     LOG_ERROR(last_error_);
     last_status_.error_count = 1;
     last_status_.last_error = last_error_;
     last_status_.last_error_source = "data_path";
   } else {
-    LOG_INFO("DataLoader: Refreshing from " + data_path_);
+    const auto& root = base_exists ? data_path_ : training_root.string();
+    if (!root.empty()) {
+      LOG_INFO("DataLoader: Refreshing from " + root);
+    }
   }
 
   auto next_quality_trends = quality_trends_;
@@ -338,17 +398,16 @@ DataLoader::LoadResult DataLoader::LoadQualityFeedback(
     RejectionSummary* rejection_summary) {
   
   LoadResult result;
-  std::string path = data_path_ + "/quality_feedback.json";
-  if (!path_exists_(path)) {
-      LOG_WARN("quality_feedback.json not found at " + path);
-      return result;
+  auto path = ResolveTrainingDataPath("quality_feedback.json", data_path_, path_exists_);
+  if (path.empty()) {
+    return result;
   }
-  LOG_INFO("DataLoader: Loading " + path);
+  LOG_INFO("DataLoader: Loading " + path.string());
 
   result.found = true;
   std::string content;
   std::string read_error;
-  if (!file_reader_(path, &content, &read_error) || content.empty() || IsWhitespaceOnly(content)) {
+  if (!file_reader_(path.string(), &content, &read_error) || content.empty() || IsWhitespaceOnly(content)) {
     result.ok = false;
     result.error = read_error.empty() ? "quality_feedback.json is empty" : read_error;
     return result;
@@ -456,14 +515,14 @@ DataLoader::LoadResult DataLoader::LoadActiveLearning(
     CoverageData* coverage) {
   
   LoadResult result;
-  std::string path = data_path_ + "/active_learning.json";
-  if (!path_exists_(path)) return result;
+  auto path = ResolveTrainingDataPath("active_learning.json", data_path_, path_exists_);
+  if (path.empty()) return result;
 
-  LOG_INFO("DataLoader: Loading " + path);
+  LOG_INFO("DataLoader: Loading " + path.string());
   result.found = true;
   std::string content;
   std::string read_error;
-  if (!file_reader_(path, &content, &read_error) || content.empty() || IsWhitespaceOnly(content)) {
+  if (!file_reader_(path.string(), &content, &read_error) || content.empty() || IsWhitespaceOnly(content)) {
     result.ok = false;
     result.error = read_error.empty() ? "active_learning.json is empty" : read_error;
     return result;
@@ -508,14 +567,14 @@ DataLoader::LoadResult DataLoader::LoadTrainingFeedback(
     OptimizationData* optimization_data) {
   
   LoadResult result;
-  std::string path = data_path_ + "/training_feedback.json";
-  if (!path_exists_(path)) return result;
+  auto path = ResolveTrainingDataPath("training_feedback.json", data_path_, path_exists_);
+  if (path.empty()) return result;
 
-  LOG_INFO("DataLoader: Loading " + path);
+  LOG_INFO("DataLoader: Loading " + path.string());
   result.found = true;
   std::string content;
   std::string read_error;
-  if (!file_reader_(path, &content, &read_error) || content.empty() || IsWhitespaceOnly(content)) {
+  if (!file_reader_(path.string(), &content, &read_error) || content.empty() || IsWhitespaceOnly(content)) {
     result.ok = false;
     result.error = read_error.empty() ? "training_feedback.json is empty" : read_error;
     return result;
@@ -574,17 +633,16 @@ DataLoader::LoadResult DataLoader::LoadTrainingFeedback(
 DataLoader::LoadResult DataLoader::LoadCuratedHacks(
     std::vector<CuratedHackEntry>* curated_hacks) {
   LoadResult result;
-  std::string path = data_path_ + "/curated_hacks.json";
-  if (!path_exists_(path)) {
-    LOG_WARN("curated_hacks.json not found at " + path);
+  auto path = ResolveTrainingDataPath("curated_hacks.json", data_path_, path_exists_);
+  if (path.empty()) {
     return result;
   }
-  LOG_INFO("DataLoader: Loading " + path);
+  LOG_INFO("DataLoader: Loading " + path.string());
 
   result.found = true;
   std::string content;
   std::string read_error;
-  if (!file_reader_(path, &content, &read_error) || content.empty() ||
+  if (!file_reader_(path.string(), &content, &read_error) || content.empty() ||
       IsWhitespaceOnly(content)) {
     result.ok = false;
     result.error =
@@ -644,17 +702,16 @@ DataLoader::LoadResult DataLoader::LoadCuratedHacks(
 
 DataLoader::LoadResult DataLoader::LoadResourceIndex(ResourceIndexData* resource_index) {
   LoadResult result;
-  std::string path = data_path_ + "/resource_index.json";
-  if (!path_exists_(path)) {
-    LOG_WARN("resource_index.json not found at " + path);
+  auto path = ResolveResourceIndexPath(data_path_, path_exists_);
+  if (path.empty()) {
     return result;
   }
-  LOG_INFO("DataLoader: Loading " + path);
+  LOG_INFO("DataLoader: Loading " + path.string());
 
   result.found = true;
   std::string content;
   std::string read_error;
-  if (!file_reader_(path, &content, &read_error) || content.empty() ||
+  if (!file_reader_(path.string(), &content, &read_error) || content.empty() ||
       IsWhitespaceOnly(content)) {
     result.ok = false;
     result.error = read_error.empty() ? "resource_index.json is empty" : read_error;
@@ -843,9 +900,17 @@ DataLoader::LoadResult DataLoader::LoadContextGraph(ContextGraphData* context_gr
 
 void DataLoader::MountDrive(const std::string& name) {
   auto scawful_root = ResolveHafsScawfulRoot();
-  std::filesystem::path script_path = scawful_root 
-      ? *scawful_root / "scripts" / "mount_windows.sh"
-      : studio::core::FileSystem::ResolvePath("~/src/trunk/scawful/research/afs_scawful/scripts/mount_windows.sh");
+  std::filesystem::path script_path;
+  if (scawful_root) {
+    script_path = *scawful_root / "scripts" / "mount_windows.sh";
+  } else {
+    auto trunk_root = ResolveTrunkRoot();
+    if (trunk_root) {
+      script_path = *trunk_root / "scawful" / "research" / "afs_scawful" / "scripts" / "mount_windows.sh";
+    } else {
+      script_path = studio::core::FileSystem::ResolvePath("~/src/trunk/scawful/research/afs_scawful/scripts/mount_windows.sh");
+    }
+  }
 
   if (studio::core::FileSystem::Exists(script_path)) {
     LOG_INFO("DataLoader: Triggering mount using " + script_path.string());

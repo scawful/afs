@@ -106,9 +106,14 @@ bool TrainingStatusWidget::FetchHealthData() {
     if (env_root && env_root[0] != '\0') {
         root = env_root;
     } else {
-        const char* home = std::getenv("HOME");
-        if (home && home[0] != '\0') {
-            root = std::string(home) + "/src/trunk/scawful/research/afs";
+        const char* trunk_root = std::getenv("TRUNK_ROOT");
+        if (trunk_root && trunk_root[0] != '\0') {
+            root = std::string(trunk_root) + "/scawful/research/afs";
+        } else {
+            const char* home = std::getenv("HOME");
+            if (home && home[0] != '\0') {
+                root = std::string(home) + "/src/trunk/scawful/research/afs";
+            }
         }
     }
 

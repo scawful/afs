@@ -12,6 +12,7 @@
 ///   Ctrl+Q - Quit
 ///   Ctrl+/ - Shortcut editor
 
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -27,8 +28,13 @@ int main(int argc, char* argv[]) {
   if (argc > 1) {
     data_path_str = argv[1];
   } else {
-    auto preferred = FileSystem::ResolvePath("~/src/training");
-    data_path_str = FileSystem::Exists(preferred) ? preferred.string() : "~/.context/training";
+    const char* env_root = std::getenv("AFS_TRAINING_ROOT");
+    if (env_root && env_root[0] != '\0') {
+      data_path_str = env_root;
+    } else {
+      auto preferred = FileSystem::ResolvePath("~/src/training");
+      data_path_str = FileSystem::Exists(preferred) ? preferred.string() : "~/.context/training";
+    }
   }
 
   std::filesystem::path data_path = FileSystem::ResolvePath(data_path_str);

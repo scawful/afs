@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -33,9 +34,18 @@ std::filesystem::path ResolveHafsScawfulRoot() {
     return plugin_path;
   }
 
-  auto legacy_path = studio::core::FileSystem::ResolvePath("~/src/trunk/scawful/research/afs_scawful");
-  if (studio::core::FileSystem::Exists(legacy_path)) {
-    return legacy_path;
+  const char* trunk_env = std::getenv("TRUNK_ROOT");
+  if (trunk_env && trunk_env[0] != '\0') {
+    auto trunk_root = studio::core::FileSystem::ResolvePath(trunk_env);
+    auto candidate = trunk_root / "scawful" / "research" / "afs_scawful";
+    if (studio::core::FileSystem::Exists(candidate)) {
+      return candidate;
+    }
+  }
+
+  auto fallback_path = studio::core::FileSystem::ResolvePath("~/src/trunk/scawful/research/afs_scawful");
+  if (studio::core::FileSystem::Exists(fallback_path)) {
+    return fallback_path;
   }
 
   return {};
@@ -219,41 +229,24 @@ static void WriteStringArray(std::ostringstream& output, const std::string& key,
   output << "]\n";
 }
 
-static bool RunCuratedSummaryBuild(const std::filesystem::path& script_path, std::string* output) {
+static bool RunPythonScript(const std::filesystem::path& script_path,
+                            const std::filesystem::path& module_root,
+                            std::string* output) {
   if (output) output->clear();
   if (!studio::core::FileSystem::Exists(script_path)) {
-    if (output) *output = "Summary script not found";
+    if (output) *output = "Script not found";
     return false;
   }
 
-  std::string cmd = "python3 \"" + script_path.string() + "\" 2>&1";
+  std::string cmd;
+  if (!module_root.empty()) {
+    cmd = "AFS_SCAWFUL_ROOT=\"" + module_root.string() + "\" ";
+    cmd += "PYTHONPATH=\"" + module_root.string() + "\" ";
+  }
+  cmd += "python3 \"" + script_path.string() + "\" 2>&1";
   FILE* pipe = popen(cmd.c_str(), "r");
   if (!pipe) {
-    if (output) *output = "Failed to launch summary build";
-    return false;
-  }
-
-  char buffer[256];
-  std::ostringstream result;
-  while (fgets(buffer, sizeof(buffer), pipe)) {
-    result << buffer;
-  }
-  int status = pclose(pipe);
-  if (output) *output = result.str();
-  return status == 0;
-}
-
-static bool RunResourceIndexBuild(const std::filesystem::path& script_path, std::string* output) {
-  if (output) output->clear();
-  if (!studio::core::FileSystem::Exists(script_path)) {
-    if (output) *output = "Resource index script not found";
-    return false;
-  }
-
-  std::string cmd = "python3 \"" + script_path.string() + "\" 2>&1";
-  FILE* pipe = popen(cmd.c_str(), "r");
-  if (!pipe) {
-    if (output) *output = "Failed to launch resource index build";
+    if (output) *output = "Failed to launch script";
     return false;
   }
 
@@ -565,7 +558,7 @@ void RenderDatasetPanel(AppState& state, const DataLoader& loader) {
             ? std::filesystem::current_path() / "rebuild_resource_index.py"
             : scawful_root / "scripts" / "rebuild_resource_index.py";
         std::string build_output;
-        bool ok = RunResourceIndexBuild(script_path, &build_output);
+        bool ok = RunPythonScript(script_path, scawful_root, &build_output);
         if (!build_output.empty()) {
           resource_status = ok ? "Resource index rebuilt (see logs)" : "Resource index rebuild failed (see logs)";
         } else {
@@ -656,13 +649,45 @@ void RenderDatasetPanel(AppState& state, const DataLoader& loader) {
     }
 
     if (ImGui::BeginTabItem("Datasets")) {
+      static std::string dataset_status;
       if (!dataset_error.empty()) {
         ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.2f, 1.0f), "%s", dataset_error.c_str());
+      }
+
+      ImGui::InputTextWithHint("##DatasetFilter", "Filter by dataset name", state.dataset_filter.data(), state.dataset_filter.size());
+      ImGui::SameLine();
+      if (ImGui::Button("Clear##DatasetFilter")) state.dataset_filter[0] = '\0';
+      ImGui::SameLine();
+      if (ImGui::Button("Rebuild Dataset Registry")) {
+        auto scawful_root = ResolveHafsScawfulRoot();
+        std::filesystem::path script_path = scawful_root.empty()
+            ? std::filesystem::current_path() / "build_dataset_registry.py"
+            : scawful_root / "scripts" / "build_dataset_registry.py";
+        std::string build_output;
+        bool ok = RunPythonScript(script_path, scawful_root, &build_output);
+        if (!build_output.empty()) {
+          dataset_status = ok ? "Dataset registry rebuilt (see logs)" : "Dataset registry rebuild failed (see logs)";
+        } else {
+          dataset_status = ok ? "Dataset registry rebuilt" : "Dataset registry rebuild failed";
+        }
+        state.should_refresh = true;
+      }
+      if (!dataset_status.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", dataset_status.c_str());
       }
 
       if (dataset_registry.datasets.empty()) {
         ImGui::TextDisabled("No dataset registry loaded.");
       } else {
+        std::uint64_t total_size = 0;
+        for (const auto& dataset : dataset_registry.datasets) {
+          total_size += dataset.size_bytes;
+        }
+        double total_mb = static_cast<double>(total_size) / (1024.0 * 1024.0);
+        ImGui::Text("Datasets: %zu", dataset_registry.datasets.size());
+        ImGui::SameLine();
+        ImGui::TextDisabled("Total size: %.2f MB", total_mb);
         if (!dataset_registry.generated_at.empty()) {
           ImGui::TextDisabled("Generated at: %s", dataset_registry.generated_at.c_str());
         }
@@ -676,10 +701,17 @@ void RenderDatasetPanel(AppState& state, const DataLoader& loader) {
           ImGui::TableSetupColumn("Updated", ImGuiTableColumnFlags_WidthStretch, 1.1f);
           ImGui::TableHeadersRow();
 
-          for (const auto& dataset : dataset_registry.datasets) {
+          for (size_t i = 0; i < dataset_registry.datasets.size(); ++i) {
+            const auto& dataset = dataset_registry.datasets[i];
+            if (!ContainsInsensitive(dataset.name, state.dataset_filter.data())) {
+              continue;
+            }
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
-            ImGui::Text("%s", dataset.name.c_str());
+            bool selected = static_cast<int>(i) == state.selected_dataset_index;
+            if (ImGui::Selectable(dataset.name.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
+              state.selected_dataset_index = static_cast<int>(i);
+            }
             if (ImGui::IsItemHovered() && !dataset.path.empty()) {
               ImGui::BeginTooltip();
               ImGui::Text("%s", dataset.path.c_str());
@@ -694,6 +726,28 @@ void RenderDatasetPanel(AppState& state, const DataLoader& loader) {
             ImGui::Text("%s", dataset.updated_at.empty() ? "-" : dataset.updated_at.c_str());
           }
           ImGui::EndTable();
+        }
+
+        ImGui::Separator();
+        if (state.selected_dataset_index >= 0 &&
+            state.selected_dataset_index < static_cast<int>(dataset_registry.datasets.size())) {
+          const auto& selected = dataset_registry.datasets[state.selected_dataset_index];
+          ImGui::TextDisabled("Selected Dataset");
+          ImGui::Text("%s", selected.name.c_str());
+          ImGui::TextDisabled("%s", selected.path.empty() ? "-" : selected.path.c_str());
+          ImGui::Text("Files: %zu", selected.files.size());
+
+          ImGui::BeginChild("DatasetFiles", ImVec2(0, 120), true);
+          size_t max_files = 12;
+          for (size_t i = 0; i < selected.files.size() && i < max_files; ++i) {
+            ImGui::BulletText("%s", selected.files[i].c_str());
+          }
+          if (selected.files.size() > max_files) {
+            ImGui::TextDisabled("... and %zu more", selected.files.size() - max_files);
+          }
+          ImGui::EndChild();
+        } else {
+          ImGui::TextDisabled("Select a dataset to view details.");
         }
       }
 
@@ -861,7 +915,7 @@ void RenderDatasetPanel(AppState& state, const DataLoader& loader) {
           std::filesystem::path script_path = override_path.parent_path().parent_path();
           script_path /= "scripts/build_curated_hacks_summary.py";
           std::string build_output;
-          bool ok = RunCuratedSummaryBuild(script_path, &build_output);
+          bool ok = RunPythonScript(script_path, scawful_root, &build_output);
           overrides_status = ok ? "Saved overrides and rebuilt summary" : "Saved overrides, rebuild failed";
           if (!build_output.empty()) {
             overrides_status += " (see logs)";

@@ -862,8 +862,8 @@ void RenderEmbeddingQualityChart(AppState& state, const DataLoader& loader) {
 
 void RenderAgentThroughputChart(AppState& state, const DataLoader& loader) {
   RenderChartHeader(PlotKind::AgentThroughput,
-                    "AGENT THROUGHPUT",
-                    "Real-time task processing rate across the swarm. Higher peaks indicate high-availability periods; the dashed line represents the Swarm Target (1.0k).",
+                    "AGENT WORKLOAD",
+                    "Tasks completed and queue depth per agent from the current data snapshot.",
                     state);
 
   if (state.agents.empty()) {
@@ -953,8 +953,8 @@ void RenderMissionQueueChart(AppState& state, const DataLoader& loader) {
 
 void RenderLatentSpaceChart(AppState& state, const DataLoader& loader) {
   RenderChartHeader(PlotKind::LatentSpace,
-                    "LATENT TOPOLOGY",
-                    "Visualization of the manifold learned by the model. Clusters indicate stable concept representations; voids represent potential logic gaps.",
+                    "EMBEDDING MAP",
+                    "Synthetic layout based on embedding region index; use for rough clustering only.",
                     state);
 
   const auto& regions = loader.GetEmbeddingRegions();

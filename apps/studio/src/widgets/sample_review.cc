@@ -1,6 +1,7 @@
 #include "sample_review.h"
 #include <imgui.h>
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <filesystem>
@@ -11,6 +12,28 @@ namespace afs {
 namespace viz {
 
 namespace {
+
+std::filesystem::path ResolveContextRoot() {
+  const char* env_root = std::getenv("AFS_CONTEXT_ROOT");
+  if (env_root && env_root[0] != '\0') {
+    auto path = studio::core::FileSystem::ResolvePath(env_root);
+    if (studio::core::FileSystem::Exists(path)) {
+      return path;
+    }
+  }
+
+  auto preferred = studio::core::FileSystem::ResolvePath("~/src/context");
+  if (studio::core::FileSystem::Exists(preferred)) {
+    return preferred;
+  }
+
+  auto fallback = studio::core::FileSystem::ResolvePath("~/.context");
+  if (studio::core::FileSystem::Exists(fallback)) {
+    return fallback;
+  }
+
+  return preferred;
+}
 
 TrainingSample ParseSampleLine(const std::string& line, bool is_rejected = false) {
   TrainingSample sample;
@@ -334,7 +357,7 @@ void SampleReviewWidget::LoadContextFiles() {
   context_files_.clear();
 
   // Load user's ASM files from alttp disassembly
-  auto alttp_path = std::filesystem::path(std::getenv("HOME")) / ".context" / "knowledge" / "alttp";
+  auto alttp_path = ResolveContextRoot() / "knowledge" / "alttp";
 
   if (studio::core::FileSystem::Exists(alttp_path)) {
       try {

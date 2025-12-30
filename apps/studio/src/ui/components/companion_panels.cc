@@ -37,15 +37,12 @@ CompanionPanels::PanelVisibility CompanionPanels::GetPanelVisibility(PlotKind ki
             vis.controls = true;
             break;
             
-        case PlotKind::AgentUtilization:
         case PlotKind::AgentThroughput:
         case PlotKind::MountsStatus:
             vis.data_quality = true;
             vis.inspector = true;
             break;
             
-        case PlotKind::MissionProgress:
-        case PlotKind::MissionQueue:
         case PlotKind::KnowledgeGraph:
             vis.controls = true;
             break;
@@ -255,9 +252,10 @@ void CompanionPanels::RenderInspectorPanel(AppState& state, const DataLoader& lo
         case PlotKind::EmbeddingQuality: graph_name = "Embedding Quality"; break;
         case PlotKind::Rejections: graph_name = "Rejections"; break;
         case PlotKind::EvalMetrics: graph_name = "Eval Metrics"; break;
-        case PlotKind::AgentUtilization: graph_name = "Agent Utilization"; break;
+        case PlotKind::AgentThroughput: graph_name = "Agent Workload"; break;
         case PlotKind::MountsStatus: graph_name = "Mounts Status"; break;
         case PlotKind::KnowledgeGraph: graph_name = "Context Graph"; break;
+        case PlotKind::LatentSpace: graph_name = "Embedding Map"; break;
         default: break;
     }
     ImGui::Text("Graph: %s", graph_name);

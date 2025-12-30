@@ -23,10 +23,7 @@ void GraphBrowser::InitializeGraphRegistry() {
         {PlotKind::Effectiveness, "Effectiveness", "Generator effectiveness analysis", GraphCategory::Quality, false, true, true, false},
         
         // System Category
-        {PlotKind::AgentUtilization, "Agent Utilization", "Agent resource usage and activity", GraphCategory::System, false, false, true, true},
-        {PlotKind::AgentThroughput, "Agent Throughput", "Agent task completion rates", GraphCategory::System, false, false, true, true},
-        {PlotKind::MissionProgress, "Mission Progress", "Mission completion tracking", GraphCategory::System, false, false, false, false},
-        {PlotKind::MissionQueue, "Mission Queue", "Mission queue depth over time", GraphCategory::System, false, false, false, false},
+        {PlotKind::AgentThroughput, "Agent Workload", "Tasks completed and queue depth per agent", GraphCategory::System, false, false, true, true},
         {PlotKind::MountsStatus, "Mounts Status", "Filesystem mount status", GraphCategory::System, false, false, true, false},
         
         // Coverage Category
@@ -35,7 +32,7 @@ void GraphBrowser::InitializeGraphRegistry() {
         
         // Embedding Category
         {PlotKind::EmbeddingDensity, "Embedding Density", "Embedding space density visualization", GraphCategory::Embedding, false, true, true, true},
-        {PlotKind::LatentSpace, "Latent Space", "2D latent space projection", GraphCategory::Embedding, false, true, true, true},
+        {PlotKind::LatentSpace, "Embedding Map", "Synthetic layout from embedding regions", GraphCategory::Embedding, false, true, true, true},
         {PlotKind::KnowledgeGraph, "Context Graph", "AFS context and mount relationships", GraphCategory::Embedding, false, false, false, false},
         
         // Optimization Category
