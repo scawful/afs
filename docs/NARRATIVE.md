@@ -4,6 +4,8 @@ AFS is a research-only internal system focused on structuring context and workfl
 for agentic tools. This repo tracks experiments and implementations; claims should
 map to code or docs.
 
+Full research catalog: `docs/RESEARCH_SOURCES.md`.
+
 ## Source papers (in `~/Documents/Research`)
 - `2512.05470v1.pdf` — "Everything is Context: Agentic File System Abstraction for Context Engineering"
 - `2512.08296.pdf` — "Towards a Science of Scaling Agent Systems"

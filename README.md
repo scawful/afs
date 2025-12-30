@@ -11,6 +11,8 @@ Docs:
 - `docs/ROADMAP.md`
 - `docs/REPO_FACTS.json`
 - `docs/NARRATIVE.md`
+- `docs/RESEARCH_SOURCES.md`
+- `docs/CLI_PLAN.md`
 - `docs/PORTING_MAP.md`
 
 Quickstart:
