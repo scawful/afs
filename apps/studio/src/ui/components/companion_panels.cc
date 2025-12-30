@@ -257,6 +257,7 @@ void CompanionPanels::RenderInspectorPanel(AppState& state, const DataLoader& lo
         case PlotKind::EvalMetrics: graph_name = "Eval Metrics"; break;
         case PlotKind::AgentUtilization: graph_name = "Agent Utilization"; break;
         case PlotKind::MountsStatus: graph_name = "Mounts Status"; break;
+        case PlotKind::KnowledgeGraph: graph_name = "Context Graph"; break;
         default: break;
     }
     ImGui::Text("Graph: %s", graph_name);

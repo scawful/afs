@@ -501,6 +501,8 @@ void RenderDatasetPanel(AppState& state, const DataLoader& loader) {
   const auto& runs = loader.GetTrainingRuns();
   const auto& generators = loader.GetGeneratorStats();
   const auto& coverage = loader.GetCoverage();
+  const auto& dataset_registry = loader.GetDatasetRegistry();
+  const auto& dataset_error = loader.GetDatasetRegistryError();
 
   if (ImGui::BeginTabBar("DatasetTabs")) {
     if (ImGui::BeginTabItem("Training Runs")) {
@@ -645,6 +647,51 @@ void RenderDatasetPanel(AppState& state, const DataLoader& loader) {
                 ? static_cast<float>(entry.second) / static_cast<float>(resource_index.total_files)
                 : 0.0f;
             ImGui::Text("%.1f%%", share * 100.0f);
+          }
+          ImGui::EndTable();
+        }
+      }
+
+      ImGui::EndTabItem();
+    }
+
+    if (ImGui::BeginTabItem("Datasets")) {
+      if (!dataset_error.empty()) {
+        ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.2f, 1.0f), "%s", dataset_error.c_str());
+      }
+
+      if (dataset_registry.datasets.empty()) {
+        ImGui::TextDisabled("No dataset registry loaded.");
+      } else {
+        if (!dataset_registry.generated_at.empty()) {
+          ImGui::TextDisabled("Generated at: %s", dataset_registry.generated_at.c_str());
+        }
+
+        if (ImGui::BeginTable("DatasetRegistryTable", 4,
+                              ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
+                              ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp)) {
+          ImGui::TableSetupColumn("Dataset", ImGuiTableColumnFlags_WidthStretch, 1.4f);
+          ImGui::TableSetupColumn("Files", ImGuiTableColumnFlags_WidthFixed, 80);
+          ImGui::TableSetupColumn("Size (MB)", ImGuiTableColumnFlags_WidthFixed, 100);
+          ImGui::TableSetupColumn("Updated", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+          ImGui::TableHeadersRow();
+
+          for (const auto& dataset : dataset_registry.datasets) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::Text("%s", dataset.name.c_str());
+            if (ImGui::IsItemHovered() && !dataset.path.empty()) {
+              ImGui::BeginTooltip();
+              ImGui::Text("%s", dataset.path.c_str());
+              ImGui::EndTooltip();
+            }
+            ImGui::TableNextColumn();
+            ImGui::Text("%zu", dataset.files.size());
+            ImGui::TableNextColumn();
+            double size_mb = static_cast<double>(dataset.size_bytes) / (1024.0 * 1024.0);
+            ImGui::Text("%.2f", size_mb);
+            ImGui::TableNextColumn();
+            ImGui::Text("%s", dataset.updated_at.empty() ? "-" : dataset.updated_at.c_str());
           }
           ImGui::EndTable();
         }

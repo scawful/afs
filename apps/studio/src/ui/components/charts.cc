@@ -1146,13 +1146,22 @@ void RenderMountsChart(AppState& state, const DataLoader& loader) {
 
 void RenderKnowledgeGraphChart(AppState& state, const DataLoader& loader) {
   RenderChartHeader(PlotKind::KnowledgeGraph, 
-                    "KNOWLEDGE GRAPH",
-                    "A topological view of semantic relationships between concepts within the training corpus.",
+                    "CONTEXT GRAPH",
+                    "AFS context map showing workspace and mount relationships.",
                     state);
 
   if (state.knowledge_concepts.empty()) {
-    ImGui::TextDisabled("No knowledge graph data available");
+    const auto& error = loader.GetContextGraphError();
+    if (!error.empty()) {
+      ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.2f, 1.0f), "%s", error.c_str());
+    }
+    ImGui::TextDisabled("No context graph data available");
     return;
+  }
+
+  const auto& graph = loader.GetContextGraph();
+  if (graph.context_count > 0 || graph.mount_count > 0) {
+    ImGui::TextDisabled("Contexts: %d  Mounts: %d", graph.context_count, graph.mount_count);
   }
 
   ImPlotFlags plot_flags = BasePlotFlags(state, false);

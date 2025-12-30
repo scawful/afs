@@ -243,7 +243,7 @@ const std::vector<PlotOption>& PlotOptions() {
       {PlotKind::MissionProgress, "Mission Progress"},
       {PlotKind::EvalMetrics, "Eval Metrics"},
       {PlotKind::Rejections, "Rejection Reasons"},
-      {PlotKind::KnowledgeGraph, "Knowledge Graph"},
+      {PlotKind::KnowledgeGraph, "Context Graph"},
       {PlotKind::LatentSpace, "Latent Space"},
       {PlotKind::Effectiveness, "Domain Effectiveness"},
       {PlotKind::Thresholds, "Threshold Sensitivity"},

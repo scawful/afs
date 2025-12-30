@@ -20,6 +20,7 @@ namespace {
 using json = nlohmann::json;
 
 constexpr size_t kTrendWindow = 5;
+constexpr float kPi = 3.14159265f;
 
 std::optional<std::filesystem::path> ResolveHafsScawfulRoot() {
   const char* env_root = std::getenv("AFS_SCAWFUL_ROOT");
@@ -41,6 +42,83 @@ std::optional<std::filesystem::path> ResolveHafsScawfulRoot() {
   }
 
   return std::nullopt;
+}
+
+std::optional<std::filesystem::path> ResolveTrunkRoot() {
+  const char* env_root = std::getenv("TRUNK_ROOT");
+  if (env_root && env_root[0] != '\0') {
+    auto path = studio::core::FileSystem::ResolvePath(env_root);
+    if (studio::core::FileSystem::Exists(path)) {
+      return path;
+    }
+  }
+
+  auto path = studio::core::FileSystem::ResolvePath("~/src/trunk");
+  if (studio::core::FileSystem::Exists(path)) {
+    return path;
+  }
+
+  return std::nullopt;
+}
+
+std::filesystem::path ResolveContextRoot() {
+  const char* env_root = std::getenv("AFS_CONTEXT_ROOT");
+  if (env_root && env_root[0] != '\0') {
+    auto path = studio::core::FileSystem::ResolvePath(env_root);
+    if (studio::core::FileSystem::Exists(path)) {
+      return path;
+    }
+  }
+
+  auto candidate = studio::core::FileSystem::ResolvePath("~/src/context");
+  if (studio::core::FileSystem::Exists(candidate)) {
+    return candidate;
+  }
+
+  auto fallback = studio::core::FileSystem::ResolvePath("~/.context");
+  if (studio::core::FileSystem::Exists(fallback)) {
+    return fallback;
+  }
+
+  return candidate;
+}
+
+std::filesystem::path ResolveTrainingRoot() {
+  const char* env_root = std::getenv("AFS_TRAINING_ROOT");
+  if (env_root && env_root[0] != '\0') {
+    auto path = studio::core::FileSystem::ResolvePath(env_root);
+    if (studio::core::FileSystem::Exists(path)) {
+      return path;
+    }
+  }
+
+  auto candidate = studio::core::FileSystem::ResolvePath("~/src/training");
+  if (studio::core::FileSystem::Exists(candidate)) {
+    return candidate;
+  }
+
+  auto fallback = studio::core::FileSystem::ResolvePath("~/.context/training");
+  if (studio::core::FileSystem::Exists(fallback)) {
+    return fallback;
+  }
+
+  return candidate;
+}
+
+std::filesystem::path ResolveContextGraphPath() {
+  const char* env_path = std::getenv("AFS_GRAPH_PATH");
+  if (env_path && env_path[0] != '\0') {
+    return studio::core::FileSystem::ResolvePath(env_path);
+  }
+  return ResolveContextRoot() / "index" / "afs_graph.json";
+}
+
+std::filesystem::path ResolveDatasetRegistryPath() {
+  const char* env_path = std::getenv("AFS_DATASET_REGISTRY");
+  if (env_path && env_path[0] != '\0') {
+    return studio::core::FileSystem::ResolvePath(env_path);
+  }
+  return ResolveTrainingRoot() / "index" / "dataset_registry.json";
 }
 
 constexpr float kTrendDeltaThreshold = 0.05f;
@@ -96,9 +174,9 @@ bool DataLoader::Refresh() {
     last_status_.error_count = 1;
     last_status_.last_error = last_error_;
     last_status_.last_error_source = "data_path";
-    return false;
+  } else {
+    LOG_INFO("DataLoader: Refreshing from " + data_path_);
   }
-  LOG_INFO("DataLoader: Refreshing from " + data_path_);
 
   auto next_quality_trends = quality_trends_;
   auto next_generator_stats = generator_stats_;
@@ -109,6 +187,8 @@ bool DataLoader::Refresh() {
   auto next_optimization_data = optimization_data_;
   auto next_curated_hacks = curated_hacks_;
   auto next_resource_index = resource_index_;
+  auto next_dataset_registry = dataset_registry_;
+  auto next_context_graph = context_graph_;
 
   LoadResult quality = LoadQualityFeedback(&next_quality_trends,
                                            &next_generator_stats,
@@ -187,6 +267,28 @@ bool DataLoader::Refresh() {
     resource_index_ = std::move(next_resource_index);
     resource_index_error_.clear();
   }
+
+  LoadResult registry = LoadDatasetRegistry(&next_dataset_registry);
+  if (!registry.found) {
+    dataset_registry_ = DatasetRegistryData{};
+    dataset_registry_error_ = "dataset_registry.json not found";
+  } else if (!registry.ok) {
+    dataset_registry_error_ = registry.error;
+  } else {
+    dataset_registry_ = std::move(next_dataset_registry);
+    dataset_registry_error_.clear();
+  }
+
+  LoadResult context_graph = LoadContextGraph(&next_context_graph);
+  if (!context_graph.found) {
+    context_graph_ = ContextGraphData{};
+    context_graph_error_ = "afs_graph.json not found";
+  } else if (!context_graph.ok) {
+    context_graph_error_ = context_graph.error;
+  } else {
+    context_graph_ = std::move(next_context_graph);
+    context_graph_error_.clear();
+  }
   
   // Update Mounts status
   mounts_.clear();
@@ -201,15 +303,25 @@ bool DataLoader::Refresh() {
   };
 
   add_mount("Code", "~/Code");
+  auto trunk_root = ResolveTrunkRoot();
+  if (trunk_root) {
+    add_mount("Trunk", trunk_root->string());
+  }
   auto scawful_root = ResolveHafsScawfulRoot();
   if (scawful_root) {
     add_mount("afs_scawful", scawful_root->string());
   }
   add_mount("usdasm", "~/Code/usdasm");
   add_mount("Medical Mechanica (D)", "/Users/scawful/Mounts/mm-d/afs_training");
-  add_mount("Oracle-of-Secrets", "~/Code/Oracle-of-Secrets");
-  add_mount("yaze", "~/Code/yaze");
-  add_mount("System Context", "~/.context");
+  if (trunk_root) {
+    add_mount("Oracle-of-Secrets", (trunk_root.value() / "scawful/retro/oracle-of-secrets").string());
+    add_mount("yaze", (trunk_root.value() / "scawful/retro/yaze").string());
+  } else {
+    add_mount("Oracle-of-Secrets", "~/Code/Oracle-of-Secrets");
+    add_mount("yaze", "~/Code/yaze");
+  }
+  add_mount("AFS Context", ResolveContextRoot().string());
+  add_mount("AFS Training", ResolveTrainingRoot().string());
 
   has_data_ = !quality_trends_.empty() || !generator_stats_.empty() ||
               !embedding_regions_.empty() || !training_runs_.empty() ||
@@ -580,6 +692,150 @@ DataLoader::LoadResult DataLoader::LoadResourceIndex(ResourceIndexData* resource
   } catch (const std::exception& e) {
     result.ok = false;
     result.error = std::string("Failed to parse resource_index.json: ") + e.what();
+  }
+
+  return result;
+}
+
+DataLoader::LoadResult DataLoader::LoadDatasetRegistry(DatasetRegistryData* dataset_registry) {
+  LoadResult result;
+  std::filesystem::path path = ResolveDatasetRegistryPath();
+  if (!path_exists_(path.string())) {
+    return result;
+  }
+  result.found = true;
+  LOG_INFO("DataLoader: Loading " + path.string());
+
+  std::string content;
+  std::string read_error;
+  if (!file_reader_(path.string(), &content, &read_error) || content.empty() ||
+      IsWhitespaceOnly(content)) {
+    result.ok = false;
+    result.error = read_error.empty() ? "dataset_registry.json is empty" : read_error;
+    return result;
+  }
+
+  try {
+    json data = json::parse(content);
+    dataset_registry->generated_at = data.value("generated_at", "");
+    dataset_registry->datasets.clear();
+
+    if (!data.contains("datasets") || !data["datasets"].is_array()) {
+      result.ok = false;
+      result.error = "dataset_registry.json missing datasets array";
+      return result;
+    }
+
+    for (const auto& entry : data["datasets"]) {
+      DatasetEntry dataset;
+      dataset.name = entry.value("name", "");
+      dataset.path = entry.value("path", "");
+      dataset.size_bytes = static_cast<std::uint64_t>(entry.value("size_bytes", 0));
+      dataset.updated_at = entry.value("updated_at", "");
+      if (entry.contains("files") && entry["files"].is_array()) {
+        for (const auto& file : entry["files"]) {
+          if (file.is_string()) {
+            dataset.files.push_back(file.get<std::string>());
+          }
+        }
+      }
+      dataset_registry->datasets.push_back(std::move(dataset));
+    }
+
+    result.ok = true;
+  } catch (const std::exception& e) {
+    result.ok = false;
+    result.error = std::string("Failed to parse dataset_registry.json: ") + e.what();
+  }
+
+  return result;
+}
+
+DataLoader::LoadResult DataLoader::LoadContextGraph(ContextGraphData* context_graph) {
+  LoadResult result;
+  std::filesystem::path path = ResolveContextGraphPath();
+  if (!path_exists_(path.string())) {
+    return result;
+  }
+  result.found = true;
+  LOG_INFO("DataLoader: Loading " + path.string());
+
+  std::string content;
+  std::string read_error;
+  if (!file_reader_(path.string(), &content, &read_error) || content.empty() ||
+      IsWhitespaceOnly(content)) {
+    result.ok = false;
+    result.error = read_error.empty() ? "afs_graph.json is empty" : read_error;
+    return result;
+  }
+
+  try {
+    json data = json::parse(content);
+    if (!data.contains("contexts") || !data["contexts"].is_array()) {
+      result.ok = false;
+      result.error = "afs_graph.json missing contexts array";
+      return result;
+    }
+
+    context_graph->labels.clear();
+    context_graph->nodes_x.clear();
+    context_graph->nodes_y.clear();
+    context_graph->edges.clear();
+    context_graph->context_count = 0;
+    context_graph->mount_count = 0;
+    context_graph->source_path = path.string();
+
+    const auto& contexts = data["contexts"];
+    const size_t context_total = contexts.size();
+    context_graph->context_count = static_cast<int>(context_total);
+
+    for (size_t i = 0; i < context_total; ++i) {
+      const auto& ctx = contexts[i];
+      std::string name = ctx.value("name", "context");
+      float angle = (context_total > 0)
+          ? (2.0f * kPi * static_cast<float>(i) / static_cast<float>(context_total))
+          : 0.0f;
+      float cx = std::cos(angle);
+      float cy = std::sin(angle);
+
+      int ctx_index = static_cast<int>(context_graph->labels.size());
+      context_graph->labels.push_back(name);
+      context_graph->nodes_x.push_back(cx);
+      context_graph->nodes_y.push_back(cy);
+
+      if (!ctx.contains("mounts") || !ctx["mounts"].is_array()) {
+        continue;
+      }
+
+      const auto& mounts = ctx["mounts"];
+      const size_t mount_total = mounts.size();
+      if (mount_total == 0) {
+        continue;
+      }
+
+      float ring = 0.35f + 0.02f * static_cast<float>(mount_total);
+      for (size_t j = 0; j < mount_total; ++j) {
+        const auto& mount = mounts[j];
+        std::string mount_name = mount.value("name", "mount");
+        std::string mount_type = mount.value("mount_type", "");
+        std::string label = mount_type.empty() ? mount_name : (mount_type + ":" + mount_name);
+        float local_angle = (2.0f * kPi * static_cast<float>(j) / static_cast<float>(mount_total));
+        float mx = cx + std::cos(local_angle) * ring;
+        float my = cy + std::sin(local_angle) * ring;
+
+        int mount_index = static_cast<int>(context_graph->labels.size());
+        context_graph->labels.push_back(label);
+        context_graph->nodes_x.push_back(mx);
+        context_graph->nodes_y.push_back(my);
+        context_graph->edges.push_back({ctx_index, mount_index});
+        context_graph->mount_count += 1;
+      }
+    }
+
+    result.ok = true;
+  } catch (const std::exception& e) {
+    result.ok = false;
+    result.error = std::string("Failed to parse afs_graph.json: ") + e.what();
   }
 
   return result;

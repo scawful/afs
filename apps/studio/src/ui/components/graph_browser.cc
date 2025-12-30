@@ -36,7 +36,7 @@ void GraphBrowser::InitializeGraphRegistry() {
         // Embedding Category
         {PlotKind::EmbeddingDensity, "Embedding Density", "Embedding space density visualization", GraphCategory::Embedding, false, true, true, true},
         {PlotKind::LatentSpace, "Latent Space", "2D latent space projection", GraphCategory::Embedding, false, true, true, true},
-        {PlotKind::KnowledgeGraph, "Knowledge Graph", "Knowledge concept relationships", GraphCategory::Embedding, false, false, false, false},
+        {PlotKind::KnowledgeGraph, "Context Graph", "AFS context and mount relationships", GraphCategory::Embedding, false, false, false, false},
         
         // Optimization Category
         {PlotKind::GeneratorEfficiency, "Generator Efficiency", "Generator performance metrics", GraphCategory::Optimization, true, true, true, true},

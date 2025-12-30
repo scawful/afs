@@ -245,7 +245,7 @@ struct AppState {
   bool is_rendering_expanded_plot = false;
   std::vector<PlotKind> custom_grid_slots;
 
-  // Knowledge Graph
+  // Context Graph
   std::vector<std::string> knowledge_concepts;
   std::vector<float> knowledge_nodes_x;
   std::vector<float> knowledge_nodes_y;

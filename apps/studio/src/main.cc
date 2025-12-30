@@ -1,7 +1,7 @@
 /// AFS Training Data Visualization - Main Entry Point
 ///
 /// Usage: afs_viz [data_path]
-///   data_path: Path to training data directory (default: ~/.context/training)
+///   data_path: Path to training data directory (default: ~/src/training if present)
 ///
 /// Build:
 ///   cmake -B build -S src/cc -DAFS_BUILD_VIZ=ON
@@ -27,7 +27,8 @@ int main(int argc, char* argv[]) {
   if (argc > 1) {
     data_path_str = argv[1];
   } else {
-    data_path_str = "~/.context/training";
+    auto preferred = FileSystem::ResolvePath("~/src/training");
+    data_path_str = FileSystem::Exists(preferred) ? preferred.string() : "~/.context/training";
   }
 
   std::filesystem::path data_path = FileSystem::ResolvePath(data_path_str);

@@ -211,6 +211,23 @@ void App::SyncDataBackedState() {
     mission.progress = 1.0f;
     state_.missions.push_back(std::move(mission));
   }
+
+  const auto& context_graph = loader_.GetContextGraph();
+  if (!context_graph.labels.empty()) {
+    state_.knowledge_concepts = context_graph.labels;
+    state_.knowledge_nodes_x = context_graph.nodes_x;
+    state_.knowledge_nodes_y = context_graph.nodes_y;
+    state_.knowledge_edges.clear();
+    state_.knowledge_edges.reserve(context_graph.edges.size());
+    for (const auto& edge : context_graph.edges) {
+      state_.knowledge_edges.push_back({edge.from, edge.to});
+    }
+  } else if (!loader_.GetContextGraphError().empty()) {
+    state_.knowledge_concepts.clear();
+    state_.knowledge_nodes_x.clear();
+    state_.knowledge_nodes_y.clear();
+    state_.knowledge_edges.clear();
+  }
 }
 
 void App::SeedDefaultState() {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <string>
@@ -96,6 +97,38 @@ struct ResourceIndexData {
   std::map<std::string, int> by_type;
 };
 
+/// Dataset registry entry.
+struct DatasetEntry {
+  std::string name;
+  std::string path;
+  std::uint64_t size_bytes = 0;
+  std::string updated_at;
+  std::vector<std::string> files;
+};
+
+/// Dataset registry summary.
+struct DatasetRegistryData {
+  std::string generated_at;
+  std::vector<DatasetEntry> datasets;
+};
+
+/// Context graph edge.
+struct ContextGraphEdge {
+  int from = -1;
+  int to = -1;
+};
+
+/// Context graph data (contexts + mounts).
+struct ContextGraphData {
+  std::string source_path;
+  int context_count = 0;
+  int mount_count = 0;
+  std::vector<std::string> labels;
+  std::vector<float> nodes_x;
+  std::vector<float> nodes_y;
+  std::vector<ContextGraphEdge> edges;
+};
+
 /// Optimization metrics.
 struct OptimizationData {
   std::map<std::string, float> domain_effectiveness;
@@ -175,6 +208,10 @@ class DataLoader {
   }
   const ResourceIndexData& GetResourceIndex() const { return resource_index_; }
   const std::string& GetResourceIndexError() const { return resource_index_error_; }
+  const DatasetRegistryData& GetDatasetRegistry() const { return dataset_registry_; }
+  const std::string& GetDatasetRegistryError() const { return dataset_registry_error_; }
+  const ContextGraphData& GetContextGraph() const { return context_graph_; }
+  const std::string& GetContextGraphError() const { return context_graph_error_; }
   const std::vector<MountData>& GetMounts() const {
     return mounts_;
   }
@@ -204,6 +241,8 @@ class DataLoader {
                                   OptimizationData* optimization_data);
   LoadResult LoadCuratedHacks(std::vector<CuratedHackEntry>* curated_hacks);
   LoadResult LoadResourceIndex(ResourceIndexData* resource_index);
+  LoadResult LoadDatasetRegistry(DatasetRegistryData* dataset_registry);
+  LoadResult LoadContextGraph(ContextGraphData* context_graph);
 
   std::string data_path_;
   FileReader file_reader_;
@@ -223,6 +262,10 @@ class DataLoader {
   std::string curated_hacks_error_;
   ResourceIndexData resource_index_;
   std::string resource_index_error_;
+  DatasetRegistryData dataset_registry_;
+  std::string dataset_registry_error_;
+  ContextGraphData context_graph_;
+  std::string context_graph_error_;
   std::vector<MountData> mounts_;
   std::map<std::string, bool> domain_visibility_;
 };
