@@ -8,6 +8,14 @@ authors = [
   {name = "scawful"}
 ]
 
+[project.optional-dependencies]
+test = [
+  "pytest>=7.4"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

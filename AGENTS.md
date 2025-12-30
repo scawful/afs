@@ -19,4 +19,4 @@
 - Concise, engineering notebook tone.
 
 ## How to verify (tests/commands)
-- Unknown / needs verification (no test harness yet).
+- `pytest`
