@@ -18,7 +18,7 @@ Status legend: Ported, Partial, Planned, Not started.
 - CLI surface: Partial (core context + graph + plugins; orchestration/services missing).
 - Plugin framework + adapters: Partial (discovery + load only; adapters not yet).
 - Orchestration/pipelines/swarm: Partial (routing skeleton + CLI).
-- Service management + daemons: Partial (definitions + render preview).
+- Service management + daemons: Partial (definitions + render preview + adapters).
 - TUI: Not started.
 - API/backends/integrations/models/llm: Not started.
 - Native/cc/editor tooling: Not started.
@@ -29,7 +29,7 @@ Status legend: Ported, Partial, Planned, Not started.
 - Resource indexing: Ported. `src/afs_scawful/resource_index.py`, `src/afs_scawful/cli.py`.
 - Training monitor config: Ported (AFS Studio loads plugin config).
 - Validators (ASM/C++/KG/ASAR): Partial (base + initial ports).
-- Generators (ASM/Oracle/curated/etc.): Planned.
+- Generators (ASM/Oracle/curated/etc.): Partial (doc-section generator + base).
 - Ops/runbooks/host scripts: Not started (needs reorg as CLI tasks).
 
 ## Near-term ports (priority)

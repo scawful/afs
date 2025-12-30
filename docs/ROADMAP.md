@@ -8,10 +8,10 @@
 - Service definitions + render preview
 - Orchestrator routing skeleton
 - Test harness for core modules
+- Service adapters (render-only)
 
 ## Planned
 - TUI starter (status + context browsing)
-- Service adapters (dry-run launchd/systemd)
 
 ## Ideas
 - Idea: Full orchestration pipeline (plan/execute/verify) with adapters
