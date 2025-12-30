@@ -113,6 +113,7 @@ void App::RefreshData(const char* reason) {
   bool ok = loader_.Refresh();
   state_.last_refresh_time = glfwGetTime();
   SyncDataBackedState();
+  EnsureActiveGraph();
   
   const auto& status = loader_.GetLastStatus();
   std::string msg;
@@ -228,6 +229,35 @@ void App::SyncDataBackedState() {
     state_.knowledge_nodes_y.clear();
     state_.knowledge_edges.clear();
   }
+}
+
+void App::EnsureActiveGraph() {
+  if (state_.active_graph != PlotKind::None &&
+      graph_browser_.IsGraphAvailable(state_.active_graph, state_, loader_)) {
+    return;
+  }
+
+  const PlotKind preferred[] = {
+      PlotKind::KnowledgeGraph,
+      PlotKind::DatasetInventory,
+      PlotKind::MountsStatus,
+  };
+
+  for (auto kind : preferred) {
+    if (graph_browser_.IsGraphAvailable(kind, state_, loader_)) {
+      graph_navigator_.NavigateToGraph(state_, kind);
+      return;
+    }
+  }
+
+  for (const auto& graph : graph_browser_.GetAllGraphs()) {
+    if (graph_browser_.IsGraphAvailable(graph.kind, state_, loader_)) {
+      graph_navigator_.NavigateToGraph(state_, graph.kind);
+      return;
+    }
+  }
+
+  state_.active_graph = PlotKind::None;
 }
 
 void App::SeedDefaultState() {
@@ -367,7 +397,7 @@ void App::RenderLayout() {
     if (state_.show_graph_browser) {
       ImGui::Begin("GraphBrowser", &state_.show_graph_browser, 
                    ImGuiWindowFlags_NoCollapse);
-      graph_browser_.Render(state_);
+      graph_browser_.Render(state_, loader_);
       ImGui::End();
     }
 

@@ -40,7 +40,17 @@ RegistryReader::RegistryReader(const std::filesystem::path& registry_path)
     : registry_path_(registry_path) {}
 
 std::filesystem::path RegistryReader::ResolveDefaultPath() const {
-  return ResolveContextRoot() / "models" / "registry.json";
+  auto preferred = ResolveContextRoot() / "models" / "registry.json";
+  if (core::FileSystem::Exists(preferred)) {
+    return preferred;
+  }
+
+  auto fallback = core::FileSystem::ResolvePath("~/.context/models/registry.json");
+  if (core::FileSystem::Exists(fallback)) {
+    return fallback;
+  }
+
+  return preferred;
 }
 
 bool RegistryReader::Exists() const {

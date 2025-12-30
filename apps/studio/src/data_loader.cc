@@ -22,6 +22,8 @@ using json = nlohmann::json;
 constexpr size_t kTrendWindow = 5;
 constexpr float kPi = 3.14159265f;
 
+std::optional<std::filesystem::path> ResolveTrunkRoot();
+
 std::optional<std::filesystem::path> ResolveHafsScawfulRoot() {
   const char* env_root = std::getenv("AFS_SCAWFUL_ROOT");
   if (env_root && env_root[0] != '\0') {
@@ -318,6 +320,15 @@ bool DataLoader::Refresh() {
   }
 
   LoadResult resource = LoadResourceIndex(&next_resource_index);
+  last_status_.resource_index_found = resource.found;
+  last_status_.resource_index_ok = resource.ok;
+  if (resource.found && !resource.ok) {
+    last_status_.error_count += 1;
+    if (last_status_.last_error.empty()) {
+      last_status_.last_error = resource.error;
+      last_status_.last_error_source = "resource_index.json";
+    }
+  }
   if (!resource.found) {
     resource_index_ = ResourceIndexData{};
     resource_index_error_ = "resource_index.json not found";
@@ -329,6 +340,15 @@ bool DataLoader::Refresh() {
   }
 
   LoadResult registry = LoadDatasetRegistry(&next_dataset_registry);
+  last_status_.dataset_registry_found = registry.found;
+  last_status_.dataset_registry_ok = registry.ok;
+  if (registry.found && !registry.ok) {
+    last_status_.error_count += 1;
+    if (last_status_.last_error.empty()) {
+      last_status_.last_error = registry.error;
+      last_status_.last_error_source = "dataset_registry.json";
+    }
+  }
   if (!registry.found) {
     dataset_registry_ = DatasetRegistryData{};
     dataset_registry_error_ = "dataset_registry.json not found";
@@ -340,6 +360,15 @@ bool DataLoader::Refresh() {
   }
 
   LoadResult context_graph = LoadContextGraph(&next_context_graph);
+  last_status_.context_graph_found = context_graph.found;
+  last_status_.context_graph_ok = context_graph.ok;
+  if (context_graph.found && !context_graph.ok) {
+    last_status_.error_count += 1;
+    if (last_status_.last_error.empty()) {
+      last_status_.last_error = context_graph.error;
+      last_status_.last_error_source = "afs_graph.json";
+    }
+  }
   if (!context_graph.found) {
     context_graph_ = ContextGraphData{};
     context_graph_error_ = "afs_graph.json not found";
@@ -386,7 +415,10 @@ bool DataLoader::Refresh() {
   has_data_ = !quality_trends_.empty() || !generator_stats_.empty() ||
               !embedding_regions_.empty() || !training_runs_.empty() ||
               !optimization_data_.domain_effectiveness.empty() ||
-              !optimization_data_.threshold_sensitivity.empty();
+              !optimization_data_.threshold_sensitivity.empty() ||
+              !dataset_registry_.datasets.empty() ||
+              resource_index_.total_files > 0 ||
+              !context_graph_.labels.empty();
   last_error_ = last_status_.last_error;
 
   return last_status_.AnyOk() || (!(last_status_.FoundCount() > 0) && has_data_);

@@ -245,6 +245,7 @@ const std::vector<PlotOption>& PlotOptions() {
       {PlotKind::Effectiveness, "Domain Effectiveness"},
       {PlotKind::Thresholds, "Threshold Sensitivity"},
       {PlotKind::MountsStatus, "Local Mounts Status"},
+      {PlotKind::DatasetInventory, "Dataset Inventory"},
   };
   return options;
 }

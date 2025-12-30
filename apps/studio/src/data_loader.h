@@ -150,19 +150,30 @@ struct LoadStatus {
   bool active_ok = false;
   bool training_found = false;
   bool training_ok = false;
+  bool resource_index_found = false;
+  bool resource_index_ok = false;
+  bool dataset_registry_found = false;
+  bool dataset_registry_ok = false;
+  bool context_graph_found = false;
+  bool context_graph_ok = false;
   int error_count = 0;
   std::string last_error;
   std::string last_error_source;
 
   int FoundCount() const {
     return static_cast<int>(quality_found) + static_cast<int>(active_found) +
-           static_cast<int>(training_found);
+           static_cast<int>(training_found) + static_cast<int>(resource_index_found) +
+           static_cast<int>(dataset_registry_found) + static_cast<int>(context_graph_found);
   }
   int OkCount() const {
     return static_cast<int>(quality_ok) + static_cast<int>(active_ok) +
-           static_cast<int>(training_ok);
+           static_cast<int>(training_ok) + static_cast<int>(resource_index_ok) +
+           static_cast<int>(dataset_registry_ok) + static_cast<int>(context_graph_ok);
   }
-  bool AnyOk() const { return quality_ok || active_ok || training_ok; }
+  bool AnyOk() const {
+    return quality_ok || active_ok || training_ok || resource_index_ok ||
+           dataset_registry_ok || context_graph_ok;
+  }
 };
 
 /// Loads training data from JSON files.

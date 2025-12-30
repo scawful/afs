@@ -37,6 +37,7 @@ enum class PlotKind {
   Effectiveness,
   Thresholds,
   MountsStatus,
+  DatasetInventory,
 };
 
 enum class GraphViewMode { Single, Compare, Overview };
@@ -238,7 +239,7 @@ struct AppState {
   bool show_plot_legends = true;
   bool show_plot_markers = true;
   bool data_scientist_mode = false;
-  bool show_all_charts = true;
+  bool show_all_charts = false;
   float pulse_timer = 0.0f;
   int custom_grid_rows = 2;
   int custom_grid_columns = 2;

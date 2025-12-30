@@ -38,10 +38,11 @@ class App {
   const DataLoader& loader() const { return loader_; }
 
  private:
-  void RefreshData(const char* reason);
-  void SeedDefaultState();
-  void SyncDataBackedState();
-  void TickSimulatedMetrics(float dt);
+ void RefreshData(const char* reason);
+ void SeedDefaultState();
+ void SyncDataBackedState();
+ void TickSimulatedMetrics(float dt);
+ void EnsureActiveGraph();
   
   void RenderFrame();
   void RenderLayout();

@@ -1,6 +1,7 @@
 #include "graph_browser.h"
 #include "../core.h"
 #include "../../icons.h"
+#include "../../data_loader.h"
 #include <imgui.h>
 #include <algorithm>
 
@@ -15,6 +16,7 @@ void GraphBrowser::InitializeGraphRegistry() {
         // Training Category
         {PlotKind::TrainingLoss, "Training Loss", "Loss curves over training steps", GraphCategory::Training, true, true, true, true},
         {PlotKind::LossVsSamples, "Loss vs Samples", "Training loss progression by sample count", GraphCategory::Training, false, true, true, false},
+        {PlotKind::DatasetInventory, "Dataset Inventory", "Dataset sizes and file counts", GraphCategory::Training, false, false, true, false},
         
         // Quality Category
         {PlotKind::QualityTrends, "Quality Trends", "Data quality trends by domain", GraphCategory::Quality, true, true, true, true},
@@ -93,7 +95,57 @@ const GraphInfo* GraphBrowser::GetGraphInfo(PlotKind kind) const {
     return nullptr;
 }
 
-void GraphBrowser::Render(AppState& state) {
+bool GraphBrowser::IsGraphAvailable(PlotKind kind,
+                                    const AppState& state,
+                                    const DataLoader& loader) const {
+    switch (kind) {
+        case PlotKind::QualityTrends:
+        case PlotKind::QualityDirection:
+            return !loader.GetQualityTrends().empty();
+        case PlotKind::GeneratorEfficiency:
+        case PlotKind::GeneratorMix:
+            return !loader.GetGeneratorStats().empty();
+        case PlotKind::CoverageDensity:
+        case PlotKind::EmbeddingDensity:
+        case PlotKind::EmbeddingQuality:
+        case PlotKind::LatentSpace:
+            return !loader.GetEmbeddingRegions().empty();
+        case PlotKind::TrainingLoss:
+        case PlotKind::LossVsSamples:
+            return !loader.GetTrainingRuns().empty();
+        case PlotKind::DomainCoverage:
+            return !loader.GetCoverage().domain_coverage.empty();
+        case PlotKind::Rejections:
+            return !loader.GetRejectionSummary().reasons.empty();
+        case PlotKind::EvalMetrics: {
+            const auto& runs = loader.GetTrainingRuns();
+            for (const auto& run : runs) {
+                if (!run.eval_metrics.empty()) return true;
+            }
+            return false;
+        }
+        case PlotKind::Effectiveness:
+            return !loader.GetOptimizationData().domain_effectiveness.empty() ||
+                   !loader.GetCoverage().domain_coverage.empty();
+        case PlotKind::Thresholds:
+            return !loader.GetOptimizationData().threshold_sensitivity.empty();
+        case PlotKind::AgentThroughput:
+            return !state.agents.empty();
+        case PlotKind::MissionQueue:
+        case PlotKind::MissionProgress:
+            return !state.missions.empty();
+        case PlotKind::MountsStatus:
+            return !loader.GetMounts().empty();
+        case PlotKind::KnowledgeGraph:
+            return !loader.GetContextGraph().labels.empty();
+        case PlotKind::DatasetInventory:
+            return !loader.GetDatasetRegistry().datasets.empty();
+        default:
+            return true;
+    }
+}
+
+void GraphBrowser::Render(AppState& state, const DataLoader& loader) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
     
     // Search bar
@@ -136,7 +188,17 @@ void GraphBrowser::Render(AppState& state) {
             for (auto kind : state.graph_bookmarks) {
                 const GraphInfo* info = GetGraphInfo(kind);
                 if (info) {
-                    RenderGraphItem(*info, state);
+                    bool available = IsGraphAvailable(info->kind, state, loader);
+                    if (!available && !state.show_all_charts) {
+                        continue;
+                    }
+                    if (!available && state.show_all_charts) {
+                        ImGui::BeginDisabled();
+                        RenderGraphItem(*info, state);
+                        ImGui::EndDisabled();
+                    } else {
+                        RenderGraphItem(*info, state);
+                    }
                 }
             }
         }
@@ -158,7 +220,17 @@ void GraphBrowser::Render(AppState& state) {
             for (auto kind : recent_unique) {
                 const GraphInfo* info = GetGraphInfo(kind);
                 if (info) {
-                    RenderGraphItem(*info, state);
+                    bool available = IsGraphAvailable(info->kind, state, loader);
+                    if (!available && !state.show_all_charts) {
+                        continue;
+                    }
+                    if (!available && state.show_all_charts) {
+                        ImGui::BeginDisabled();
+                        RenderGraphItem(*info, state);
+                        ImGui::EndDisabled();
+                    } else {
+                        RenderGraphItem(*info, state);
+                    }
                 }
             }
         }
@@ -170,13 +242,31 @@ void GraphBrowser::Render(AppState& state) {
     ImGui::Spacing();
     
     auto filtered = GetFilteredGraphs(state.browser_filter, state.graph_search_query);
+    if (!state.show_all_charts) {
+        filtered.erase(std::remove_if(filtered.begin(), filtered.end(),
+                                      [&](const GraphInfo& graph) {
+                                          return !IsGraphAvailable(graph.kind, state, loader);
+                                      }),
+                       filtered.end());
+    }
     
     if (filtered.empty()) {
-        ImGui::TextDisabled("No graphs found");
+        if (state.show_all_charts) {
+            ImGui::TextDisabled("No graphs found");
+        } else {
+            ImGui::TextDisabled("No graphs with data (toggle Show All Chart Windows to view empty graphs)");
+        }
     } else {
         ImGui::BeginChild("GraphList", ImVec2(0, 0), false);
         for (const auto& graph : filtered) {
-            RenderGraphItem(graph, state);
+            bool available = IsGraphAvailable(graph.kind, state, loader);
+            if (!available && state.show_all_charts) {
+                ImGui::BeginDisabled();
+                RenderGraphItem(graph, state);
+                ImGui::EndDisabled();
+            } else {
+                RenderGraphItem(graph, state);
+            }
         }
         ImGui::EndChild();
     }

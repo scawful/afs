@@ -14,6 +14,7 @@ namespace viz {
 namespace ui {
 void RenderMountsChart(AppState& state, const DataLoader& loader);
 void RenderKnowledgeGraphChart(AppState& state, const DataLoader& loader);
+void RenderDatasetInventoryChart(AppState& state, const DataLoader& loader);
 
 
 
@@ -258,6 +259,65 @@ void RenderTrainingLossChart(AppState& state, const DataLoader& loader) {
         ImGui::Text("Loss: %.4f", mouse.y);
         ImGui::EndTooltip();
     }
+
+    ImPlot::EndPlot();
+  }
+  ImPlot::PopStyleColor(2);
+  ImPlot::PopStyleVar(6);
+}
+
+void RenderDatasetInventoryChart(AppState& state, const DataLoader& loader) {
+  RenderChartHeader(PlotKind::DatasetInventory,
+                    "DATASET INVENTORY",
+                    "Dataset sizes and file counts from the registry index.",
+                    state);
+
+  const auto& registry = loader.GetDatasetRegistry();
+  if (registry.datasets.empty()) {
+    ImGui::TextDisabled("No dataset registry data available");
+    return;
+  }
+
+  std::vector<const char*> labels;
+  std::vector<float> sizes_mb;
+  std::vector<float> file_counts;
+  std::vector<std::string> label_storage;
+  labels.reserve(registry.datasets.size());
+  sizes_mb.reserve(registry.datasets.size());
+  file_counts.reserve(registry.datasets.size());
+  label_storage.reserve(registry.datasets.size());
+
+  for (const auto& dataset : registry.datasets) {
+    label_storage.push_back(dataset.name);
+    sizes_mb.push_back(static_cast<float>(dataset.size_bytes) / (1024.0f * 1024.0f));
+    file_counts.push_back(static_cast<float>(dataset.files.size()));
+  }
+
+  for (const auto& label : label_storage) labels.push_back(label.c_str());
+
+  ImPlotFlags plot_flags = BasePlotFlags(state, true);
+  ApplyPremiumPlotStyles("##DatasetInventory", state);
+  if (ImPlot::BeginPlot("##DatasetInventory", ImGui::GetContentRegionAvail(), plot_flags)) {
+    ImPlotAxisFlags axis_flags = static_cast<ImPlotAxisFlags>(GetPlotAxisFlags(state));
+    ImPlot::SetupAxes("Dataset", "Size (MB)", axis_flags, axis_flags);
+    ImPlot::SetupAxis(ImAxis_Y2, "Files", axis_flags);
+    if (!labels.empty()) {
+      ImPlot::SetupAxisTicks(ImAxis_X1, 0, static_cast<double>(labels.size() - 1),
+                             static_cast<int>(labels.size()), labels.data());
+    }
+    HandlePlotContextMenu(PlotKind::DatasetInventory, state);
+
+    ImPlot::SetNextFillStyle(GetSeriesColor(3), 0.75f);
+    ImPlot::PlotBars("Size (MB)", sizes_mb.data(),
+                     static_cast<int>(sizes_mb.size()), 0.6f);
+
+    ImPlot::SetAxis(ImAxis_Y2);
+    ImPlot::SetNextLineStyle(GetSeriesColor(6), 2.0f);
+    if (state.show_plot_markers) {
+      ImPlot::SetNextMarkerStyle(ImPlotMarker_Circle, 4.0f, GetSeriesColor(6));
+    }
+    ImPlot::PlotLine("Files", file_counts.data(),
+                     static_cast<int>(file_counts.size()));
 
     ImPlot::EndPlot();
   }
@@ -1074,6 +1134,9 @@ void RenderPlotByKind(PlotKind kind, AppState& state, const DataLoader& loader) 
       break;
     case PlotKind::MountsStatus:
       RenderMountsChart(state, loader);
+      break;
+    case PlotKind::DatasetInventory:
+      RenderDatasetInventoryChart(state, loader);
       break;
     default:
       break;
