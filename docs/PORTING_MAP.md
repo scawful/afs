@@ -3,10 +3,10 @@
 Scope: inventory of legacy features and their status in the current AFS/AFS Scawful repos. Use this as a porting checklist; verify specifics when moving code.
 
 Sources (local workspace):
-- Previous core: `trunk/scawful/research/legacy/afs_legacy`
-- Previous plugin: `trunk/scawful/research/legacy/afs_scawful_legacy`
-- Current core: `trunk/scawful/research/afs`
-- Current plugin: `trunk/scawful/research/afs_scawful`
+- Previous core: `trunk/lab/legacy/afs_legacy`
+- Previous plugin: `trunk/lab/legacy/afs_scawful_legacy`
+- Current core: `trunk/lab/afs`
+- Current plugin: `trunk/lab/afs_scawful`
 
 Status legend: Ported, Partial, Planned, Not started.
 

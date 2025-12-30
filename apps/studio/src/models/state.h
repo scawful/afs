@@ -122,6 +122,7 @@ struct AppState {
   bool show_quality_trends = false; // Default off, let layout init handle it
   bool show_generator_efficiency = false;
   bool show_coverage_density = false;
+  bool show_about_modal = false;
   bool enable_viewports = true;
   bool enable_docking = true;
   bool reset_layout_on_workspace_change = false;
@@ -160,6 +161,8 @@ struct AppState {
   bool force_reset_layout = false;
   bool lock_layout = false;
   double last_refresh_time = 0.0;
+  std::string studio_version;
+  std::string studio_data_root;
   
   // Advanced Interaction
   std::vector<PlotKind> active_floaters;

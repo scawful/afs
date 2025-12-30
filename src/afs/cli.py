@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 from pathlib import Path
 from typing import Iterable
 
@@ -36,6 +38,75 @@ def _parse_mount_type(value: str) -> MountType:
         return MountType(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"Unknown mount type: {value}") from exc
+
+
+def _resolve_studio_root() -> Path:
+    candidates: list[Path] = []
+    env_root = os.getenv("AFS_ROOT")
+    if env_root:
+        candidates.append(Path(env_root).expanduser().resolve())
+    trunk_root = os.getenv("TRUNK_ROOT")
+    if trunk_root:
+        candidates.append(Path(trunk_root).expanduser().resolve() / "lab" / "afs")
+    candidates.append(Path(__file__).resolve().parents[2])
+
+    for candidate in candidates:
+        if (candidate / "apps" / "studio" / "CMakeLists.txt").exists():
+            return candidate
+
+    raise FileNotFoundError(
+        "AFS studio source not found. Set AFS_ROOT to the repo root."
+    )
+
+
+def _studio_binary_name() -> str:
+    return "afs_studio.exe" if os.name == "nt" else "afs_studio"
+
+
+def _studio_build_dir(root: Path, override: str | None) -> Path:
+    return (
+        Path(override).expanduser().resolve()
+        if override
+        else root / "build" / "studio"
+    )
+
+
+def _studio_binary_path(build_dir: Path, config: str | None) -> Path:
+    if config:
+        candidate = build_dir / config / _studio_binary_name()
+        if candidate.exists():
+            return candidate
+    return build_dir / _studio_binary_name()
+
+
+def _run_command(cmd: list[str]) -> int:
+    try:
+        subprocess.run(cmd, check=True)
+    except FileNotFoundError:
+        print(f"command not found: {cmd[0]}")
+        return 1
+    except subprocess.CalledProcessError as exc:
+        return exc.returncode
+    return 0
+
+
+def _studio_build(
+    root: Path,
+    build_dir: Path,
+    build_type: str | None,
+    config: str | None,
+) -> int:
+    src_dir = root / "apps" / "studio"
+    cmake_cmd = ["cmake", "-S", str(src_dir), "-B", str(build_dir)]
+    if build_type:
+        cmake_cmd.append(f"-DCMAKE_BUILD_TYPE={build_type}")
+    status = _run_command(cmake_cmd)
+    if status != 0:
+        return status
+    build_cmd = ["cmake", "--build", str(build_dir), "--target", "afs_studio"]
+    if config:
+        build_cmd.extend(["--config", config])
+    return _run_command(build_cmd)
 
 
 def _load_manager(config_path: Path | None) -> AFSManager:
@@ -194,6 +265,90 @@ def _orchestrator_plan_command(args: argparse.Namespace) -> int:
     for agent in plan.agents:
         tags = ",".join(agent.tags) if agent.tags else "-"
         print(f"{agent.name}\t{agent.role}\t{agent.backend}\t{tags}")
+    return 0
+
+
+def _studio_build_command(args: argparse.Namespace) -> int:
+    try:
+        root = _resolve_studio_root()
+    except FileNotFoundError as exc:
+        print(str(exc))
+        return 1
+    build_dir = _studio_build_dir(root, args.build_dir)
+    status = _studio_build(root, build_dir, args.build_type, args.config)
+    if status == 0:
+        print(f"build_dir: {build_dir}")
+    return status
+
+
+def _studio_run_command(args: argparse.Namespace) -> int:
+    try:
+        root = _resolve_studio_root()
+    except FileNotFoundError as exc:
+        print(str(exc))
+        return 1
+    build_dir = _studio_build_dir(root, args.build_dir)
+    binary = _studio_binary_path(build_dir, args.config)
+    if not binary.exists() and args.build:
+        status = _studio_build(root, build_dir, args.build_type, args.config)
+        if status != 0:
+            return status
+        binary = _studio_binary_path(build_dir, args.config)
+    if not binary.exists():
+        print(f"binary not found: {binary}")
+        return 1
+    cmd = [str(binary)]
+    if args.args:
+        cmd.extend(args.args)
+    return _run_command(cmd)
+
+
+def _studio_install_command(args: argparse.Namespace) -> int:
+    try:
+        root = _resolve_studio_root()
+    except FileNotFoundError as exc:
+        print(str(exc))
+        return 1
+    build_dir = _studio_build_dir(root, args.build_dir)
+    if not build_dir.exists():
+        print(f"build dir missing: {build_dir}")
+        return 1
+    prefix = (
+        Path(args.prefix).expanduser().resolve()
+        if args.prefix
+        else Path.home() / ".local"
+    )
+    cmd = ["cmake", "--install", str(build_dir), "--prefix", str(prefix)]
+    if args.config:
+        cmd.extend(["--config", args.config])
+    status = _run_command(cmd)
+    if status == 0:
+        print(f"installed: {prefix / 'bin' / _studio_binary_name()}")
+    return status
+
+
+def _studio_path_command(args: argparse.Namespace) -> int:
+    try:
+        root = _resolve_studio_root()
+    except FileNotFoundError as exc:
+        print(str(exc))
+        return 1
+    build_dir = _studio_build_dir(root, args.build_dir)
+    binary = _studio_binary_path(build_dir, args.config)
+    print(binary)
+    return 0
+
+
+def _studio_alias_command(args: argparse.Namespace) -> int:
+    try:
+        root = _resolve_studio_root()
+    except FileNotFoundError as exc:
+        print(str(exc))
+        return 1
+    root_value = os.getenv("AFS_ROOT") or str(root)
+    print(f"export AFS_ROOT=\"{root_value}\"")
+    print("alias afs-studio='PYTHONPATH=\"$AFS_ROOT/src\" python -m afs studio run --build'")
+    print("alias afs-studio-build='PYTHONPATH=\"$AFS_ROOT/src\" python -m afs studio build'")
     return 0
 
 
@@ -580,6 +735,45 @@ def build_parser() -> argparse.ArgumentParser:
     orch_plan.add_argument("--role", help="Role to match.")
     orch_plan.set_defaults(func=_orchestrator_plan_command)
 
+    studio_parser = subparsers.add_parser("studio", help="AFS Studio helpers.")
+    studio_sub = studio_parser.add_subparsers(dest="studio_command")
+
+    studio_build = studio_sub.add_parser("build", help="Build AFS Studio.")
+    studio_build.add_argument("--build-dir", help="Build directory override.")
+    studio_build.add_argument(
+        "--build-type",
+        default="RelWithDebInfo",
+        help="CMake build type (default: RelWithDebInfo).",
+    )
+    studio_build.add_argument("--config", help="Multi-config build name.")
+    studio_build.set_defaults(func=_studio_build_command)
+
+    studio_run = studio_sub.add_parser("run", help="Run AFS Studio.")
+    studio_run.add_argument("--build", action="store_true", help="Build if missing.")
+    studio_run.add_argument("--build-dir", help="Build directory override.")
+    studio_run.add_argument(
+        "--build-type",
+        default="RelWithDebInfo",
+        help="CMake build type (default: RelWithDebInfo).",
+    )
+    studio_run.add_argument("--config", help="Multi-config build name.")
+    studio_run.add_argument("args", nargs=argparse.REMAINDER, help="Arguments for afs_studio.")
+    studio_run.set_defaults(func=_studio_run_command)
+
+    studio_install = studio_sub.add_parser("install", help="Install AFS Studio.")
+    studio_install.add_argument("--prefix", help="Install prefix (default: ~/.local).")
+    studio_install.add_argument("--build-dir", help="Build directory override.")
+    studio_install.add_argument("--config", help="Multi-config build name.")
+    studio_install.set_defaults(func=_studio_install_command)
+
+    studio_path = studio_sub.add_parser("path", help="Print studio binary path.")
+    studio_path.add_argument("--build-dir", help="Build directory override.")
+    studio_path.add_argument("--config", help="Multi-config build name.")
+    studio_path.set_defaults(func=_studio_path_command)
+
+    studio_alias = studio_sub.add_parser("alias", help="Print alias suggestions.")
+    studio_alias.set_defaults(func=_studio_alias_command)
+
     status_parser = subparsers.add_parser("status", help="Show context root status.")
     status_parser.add_argument("--start-dir", help="Directory to search from.")
     status_parser.set_defaults(func=_status_command)
@@ -775,6 +969,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         parser.print_help()
         return 1
     if args.command == "orchestrator" and not getattr(args, "orchestrator_command", None):
+        parser.print_help()
+        return 1
+    if args.command == "studio" and not getattr(args, "studio_command", None):
         parser.print_help()
         return 1
     return args.func(args)

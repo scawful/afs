@@ -37,15 +37,23 @@ std::filesystem::path ResolveHafsScawfulRoot() {
   const char* trunk_env = std::getenv("TRUNK_ROOT");
   if (trunk_env && trunk_env[0] != '\0') {
     auto trunk_root = studio::core::FileSystem::ResolvePath(trunk_env);
-    auto candidate = trunk_root / "scawful" / "research" / "afs_scawful";
+    auto candidate = trunk_root / "lab" / "afs_scawful";
     if (studio::core::FileSystem::Exists(candidate)) {
       return candidate;
     }
+    auto legacy = trunk_root / "scawful" / "research" / "afs_scawful";
+    if (studio::core::FileSystem::Exists(legacy)) {
+      return legacy;
+    }
   }
 
-  auto fallback_path = studio::core::FileSystem::ResolvePath("~/src/trunk/scawful/research/afs_scawful");
+  auto fallback_path = studio::core::FileSystem::ResolvePath("~/src/trunk/lab/afs_scawful");
   if (studio::core::FileSystem::Exists(fallback_path)) {
     return fallback_path;
+  }
+  auto legacy_fallback = studio::core::FileSystem::ResolvePath("~/src/trunk/scawful/research/afs_scawful");
+  if (studio::core::FileSystem::Exists(legacy_fallback)) {
+    return legacy_fallback;
   }
 
   return {};
@@ -1458,10 +1466,32 @@ void RenderMenuBar(AppState& state,
         if (show_shortcuts_window) *show_shortcuts_window = true;
       }
       ImGui::Separator();
-      if (ImGui::MenuItem("About AFS Viz")) {}
+      if (ImGui::MenuItem("About AFS Studio")) {
+        state.show_about_modal = true;
+      }
       ImGui::EndMenu();
     }
     ImGui::EndMainMenuBar();
+  }
+
+  if (state.show_about_modal) {
+    ImGui::OpenPopup("About AFS Studio");
+  }
+  if (ImGui::BeginPopupModal("About AFS Studio", &state.show_about_modal,
+                             ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::Text("AFS Studio");
+    ImGui::Separator();
+    ImGui::Text("Version: %s", state.studio_version.empty()
+                                 ? "(unknown)"
+                                 : state.studio_version.c_str());
+    ImGui::Text("Data root: %s", state.studio_data_root.empty()
+                                  ? "(not set)"
+                                  : state.studio_data_root.c_str());
+    ImGui::Spacing();
+    if (ImGui::Button("Close")) {
+      state.show_about_modal = false;
+    }
+    ImGui::EndPopup();
   }
 }
 

@@ -1,7 +1,8 @@
 #include "app.h"
-#include "core/logger.h"
-#include "core/context.h"
 #include "core/assets.h"
+#include "core/context.h"
+#include "core/logger.h"
+#include "core/version.h"
 #include "ui/panels/chat_panel.h"
 
 #include <algorithm>
@@ -41,6 +42,9 @@ App::App(const std::string& data_path)
     : data_path_(data_path), loader_(data_path) {
   LOG_INFO("AFS Studio initialize with data path: " + data_path);
 
+  state_.studio_version = studio::core::StudioVersion();
+  state_.studio_data_root = data_path_;
+
   std::snprintf(state_.new_agent_role.data(), state_.new_agent_role.size(), "Evaluator");
   std::snprintf(state_.new_mission_owner.data(), state_.new_mission_owner.size(), "Ops");
   std::snprintf(state_.system_prompt.data(), state_.system_prompt.size(), 
@@ -69,7 +73,12 @@ App::App(const std::string& data_path)
   SeedDefaultState();
 
   // Create graphics context
-  context_ = std::make_unique<studio::core::GraphicsContext>("AFS Studio", 1400, 900);
+  std::string title = "AFS Studio";
+  if (!state_.studio_version.empty()) {
+    title += " ";
+    title += state_.studio_version;
+  }
+  context_ = std::make_unique<studio::core::GraphicsContext>(title, 1400, 900);
   if (context_->IsValid()) {
       fonts_ = studio::core::AssetLoader::LoadFonts();
       themes::ApplyHafsTheme();

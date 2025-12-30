@@ -28,3 +28,8 @@ Quickstart:
 - `python -m afs orchestrator list`
 
 Discovery skips directory names in `general.discovery_ignore` (default: legacy, archive, archives).
+
+Studio:
+- `python -m afs studio build`
+- `python -m afs studio run --build`
+- `python -m afs studio install --prefix ~/.local`

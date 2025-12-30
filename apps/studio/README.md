@@ -5,15 +5,39 @@ Native C++17 visualization and training management application for AFS.
 ## Build
 
 ```bash
-# From project root
-cmake -B build -S . -DAFS_BUILD_STUDIO=ON
-cmake --build build --target afs_studio
+# From AFS repo root
+cmake -S apps/studio -B build/studio
+cmake --build build/studio --target afs_studio
 ```
 
 ## Run
 
 ```bash
-./build/apps/studio/afs_studio
+./build/studio/afs_studio --data ~/src/training
+```
+
+## Install (local)
+
+```bash
+cmake --install build/studio --prefix ~/.local
+# Ensure ~/.local/bin is on PATH
+```
+
+## CLI helpers
+
+```bash
+python -m afs studio build
+python -m afs studio run --build
+python -m afs studio install --prefix ~/.local
+python -m afs studio alias
+```
+
+## Quick aliases
+
+```bash
+export AFS_ROOT=~/src/trunk/lab/afs
+alias afs-studio='PYTHONPATH="$AFS_ROOT/src" python -m afs studio run --build'
+alias afs-studio-build='PYTHONPATH="$AFS_ROOT/src" python -m afs studio build'
 ```
 
 ## Data sources
@@ -22,6 +46,11 @@ cmake --build build --target afs_studio
 - Context graph: `AFS_GRAPH_PATH` or `${AFS_CONTEXT_ROOT}/index/afs_graph.json` (defaults to `~/src/context` or `~/.context`).
 - Dataset registry: `AFS_DATASET_REGISTRY` or `${AFS_TRAINING_ROOT}/index/dataset_registry.json`.
 - Resource index: `AFS_RESOURCE_INDEX` or `${AFS_TRAINING_ROOT}/index/resource_index.json`.
+
+## Flags
+
+- `--data` or `--data-path`: override training root
+- `--version`: print version and exit
 
 ## Features
 

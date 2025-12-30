@@ -41,9 +41,13 @@ std::optional<std::filesystem::path> ResolveHafsScawfulRoot() {
 
   auto trunk_root = ResolveTrunkRoot();
   if (trunk_root) {
-    auto candidate = *trunk_root / "scawful" / "research" / "afs_scawful";
+    auto candidate = *trunk_root / "lab" / "afs_scawful";
     if (studio::core::FileSystem::Exists(candidate)) {
       return candidate;
+    }
+    auto legacy = *trunk_root / "scawful" / "research" / "afs_scawful";
+    if (studio::core::FileSystem::Exists(legacy)) {
+      return legacy;
     }
   }
 
@@ -1019,9 +1023,15 @@ void DataLoader::MountDrive(const std::string& name) {
   } else {
     auto trunk_root = ResolveTrunkRoot();
     if (trunk_root) {
-      script_path = *trunk_root / "scawful" / "research" / "afs_scawful" / "scripts" / "mount_windows.sh";
+      script_path = *trunk_root / "lab" / "afs_scawful" / "scripts" / "mount_windows.sh";
+      if (!studio::core::FileSystem::Exists(script_path)) {
+        script_path = *trunk_root / "scawful" / "research" / "afs_scawful" / "scripts" / "mount_windows.sh";
+      }
     } else {
-      script_path = studio::core::FileSystem::ResolvePath("~/src/trunk/scawful/research/afs_scawful/scripts/mount_windows.sh");
+      script_path = studio::core::FileSystem::ResolvePath("~/src/trunk/lab/afs_scawful/scripts/mount_windows.sh");
+      if (!studio::core::FileSystem::Exists(script_path)) {
+        script_path = studio::core::FileSystem::ResolvePath("~/src/trunk/scawful/research/afs_scawful/scripts/mount_windows.sh");
+      }
     }
   }
 
