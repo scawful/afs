@@ -17,6 +17,12 @@ from . import core
 from . import context
 from . import training
 from . import generators
+from . import tokenizer
+from . import encoder
+from . import entity
+from . import pipeline
+from . import active_learning
+from . import generator
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,13 +39,26 @@ def build_parser() -> argparse.ArgumentParser:
     # Register training commands (training, discriminator)
     training.register_parsers(subparsers)
 
-    # Register generator commands (generators)
+    # Register generator commands (generators - data augmentation)
     generators.register_parsers(subparsers)
 
-    # Import remaining commands from legacy cli module
-    # These will be migrated to separate modules over time
-    from .._cli_legacy import register_remaining_parsers
-    register_remaining_parsers(subparsers)
+    # Register tokenizer commands
+    tokenizer.register_parsers(subparsers)
+
+    # Register encoder commands
+    encoder.register_parsers(subparsers)
+
+    # Register entity commands
+    entity.register_parsers(subparsers)
+
+    # Register pipeline commands (scoring, pipeline, evaluation)
+    pipeline.register_parsers(subparsers)
+
+    # Register active learning commands
+    active_learning.register_parsers(subparsers)
+
+    # Register generator commands (model-based generation)
+    generator.register_parsers(subparsers)
 
     return parser
 
