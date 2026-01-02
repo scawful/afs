@@ -12,9 +12,12 @@ The unified score populates the quality_score field in TrainingSample.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from afs.generators.base import TrainingSample
@@ -191,7 +194,8 @@ class QualityScorer:
         if self.electra is not None:
             try:
                 electra_score = self.electra.score(sample.output)
-            except Exception:
+            except Exception as e:
+                logger.debug("ELECTRA scoring failed, using default 0.5: %s", e)
                 electra_score = 0.5
         components["electra"] = electra_score
 
@@ -291,7 +295,12 @@ class QualityScorer:
             try:
                 texts = [s.output for s in samples]
                 electra_scores = self.electra.score_batch(texts)
-            except Exception:
+            except Exception as e:
+                logger.warning(
+                    "Batch ELECTRA scoring failed for %d samples, using default 0.5: %s",
+                    len(samples),
+                    e,
+                )
                 electra_scores = [0.5] * len(samples)
         else:
             electra_scores = [0.5] * len(samples)

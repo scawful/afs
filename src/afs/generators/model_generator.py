@@ -7,6 +7,7 @@ and syntax validation.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -20,6 +21,8 @@ if TYPE_CHECKING:
     from afs.discriminator.electra import ASMElectra
     from afs.generators.asar_validator import AsarValidator
     from afs.training.scoring import QualityScorer
+
+logger = logging.getLogger(__name__)
 
 
 class ModelType(str, Enum):
@@ -48,6 +51,7 @@ class ModelGeneratorConfig:
 
     # Quality control
     use_discriminator: bool = True
+    discriminator_model_path: Path | None = None  # Path to ELECTRA discriminator
     min_quality_score: float = 0.6
     validate_syntax: bool = True
     max_retries: int = 3
@@ -358,13 +362,34 @@ class ModelGenerator(BaseGenerator):
     def discriminator(self) -> "ASMElectra | None":
         """Lazy load discriminator."""
         if self._discriminator is None and self.config.use_discriminator:
-            # Try to load default discriminator
-            try:
-                from afs.discriminator.electra import ASMElectra
-                # Would need a default model path
-                pass
-            except Exception:
-                pass
+            if self.config.discriminator_model_path:
+                try:
+                    from afs.discriminator.electra import ASMElectra
+                    self._discriminator = ASMElectra(
+                        model_path=self.config.discriminator_model_path
+                    )
+                    logger.info(
+                        "Loaded discriminator from %s",
+                        self.config.discriminator_model_path,
+                    )
+                except ImportError as e:
+                    logger.warning(
+                        "Could not import ASMElectra: %s. "
+                        "Discriminator filtering disabled.",
+                        e,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to load discriminator from %s: %s. "
+                        "Discriminator filtering disabled.",
+                        self.config.discriminator_model_path,
+                        e,
+                    )
+            else:
+                logger.debug(
+                    "No discriminator_model_path configured. "
+                    "Discriminator filtering disabled."
+                )
         return self._discriminator
 
     @property
@@ -468,9 +493,21 @@ class ModelGenerator(BaseGenerator):
             try:
                 result = self.validator.validate_sample(sample)
                 if not result.passed:
+                    logger.debug(
+                        "Sample %s failed syntax validation: %s",
+                        sample.sample_id,
+                        result.error_message,
+                    )
                     return False
-            except Exception:
-                pass  # Skip validation on error
+            except FileNotFoundError as e:
+                # asar not installed - log once and continue without validation
+                logger.warning("Syntax validation skipped: %s", e)
+            except Exception as e:
+                logger.debug(
+                    "Syntax validation error for sample %s: %s",
+                    sample.sample_id,
+                    e,
+                )
 
         # Discriminator check
         if self.discriminator is not None:
@@ -478,9 +515,19 @@ class ModelGenerator(BaseGenerator):
                 score = self.discriminator.score(sample.output)
                 sample._metadata["electra_score"] = score
                 if score < self.config.min_quality_score:
+                    logger.debug(
+                        "Sample %s failed quality threshold: %.3f < %.3f",
+                        sample.sample_id,
+                        score,
+                        self.config.min_quality_score,
+                    )
                     return False
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(
+                    "Discriminator scoring error for sample %s: %s",
+                    sample.sample_id,
+                    e,
+                )
 
         return True
 
