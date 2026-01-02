@@ -16,6 +16,7 @@ from typing import Iterable
 from . import core
 from . import context
 from . import training
+from . import generators
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,6 +32,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Register training commands (training, discriminator)
     training.register_parsers(subparsers)
+
+    # Register generator commands (generators)
+    generators.register_parsers(subparsers)
 
     # Import remaining commands from legacy cli module
     # These will be migrated to separate modules over time
