@@ -11,6 +11,10 @@
 ## Scope control
 - Research-only; keep scope to core AFS primitives and APIs.
 
+## Workspace integration
+- If operating inside the Scawful workspace, consult `~/src/docs/NERV_INFRASTRUCTURE.md` and `~/src/docs/SRC_UNIVERSE_NETWORK.md`.
+- Prefer SSH host aliases and mounts instead of hardcoded IPs.
+
 ## Provenance / separation
 - Do not use employer or internal material.
 - If provenance is unclear, leave it out.

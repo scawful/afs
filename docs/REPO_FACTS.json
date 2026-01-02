@@ -1,18 +1,20 @@
 {
   "name": "afs",
+  "description": "Agentic File System - Core primitives and workflow tooling for AI agents",
   "stage": "prototype",
   "is_product": false,
   "commercial_intent": "none",
-  "verified_features": [],
+  "languages": ["Python"],
+  "frameworks": ["textual"],
+  "verified_features": [
+    "context-management",
+    "workspace-discovery",
+    "graph-export",
+    "orchestrator"
+  ],
   "hard_no": [
     "enterprise",
     "production-ready",
-    "platform",
-    "seamless",
-    "scalable",
-    "best-in-class",
-    "state-of-the-art",
-    "robust",
-    "official"
+    "employer-sources"
   ]
 }

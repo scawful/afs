@@ -247,6 +247,30 @@ def _services_render_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _agents_list_command(args: argparse.Namespace) -> int:
+    from .agents import list_agents
+
+    for agent in list_agents():
+        if agent.description:
+            print(f"{agent.name}\t{agent.description}")
+        else:
+            print(agent.name)
+    return 0
+
+
+def _agents_run_command(args: argparse.Namespace) -> int:
+    from .agents import get_agent
+
+    agent = get_agent(args.name)
+    if not agent:
+        print(f"unknown agent: {args.name}")
+        return 1
+    agent_args = list(args.agent_args or [])
+    if agent_args and agent_args[0] == "--":
+        agent_args = agent_args[1:]
+    return agent.entrypoint(agent_args)
+
+
 def _orchestrator_list_command(args: argparse.Namespace) -> int:
     orchestrator = Orchestrator()
     for agent in orchestrator.list_agents():
@@ -694,6 +718,474 @@ def _workspace_remove_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _generators_asm_augment_command(args: argparse.Namespace) -> int:
+    from .generators import AsmAugmentConfig, AsmAugmentGenerator, write_jsonl
+
+    input_path = Path(args.input).expanduser().resolve()
+    if not input_path.exists():
+        print(f"Input file not found: {input_path}")
+        return 1
+
+    config = AsmAugmentConfig(
+        paraphrase_count=args.paraphrase_count,
+        include_original=args.include_original,
+        shuffle_output=not args.no_shuffle,
+        min_instruction_len=args.min_len,
+        random_seed=args.seed,
+    )
+
+    generator = AsmAugmentGenerator(input_path=input_path, config=config)
+    result = generator.generate()
+
+    if args.output:
+        output_path = Path(args.output).expanduser().resolve()
+    else:
+        # Default: same directory with _augmented suffix
+        output_path = input_path.parent / f"{input_path.stem}_augmented.jsonl"
+
+    count = write_jsonl(result.samples, output_path)
+
+    print(f"Source samples: {result.source_count}")
+    print(f"Generated samples: {result.total}")
+    print(f"Skipped: {result.skipped}")
+    if result.errors:
+        print(f"Errors: {len(result.errors)}")
+        for error in result.errors[:5]:
+            print(f"  - {error}")
+    print(f"Output: {output_path}")
+    print(f"Wrote {count} samples")
+    return 0
+
+
+def _generators_cot_command(args: argparse.Namespace) -> int:
+    from .generators.cot import CotConfig, CotGenerator, CotFormat
+    from .generators import write_jsonl
+
+    input_path = Path(args.input).expanduser().resolve()
+    if not input_path.exists():
+        print(f"Input file not found: {input_path}")
+        return 1
+
+    try:
+        cot_format = CotFormat(args.format)
+    except ValueError:
+        print(f"Invalid format: {args.format}")
+        print(f"Valid formats: {', '.join(f.value for f in CotFormat)}")
+        return 1
+
+    config = CotConfig(
+        api_provider=args.provider,
+        model_name=args.model,
+        cot_format=cot_format,
+        requests_per_minute=args.rpm,
+        batch_size=args.batch_size,
+        temperature=args.temperature,
+    )
+
+    generator = CotGenerator(input_path=input_path, config=config)
+
+    # Apply limit if specified
+    if args.limit:
+        print(f"Limiting to {args.limit} samples")
+
+    result = generator.generate()
+
+    if args.limit and len(result.samples) > args.limit:
+        result.samples = result.samples[: args.limit]
+
+    if args.output:
+        output_path = Path(args.output).expanduser().resolve()
+    else:
+        output_path = input_path.parent / f"{input_path.stem}_cot.jsonl"
+
+    count = write_jsonl(result.samples, output_path)
+
+    print(f"\nResults:")
+    print(f"  Source samples: {result.source_count}")
+    print(f"  Generated CoT: {result.total}")
+    print(f"  Skipped: {result.skipped}")
+    if result.errors:
+        print(f"  Errors: {len(result.errors)}")
+        for error in result.errors[:5]:
+            print(f"    - {error}")
+    print(f"  Output: {output_path}")
+    print(f"  Wrote {count} samples")
+    return 0
+
+
+def _generators_clean_command(args: argparse.Namespace) -> int:
+    """Clean training data by fixing malformed samples."""
+    from .generators.data_cleaner import clean_dataset
+
+    input_path = Path(args.input).expanduser().resolve()
+    if not input_path.exists():
+        print(f"Input file not found: {input_path}")
+        return 1
+
+    output_path = None
+    if args.output:
+        output_path = Path(args.output).expanduser().resolve()
+
+    regen_output_path = None
+    if args.regen_output:
+        regen_output_path = Path(args.regen_output).expanduser().resolve()
+
+    stats = clean_dataset(
+        input_path=input_path,
+        output_path=output_path,
+        regen_output_path=regen_output_path,
+        min_output_length=args.min_output_length,
+    )
+
+    print("\nCleaning Results:")
+    print("-" * 40)
+    print(stats.summary())
+
+    actual_output = output_path or input_path.parent / f"{input_path.stem}_cleaned.jsonl"
+    print(f"\nOutput: {actual_output}")
+
+    if regen_output_path and stats.marked_for_regen > 0:
+        print(f"Samples for regeneration: {regen_output_path}")
+
+    if stats.errors:
+        print("\nErrors:")
+        for error in stats.errors[:5]:
+            print(f"  - {error}")
+        if len(stats.errors) > 5:
+            print(f"  ... and {len(stats.errors) - 5} more")
+
+    return 0
+
+
+def _generators_validate_command(args: argparse.Namespace) -> int:
+    """Validate assembly code in training samples using asar."""
+    from .generators.asar_validator import (
+        AsarValidatorConfig,
+        check_asar_available,
+        validate_training_data,
+    )
+
+    input_path = Path(args.input).expanduser().resolve()
+    if not input_path.exists():
+        print(f"Input file not found: {input_path}")
+        return 1
+
+    if not check_asar_available():
+        print("Error: asar not found. Install asar SNES assembler and ensure it's in PATH.")
+        print("  - macOS: brew install asar (if available) or build from source")
+        print("  - Linux: build from source at https://github.com/RPGHacker/asar")
+        print("  - You can also specify --asar-path to point to the executable")
+        return 1
+
+    # Determine output paths
+    if args.output_pass:
+        output_pass_path = Path(args.output_pass).expanduser().resolve()
+    else:
+        output_pass_path = input_path.parent / f"{input_path.stem}_valid.jsonl"
+
+    if args.output_fail:
+        output_fail_path = Path(args.output_fail).expanduser().resolve()
+    else:
+        output_fail_path = input_path.parent / f"{input_path.stem}_invalid.jsonl"
+
+    # Build config
+    config = AsarValidatorConfig(
+        asar_path=args.asar_path,
+        include_alttp_context=not args.no_alttp_context,
+        min_output_length=args.min_length,
+        keep_temp_files=args.keep_temp,
+    )
+
+    if args.include_path:
+        config.include_paths = [Path(p).expanduser().resolve() for p in args.include_path]
+
+    if args.skip_domain:
+        config.skip_domains = list(args.skip_domain)
+
+    print(f"Input: {input_path}")
+    print(f"Pass output: {output_pass_path}")
+    print(f"Fail output: {output_fail_path}")
+    print()
+
+    stats = validate_training_data(
+        input_path=input_path,
+        output_pass_path=output_pass_path,
+        output_fail_path=output_fail_path,
+        config=config,
+        verbose=True,
+    )
+
+    print()
+    print(f"Wrote {stats.passed} samples to: {output_pass_path}")
+    print(f"Wrote {stats.failed + stats.skipped} samples to: {output_fail_path}")
+
+    if stats.errors:
+        print("\nErrors encountered:")
+        for error in stats.errors[:10]:
+            print(f"  - {error}")
+        if len(stats.errors) > 10:
+            print(f"  ... and {len(stats.errors) - 10} more")
+
+    return 0
+
+
+def _training_prepare_command(args: argparse.Namespace) -> int:
+    """Split dataset into train/val/test sets."""
+    from .training import split_dataset
+
+    input_path = Path(args.input).expanduser().resolve()
+    if not input_path.exists():
+        print(f"Input file not found: {input_path}")
+        return 1
+
+    output_dir = Path(args.output).expanduser().resolve()
+
+    result = split_dataset(
+        input_path=input_path,
+        output_dir=output_dir,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        test_ratio=1.0 - args.train_ratio - args.val_ratio,
+        stratify_by=args.stratify_by if not args.no_stratify else None,
+        shuffle=not args.no_shuffle,
+        seed=args.seed,
+    )
+
+    print(result.summary())
+    print(f"\nOutput directory: {output_dir}")
+    return 0
+
+
+def _training_convert_command(args: argparse.Namespace) -> int:
+    """Convert training data to framework format."""
+    from .training import get_converter
+
+    input_path = Path(args.input).expanduser().resolve()
+    if not input_path.exists():
+        print(f"Input file not found: {input_path}")
+        return 1
+
+    if args.output:
+        output_path = Path(args.output).expanduser().resolve()
+    else:
+        output_path = input_path.parent / f"{input_path.stem}_{args.format}.jsonl"
+
+    converter = get_converter(
+        format_name=args.format,
+        include_cot=not args.no_cot,
+        cot_mode=args.cot_mode,
+    )
+
+    count = converter.convert_file(input_path, output_path)
+    print(f"Converted {count} samples to {args.format} format")
+    print(f"Output: {output_path}")
+    return 0
+
+
+def _training_registry_list_command(args: argparse.Namespace) -> int:
+    """List experiments in registry."""
+    from .training import ModelRegistry
+
+    registry = ModelRegistry()
+    experiments = registry.list(
+        status=args.status,
+        ab_group=args.ab_group,
+        framework=args.framework,
+    )
+
+    if not experiments:
+        print("No experiments found.")
+        return 0
+
+    print(f"Found {len(experiments)} experiments:\n")
+    for exp in experiments:
+        loss_str = f"loss={exp.metrics.final_loss:.4f}" if exp.metrics.final_loss else ""
+        print(f"  {exp.experiment_id}: {exp.run_name}")
+        print(f"    Model: {exp.base_model}")
+        print(f"    Status: {exp.status} {loss_str}")
+        if exp.ab_group:
+            print(f"    A/B Group: {exp.ab_group} ({exp.ab_variant or 'unassigned'})")
+        print()
+
+    return 0
+
+
+def _training_registry_create_command(args: argparse.Namespace) -> int:
+    """Create a new experiment."""
+    from .training import ModelRegistry
+
+    registry = ModelRegistry()
+    exp = registry.create_experiment(
+        run_name=args.name,
+        base_model=args.model,
+        framework=args.framework,
+        dataset_path=args.dataset,
+        ab_group=args.ab_group,
+        ab_variant=args.ab_variant,
+        tags=args.tag or [],
+        notes=args.notes or "",
+    )
+
+    print(f"Created experiment: {exp.experiment_id}")
+    print(f"  Run name: {exp.run_name}")
+    print(f"  Base model: {exp.base_model}")
+    print(f"  Framework: {exp.framework}")
+    return 0
+
+
+def _discriminator_data_command(args: argparse.Namespace) -> int:
+    """Create ELECTRA training data from assembly sources."""
+    from .discriminator import create_training_data
+
+    sources = [Path(s).expanduser() for s in args.sources]
+    output = Path(args.output).expanduser()
+
+    print(f"Creating ELECTRA training data...")
+    print(f"  Sources: {len(sources)} paths")
+    print(f"  Fake ratio: {args.fake_ratio}")
+
+    dataset = create_training_data(
+        real_sources=sources,
+        fake_ratio=args.fake_ratio,
+        min_lines=args.min_lines,
+        max_lines=args.max_lines,
+    )
+
+    dataset.to_jsonl(output)
+    stats = dataset.stats()
+
+    print(f"\nResults:")
+    print(f"  Total: {stats['total']}")
+    print(f"  Real: {stats['real']}")
+    print(f"  Fake: {stats['fake']}")
+    print(f"  Output: {output}")
+
+    return 0
+
+
+def _discriminator_train_command(args: argparse.Namespace) -> int:
+    """Train ASM-ELECTRA discriminator."""
+    from .discriminator import ASMElectra, ElectraConfig, ElectraDataset
+
+    input_path = Path(args.input).expanduser()
+    output_dir = Path(args.output).expanduser()
+    val_path = Path(args.val).expanduser() if args.val else None
+
+    config = ElectraConfig(
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        output_dir=output_dir,
+    )
+
+    print(f"Training ASM-ELECTRA...")
+    print(f"  Input: {input_path}")
+    print(f"  Epochs: {config.epochs}")
+    print(f"  Batch size: {config.batch_size}")
+
+    # Load data
+    train_dataset = ElectraDataset.from_jsonl(input_path)
+    train_data = train_dataset.to_hf_format()
+
+    val_data = None
+    if val_path:
+        val_dataset = ElectraDataset.from_jsonl(val_path)
+        val_data = val_dataset.to_hf_format()
+
+    # Train
+    electra = ASMElectra(config=config)
+    metrics = electra.train(train_data, val_data)
+
+    print(f"\nTraining complete:")
+    print(f"  Loss: {metrics['train_loss']:.4f}")
+    print(f"  Steps: {metrics['steps']}")
+    print(f"  Model saved: {output_dir / 'final'}")
+
+    return 0
+
+
+def _discriminator_filter_command(args: argparse.Namespace) -> int:
+    """Filter training data using trained discriminator."""
+    from .discriminator import SampleFilter, FilterConfig
+
+    model_path = Path(args.model).expanduser()
+    input_path = Path(args.input).expanduser()
+    output_path = Path(args.output).expanduser()
+    rejected_path = Path(args.rejected).expanduser() if args.rejected else None
+
+    config = FilterConfig(min_score=args.min_score)
+
+    print(f"Filtering training data...")
+    print(f"  Model: {model_path}")
+    print(f"  Min score: {config.min_score}")
+
+    filter = SampleFilter(model_path=model_path, config=config)
+    result = filter.filter_jsonl(input_path, output_path, rejected_path)
+
+    print(f"\n{result}")
+    print(f"\nScore distribution:")
+    for bucket, count in result.score_distribution.items():
+        print(f"  {bucket}: {count}")
+
+    return 0
+
+
+def _discriminator_score_command(args: argparse.Namespace) -> int:
+    """Score assembly code quality."""
+    from .discriminator import ASMElectra
+
+    model_path = Path(args.model).expanduser()
+
+    if args.file:
+        text = Path(args.file).expanduser().read_text()
+    elif args.text:
+        text = args.text
+    else:
+        print("Error: must provide --text or --file")
+        return 1
+
+    electra = ASMElectra(model_path=model_path)
+    score = electra.score(text)
+    prediction, confidence = electra.predict(text)
+
+    label = "REAL" if prediction == 0 else "FAKE"
+    print(f"Score: {score:.4f}")
+    print(f"Prediction: {label} (confidence: {confidence:.2%})")
+
+    return 0
+
+
+def _training_registry_compare_command(args: argparse.Namespace) -> int:
+    """Compare experiments."""
+    from .training import ModelRegistry
+
+    registry = ModelRegistry()
+    results = registry.compare(args.experiments)
+
+    if not results:
+        print("No experiments found for comparison.")
+        return 1
+
+    # Print comparison table
+    headers = list(results[0].keys())
+    print(" | ".join(f"{h:15}" for h in headers))
+    print("-" * (17 * len(headers)))
+
+    for row in results:
+        values = []
+        for h in headers:
+            v = row.get(h)
+            if isinstance(v, float):
+                values.append(f"{v:.4f}")
+            elif v is None:
+                values.append("-")
+            else:
+                values.append(str(v)[:15])
+        print(" | ".join(f"{v:15}" for v in values))
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="afs")
     subparsers = parser.add_subparsers(dest="command")
@@ -722,6 +1214,21 @@ def build_parser() -> argparse.ArgumentParser:
     services_render = services_sub.add_parser("render", help="Render service unit.")
     services_render.add_argument("name", help="Service name.")
     services_render.set_defaults(func=_services_render_command)
+
+    agents_parser = subparsers.add_parser("agents", help="Run built-in agents.")
+    agents_sub = agents_parser.add_subparsers(dest="agents_command")
+
+    agents_list = agents_sub.add_parser("list", help="List available agents.")
+    agents_list.set_defaults(func=_agents_list_command)
+
+    agents_run = agents_sub.add_parser("run", help="Run a built-in agent.")
+    agents_run.add_argument("name", help="Agent name.")
+    agents_run.add_argument(
+        "agent_args",
+        nargs=argparse.REMAINDER,
+        help="Arguments for the agent (prefix with -- to pass through).",
+    )
+    agents_run.set_defaults(func=_agents_run_command)
 
     orch_parser = subparsers.add_parser("orchestrator", help="Orchestrator helpers.")
     orch_sub = orch_parser.add_subparsers(dest="orchestrator_command")
@@ -947,6 +1454,444 @@ def build_parser() -> argparse.ArgumentParser:
     ws_remove.add_argument("--config", help="Config path to update (default: registry).")
     ws_remove.set_defaults(func=_workspace_remove_command)
 
+    # Generators
+    generators_parser = subparsers.add_parser(
+        "generators", help="Training data generators."
+    )
+    generators_sub = generators_parser.add_subparsers(dest="generators_command")
+
+    gen_asm_augment = generators_sub.add_parser(
+        "asm-augment", help="Augment ASM training samples via paraphrasing."
+    )
+    gen_asm_augment.add_argument(
+        "--input", required=True, help="Source JSONL file with training samples."
+    )
+    gen_asm_augment.add_argument(
+        "--output", help="Output JSONL path (default: input_augmented.jsonl)."
+    )
+    gen_asm_augment.add_argument(
+        "--paraphrase-count",
+        type=int,
+        default=5,
+        help="Number of paraphrases per sample (default: 5).",
+    )
+    gen_asm_augment.add_argument(
+        "--no-original",
+        action="store_false",
+        dest="include_original",
+        help="Exclude original samples from output.",
+    )
+    gen_asm_augment.add_argument(
+        "--no-shuffle",
+        action="store_true",
+        help="Don't shuffle output samples.",
+    )
+    gen_asm_augment.add_argument(
+        "--min-len",
+        type=int,
+        default=10,
+        help="Minimum instruction length to augment (default: 10).",
+    )
+    gen_asm_augment.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducibility.",
+    )
+    gen_asm_augment.set_defaults(func=_generators_asm_augment_command)
+
+    # Chain of Thought generator
+    gen_cot = generators_sub.add_parser(
+        "cot", help="Generate Chain of Thought reasoning for samples."
+    )
+    gen_cot.add_argument(
+        "--input", required=True, help="Source JSONL file with training samples."
+    )
+    gen_cot.add_argument(
+        "--output", help="Output JSONL path (default: input_cot.jsonl)."
+    )
+    gen_cot.add_argument(
+        "--provider",
+        default="gemini",
+        choices=["gemini", "claude", "openai"],
+        help="LLM provider for CoT generation (default: gemini).",
+    )
+    gen_cot.add_argument(
+        "--model",
+        default="gemini-2.0-flash-exp",
+        help="Model name (default: gemini-2.0-flash-exp).",
+    )
+    gen_cot.add_argument(
+        "--format",
+        default="separate",
+        choices=["separate", "embedded", "special_tokens"],
+        help="CoT output format (default: separate).",
+    )
+    gen_cot.add_argument(
+        "--rpm",
+        type=int,
+        default=60,
+        help="Requests per minute rate limit (default: 60).",
+    )
+    gen_cot.add_argument(
+        "--batch-size",
+        type=int,
+        default=10,
+        help="Batch size for processing (default: 10).",
+    )
+    gen_cot.add_argument(
+        "--temperature",
+        type=float,
+        default=0.7,
+        help="LLM temperature (default: 0.7).",
+    )
+    gen_cot.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit number of samples to process (for testing).",
+    )
+    gen_cot.set_defaults(func=_generators_cot_command)
+
+    # Data cleaner
+    gen_clean = generators_sub.add_parser(
+        "clean", help="Clean training data by fixing malformed samples."
+    )
+    gen_clean.add_argument(
+        "--input", required=True, help="Source JSONL file with training samples."
+    )
+    gen_clean.add_argument(
+        "--output", help="Output JSONL path (default: input_cleaned.jsonl)."
+    )
+    gen_clean.add_argument(
+        "--regen-output",
+        help="Output file for samples needing regeneration (optional).",
+    )
+    gen_clean.add_argument(
+        "--min-output-length",
+        type=int,
+        default=100,
+        help="Minimum output length to retain sample (default: 100).",
+    )
+    gen_clean.set_defaults(func=_generators_clean_command)
+
+    # Asar validation
+    gen_validate = generators_sub.add_parser(
+        "validate", help="Validate assembly code samples using asar SNES assembler."
+    )
+    gen_validate.add_argument(
+        "--input", required=True, help="Source JSONL file with training samples."
+    )
+    gen_validate.add_argument(
+        "--output-pass",
+        help="Output JSONL for passing samples (default: input_valid.jsonl).",
+    )
+    gen_validate.add_argument(
+        "--output-fail",
+        help="Output JSONL for failing samples (default: input_invalid.jsonl).",
+    )
+    gen_validate.add_argument(
+        "--asar-path",
+        help="Path to asar executable (default: search PATH).",
+    )
+    gen_validate.add_argument(
+        "--include-path",
+        action="append",
+        help="Additional include path for asar (repeatable).",
+    )
+    gen_validate.add_argument(
+        "--no-alttp-context",
+        action="store_true",
+        help="Don't include ALTTP-specific defines and context.",
+    )
+    gen_validate.add_argument(
+        "--min-length",
+        type=int,
+        default=10,
+        help="Minimum output length to validate (default: 10).",
+    )
+    gen_validate.add_argument(
+        "--skip-domain",
+        action="append",
+        help="Domain to skip (repeatable). Default: text, docs.",
+    )
+    gen_validate.add_argument(
+        "--keep-temp",
+        action="store_true",
+        help="Keep temporary .asm files for debugging.",
+    )
+    gen_validate.set_defaults(func=_generators_validate_command)
+
+    # Training
+    training_parser = subparsers.add_parser(
+        "training", help="Training data preparation and experiment tracking."
+    )
+    training_sub = training_parser.add_subparsers(dest="training_command")
+
+    # training prepare - split dataset
+    train_prepare = training_sub.add_parser(
+        "prepare", help="Split dataset into train/val/test sets."
+    )
+    train_prepare.add_argument(
+        "--input", required=True, help="Source JSONL file."
+    )
+    train_prepare.add_argument(
+        "--output", required=True, help="Output directory for split files."
+    )
+    train_prepare.add_argument(
+        "--train-ratio",
+        type=float,
+        default=0.8,
+        help="Training set ratio (default: 0.8).",
+    )
+    train_prepare.add_argument(
+        "--val-ratio",
+        type=float,
+        default=0.1,
+        help="Validation set ratio (default: 0.1).",
+    )
+    train_prepare.add_argument(
+        "--stratify-by",
+        default="domain",
+        help="Field to stratify by (default: domain).",
+    )
+    train_prepare.add_argument(
+        "--no-stratify",
+        action="store_true",
+        help="Disable stratification.",
+    )
+    train_prepare.add_argument(
+        "--no-shuffle",
+        action="store_true",
+        help="Don't shuffle samples.",
+    )
+    train_prepare.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed (default: 42).",
+    )
+    train_prepare.set_defaults(func=_training_prepare_command)
+
+    # training convert - format conversion
+    train_convert = training_sub.add_parser(
+        "convert", help="Convert data to framework format."
+    )
+    train_convert.add_argument(
+        "--input", required=True, help="Source JSONL file."
+    )
+    train_convert.add_argument(
+        "--output", help="Output path (default: input_<format>.jsonl)."
+    )
+    train_convert.add_argument(
+        "--format",
+        required=True,
+        choices=["mlx", "alpaca", "chatml", "sharegpt", "llama_cpp", "gguf"],
+        help="Target format.",
+    )
+    train_convert.add_argument(
+        "--no-cot",
+        action="store_true",
+        help="Exclude chain of thought from output.",
+    )
+    train_convert.add_argument(
+        "--cot-mode",
+        default="separate",
+        choices=["none", "separate", "embedded", "special_tokens"],
+        help="How to include CoT (default: separate).",
+    )
+    train_convert.set_defaults(func=_training_convert_command)
+
+    # training registry list
+    train_reg_list = training_sub.add_parser(
+        "list", help="List experiments in registry."
+    )
+    train_reg_list.add_argument(
+        "--status",
+        choices=["pending", "running", "completed", "failed"],
+        help="Filter by status.",
+    )
+    train_reg_list.add_argument(
+        "--ab-group", help="Filter by A/B test group."
+    )
+    train_reg_list.add_argument(
+        "--framework",
+        choices=["mlx", "unsloth", "llama_cpp"],
+        help="Filter by framework.",
+    )
+    train_reg_list.set_defaults(func=_training_registry_list_command)
+
+    # training registry create
+    train_reg_create = training_sub.add_parser(
+        "create", help="Create a new experiment."
+    )
+    train_reg_create.add_argument(
+        "--name", required=True, help="Experiment run name."
+    )
+    train_reg_create.add_argument(
+        "--model", required=True, help="Base model identifier."
+    )
+    train_reg_create.add_argument(
+        "--framework",
+        required=True,
+        choices=["mlx", "unsloth", "llama_cpp"],
+        help="Training framework.",
+    )
+    train_reg_create.add_argument(
+        "--dataset", help="Path to training dataset."
+    )
+    train_reg_create.add_argument(
+        "--ab-group", help="A/B test group name."
+    )
+    train_reg_create.add_argument(
+        "--ab-variant", help="A/B test variant (A, B, control)."
+    )
+    train_reg_create.add_argument(
+        "--tag", action="append", help="Tag for categorization (repeatable)."
+    )
+    train_reg_create.add_argument(
+        "--notes", help="Free-form notes."
+    )
+    train_reg_create.set_defaults(func=_training_registry_create_command)
+
+    # training registry compare
+    train_reg_compare = training_sub.add_parser(
+        "compare", help="Compare experiments."
+    )
+    train_reg_compare.add_argument(
+        "experiments", nargs="+", help="Experiment IDs to compare."
+    )
+    train_reg_compare.set_defaults(func=_training_registry_compare_command)
+
+    # Discriminator
+    disc_parser = subparsers.add_parser(
+        "discriminator", help="ASM-ELECTRA discriminator for quality filtering."
+    )
+    disc_sub = disc_parser.add_subparsers(dest="discriminator_command")
+
+    # discriminator data - create training data
+    disc_data = disc_sub.add_parser(
+        "data", help="Create ELECTRA training data from assembly sources."
+    )
+    disc_data.add_argument(
+        "--sources",
+        nargs="+",
+        required=True,
+        help="Paths to files/directories containing real assembly.",
+    )
+    disc_data.add_argument(
+        "--output",
+        required=True,
+        help="Output JSONL path.",
+    )
+    disc_data.add_argument(
+        "--fake-ratio",
+        type=float,
+        default=0.5,
+        help="Ratio of fake samples (default: 0.5).",
+    )
+    disc_data.add_argument(
+        "--min-lines",
+        type=int,
+        default=3,
+        help="Minimum lines per sample (default: 3).",
+    )
+    disc_data.add_argument(
+        "--max-lines",
+        type=int,
+        default=50,
+        help="Maximum lines per sample (default: 50).",
+    )
+    disc_data.set_defaults(func=_discriminator_data_command)
+
+    # discriminator train - train ELECTRA
+    disc_train = disc_sub.add_parser(
+        "train", help="Train ASM-ELECTRA discriminator."
+    )
+    disc_train.add_argument(
+        "--input",
+        required=True,
+        help="Training JSONL from 'discriminator data'.",
+    )
+    disc_train.add_argument(
+        "--output",
+        required=True,
+        help="Output directory for trained model.",
+    )
+    disc_train.add_argument(
+        "--val",
+        help="Optional validation JSONL.",
+    )
+    disc_train.add_argument(
+        "--epochs",
+        type=int,
+        default=3,
+        help="Training epochs (default: 3).",
+    )
+    disc_train.add_argument(
+        "--batch-size",
+        type=int,
+        default=16,
+        help="Batch size (default: 16).",
+    )
+    disc_train.add_argument(
+        "--learning-rate",
+        type=float,
+        default=2e-5,
+        help="Learning rate (default: 2e-5).",
+    )
+    disc_train.set_defaults(func=_discriminator_train_command)
+
+    # discriminator filter - filter training samples
+    disc_filter = disc_sub.add_parser(
+        "filter", help="Filter training data using trained discriminator."
+    )
+    disc_filter.add_argument(
+        "--model",
+        required=True,
+        help="Path to trained ASM-ELECTRA model.",
+    )
+    disc_filter.add_argument(
+        "--input",
+        required=True,
+        help="Input training JSONL to filter.",
+    )
+    disc_filter.add_argument(
+        "--output",
+        required=True,
+        help="Output filtered JSONL.",
+    )
+    disc_filter.add_argument(
+        "--min-score",
+        type=float,
+        default=0.7,
+        help="Minimum score to accept (default: 0.7).",
+    )
+    disc_filter.add_argument(
+        "--rejected",
+        help="Optional output for rejected samples.",
+    )
+    disc_filter.set_defaults(func=_discriminator_filter_command)
+
+    # discriminator score - score a sample
+    disc_score = disc_sub.add_parser(
+        "score", help="Score assembly code quality."
+    )
+    disc_score.add_argument(
+        "--model",
+        required=True,
+        help="Path to trained ASM-ELECTRA model.",
+    )
+    disc_score.add_argument(
+        "--text",
+        help="Assembly code to score (or use --file).",
+    )
+    disc_score.add_argument(
+        "--file",
+        help="File containing assembly code to score.",
+    )
+    disc_score.set_defaults(func=_discriminator_score_command)
+
     return parser
 
 
@@ -968,10 +1913,22 @@ def main(argv: Iterable[str] | None = None) -> int:
     if args.command == "services" and not getattr(args, "services_command", None):
         parser.print_help()
         return 1
+    if args.command == "agents" and not getattr(args, "agents_command", None):
+        parser.print_help()
+        return 1
     if args.command == "orchestrator" and not getattr(args, "orchestrator_command", None):
         parser.print_help()
         return 1
     if args.command == "studio" and not getattr(args, "studio_command", None):
+        parser.print_help()
+        return 1
+    if args.command == "generators" and not getattr(args, "generators_command", None):
+        parser.print_help()
+        return 1
+    if args.command == "training" and not getattr(args, "training_command", None):
+        parser.print_help()
+        return 1
+    if args.command == "discriminator" and not getattr(args, "discriminator_command", None):
         parser.print_help()
         return 1
     return args.func(args)

@@ -79,6 +79,8 @@ class ServiceManager:
         python = self._resolve_python_executable()
         repo_root = self._find_repo_root()
         environment = self._service_environment()
+        context_root = self.config.general.context_root
+        agent_output_dir = context_root / "scratchpad" / "afs_agents"
 
         return {
             "orchestrator": ServiceDefinition(
@@ -108,6 +110,40 @@ class ServiceManager:
                 label="AFS Context Graph Export",
                 description="Export AFS context graph JSON",
                 command=[python, "-m", "afs", "graph", "export"],
+                working_directory=repo_root,
+                environment=environment,
+                service_type=ServiceType.ONESHOT,
+                keep_alive=False,
+                run_at_load=False,
+            ),
+            "context-audit": ServiceDefinition(
+                name="context-audit",
+                label="AFS Context Audit",
+                description="Audit AFS contexts for missing directories",
+                command=[
+                    python,
+                    "-m",
+                    "afs.agents.context_audit",
+                    "--output",
+                    str(agent_output_dir / "context_audit.json"),
+                ],
+                working_directory=repo_root,
+                environment=environment,
+                service_type=ServiceType.ONESHOT,
+                keep_alive=False,
+                run_at_load=False,
+            ),
+            "context-inventory": ServiceDefinition(
+                name="context-inventory",
+                label="AFS Context Inventory",
+                description="Summarize AFS contexts and mount counts",
+                command=[
+                    python,
+                    "-m",
+                    "afs.agents.context_inventory",
+                    "--output",
+                    str(agent_output_dir / "context_inventory.json"),
+                ],
                 working_directory=repo_root,
                 environment=environment,
                 service_type=ServiceType.ONESHOT,
@@ -164,4 +200,3 @@ def _merge_definition(
         keep_alive=base.keep_alive,
         run_at_load=override.auto_start,
     )
-
