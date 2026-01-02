@@ -15,6 +15,7 @@ from typing import Iterable
 
 from . import core
 from . import context
+from . import training
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +28,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Register context commands (context, graph, workspace)
     context.register_parsers(subparsers)
+
+    # Register training commands (training, discriminator)
+    training.register_parsers(subparsers)
 
     # Import remaining commands from legacy cli module
     # These will be migrated to separate modules over time

@@ -4109,9 +4109,10 @@ def register_remaining_parsers(subparsers: argparse._SubParsersAction) -> None:
     Migrated commands (in cli/ modules):
     - init, plugins, status, services, agents, orchestrator, studio (core.py)
     - context, graph, workspace (context.py)
+    - training, discriminator (training.py)
 
     Commands registered here:
-    - generators, training, discriminator, tokenizer, encoder
+    - generators, tokenizer, encoder
     - entity, scoring, pipeline, evaluation, active-learning, generator
     """
     # Generators
@@ -4268,84 +4269,7 @@ def register_remaining_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     gen_validate.set_defaults(func=_generators_validate_command)
 
-    # Training commands
-    training_parser = subparsers.add_parser("training", help="Training data utilities.")
-    training_sub = training_parser.add_subparsers(dest="training_command")
-
-    train_prepare = training_sub.add_parser("prepare", help="Prepare train/val/test split.")
-    train_prepare.add_argument("--input", required=True, help="Input JSONL file.")
-    train_prepare.add_argument("--output", required=True, help="Output directory.")
-    train_prepare.add_argument("--train-ratio", type=float, default=0.8, help="Train ratio.")
-    train_prepare.add_argument("--val-ratio", type=float, default=0.1, help="Validation ratio.")
-    train_prepare.add_argument("--no-stratify", action="store_true", help="Disable stratification.")
-    train_prepare.add_argument("--stratify-by", default="domain", help="Field to stratify by.")
-    train_prepare.add_argument("--no-shuffle", action="store_true", help="Don't shuffle data.")
-    train_prepare.add_argument("--seed", type=int, default=42, help="Random seed.")
-    train_prepare.set_defaults(func=_training_prepare_command)
-
-    train_convert = training_sub.add_parser("convert", help="Convert to training format.")
-    train_convert.add_argument("--input", required=True, help="Input JSONL file.")
-    train_convert.add_argument("--output", help="Output path.")
-    train_convert.add_argument("--format", default="alpaca", choices=["alpaca", "sharegpt", "openai"], help="Format.")
-    train_convert.add_argument("--no-cot", action="store_true", help="Exclude CoT.")
-    train_convert.add_argument("--cot-mode", default="separate", choices=["separate", "embedded"], help="CoT mode.")
-    train_convert.set_defaults(func=_training_convert_command)
-
-    train_reg_list = training_sub.add_parser("registry-list", help="List experiments.")
-    train_reg_list.add_argument("--status", help="Filter by status.")
-    train_reg_list.add_argument("--ab-group", help="Filter by A/B group.")
-    train_reg_list.add_argument("--framework", help="Filter by framework.")
-    train_reg_list.set_defaults(func=_training_registry_list_command)
-
-    train_reg_create = training_sub.add_parser("registry-create", help="Create experiment.")
-    train_reg_create.add_argument("--name", required=True, help="Run name.")
-    train_reg_create.add_argument("--model", required=True, help="Base model.")
-    train_reg_create.add_argument("--framework", default="mlx", help="Framework.")
-    train_reg_create.add_argument("--dataset", help="Dataset path.")
-    train_reg_create.add_argument("--ab-group", help="A/B group.")
-    train_reg_create.add_argument("--ab-variant", help="A/B variant.")
-    train_reg_create.add_argument("--tag", action="append", help="Tags.")
-    train_reg_create.add_argument("--notes", help="Notes.")
-    train_reg_create.set_defaults(func=_training_registry_create_command)
-
-    train_compare = training_sub.add_parser("registry-compare", help="Compare experiments.")
-    train_compare.add_argument("experiments", nargs="+", help="Experiment IDs.")
-    train_compare.set_defaults(func=_training_registry_compare_command)
-
-    # Discriminator
-    disc_parser = subparsers.add_parser("discriminator", help="ASM-ELECTRA discriminator.")
-    disc_sub = disc_parser.add_subparsers(dest="discriminator_command")
-
-    disc_data = disc_sub.add_parser("data", help="Create training data.")
-    disc_data.add_argument("sources", nargs="+", help="Source paths.")
-    disc_data.add_argument("--output", "-o", required=True, help="Output file.")
-    disc_data.add_argument("--fake-ratio", type=float, default=0.5, help="Fake sample ratio.")
-    disc_data.add_argument("--min-lines", type=int, default=3, help="Min lines.")
-    disc_data.add_argument("--max-lines", type=int, default=50, help="Max lines.")
-    disc_data.set_defaults(func=_discriminator_data_command)
-
-    disc_train = disc_sub.add_parser("train", help="Train discriminator.")
-    disc_train.add_argument("--input", required=True, help="Training data.")
-    disc_train.add_argument("--output", required=True, help="Output directory.")
-    disc_train.add_argument("--val", help="Validation data.")
-    disc_train.add_argument("--epochs", type=int, default=3, help="Epochs.")
-    disc_train.add_argument("--batch-size", type=int, default=16, help="Batch size.")
-    disc_train.add_argument("--learning-rate", type=float, default=5e-5, help="Learning rate.")
-    disc_train.set_defaults(func=_discriminator_train_command)
-
-    disc_filter = disc_sub.add_parser("filter", help="Filter samples.")
-    disc_filter.add_argument("--model", required=True, help="Model path.")
-    disc_filter.add_argument("--input", required=True, help="Input file.")
-    disc_filter.add_argument("--output", required=True, help="Output file.")
-    disc_filter.add_argument("--rejected", help="Rejected output.")
-    disc_filter.add_argument("--min-score", type=float, default=0.6, help="Min score.")
-    disc_filter.set_defaults(func=_discriminator_filter_command)
-
-    disc_score = disc_sub.add_parser("score", help="Score code.")
-    disc_score.add_argument("--model", required=True, help="Model path.")
-    disc_score.add_argument("--text", help="Text to score.")
-    disc_score.add_argument("--file", help="File to score.")
-    disc_score.set_defaults(func=_discriminator_score_command)
+    # NOTE: training and discriminator commands have been migrated to cli/training.py
 
     # Tokenizer
     tok_parser = subparsers.add_parser("tokenizer", help="ASM tokenizer utilities.")
