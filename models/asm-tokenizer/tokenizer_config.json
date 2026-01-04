@@ -1,0 +1,6 @@
+{
+  "split_addresses": true,
+  "max_length": 512,
+  "add_special_tokens": true,
+  "vocab_size": 1680
+}

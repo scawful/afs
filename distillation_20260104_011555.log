@@ -1,0 +1,21 @@
+2026-01-04 01:15:55,043 - INFO - ============================================================
+2026-01-04 01:15:55,043 - INFO - DISTILLATION DATA GENERATION
+2026-01-04 01:15:55,043 - INFO - ============================================================
+2026-01-04 01:15:55,043 - INFO - Target samples: 1000
+2026-01-04 01:15:55,043 - INFO - Output: distillation_data
+2026-01-04 01:15:55,043 - INFO - Domains: ['din', 'nayru', 'farore', 'veran']
+2026-01-04 01:15:55,043 - INFO - Min quality: 0.5
+2026-01-04 01:15:55,043 - INFO - ============================================================
+2026-01-04 01:15:55,043 - INFO - Added OpenAI (gpt-5.2)
+2026-01-04 01:15:55,043 - INFO - Added Google (gemini-2.5-flash)
+2026-01-04 01:15:55,043 - INFO - Added Anthropic (claude-opus-4.5)
+2026-01-04 01:16:03,741 - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-04 01:16:29,274 - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-04 01:16:33,404 - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-04 01:17:02,744 - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-04 01:17:16,910 - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-04 01:17:34,650 - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-04 01:17:40,570 - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-04 01:17:40,572 - INFO - Progress: 10/1000 (5.7/min) | Failed: 0 | Quality filtered: 0 | ETA: 174 min
+2026-01-04 01:18:00,985 - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-04 01:18:40,373 - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"

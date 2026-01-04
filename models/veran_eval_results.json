@@ -1,0 +1,131 @@
+{
+  "basic": [
+    {
+      "code": "LDA #$00\nSTA $10",
+      "response": "This code loads the value $00 into register A and stores it to memory address $10.\n\n1. LDA #$00: Load the immediate value $00 into register A.\n2. STA $10: Store the value in register A to memory address $10.\n\nThis is a simple example of initializing memory with a zero value.",
+      "score": 1.0,
+      "found": [
+        "store",
+        "zero",
+        "immediate",
+        "$10"
+      ],
+      "missing": []
+    },
+    {
+      "code": "LDA $10\nCLC\nADC $11\nSTA $12",
+      "response": "This code Loads and Adds, then stores the result.\n\n1. LDA $10: Load the value at address $10 into the accumulator.\n2. CLC: Clear the carry flag.\n3. ADC $11: Add the value at address $11 to the accumulator, including the carry.\n4. STA $12: Store the result in address $12.\n\nCarry is not affected by CLC, so the addition is straightforward. The result is the sum of the values at $10 and $11, stored at $12.",
+      "score": 1.0,
+      "found": [
+        "add",
+        "carry",
+        "sum"
+      ],
+      "missing": []
+    },
+    {
+      "code": "LDA $10\nASL A\nASL A\nASL A",
+      "response": "This code multiplies the value at address $10 by 8.\n\n1. LDA $10: Load the value at address $10 into register A.\n2. ASL A: Shift the contents of A one position to the left (multiply by 2).\n3. ASL A: Shift A left again (multiply by 2).\n4. ASL A: Shift A left one more time (multiply by 2).\n\nResult: The original value is multiplied by 8.",
+      "score": 1.0,
+      "found": [
+        "shift",
+        "multiply",
+        "8"
+      ],
+      "missing": []
+    }
+  ],
+  "intermediate": [
+    {
+      "code": "LDA $10\nEOR #$FF\nINC A",
+      "response": "This code performs a bitwise NOT operation on the value at memory location $10 and stores the result in the accumulator.\n\n1. LDA $10: Load the value at memory address $10 into the accumulator.\n2. EOR #$FF: Perform a bitwise exclusive OR (XOR) operation between the accumulator and $FF (11111111 in binary). This effectively inverts all the bits of the value in the accumulator.\n3. INC A: Increment the value in the accumulator by 1. This is equivalent to adding 1 to the inverted value.\n\nThe result is that the final value in the accumulator is the two's complement representation of the negative of the original value at memory location $10. This is a common technique for sign extension in 8-bit values.",
+      "score": 0.6666666666666666,
+      "found": [
+        "complement",
+        "two's complement"
+      ],
+      "missing": [
+        "negate"
+      ]
+    },
+    {
+      "code": "REP #$20\nLDA $00\nSTA $10\nSEP #$20",
+      "response": "This code switches between 8-bit and 16-bit modes.\n\n1. REP #$20: Repeats the following instruction 32 times (2^5 = 32).\n\n2. LDA $00: Load the accumulator with the byte at address $00.\n\n3. STA $10: Store the accumulator to address $10.\n\n4. SEP #$20: Switch to 8-bit mode.\n\nThe REP instruction is used to repeat the following instruction 32 times. In this case, it's loading and storing values, repeated 32 times. The SEP instruction switches back to 8-bit mode after the REP block.\n\nThis pattern is often used for operations that need to be repeated multiple times, like clearing memory or initializing arrays.",
+      "score": 1.0,
+      "found": [
+        "16-bit",
+        "mode",
+        "REP",
+        "SEP"
+      ],
+      "missing": []
+    },
+    {
+      "code": "PHB\nPHK\nPLB\nJSR Routine\nPLB\nRTL",
+      "response": "This code switches between the stack pages, calls a routine, and then returns.\n\n1. PHB: Push the current stack page (PPU) to the stack.\n2. PHK: Push the current program counter (PC) to the stack.\n3. PLB: Pull the stack page from the stack and set it as the new PPU.\n4. JSR Routine: Jump to the specified routine and save the return address.\n5. PLB: Pull the original stack page back and set it as the current PPU.\n6. RTL: Return from the JSR, popping the return address and continuing execution.\n\nThis pattern is used when you need to temporarily use a different stack for a routine, ensuring that the original stack is restored afterward.",
+      "score": 0.5,
+      "found": [
+        "save",
+        "restore"
+      ],
+      "missing": [
+        "bank",
+        "data bank"
+      ]
+    }
+  ],
+  "advanced": [
+    {
+      "code": "LDA $10\nASL A\nTAX\nLDA.l Table,X\nSTA $00\nLDA.l Table+1,X\nSTA $01\nJMP ($0000)",
+      "response": "This code Loads and stores values from a table, then jumps to an address.\n\n1. LDA $10: Load the value at $10 into A.\n2. ASL A: Shift A left 1 bit (multiply by 2).\n3. TAX: Transfer A to X (X = A * 2).\n4. LDA.l Table,X: Load the value from Table + X into A.\n5. STA $00: Store A to $00.\n6. LDA.l Table+1,X: Load the value from Table + X + 1 into A.\n7. STA $01: Store A to $01.\n8. JMP ($0000): Jump to the address stored in $0000.\n\nThis pattern is used for indexed table access, where the table address is in $10 and the index is A * 2. The values at Table + X and Table + X + 1 are stored to $00 and $01, respectively. The jump at the end is unusual and should be verified as it may not work as intended.",
+      "score": 0.25,
+      "found": [
+        "index"
+      ],
+      "missing": [
+        "jump table",
+        "indirect",
+        "double"
+      ]
+    },
+    {
+      "code": "REP #$30\nLDX #$0000\nLDY #$1000\nLDA #$00FF\nMVN $7E,$7E\nSEP #$30",
+      "response": "This code performs a memory fill operation using the MVN (Memory Not) instruction.\n\n1. REP #$30: Repeats the following instruction 48 times (16 * 3).\n\n2. LDX #$0000: Initialize X to 0 (start address).\n3. LDY #$1000: Initialize Y to 4096 (number of bytes to fill).\n\n4. LDA #$00FF: Load accumulator with $00FF (fill pattern).\n\n5. MVN $7E,$7E: Fill memory from $7E0000 to $7E3FFF with the complement of A ($FF00).\n\n6. SEP #$30: Switch to 8-bit mode.\n\nMVN is a special instruction that fills memory with the complement of the value in A. REP and SEP are used to efficiently apply MVN multiple times.",
+      "score": 0.2,
+      "found": [
+        "MVN"
+      ],
+      "missing": [
+        "block",
+        "move",
+        "copy",
+        "256"
+      ]
+    }
+  ],
+  "snes_hardware": [
+    {
+      "code": "LDA #$80\nSTA $2100",
+      "response": "This code loads the value $80 into register A and stores it to memory location $2100.\n\n1. LDA #$80: Load the immediate value $80 into register A.\n2. STA $2100: Store the value in register A to memory address $2100.\n\nThis is a simple data write operation where the CPU is instructed to load a constant value and then store it to a specific memory location.",
+      "score": 0.0,
+      "found": [],
+      "missing": [
+        "screen",
+        "blank",
+        "force blank",
+        "INIDISP"
+      ]
+    },
+    {
+      "code": "LDA #$01\nSTA $420B",
+      "response": "This code loads the value $01 into register A and stores it to memory address $420B.\n\n1. LDA #$01: Load the immediate value $01 into register A.\n2. STA $420B: Store the value in register A to memory address $420B.\n\nThis is a simple write operation where the CPU is setting a hardware register or memory location to a specific value.",
+      "score": 0.0,
+      "found": [],
+      "missing": [
+        "DMA",
+        "transfer",
+        "channel"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "version": "2.0",
+  "generated": "2026-01-04",
+  "domains": {
+    "din": {
+      "file": "din/benchmark.jsonl",
+      "count": 136
+    },
+    "farore": {
+      "file": "farore/benchmark.jsonl",
+      "count": 100
+    },
+    "nayru": {
+      "file": "nayru/benchmark.jsonl",
+      "count": 133
+    },
+    "veran": {
+      "file": "veran/benchmark.jsonl",
+      "count": 131
+    }
+  },
+  "total_items": 500
+}

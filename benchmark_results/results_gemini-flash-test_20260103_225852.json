@@ -1,0 +1,75 @@
+{
+  "model": "gemini-flash-test",
+  "timestamp": "2026-01-03T22:58:52.551304",
+  "domains": {
+    "din": {
+      "model": "gemini-flash-test",
+      "domain": "din",
+      "category": "all",
+      "total_items": 2,
+      "passed": 1,
+      "failed": 1,
+      "pass_rate": 0.5,
+      "metrics": {
+        "baseline_cycles_mean": 14.0,
+        "baseline_cycles_min": 14,
+        "baseline_cycles_max": 14,
+        "optimized_cycles_mean": 8.0,
+        "optimized_cycles_min": 8,
+        "optimized_cycles_max": 8,
+        "cycle_reduction_mean": 0.42857142857142855,
+        "cycle_reduction_min": 0.42857142857142855,
+        "cycle_reduction_max": 0.42857142857142855,
+        "baseline_bytes_mean": 10.0,
+        "baseline_bytes_min": 10,
+        "baseline_bytes_max": 10,
+        "optimized_bytes_mean": 6.0,
+        "optimized_bytes_min": 6,
+        "optimized_bytes_max": 6,
+        "size_reduction_mean": 0.4,
+        "size_reduction_min": 0.4,
+        "size_reduction_max": 0.4,
+        "compiles_mean": 1.0,
+        "compiles_min": 1.0,
+        "compiles_max": 1.0
+      },
+      "item_results": [
+        {
+          "id": "din_basic_001",
+          "passed": true,
+          "score": 0.5914285714285714,
+          "metrics": {
+            "baseline_cycles": 14,
+            "optimized_cycles": 8,
+            "cycle_reduction": 0.42857142857142855,
+            "baseline_bytes": 10,
+            "optimized_bytes": 6,
+            "size_reduction": 0.4,
+            "compiles": 1.0
+          },
+          "output": "STZ $10 ; Clear memory at $10 (3 cycles)\nSTZ $11 ; Clear memory at $11 (3 cycles)"
+        },
+        {
+          "id": "din_basic_002",
+          "passed": false,
+          "score": 0.0,
+          "metrics": {},
+          "output": ""
+        }
+      ],
+      "timestamp": "2026-01-03T22:58:52.548914",
+      "duration_seconds": 13.400297164916992
+    }
+  },
+  "summary": {
+    "total_items": 2,
+    "total_passed": 1,
+    "overall_pass_rate": 0.5,
+    "domains": {
+      "din": {
+        "pass_rate": 0.5,
+        "items": 2
+      }
+    }
+  }
+}
