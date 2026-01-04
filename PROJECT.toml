@@ -1,0 +1,52 @@
+name = "afs"
+description = "Agentic File System - Core primitives and workflow tooling for AI agents. Part of halext ecosystem."
+tags = ["halext-ecosystem", "ai", "agents", "infra", "python", "framework"]
+aliases = ["agentic-file-system", "agent-framework"]
+platforms = ["mac", "linux"]
+
+stage = "beta"
+is_product = false
+public = true
+commercial_intent = "none"
+
+# Technology stack
+languages = ["python"]
+build_system = "setuptools"
+requires_version = {python = "3.11"}
+
+[dependencies]
+# External Python packages
+external = ["anthropic", "openai", "pydantic", "rich", "click"]
+
+# Build dependencies
+build = ["pip", "setuptools"]
+
+# Test dependencies
+test = ["pytest", "pytest-asyncio"]
+
+[links]
+github = "https://github.com/scawful/afs"
+
+[build]
+system = "setuptools"
+command = "pip install -e ."
+
+[test]
+command = "pytest"
+
+[sync]
+type = "git"
+direction = "both"
+remote = "server"
+
+[docs]
+overview = "README.md"
+framework = "https://github.com/scawful/afs/tree/main/src"
+integration = "../../.config/sketchybar/docs/TOOLS_INTEGRATION.md"
+ecosystem = "../../docs/HALEXT_ECOSYSTEM.md"
+
+[integrations]
+cortex = "AFSReader for workspace state access"
+barista = "Workspace metadata integration"
+halext = "Shared infrastructure foundation"
+cli = "Command-line agent interface"

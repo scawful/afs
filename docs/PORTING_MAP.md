@@ -3,10 +3,10 @@
 Scope: inventory of legacy features and their status in the current AFS/AFS Scawful repos. Use this as a porting checklist; verify specifics when moving code.
 
 Sources (local workspace):
-- Previous core: `trunk/lab/legacy/afs_legacy`
-- Previous plugin: `trunk/lab/legacy/afs_scawful_legacy`
-- Current core: `trunk/lab/afs`
-- Current plugin: `trunk/lab/afs_scawful`
+- Previous core: `lab/legacy/afs-legacy`
+- Previous plugin: `trunk/scawful/research/afs_scawful`
+- Current core: `lab/afs`
+- Current plugin: `lab/afs-scawful`
 
 Status legend: Ported, Partial, Planned, Not started.
 
@@ -14,7 +14,7 @@ Status legend: Ported, Partial, Planned, Not started.
 - Context roots + workspace registry: Ported (config + CLI + workspaces.toml). `src/afs/config.py`, `src/afs/cli.py`.
 - Context validation/mapping/policy/graph: Ported. `src/afs/manager.py`, `src/afs/mapping.py`, `src/afs/policy.py`, `src/afs/validator.py`, `src/afs/graph.py`.
 - Discovery + ensure-all: Ported. `src/afs/discovery.py`, `src/afs/cli.py`.
-- Studio UI (ImGui): Ported (apps/studio). Active.
+- Studio UI (ImGui): Ported (afs_studio standalone repo; legacy mirror in apps/studio). Active.
 - CLI surface: Partial (core context + graph + plugins; orchestration/services missing).
 - Plugin framework + adapters: Partial (discovery + load only; adapters not yet).
 - Orchestration/pipelines/swarm: Partial (routing skeleton + CLI).

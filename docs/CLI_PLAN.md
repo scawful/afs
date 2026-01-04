@@ -13,6 +13,8 @@ claims. See `docs/RESEARCH_SOURCES.md` for citations.
 - Document existing commands and config defaults in `README.md`.
 - Add `--json` output for `status`, `context validate`, `context discover`, and `graph export`.
 - Add `afs config show` (effective config + defaults).
+- Add `afs fs` commands for context read/write/list/info.
+- Add `afs embeddings` commands for indexing and search.
 
 ## Phase 1 (near-term)
 - `afs context report` to emit a single summary JSON (roots, missing dirs, counts).

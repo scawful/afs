@@ -11,6 +11,11 @@
 ## Scope control
 - Research-only; keep scope to core AFS primitives and APIs.
 
+## CLI surface
+- Preferred entrypoint: `afs` (installed) or `scripts/afs` (repo wrapper).
+- Shell setup: `scripts/afs-shell-init.sh` (bash/zsh).
+- Context warm: `scripts/afs-warm` or `afs agents run context-warm -- --interval 0`.
+
 ## Workspace integration
 - If operating inside the Scawful workspace, consult `~/src/docs/NERV_INFRASTRUCTURE.md` and `~/src/docs/SRC_UNIVERSE_NETWORK.md`.
 - Prefer SSH host aliases and mounts instead of hardcoded IPs.
