@@ -1,0 +1,51 @@
+# Open WebUI deployment for halext-nj (chat.halext.org)
+
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: afs-chat-simple
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3002:8080"
+    env_file:
+      - ${HOME}/.config/afs/openwebui.env
+      - ${HOME}/.config/afs/openwebui.secrets.env
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11435
+      - OLLAMA_BASE_URLS=http://host.docker.internal:11435
+      - WEBUI_AUTH=true
+      - WEBUI_AUTH_TRUSTED_EMAIL_HEADER=X-User-Email
+      - WEBUI_AUTH_TRUSTED_NAME_HEADER=X-Username
+      - WEBUI_AUTH_TRUSTED_GROUPS_HEADER=X-User-Groups
+      - WEBUI_AUTH_COOKIE_SECURE=true
+      - WEBUI_SESSION_COOKIE_SECURE=true
+      - WEBUI_AUTH_SIGNOUT_REDIRECT_URL=https://chat.halext.org/
+      - CORS_ALLOW_ORIGIN=https://chat.halext.org
+      - USER_AGENT=AFS-OpenWebUI
+      - WEBUI_NAME=HALEXT Chat
+    volumes:
+      - open-webui-data:/app/backend/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main
+    container_name: afs-chat-litellm
+    restart: unless-stopped
+    platform: linux/amd64
+    profiles:
+      - litellm
+    env_file:
+      - ${HOME}/.config/afs/litellm.env
+    volumes:
+      - ${HOME}/.config/afs/litellm.yaml:/app/config/litellm.yaml:ro
+    entrypoint:
+      - "litellm"
+    command:
+      - "--config"
+      - "/app/config/litellm.yaml"
+      - "--port"
+      - "4000"
+
+volumes:
+  open-webui-data:

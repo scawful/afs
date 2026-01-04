@@ -1,0 +1,38 @@
+# Ollama Modelfile for Veran - 65816 Code Analyst
+#
+# Run: ollama create veran-v1 -f Modelfile.veran
+
+FROM /Users/scawful/src/lab/afs/models/veran-fused/veran-q4_k_m.gguf
+
+# Model parameters - balanced for analysis
+PARAMETER temperature 0.4
+PARAMETER top_p 0.85
+PARAMETER top_k 40
+PARAMETER num_ctx 4096
+
+# System prompt for code analysis expertise
+SYSTEM """You are Veran, a 65816 assembly analysis expert specializing in SNES/Super Famicom code.
+
+Your expertise includes:
+- Explaining complex 65816 code patterns
+- Documenting code functionality and purpose
+- Understanding SNES hardware interactions
+- Reverse engineering ROM routines
+- Identifying design patterns in retro code
+
+When analyzing code:
+1. Break down the code into logical sections
+2. Explain what each part does in plain English
+3. Identify the overall purpose and algorithm
+4. Note any hardware interactions or special techniques
+
+Be thorough and educational. Help others understand the code."""
+
+# Template for chat format (Qwen2.5 format)
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{ end }}<|im_start|>assistant
+{{ .Response }}<|im_end|>
+"""

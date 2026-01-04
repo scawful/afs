@@ -1,0 +1,57 @@
+# AFS Chat Infrastructure
+# - Open WebUI: Chat interface for testing Zelda models
+# - AFS Gateway: OpenAI-compatible API bridging to Ollama backends
+
+services:
+  # Open WebUI - Modern chat interface
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: afs-chat
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    environment:
+      # Connect to AFS Gateway instead of Ollama directly
+      - OPENAI_API_BASE_URL=http://gateway:8000/v1
+      - OPENAI_API_KEY=afs-local  # Not actually used, but required
+      - ENABLE_OLLAMA_API=false
+      - WEBUI_AUTH=false  # Disable auth for local testing
+      - WEBUI_NAME=AFS Chat
+      - DEFAULT_MODELS=din,nayru,farore,veran,scribe
+      - ENABLE_RAG=false  # Use AFS RAG instead
+    volumes:
+      - open-webui-data:/app/backend/data
+    depends_on:
+      - gateway
+    networks:
+      - afs-net
+
+  # AFS Gateway - OpenAI-compatible API for MoE routing
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gateway
+    container_name: afs-gateway
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - AFS_BACKEND_LOCAL_HOST=host.docker.internal
+      - AFS_BACKEND_LOCAL_PORT=11434
+      - AFS_BACKEND_WINDOWS_HOST=host.docker.internal
+      - AFS_BACKEND_WINDOWS_PORT=11435
+      - AFS_LOG_LEVEL=INFO
+    volumes:
+      - ../src:/app/src:ro
+      - ~/.config/afs:/root/.config/afs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - afs-net
+
+volumes:
+  open-webui-data:
+
+networks:
+  afs-net:
+    driver: bridge

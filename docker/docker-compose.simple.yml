@@ -1,0 +1,45 @@
+# Simple Open WebUI setup - connects directly to local Ollama
+# Use this for quick testing without the full gateway
+
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: afs-chat-simple
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    env_file:
+      - ${HOME}/.config/afs/openwebui.env
+      - ${HOME}/.config/afs/openwebui.secrets.env
+    environment:
+      # Prefer Windows GPU tunnel; fall back to local Ollama
+      - OLLAMA_BASE_URL=http://host.docker.internal:11435
+      - OLLAMA_BASE_URLS=http://host.docker.internal:11435;http://host.docker.internal:11434
+      - WEBUI_AUTH=false
+      - WEBUI_NAME=AFS Chat
+    volumes:
+      - open-webui-data:/app/backend/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main
+    container_name: afs-chat-litellm
+    restart: unless-stopped
+    platform: linux/amd64
+    profiles:
+      - litellm
+    env_file:
+      - ${HOME}/.config/afs/litellm.env
+    volumes:
+      - ${HOME}/.config/afs/litellm.yaml:/app/config/litellm.yaml:ro
+    entrypoint:
+      - "litellm"
+    command:
+      - "--config"
+      - "/app/config/litellm.yaml"
+      - "--port"
+      - "4000"
+
+volumes:
+  open-webui-data:
