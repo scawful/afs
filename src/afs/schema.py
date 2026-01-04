@@ -287,6 +287,91 @@ class ServicesConfig:
 
 
 @dataclass
+class MemoryExportConfig:
+    interval_seconds: int = 0
+    dataset_output: Path = field(
+        default_factory=lambda: Path.home() / "src" / "training" / "datasets" / "memory_export.jsonl"
+    )
+    report_output: Path | None = None
+    allow_raw: bool = False
+    default_instruction: str = "Recall the following memory entry."
+    limit: int = 0
+    auto_start: bool = False
+    routes: list["MemoryExportRoute"] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MemoryExportConfig":
+        interval_seconds = data.get("interval_seconds", cls().interval_seconds)
+        dataset_output = data.get("dataset_output", cls().dataset_output)
+        report_output = data.get("report_output")
+        allow_raw = data.get("allow_raw", cls().allow_raw)
+        default_instruction = data.get("default_instruction", cls().default_instruction)
+        limit = data.get("limit", cls().limit)
+        auto_start = data.get("auto_start", cls().auto_start)
+        routes = data.get("routes")
+        parsed_routes: list[MemoryExportRoute] = []
+        if isinstance(routes, list):
+            for route in routes:
+                if isinstance(route, dict):
+                    parsed_routes.append(MemoryExportRoute.from_dict(route))
+        if "routes" not in data:
+            parsed_routes = default_memory_export_routes()
+        return cls(
+            interval_seconds=int(interval_seconds)
+            if isinstance(interval_seconds, (int, float))
+            else cls().interval_seconds,
+            dataset_output=_as_path(dataset_output)
+            if isinstance(dataset_output, (str, Path))
+            else cls().dataset_output,
+            report_output=_as_path(report_output)
+            if isinstance(report_output, (str, Path))
+            else None,
+            allow_raw=bool(allow_raw),
+            default_instruction=str(default_instruction)
+            if isinstance(default_instruction, str)
+            else cls().default_instruction,
+            limit=int(limit) if isinstance(limit, (int, float)) else cls().limit,
+            auto_start=bool(auto_start),
+            routes=parsed_routes,
+        )
+
+
+@dataclass
+class MemoryExportRoute:
+    tags: list[str]
+    output: Path
+    domain: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MemoryExportRoute":
+        tags = data.get("tags")
+        if isinstance(data.get("tag"), str):
+            tags = [data.get("tag")]
+        if not isinstance(tags, list):
+            tags = []
+        parsed_tags = [str(tag) for tag in tags if isinstance(tag, str)]
+        output = data.get("output")
+        if not output:
+            output = Path.home() / "src" / "training" / "datasets" / "memory_export.jsonl"
+        domain = data.get("domain")
+        return cls(
+            tags=parsed_tags,
+            output=_as_path(output),
+            domain=str(domain) if isinstance(domain, str) else None,
+        )
+
+
+def default_memory_export_routes() -> list[MemoryExportRoute]:
+    return [
+        MemoryExportRoute(
+            tags=["scribe", "scribe_voice", "voice"],
+            output=Path.home() / "src" / "training" / "datasets" / "scribe_voice.jsonl",
+            domain="scribe",
+        )
+    ]
+
+
+@dataclass
 class CognitiveConfig:
     enabled: bool = False
     record_emotions: bool = False
@@ -313,6 +398,7 @@ class AFSConfig:
     cognitive: CognitiveConfig = field(default_factory=CognitiveConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     services: ServicesConfig = field(default_factory=ServicesConfig)
+    memory_export: MemoryExportConfig = field(default_factory=MemoryExportConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "AFSConfig":
@@ -323,6 +409,7 @@ class AFSConfig:
         cognitive = CognitiveConfig.from_dict(data.get("cognitive", {}))
         orchestrator = OrchestratorConfig.from_dict(data.get("orchestrator", {}))
         services = ServicesConfig.from_dict(data.get("services", {}))
+        memory_export = MemoryExportConfig.from_dict(data.get("memory_export", {}))
         return cls(
             general=general,
             plugins=plugins,
@@ -330,6 +417,7 @@ class AFSConfig:
             cognitive=cognitive,
             orchestrator=orchestrator,
             services=services,
+            memory_export=memory_export,
         )
 
 

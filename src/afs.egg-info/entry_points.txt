@@ -1,0 +1,2 @@
+[console_scripts]
+afs = afs.cli:main

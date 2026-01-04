@@ -1,0 +1,12 @@
+{"id": "gen_001", "query": "Write a function to copy 256 bytes from $7E0000 to $7F0000", "expected_intent": "generation", "expected_contains": ["MVN", "MVP", "LDX", "LDY"], "notes": "Should use block move or loop"}
+{"id": "gen_002", "query": "Generate code to check if Link has the hookshot in ALTTP", "expected_intent": "generation", "expected_contains": ["$7EF342", "LDA", "BIT", "AND"], "notes": "Hookshot is at $7EF342"}
+{"id": "gen_003", "query": "Create a subroutine that plays sound effect $1B", "expected_intent": "generation", "expected_contains": ["$012E", "STA", "LDA #$1B"], "notes": "SFX queue at $012E"}
+{"id": "gen_004", "query": "Implement a 16-bit addition of $10-$11 and $12-$13, store in $14-$15", "expected_intent": "generation", "expected_contains": ["REP", "ADC", "CLC", "SEP"], "notes": "16-bit math"}
+{"id": "gen_005", "query": "Write code to wait for VBlank", "expected_intent": "generation", "expected_contains": ["$4212", "BIT", "BPL", "BMI"], "notes": "Check $4212 bit 7"}
+{"id": "gen_006", "query": "Generate a jump table handler for 8 different sprite states", "expected_intent": "generation", "expected_contains": ["ASL", "TAX", "JMP", ".dw"], "notes": "Jump table pattern"}
+{"id": "gen_007", "query": "Create code to increment a 24-bit counter at $10-$12", "expected_intent": "generation", "expected_contains": ["INC", "BNE", "ADC"], "notes": "24-bit increment with carry"}
+{"id": "gen_008", "query": "Write a routine to clear 256 bytes of RAM starting at $7E2000", "expected_intent": "generation", "expected_contains": ["STZ", "LDX", "DEX", "BNE"], "notes": "Zero fill loop or block"}
+{"id": "gen_009", "query": "Implement DMA transfer of $100 bytes from ROM $C08000 to VRAM $0000", "expected_intent": "generation", "expected_contains": ["$4300", "$4301", "$4302", "$4305", "$420B"], "notes": "DMA setup registers"}
+{"id": "gen_010", "query": "Generate code to swap the values in $10 and $12", "expected_intent": "generation", "expected_contains": ["LDA", "STA", "PHA", "XBA", "TAX"], "notes": "Swap using temp or XBA"}
+{"id": "gen_011", "query": "Write a function to convert BCD value in A to binary", "expected_intent": "generation", "expected_contains": ["AND", "LSR", "ADC"], "notes": "BCD conversion"}
+{"id": "gen_012", "query": "Create an NMI handler that increments a frame counter", "expected_intent": "generation", "expected_contains": ["INC", "RTI", "PHA", "PLA"], "notes": "NMI boilerplate"}

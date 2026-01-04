@@ -70,6 +70,10 @@ from .pipeline import (
     DataPipeline,
     run_pipeline,
 )
+from .memory_export import (
+    MemoryExportResult,
+    export_memory_to_dataset,
+)
 
 __all__ = [
     # Config
@@ -123,4 +127,7 @@ __all__ = [
     "PipelineResult",
     "DataPipeline",
     "run_pipeline",
+    # Memory export
+    "MemoryExportResult",
+    "export_memory_to_dataset",
 ]

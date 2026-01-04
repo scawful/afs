@@ -60,6 +60,18 @@ def _expand_config_paths(config_data: dict[str, Any]) -> None:
                     _expand_path(p) for p in project["knowledge_roots"]
                 ]
 
+    if "memory_export" in config_data:
+        memory_export = config_data["memory_export"]
+        if "dataset_output" in memory_export:
+            memory_export["dataset_output"] = _expand_path(memory_export["dataset_output"])
+        if "report_output" in memory_export and memory_export["report_output"]:
+            memory_export["report_output"] = _expand_path(memory_export["report_output"])
+        routes = memory_export.get("routes")
+        if isinstance(routes, list):
+            for route in routes:
+                if isinstance(route, dict) and "output" in route:
+                    route["output"] = _expand_path(route["output"])
+
 
 def load_config(config_path: Path | None = None, merge_user: bool = True) -> dict[str, Any]:
     """Load configuration with basic precedence and path expansion."""

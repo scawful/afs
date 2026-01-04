@@ -3,9 +3,34 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from ._utils import load_manager, parse_mount_type, resolve_context_paths
+
+
+def _mount_to_dict(mount) -> dict:
+    return {
+        "name": mount.name,
+        "source": str(mount.source),
+        "mount_type": mount.mount_type.value,
+        "is_symlink": mount.is_symlink,
+    }
+
+
+def _context_to_dict(context) -> dict:
+    mounts: dict[str, list[dict]] = {}
+    for mount_type, mount_list in context.mounts.items():
+        mounts[mount_type.value] = [_mount_to_dict(mount) for mount in mount_list]
+    metadata = context.metadata.to_dict() if context.metadata else {}
+    return {
+        "path": str(context.path),
+        "project_name": context.project_name,
+        "is_valid": context.is_valid,
+        "total_mounts": context.total_mounts,
+        "metadata": metadata,
+        "mounts": mounts,
+    }
 
 
 def context_init_command(args: argparse.Namespace) -> int:
@@ -55,6 +80,10 @@ def context_list_command(args: argparse.Namespace) -> int:
         args, manager
     )
     context = manager.list_context(context_path=context_path)
+    if args.json:
+        print(json.dumps(_context_to_dict(context), indent=2))
+        return 0
+
     print(f"context_path: {context.path}")
     print(f"project: {context.project_name}")
     if not context.mounts:
@@ -123,6 +152,15 @@ def context_validate_command(args: argparse.Namespace) -> int:
     status = validator.check_integrity()
     missing = ", ".join(status.get("missing", [])) or "(none)"
     errors = status.get("errors", [])
+    if args.json:
+        payload = {
+            "valid": status.get("valid", False),
+            "missing": status.get("missing", []),
+            "errors": errors,
+        }
+        print(json.dumps(payload, indent=2))
+        return 0 if status.get("valid", False) else 1
+
     print(f"valid: {status.get('valid', False)}")
     print(f"missing: {missing}")
     if errors:
@@ -148,7 +186,17 @@ def context_discover_command(args: argparse.Namespace) -> int:
         config=config,
     )
     if not projects:
-        print("(no contexts)")
+        if args.json:
+            payload = {"contexts": [], "stats": {"total_projects": 0, "total_mounts": 0}}
+            print(json.dumps(payload, indent=2))
+        else:
+            print("(no contexts)")
+        return 0
+    if args.json:
+        payload = {"contexts": [_context_to_dict(project) for project in projects]}
+        if args.stats:
+            payload["stats"] = get_project_stats(projects)
+        print(json.dumps(payload, indent=2))
         return 0
     for project in projects:
         label = project.project_name
@@ -157,6 +205,49 @@ def context_discover_command(args: argparse.Namespace) -> int:
         stats = get_project_stats(projects)
         pairs = [f"{key}={value}" for key, value in stats.items()]
         print("stats: " + ", ".join(pairs))
+    return 0
+
+
+def context_report_command(args: argparse.Namespace) -> int:
+    """Generate a summary report of all discovered contexts."""
+    from ..config import load_config_model
+    from ..discovery import discover_contexts, get_project_stats
+
+    config_path = Path(args.config) if args.config else None
+    config = load_config_model(config_path=config_path, merge_user=True)
+    search_paths = None
+    if args.path:
+        search_paths = [Path(path).expanduser() for path in args.path]
+    ignore_names = args.ignore if args.ignore else None
+    projects = discover_contexts(
+        search_paths=search_paths,
+        max_depth=args.max_depth,
+        ignore_names=ignore_names,
+        config=config,
+    )
+
+    stats = get_project_stats(projects) if projects else {
+        "total_projects": 0,
+        "total_mounts": 0,
+    }
+    stats["invalid_projects"] = sum(1 for project in projects if not project.is_valid)
+
+    payload = {
+        "context_root": str(config.general.context_root)
+        if config.general.context_root
+        else None,
+        "stats": stats,
+        "contexts": [_context_to_dict(project) for project in projects],
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print(f"context_root: {payload['context_root']}")
+    print(f"contexts: {stats['total_projects']}")
+    print(f"invalid: {stats['invalid_projects']}")
+    print(f"total_mounts: {stats['total_mounts']}")
     return 0
 
 
@@ -307,6 +398,48 @@ def workspace_remove_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def workspace_sync_command(args: argparse.Namespace) -> int:
+    """Sync workspace directories from WORKSPACE.toml."""
+    from ..config import load_config_model
+    from ..workspace_sync import (
+        load_workspace_entries,
+        resolve_config_output,
+        sync_workspace_config,
+    )
+    from ._utils import write_config
+
+    config_path = Path(args.config) if args.config else None
+    config = load_config_model(config_path=config_path, merge_user=True)
+
+    root = Path(args.root).expanduser().resolve()
+    try:
+        entries = load_workspace_entries(
+            root,
+            include_sections=not args.no_sections,
+            include_items=not args.no_items,
+            include_local=not args.no_local,
+        )
+    except FileNotFoundError as exc:
+        print(str(exc))
+        return 1
+
+    sync_workspace_config(config, entries, merge=args.merge)
+
+    if args.dry_run:
+        for entry in config.general.workspace_directories:
+            desc = entry.description or ""
+            print(f"{entry.path}\t{desc}")
+        return 0
+
+    output = resolve_config_output(config_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    write_config(output, config)
+    print(f"synced workspaces: {len(config.general.workspace_directories)}")
+    return 0
+
+
+
+
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register context and workspace command parsers."""
     from ..models import MountType
@@ -338,6 +471,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     # context list
     ctx_list = context_sub.add_parser("list", help="List context mounts.")
     add_context_args(ctx_list)
+    ctx_list.add_argument("--json", action="store_true", help="Output JSON.")
     ctx_list.set_defaults(func=context_list_command)
 
     # context mount
@@ -358,6 +492,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     # context validate
     ctx_validate = context_sub.add_parser("validate", help="Validate context.")
     add_context_args(ctx_validate)
+    ctx_validate.add_argument("--json", action="store_true", help="Output JSON.")
     ctx_validate.set_defaults(func=context_validate_command)
 
     # context discover
@@ -367,7 +502,17 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     ctx_discover.add_argument("--max-depth", type=int, default=3, help="Max search depth.")
     ctx_discover.add_argument("--ignore", action="append", help="Directories to ignore.")
     ctx_discover.add_argument("--stats", action="store_true", help="Show statistics.")
+    ctx_discover.add_argument("--json", action="store_true", help="Output JSON.")
     ctx_discover.set_defaults(func=context_discover_command)
+
+    # context report
+    ctx_report = context_sub.add_parser("report", help="Summarize discovered contexts.")
+    ctx_report.add_argument("--config", help="Config path.")
+    ctx_report.add_argument("--path", action="append", help="Search paths.")
+    ctx_report.add_argument("--max-depth", type=int, default=3, help="Max search depth.")
+    ctx_report.add_argument("--ignore", action="append", help="Directories to ignore.")
+    ctx_report.add_argument("--json", action="store_true", help="Output JSON.")
+    ctx_report.set_defaults(func=context_report_command)
 
     # context ensure-all
     ctx_ensure_all = context_sub.add_parser("ensure-all", help="Ensure all discovered contexts.")
@@ -408,3 +553,21 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     ws_remove.add_argument("path", help="Workspace path.")
     ws_remove.add_argument("--config", help="Config path.")
     ws_remove.set_defaults(func=workspace_remove_command)
+
+    ws_sync = ws_sub.add_parser("sync", help="Sync workspaces from WORKSPACE.toml.")
+    ws_sync.add_argument(
+        "--root",
+        default=str(Path.home() / "src"),
+        help="Workspace root (default: ~/src).",
+    )
+    ws_sync.add_argument("--config", help="Config path.")
+    ws_sync.add_argument("--no-sections", action="store_true", help="Ignore sections.")
+    ws_sync.add_argument("--no-items", action="store_true", help="Ignore items.")
+    ws_sync.add_argument("--no-local", action="store_true", help="Ignore local overrides.")
+    ws_sync.add_argument("--dry-run", action="store_true", help="Show planned entries.")
+    replace_group = ws_sync.add_mutually_exclusive_group()
+    replace_group.add_argument("--merge", action="store_true", help="Merge with existing.")
+    replace_group.add_argument(
+        "--replace", action="store_false", dest="merge", help="Replace existing."
+    )
+    ws_sync.set_defaults(func=workspace_sync_command, merge=True)

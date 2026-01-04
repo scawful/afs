@@ -20,6 +20,14 @@ from .human import (
     create_eval_batch,
     import_eval_results,
 )
+from .semantic_eval import (
+    CPUState,
+    ExecutionResult,
+    SemanticScore,
+    SemanticEvalConfig,
+    SemanticEvaluator,
+    create_semantic_evaluator,
+)
 
 __all__ = [
     # Harness
@@ -34,4 +42,11 @@ __all__ = [
     "HumanEvaluationManager",
     "create_eval_batch",
     "import_eval_results",
+    # Semantic evaluation
+    "CPUState",
+    "ExecutionResult",
+    "SemanticScore",
+    "SemanticEvalConfig",
+    "SemanticEvaluator",
+    "create_semantic_evaluator",
 ]

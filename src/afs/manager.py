@@ -49,6 +49,19 @@ class AFSManager:
         context_dir = context_dir or self.CONTEXT_DIR_DEFAULT
         return project_path.resolve() / context_dir
 
+    def resolve_mount_root(
+        self,
+        context_path: Path,
+        mount_type: MountType,
+    ) -> Path:
+        metadata = self._load_metadata(context_path)
+        directory_name = resolve_directory_name(
+            mount_type,
+            afs_directories=self._directories,
+            metadata=metadata,
+        )
+        return context_path / directory_name
+
     def ensure(
         self,
         path: Path = Path("."),

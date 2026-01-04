@@ -146,6 +146,41 @@ def training_registry_compare_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def training_memory_export_command(args: argparse.Namespace) -> int:
+    """Export memory entries to TrainingSample JSONL."""
+    from ..config import load_config_model
+    from ..training import export_memory_to_dataset
+
+    config = load_config_model(config_path=Path(args.config) if args.config else None)
+    memory_cfg = config.memory_export
+    context_root = (
+        Path(args.context_root).expanduser().resolve()
+        if args.context_root
+        else config.general.context_root
+    )
+    memory_root = (
+        Path(args.memory_root).expanduser().resolve()
+        if args.memory_root
+        else (Path(context_root) / "memory")
+    )
+    output_path = Path(args.output).expanduser().resolve()
+
+    result = export_memory_to_dataset(
+        memory_root,
+        output_path,
+        default_domain=args.domain,
+        allow_raw=args.allow_raw or memory_cfg.allow_raw,
+        default_instruction=args.default_instruction or memory_cfg.default_instruction,
+        include_tags=args.include_tag,
+        exclude_tags=args.exclude_tag,
+        limit=args.limit if args.limit is not None else (memory_cfg.limit or None),
+    )
+
+    print(result.summary())
+    print(f"output: {output_path}")
+    return 0
+
+
 # =============================================================================
 # Discriminator Commands
 # =============================================================================
@@ -339,6 +374,41 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     train_reg_compare = training_sub.add_parser("registry-compare", help="Compare experiments.")
     train_reg_compare.add_argument("experiments", nargs="+", help="Experiment IDs to compare.")
     train_reg_compare.set_defaults(func=training_registry_compare_command)
+
+    # training memory-export
+    train_memory = training_sub.add_parser(
+        "memory-export", help="Export memory entries to TrainingSample JSONL."
+    )
+    train_memory.add_argument("--config", help="Config path.")
+    train_memory.add_argument("--context-root", help="Context root override.")
+    train_memory.add_argument("--memory-root", help="Memory directory override.")
+    train_memory.add_argument("--output", required=True, help="Output JSONL path.")
+    train_memory.add_argument("--domain", default="memory", help="Default domain.")
+    train_memory.add_argument(
+        "--allow-raw",
+        action="store_true",
+        help="Allow raw content entries without explicit instruction/output.",
+    )
+    train_memory.add_argument(
+        "--include-tag",
+        action="append",
+        help="Only export entries matching this tag (repeatable).",
+    )
+    train_memory.add_argument(
+        "--exclude-tag",
+        action="append",
+        help="Skip entries matching this tag (repeatable).",
+    )
+    train_memory.add_argument(
+        "--default-instruction",
+        help="Instruction to use when allow-raw is set.",
+    )
+    train_memory.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of exported samples.",
+    )
+    train_memory.set_defaults(func=training_memory_export_command)
 
     # =========================================================================
     # Discriminator

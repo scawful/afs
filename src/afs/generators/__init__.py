@@ -53,6 +53,15 @@ from .knowledge_generator import (
     KnowledgeGeneratorConfig,
     create_knowledge_generator,
 )
+from .curriculum_generator import (
+    CurriculumGenerator,
+    CurriculumTemplate,
+    Difficulty,
+    ExpertDomain,
+    GenerationProgress,
+    ScaleConfig,
+    create_curriculum_generator,
+)
 
 __all__ = [
     # Base classes
@@ -103,4 +112,12 @@ __all__ = [
     "KnowledgeAwareGenerator",
     "KnowledgeGeneratorConfig",
     "create_knowledge_generator",
+    # Curriculum-based generation (scaled)
+    "CurriculumGenerator",
+    "CurriculumTemplate",
+    "Difficulty",
+    "ExpertDomain",
+    "GenerationProgress",
+    "ScaleConfig",
+    "create_curriculum_generator",
 ]

@@ -199,6 +199,100 @@ def generator_batch_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def generator_scale_command(args: argparse.Namespace) -> int:
+    """Generate large-scale training data using curriculum learning."""
+    import asyncio
+    from ..generators.curriculum_generator import (
+        create_curriculum_generator,
+        Difficulty,
+        ExpertDomain,
+    )
+    from ..generators import write_jsonl
+
+    # Validate domain
+    try:
+        domain = ExpertDomain(args.domain.lower())
+    except ValueError:
+        print(f"Invalid domain: {args.domain}")
+        print(f"Valid domains: {', '.join(d.value for d in ExpertDomain)}")
+        return 1
+
+    # Parse providers
+    providers = args.providers.split(",") if args.providers else ["gemini"]
+
+    # Create generator
+    generator = create_curriculum_generator(
+        domain=domain,
+        target_per_difficulty=args.target_per_difficulty,
+        providers=providers,
+    )
+
+    # Load checkpoint if resuming
+    if args.resume:
+        checkpoint_path = Path(args.resume).expanduser()
+        if checkpoint_path.exists():
+            print(f"Resuming from checkpoint: {checkpoint_path}")
+            generator.load_checkpoint(checkpoint_path)
+        else:
+            print(f"Checkpoint not found: {checkpoint_path}")
+            return 1
+
+    # Parse difficulty filter
+    difficulty = None
+    if args.difficulty:
+        try:
+            difficulty = Difficulty(args.difficulty.lower())
+        except ValueError:
+            print(f"Invalid difficulty: {args.difficulty}")
+            print(f"Valid difficulties: {', '.join(d.value for d in Difficulty)}")
+            return 1
+
+    # Progress callback
+    def on_progress(progress):
+        print(f"\r[{progress.total_generated} samples | "
+              f"{progress.samples_per_minute():.1f}/min | "
+              f"Failed: {progress.total_failed}]", end="", flush=True)
+
+    print(f"Generating {args.count} samples for {domain.value}")
+    print(f"Providers: {', '.join(providers)}")
+    if difficulty:
+        print(f"Difficulty: {difficulty.value}")
+    print()
+
+    # Generate
+    try:
+        samples = generator.generate_batch_sync(
+            count=args.count,
+            difficulty=difficulty,
+            progress_callback=on_progress,
+        )
+    except KeyboardInterrupt:
+        print("\n\nInterrupted! Saving checkpoint...")
+        checkpoint_path = generator.save_checkpoint()
+        print(f"Checkpoint saved: {checkpoint_path}")
+        return 1
+
+    print()  # Newline after progress
+
+    # Save results
+    output_path = Path(args.output).expanduser()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    count = write_jsonl(samples, output_path)
+    print(f"\nGenerated {count} samples")
+    print(f"Output: {output_path}")
+
+    # Show summary
+    print(f"\n{generator._progress.summary()}")
+
+    # Save checkpoint if requested
+    if args.checkpoint:
+        checkpoint_path = generator.save_checkpoint()
+        print(f"\nCheckpoint: {checkpoint_path}")
+
+    return 0
+
+
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register generator command parsers."""
     gen_parser = subparsers.add_parser(
@@ -328,3 +422,47 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Maximum tokens to generate (default: 1024).",
     )
     gen_batch.set_defaults(func=generator_batch_command)
+
+    # generator scale
+    gen_scale = gen_sub.add_parser(
+        "scale", help="Large-scale curriculum-based data generation."
+    )
+    gen_scale.add_argument(
+        "--domain", "-d", required=True,
+        choices=["din", "nayru", "farore", "veran"],
+        help="Expert domain to generate for.",
+    )
+    gen_scale.add_argument(
+        "--count", "-n", type=int, default=1000,
+        help="Number of samples to generate (default: 1000).",
+    )
+    gen_scale.add_argument(
+        "--output", "-o", required=True,
+        help="Output JSONL file path.",
+    )
+    gen_scale.add_argument(
+        "--providers", "-p",
+        default="gemini",
+        help="Comma-separated list of providers (gemini,claude,openai).",
+    )
+    gen_scale.add_argument(
+        "--difficulty",
+        choices=["basic", "intermediate", "advanced", "expert"],
+        help="Generate only this difficulty level (default: all).",
+    )
+    gen_scale.add_argument(
+        "--target-per-difficulty",
+        type=int,
+        default=2500,
+        help="Target samples per difficulty level (default: 2500).",
+    )
+    gen_scale.add_argument(
+        "--resume",
+        help="Path to checkpoint file to resume from.",
+    )
+    gen_scale.add_argument(
+        "--checkpoint",
+        action="store_true",
+        help="Save checkpoint after completion.",
+    )
+    gen_scale.set_defaults(func=generator_scale_command)

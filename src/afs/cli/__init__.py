@@ -11,6 +11,7 @@ Commands are organized into logical groups:
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import Iterable
 
 from . import core
@@ -23,6 +24,12 @@ from . import entity
 from . import pipeline
 from . import active_learning
 from . import generator
+from . import gateway
+from . import benchmark
+from . import distillation
+from . import fs
+from . import embeddings
+from ..history import log_cli_invocation
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,6 +67,21 @@ def build_parser() -> argparse.ArgumentParser:
     # Register generator commands (model-based generation)
     generator.register_parsers(subparsers)
 
+    # Register gateway commands (API server, backends, vast.ai)
+    gateway.register_parsers(subparsers)
+
+    # Register benchmark commands
+    benchmark.register_parsers(subparsers)
+
+    # Register distillation commands
+    distillation.register_parsers(subparsers)
+
+    # Register filesystem commands
+    fs.register_parsers(subparsers)
+
+    # Register embedding commands
+    embeddings.register_parsers(subparsers)
+
     return parser
 
 
@@ -92,6 +114,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         ("evaluation", "evaluation_command"),
         ("active-learning", "active_learning_command"),
         ("generator", "generator_command"),
+        ("gateway", "gateway_command"),
+        ("vastai", "vastai_command"),
+        ("benchmark", "benchmark_command"),
+        ("distill", "distill_command"),
+        ("fs", "fs_command"),
+        ("embeddings", "embeddings_command"),
     ]
 
     for cmd, subcmd_attr in subcommand_checks:
@@ -99,7 +127,12 @@ def main(argv: Iterable[str] | None = None) -> int:
             parser.print_help()
             return 1
 
-    return args.func(args)
+    exit_code = args.func(args)
+    try:
+        log_cli_invocation(argv or sys.argv[1:], exit_code)
+    except Exception:
+        pass
+    return exit_code
 
 
 __all__ = ["build_parser", "main"]

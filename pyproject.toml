@@ -8,6 +8,9 @@ authors = [
   {name = "scawful"}
 ]
 
+[project.scripts]
+afs = "afs.cli:main"
+
 [project.optional-dependencies]
 test = [
   "pytest>=7.4"

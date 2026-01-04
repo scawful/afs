@@ -34,6 +34,18 @@ AFS_DIRS = [
 ]
 
 
+def _is_studio_root(path: Path) -> bool:
+    return (path / "CMakeLists.txt").exists() and (path / "src").exists()
+
+
+def _default_studio_build_dir(studio_root: Path) -> Path:
+    if studio_root.name == "studio" and studio_root.parent.name == "apps":
+        repo_root = studio_root.parent.parent
+        if (repo_root / "src" / "afs").exists():
+            return repo_root / "build" / "studio"
+    return studio_root / "build"
+
+
 def _parse_mount_type(value: str) -> MountType:
     try:
         return MountType(value)
@@ -43,20 +55,30 @@ def _parse_mount_type(value: str) -> MountType:
 
 def _resolve_studio_root() -> Path:
     candidates: list[Path] = []
+    env_studio = os.getenv("AFS_STUDIO_ROOT")
+    if env_studio:
+        candidates.append(Path(env_studio).expanduser().resolve())
     env_root = os.getenv("AFS_ROOT")
     if env_root:
         candidates.append(Path(env_root).expanduser().resolve())
     trunk_root = os.getenv("TRUNK_ROOT")
     if trunk_root:
-        candidates.append(Path(trunk_root).expanduser().resolve() / "lab" / "afs")
-    candidates.append(Path(__file__).resolve().parents[2])
+        trunk_path = Path(trunk_root).expanduser().resolve()
+        candidates.append(trunk_path / "lab" / "afs_studio")
+        candidates.append(trunk_path / "lab" / "afs")
+    afs_root = Path(__file__).resolve().parents[2]
+    candidates.append(afs_root.parent / "afs_studio")
+    candidates.append(afs_root)
 
     for candidate in candidates:
-        if (candidate / "apps" / "studio" / "CMakeLists.txt").exists():
+        if _is_studio_root(candidate):
             return candidate
+        studio_path = candidate / "apps" / "studio"
+        if _is_studio_root(studio_path):
+            return studio_path
 
     raise FileNotFoundError(
-        "AFS studio source not found. Set AFS_ROOT to the repo root."
+        "AFS studio source not found. Set AFS_STUDIO_ROOT or AFS_ROOT."
     )
 
 
@@ -68,7 +90,7 @@ def _studio_build_dir(root: Path, override: str | None) -> Path:
     return (
         Path(override).expanduser().resolve()
         if override
-        else root / "build" / "studio"
+        else _default_studio_build_dir(root)
     )
 
 
@@ -97,8 +119,7 @@ def _studio_build(
     build_type: str | None,
     config: str | None,
 ) -> int:
-    src_dir = root / "apps" / "studio"
-    cmake_cmd = ["cmake", "-S", str(src_dir), "-B", str(build_dir)]
+    cmake_cmd = ["cmake", "-S", str(root), "-B", str(build_dir)]
     if build_type:
         cmake_cmd.append(f"-DCMAKE_BUILD_TYPE={build_type}")
     status = _run_command(cmake_cmd)
@@ -366,12 +387,14 @@ def _studio_path_command(args: argparse.Namespace) -> int:
 
 def _studio_alias_command(args: argparse.Namespace) -> int:
     try:
-        root = _resolve_studio_root()
+        studio_root = _resolve_studio_root()
     except FileNotFoundError as exc:
         print(str(exc))
         return 1
-    root_value = os.getenv("AFS_ROOT") or str(root)
-    print(f"export AFS_ROOT=\"{root_value}\"")
+    afs_root = Path(os.getenv("AFS_ROOT") or Path(__file__).resolve().parents[2]).expanduser().resolve()
+    print(f"export AFS_ROOT=\"{afs_root}\"")
+    if studio_root.resolve() != (afs_root / "apps" / "studio").resolve():
+        print(f"export AFS_STUDIO_ROOT=\"{studio_root}\"")
     print("alias afs-studio='PYTHONPATH=\"$AFS_ROOT/src\" python -m afs studio run --build'")
     print("alias afs-studio-build='PYTHONPATH=\"$AFS_ROOT/src\" python -m afs studio build'")
     return 0

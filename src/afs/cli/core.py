@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -99,6 +100,82 @@ def services_render_command(args: argparse.Namespace) -> int:
     manager = ServiceManager()
     print(manager.render_unit(args.name))
     return 0
+
+
+def services_start_command(args: argparse.Namespace) -> int:
+    """Start a service."""
+    from ..services import ServiceManager
+
+    manager = ServiceManager()
+    try:
+        if manager.start(args.name, foreground=args.foreground):
+            print(f"Started: {args.name}")
+            return 0
+        print(f"Failed to start: {args.name}")
+        return 1
+    except KeyError as e:
+        print(str(e))
+        return 1
+
+
+def services_stop_command(args: argparse.Namespace) -> int:
+    """Stop a service."""
+    from ..services import ServiceManager
+
+    manager = ServiceManager()
+    try:
+        if manager.stop(args.name):
+            print(f"Stopped: {args.name}")
+            return 0
+        print(f"Failed to stop: {args.name}")
+        return 1
+    except KeyError as e:
+        print(str(e))
+        return 1
+
+
+def services_status_command(args: argparse.Namespace) -> int:
+    """Get service status."""
+    from ..services import ServiceManager
+
+    manager = ServiceManager()
+
+    if args.name:
+        status = manager.status(args.name)
+        symbol = "●" if status.state.value == "running" else "○"
+        color = "\033[32m" if status.state.value == "running" else "\033[31m"
+        reset = "\033[0m"
+        print(f"{color}{symbol}{reset} {status.name}: {status.state.value}")
+        if status.pid:
+            print(f"  PID: {status.pid}")
+        if status.last_started:
+            print(f"  Started: {status.last_started.isoformat()}")
+    else:
+        # Show all services
+        for definition in manager.list_definitions():
+            status = manager.status(definition.name)
+            symbol = "●" if status.state.value == "running" else "○"
+            color = "\033[32m" if status.state.value == "running" else "\033[31m"
+            reset = "\033[0m"
+            print(f"{color}{symbol}{reset} {definition.name}: {status.state.value}")
+
+    return 0
+
+
+def services_restart_command(args: argparse.Namespace) -> int:
+    """Restart a service."""
+    from ..services import ServiceManager
+
+    manager = ServiceManager()
+    try:
+        if manager.restart(args.name):
+            print(f"Restarted: {args.name}")
+            return 0
+        print(f"Failed to restart: {args.name}")
+        return 1
+    except KeyError as e:
+        print(str(e))
+        return 1
 
 
 def agents_list_command(args: argparse.Namespace) -> int:
@@ -232,12 +309,14 @@ def studio_path_command(args: argparse.Namespace) -> int:
 def studio_alias_command(args: argparse.Namespace) -> int:
     """Print shell aliases for studio."""
     try:
-        root = resolve_studio_root()
+        studio_root = resolve_studio_root()
     except FileNotFoundError as exc:
         print(str(exc))
         return 1
-    root_value = os.getenv("AFS_ROOT") or str(root)
-    print(f"export AFS_ROOT=\"{root_value}\"")
+    afs_root = Path(os.getenv("AFS_ROOT") or Path(__file__).resolve().parents[3]).expanduser().resolve()
+    print(f"export AFS_ROOT=\"{afs_root}\"")
+    if studio_root.resolve() != (afs_root / "apps" / "studio").resolve():
+        print(f"export AFS_STUDIO_ROOT=\"{studio_root}\"")
     print("alias afs-studio='PYTHONPATH=\"$AFS_ROOT/src\" python -m afs studio run --build'")
     print("alias afs-studio-build='PYTHONPATH=\"$AFS_ROOT/src\" python -m afs studio build'")
     return 0
@@ -253,13 +332,23 @@ def status_command(args: argparse.Namespace) -> int:
     config = load_config_model()
     context_root = resolve_context_root(config, root)
 
-    print(f"context_root: {context_root}")
-    print(f"linked_root: {root if root else '(none)'}")
-
     missing = []
     for name in AFS_DIRS:
         if not (context_root / name).exists():
             missing.append(name)
+
+    if args.json:
+        payload = {
+            "context_root": str(context_root),
+            "linked_root": str(root) if root else None,
+            "missing_dirs": missing,
+            "valid": not missing,
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print(f"context_root: {context_root}")
+    print(f"linked_root: {root if root else '(none)'}")
     if missing:
         print("missing_dirs: " + ", ".join(missing))
     else:
@@ -290,6 +379,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     # status
     status_parser = subparsers.add_parser("status", help="Show AFS status.")
     status_parser.add_argument("--start-dir", help="Starting directory.")
+    status_parser.add_argument("--json", action="store_true", help="Output JSON.")
     status_parser.set_defaults(func=status_command)
 
     # services
@@ -302,6 +392,23 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     services_render = services_sub.add_parser("render", help="Render service unit.")
     services_render.add_argument("name", help="Service name.")
     services_render.set_defaults(func=services_render_command)
+
+    services_start = services_sub.add_parser("start", help="Start a service.")
+    services_start.add_argument("name", help="Service name.")
+    services_start.add_argument("--foreground", "-f", action="store_true", help="Run in foreground.")
+    services_start.set_defaults(func=services_start_command)
+
+    services_stop = services_sub.add_parser("stop", help="Stop a service.")
+    services_stop.add_argument("name", help="Service name.")
+    services_stop.set_defaults(func=services_stop_command)
+
+    services_status = services_sub.add_parser("status", help="Get service status.")
+    services_status.add_argument("name", nargs="?", help="Service name (optional, shows all if omitted).")
+    services_status.set_defaults(func=services_status_command)
+
+    services_restart = services_sub.add_parser("restart", help="Restart a service.")
+    services_restart.add_argument("name", help="Service name.")
+    services_restart.set_defaults(func=services_restart_command)
 
     # agents
     agents_parser = subparsers.add_parser("agents", help="Run built-in agents.")
