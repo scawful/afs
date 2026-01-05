@@ -9,10 +9,7 @@ from pathlib import Path
 
 def generator_model_command(args: argparse.Namespace) -> int:
     """Generate assembly code using a trained model."""
-    from ..generators.model_generator import (
-        ModelType,
-        create_generator,
-    )
+    from ..generators.model_generator import create_generator
 
     # Determine model type
     model_type = args.type or "api"

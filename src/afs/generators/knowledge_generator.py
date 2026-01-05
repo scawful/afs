@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from .base import BaseGenerator, GenerationResult, TrainingSample
-from .model_generator import ModelGenerator, ModelGeneratorConfig, ModelType
+from .model_generator import ModelGenerator, ModelGeneratorConfig
 
 if TYPE_CHECKING:
     from afs.knowledge.entity_extractor import EntityExtractor
@@ -27,7 +27,7 @@ class KnowledgeGeneratorConfig:
 
     # Base model config
     model_path: Path | None = None
-    model_type: ModelType = ModelType.API
+    model_type: str = "api"
     model_name: str = ""
     api_provider: str = "gemini"
     api_key: str | None = None

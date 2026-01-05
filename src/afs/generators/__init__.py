@@ -47,6 +47,8 @@ from .model_generator import (
     HuggingFaceBackend,
     APIBackend,
     create_generator,
+    available_backends,
+    register_backend,
 )
 from .knowledge_generator import (
     KnowledgeAwareGenerator,
@@ -108,6 +110,8 @@ __all__ = [
     "HuggingFaceBackend",
     "APIBackend",
     "create_generator",
+    "available_backends",
+    "register_backend",
     # Knowledge-aware generation
     "KnowledgeAwareGenerator",
     "KnowledgeGeneratorConfig",

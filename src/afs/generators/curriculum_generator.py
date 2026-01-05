@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, TYPE_CHECKING
 
 from .base import BaseGenerator, GenerationResult, TrainingSample, write_jsonl
-from .model_generator import ModelGenerator, ModelGeneratorConfig, ModelType
 
 if TYPE_CHECKING:
     from afs.generators.cot.client import LLMClient

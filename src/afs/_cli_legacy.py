@@ -2405,7 +2405,6 @@ def _generator_model_command(args: argparse.Namespace) -> int:
     from .generators.model_generator import (
         ModelGenerator,
         ModelGeneratorConfig,
-        ModelType,
         create_generator,
     )
 

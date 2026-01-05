@@ -9,11 +9,13 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
-from typing import Iterable
+from typing import Any, Iterable
 
 from .schema import AFSConfig, PluginsConfig
 
 logger = logging.getLogger(__name__)
+
+_LOADED_PLUGINS: dict[str, ModuleType] = {}
 
 
 def _iter_module_names(paths: list[Path] | None) -> set[str]:
@@ -100,3 +102,52 @@ def load_plugins(
             except Exception as exc:
                 logger.warning("Failed to load plugin %s: %s", name, exc)
     return loaded
+
+
+def load_enabled_plugins(
+    config: AFSConfig | PluginsConfig | dict | None = None,
+    extra_paths: Iterable[Path] | None = None,
+    *,
+    force: bool = False,
+) -> dict[str, ModuleType]:
+    """Load plugins from config (cached by default)."""
+    global _LOADED_PLUGINS
+    if _LOADED_PLUGINS and not force:
+        return dict(_LOADED_PLUGINS)
+
+    if config is None:
+        try:
+            from .config import load_config_model
+
+            config = load_config_model()
+        except Exception:
+            config = PluginsConfig()
+
+    plugins_config = _normalize_plugins_config(config)
+    plugin_names = discover_plugins(plugins_config, extra_paths=extra_paths)
+    plugin_dirs = list(plugins_config.plugin_dirs)
+    if extra_paths:
+        plugin_dirs.extend(extra_paths)
+
+    _LOADED_PLUGINS = load_plugins(plugin_names, plugin_dirs)
+    return dict(_LOADED_PLUGINS)
+
+
+def call_plugin_hook(
+    hook: str,
+    *args: Any,
+    plugins: Iterable[ModuleType] | None = None,
+    **kwargs: Any,
+) -> list[Any]:
+    """Invoke a hook across loaded plugins, ignoring failures."""
+    modules = list(plugins or load_enabled_plugins().values())
+    results: list[Any] = []
+    for module in modules:
+        handler = getattr(module, hook, None)
+        if callable(handler):
+            try:
+                results.append(handler(*args, **kwargs))
+            except Exception as exc:
+                name = getattr(module, "__name__", "unknown")
+                logger.warning("Plugin hook %s failed in %s: %s", hook, name, exc)
+    return results

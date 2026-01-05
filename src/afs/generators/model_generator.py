@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from .base import BaseGenerator, GenerationResult, TrainingSample
 
@@ -34,13 +34,19 @@ class ModelType(str, Enum):
     API = "api"  # External API (Gemini, Claude, etc.)
 
 
+def _normalize_model_type(value: str | "ModelType") -> str:
+    if isinstance(value, ModelType):
+        return value.value
+    return str(value).strip().lower()
+
+
 @dataclass
 class ModelGeneratorConfig:
     """Configuration for model-based generation."""
 
     # Model settings
     model_path: Path | None = None
-    model_type: ModelType = ModelType.MLX
+    model_type: str = ModelType.MLX.value
     model_name: str = ""  # For API or HuggingFace hub
 
     # Generation parameters
@@ -62,6 +68,9 @@ class ModelGeneratorConfig:
 
     # Output
     domain: str = "model-generated"
+
+    def __post_init__(self) -> None:
+        self.model_type = _normalize_model_type(self.model_type)
 
 
 class ModelBackend(ABC):
@@ -288,6 +297,67 @@ class APIBackend(ModelBackend):
         return True  # Depends on API key
 
 
+BackendFactory = Callable[[ModelGeneratorConfig], ModelBackend]
+_BACKEND_FACTORIES: dict[str, BackendFactory] = {}
+
+
+def register_backend(
+    name: str,
+    factory: BackendFactory,
+    *,
+    overwrite: bool = False,
+) -> None:
+    """Register a backend factory."""
+    key = name.strip().lower()
+    if not overwrite and key in _BACKEND_FACTORIES:
+        raise ValueError(f"Backend already registered: {key}")
+    _BACKEND_FACTORIES[key] = factory
+
+
+def get_backend_factory(name: str) -> BackendFactory | None:
+    return _BACKEND_FACTORIES.get(name.strip().lower())
+
+
+def available_backends() -> list[str]:
+    from ..plugins import load_enabled_plugins
+
+    load_enabled_plugins()
+    return sorted(_BACKEND_FACTORIES)
+
+
+def _register_builtin_backends() -> None:
+    if _BACKEND_FACTORIES:
+        return
+
+    def _mlx_factory(config: ModelGeneratorConfig) -> ModelBackend:
+        if not config.model_path:
+            raise ValueError("model_path required for MLX backend")
+        return MLXBackend(config.model_path)
+
+    def _llama_factory(config: ModelGeneratorConfig) -> ModelBackend:
+        if not config.model_path:
+            raise ValueError("model_path required for llama.cpp backend")
+        return LlamaCppBackend(config.model_path)
+
+    def _hf_factory(config: ModelGeneratorConfig) -> ModelBackend:
+        model_id = config.model_name or config.model_path
+        if not model_id:
+            raise ValueError("model_path or model_name required for HuggingFace backend")
+        return HuggingFaceBackend(model_id)
+
+    def _api_factory(config: ModelGeneratorConfig) -> ModelBackend:
+        return APIBackend(
+            config.api_provider,
+            api_key=config.api_key,
+            model=config.model_name or None,
+        )
+
+    register_backend(ModelType.MLX.value, _mlx_factory)
+    register_backend(ModelType.LLAMA_CPP.value, _llama_factory)
+    register_backend(ModelType.HUGGINGFACE.value, _hf_factory)
+    register_backend(ModelType.API.value, _api_factory)
+
+
 # System prompt for ASM generation
 ASM_GENERATION_PROMPT = """You are an expert 65816 assembly programmer specializing in SNES/Super Nintendo game development, particularly for The Legend of Zelda: A Link to the Past (ALTTP).
 
@@ -332,31 +402,18 @@ class ModelGenerator(BaseGenerator):
 
     def _create_backend(self) -> ModelBackend:
         """Create appropriate backend based on config."""
-        if self.config.model_type == ModelType.MLX:
-            if not self.config.model_path:
-                raise ValueError("model_path required for MLX backend")
-            return MLXBackend(self.config.model_path)
+        from ..plugins import load_enabled_plugins
 
-        elif self.config.model_type == ModelType.LLAMA_CPP:
-            if not self.config.model_path:
-                raise ValueError("model_path required for llama.cpp backend")
-            return LlamaCppBackend(self.config.model_path)
-
-        elif self.config.model_type == ModelType.HUGGINGFACE:
-            model_id = self.config.model_name or self.config.model_path
-            if not model_id:
-                raise ValueError("model_path or model_name required for HuggingFace backend")
-            return HuggingFaceBackend(model_id)
-
-        elif self.config.model_type == ModelType.API:
-            return APIBackend(
-                self.config.api_provider,
-                api_key=self.config.api_key,
-                model=self.config.model_name or None,
+        load_enabled_plugins()
+        backend_type = _normalize_model_type(self.config.model_type)
+        factory = get_backend_factory(backend_type)
+        if factory is None:
+            available = ", ".join(available_backends())
+            raise ValueError(
+                f"Unsupported model type: {self.config.model_type}. "
+                f"Available: {available}"
             )
-
-        else:
-            raise ValueError(f"Unsupported model type: {self.config.model_type}")
+        return factory(self.config)
 
     @property
     def discriminator(self) -> "ASMElectra | None":
@@ -443,7 +500,7 @@ class ModelGenerator(BaseGenerator):
                 # Quality check
                 if self._passes_quality(sample):
                     sample._metadata["generation_attempt"] = attempt + 1
-                    sample._metadata["model_type"] = self.config.model_type.value
+                    sample._metadata["model_type"] = self.config.model_type
                     return sample
 
             except Exception as e:
@@ -579,9 +636,12 @@ def create_generator(
     """
     config = ModelGeneratorConfig(
         model_path=Path(model_path) if model_path else None,
-        model_type=ModelType(model_type),
+        model_type=model_type,
         api_provider=api_provider or "gemini",
         **kwargs,
     )
 
     return ModelGenerator(config)
+
+
+_register_builtin_backends()

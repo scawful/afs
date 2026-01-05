@@ -78,6 +78,11 @@ loaded = load_plugins(plugin_names, plugin_dirs=[Path("~/.afs/plugins")])
 - Searches configured `plugin_dirs` plus system path
 - Plugins can register custom mount types, validators, or generators
 
+**Plugin Hooks (new surfaces):**
+- CLI modules can call `register_cli(subparsers)` or `register_parsers(subparsers)` from plugins.
+- Generator backends can be registered via `afs.generators.register_backend`.
+- Training format converters can be registered via `afs.training.converters.register_converter`.
+
 ---
 
 ## 2. Context Directory Structure

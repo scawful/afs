@@ -82,6 +82,16 @@ def build_parser() -> argparse.ArgumentParser:
     # Register embedding commands
     embeddings.register_parsers(subparsers)
 
+    # Allow plugins to extend the CLI surface.
+    try:
+        from ..plugins import call_plugin_hook, load_enabled_plugins
+
+        plugins = load_enabled_plugins()
+        call_plugin_hook("register_cli", subparsers, plugins=plugins.values())
+        call_plugin_hook("register_parsers", subparsers, plugins=plugins.values())
+    except Exception:
+        pass
+
     return parser
 
 
