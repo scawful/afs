@@ -18,7 +18,7 @@ Docs:
 - `docs/PORTING_MAP.md`
 - `docs/WORKSPACE_INTEGRATION.md`
 - `docs/PLUGINS.md`
-Training/model ops docs live in `afs-scawful/docs/afs/`.
+- `docs/TRAINING_INFRA.md`
 
 Quickstart:
 - `afs` (shows defaults + command tree)
