@@ -1,0 +1,24 @@
+{
+  "id": "synthetic_assemble_002",
+  "source": "synthetic_focused",
+  "context": {
+    "scenario": "Loading sprite ID for new enemy",
+    "rom_path": "~/roms/zelda3.sfc",
+    "tool_category": "assembly_generation",
+    "instruction_set": "65816"
+  },
+  "instruction": "Assemble LDA immediate to load sprite ID",
+  "tool_calls": [
+    {
+      "tool": "yaze_debugger.assemble",
+      "parameters": {
+        "code": "LDA #$05",
+        "origin": "0x808000"
+      },
+      "rationale": "Assemble 65816 code: Assemble LDA immediate to load sprite ID",
+      "expected_output": "Assembled bytes in hexadecimal format"
+    }
+  ],
+  "success_criteria": "LDA immediate assembled (A9 05)",
+  "difficulty": "simple"
+}

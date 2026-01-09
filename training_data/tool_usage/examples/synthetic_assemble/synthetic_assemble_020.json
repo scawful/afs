@@ -1,0 +1,24 @@
+{
+  "id": "synthetic_assemble_020",
+  "source": "synthetic_focused",
+  "context": {
+    "scenario": "Set high bit for sprite priority",
+    "rom_path": "~/roms/zelda3.sfc",
+    "tool_category": "assembly_generation",
+    "instruction_set": "65816"
+  },
+  "instruction": "Assemble ORA immediate to set bits",
+  "tool_calls": [
+    {
+      "tool": "yaze_debugger.assemble",
+      "parameters": {
+        "code": "ORA #$80",
+        "origin": "0x808000"
+      },
+      "rationale": "Assemble 65816 code: Assemble ORA immediate to set bits",
+      "expected_output": "Assembled bytes in hexadecimal format"
+    }
+  ],
+  "success_criteria": "ORA immediate assembled (09 80)",
+  "difficulty": "medium"
+}

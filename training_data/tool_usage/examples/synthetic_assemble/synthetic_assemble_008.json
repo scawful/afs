@@ -1,0 +1,24 @@
+{
+  "id": "synthetic_assemble_008",
+  "source": "synthetic_focused",
+  "context": {
+    "scenario": "Call routine in different bank",
+    "rom_path": "~/roms/zelda3.sfc",
+    "tool_category": "assembly_generation",
+    "instruction_set": "65816"
+  },
+  "instruction": "Assemble JSL for long subroutine call",
+  "tool_calls": [
+    {
+      "tool": "yaze_debugger.assemble",
+      "parameters": {
+        "code": "JSL $80F000",
+        "origin": "0x808000"
+      },
+      "rationale": "Assemble 65816 code: Assemble JSL for long subroutine call",
+      "expected_output": "Assembled bytes in hexadecimal format"
+    }
+  ],
+  "success_criteria": "JSL long assembled (22 00 F0 80)",
+  "difficulty": "medium"
+}

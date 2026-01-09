@@ -1,0 +1,24 @@
+{
+  "id": "synthetic_assemble_004",
+  "source": "synthetic_focused",
+  "context": {
+    "scenario": "Loop until counter reaches zero",
+    "rom_path": "~/roms/zelda3.sfc",
+    "tool_category": "assembly_generation",
+    "instruction_set": "65816"
+  },
+  "instruction": "Assemble BNE branch for loop control",
+  "tool_calls": [
+    {
+      "tool": "yaze_debugger.assemble",
+      "parameters": {
+        "code": "BNE $8080",
+        "origin": "0x808000"
+      },
+      "rationale": "Assemble 65816 code: Assemble BNE branch for loop control",
+      "expected_output": "Assembled bytes in hexadecimal format"
+    }
+  ],
+  "success_criteria": "Branch instruction generated",
+  "difficulty": "medium"
+}

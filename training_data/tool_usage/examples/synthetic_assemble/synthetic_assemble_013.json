@@ -1,0 +1,24 @@
+{
+  "id": "synthetic_assemble_013",
+  "source": "synthetic_focused",
+  "context": {
+    "scenario": "Save all registers before complex operation",
+    "rom_path": "~/roms/zelda3.sfc",
+    "tool_category": "assembly_generation",
+    "instruction_set": "65816"
+  },
+  "instruction": "Assemble register preservation sequence",
+  "tool_calls": [
+    {
+      "tool": "yaze_debugger.assemble",
+      "parameters": {
+        "code": "PHA\\nPHX\\nPHY",
+        "origin": "0x808000"
+      },
+      "rationale": "Assemble 65816 code: Assemble register preservation sequence",
+      "expected_output": "Assembled bytes in hexadecimal format"
+    }
+  ],
+  "success_criteria": "Stack push sequence assembled",
+  "difficulty": "medium"
+}

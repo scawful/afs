@@ -1,0 +1,24 @@
+{
+  "id": "synthetic_assemble_003",
+  "source": "synthetic_focused",
+  "context": {
+    "scenario": "Writing to OAM table",
+    "rom_path": "~/roms/zelda3.sfc",
+    "tool_category": "assembly_generation",
+    "instruction_set": "65816"
+  },
+  "instruction": "Assemble STA absolute to write to RAM",
+  "tool_calls": [
+    {
+      "tool": "yaze_debugger.assemble",
+      "parameters": {
+        "code": "STA $0300",
+        "origin": "0x808000"
+      },
+      "rationale": "Assemble 65816 code: Assemble STA absolute to write to RAM",
+      "expected_output": "Assembled bytes in hexadecimal format"
+    }
+  ],
+  "success_criteria": "STA absolute assembled (8D 00 03)",
+  "difficulty": "simple"
+}

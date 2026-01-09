@@ -1,13 +1,14 @@
 {
-  "total_examples": 854,
+  "total_examples": 874,
   "by_source": {
     "extracted_agahnim": 7,
     "synthetic_batch1": 164,
-    "synthetic_batch2_vastai": 683
+    "synthetic_batch2_vastai": 683,
+    "synthetic_assemble_focused": 20
   },
   "by_tool": {
     "mesen2.run": 90,
-    "yaze_debugger.assemble": 1,
+    "yaze_debugger.assemble": 21,
     "yaze_debugger.read_memory": 61,
     "yaze_debugger.write_memory": 157,
     "mesen2.load_rom": 189,
@@ -20,10 +21,13 @@
     "z3ed_cli.import": 90
   },
   "by_difficulty": {
-    "simple": 400,
-    "medium": 342,
-    "complex": 105
+    "simple": 407,
+    "medium": 352,
+    "complex": 108
   },
   "generation_date": "2026-01-08",
-  "status": "complete"
+  "status": "ready_for_training",
+  "coverage_improvements": {
+    "yaze_debugger.assemble": "1 \u2192 21 examples (21x increase)"
+  }
 }

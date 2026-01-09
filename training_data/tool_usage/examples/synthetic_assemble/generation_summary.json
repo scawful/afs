@@ -1,0 +1,21 @@
+{
+  "total_examples": 20,
+  "tool": "yaze_debugger.assemble",
+  "by_difficulty": {
+    "simple": 7,
+    "medium": 10,
+    "complex": 3
+  },
+  "source": "synthetic_focused_generation",
+  "generation_date": "2026-01-08",
+  "instruction_types": [
+    "Basic loads/stores",
+    "Branching",
+    "Subroutine calls",
+    "Stack operations",
+    "DMA setup",
+    "Index operations",
+    "Addressing modes",
+    "Bit manipulation"
+  ]
+}
