@@ -1,6 +1,26 @@
 /.vscode/
 /build/
+/dist/
 __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
+
+# Logs
+*.log
+
+# Data & Models
+distillation_data/
+generated_data/
+pilot_output/
+models/
+data/
+training_data/
+benchmarks/
+benchmark_results/
+VAST_INSTANCES.md
+
+# Python environments/artifacts
+/.venv/
+/venv/
+*.egg-info/

@@ -76,6 +76,8 @@ loaded = load_plugins(plugin_names, plugin_dirs=[Path("~/.afs/plugins")])
 **Plugin Discovery:**
 - Auto-discovers modules with prefix `afs_plugin` or `afs_scawful`
 - Searches configured `plugin_dirs` plus system path
+- `AFS_PLUGIN_DIRS` (colon-separated on macOS/Linux) prepends extra plugin folders
+- `AFS_ENABLED_PLUGINS` (comma/space separated) appends explicit plugin names
 - Plugins can register custom mount types, validators, or generators
 
 **Plugin Hooks (new surfaces):**
@@ -203,24 +205,43 @@ if context.is_valid:
     print(f"Total mounts: {context.total_mounts}")
 ```
 
-## 4. History Logging (CLI)
+## 4. History Logging (CLI + Tools + Models)
 
-AFS now records CLI invocations into the context history log. This supports
-traceability and context provenance.
+AFS records CLI invocations, tool calls, filesystem reads/writes, and model
+interactions into the context history log. This supports traceability,
+provenance, and training exports.
 
 Default log path:
 ```
-~/.context/history/commands_YYYYMMDD.jsonl
+~/.context/history/events_YYYYMMDD.jsonl
+```
+
+Large payloads are stored under:
+```
+~/.context/history/payloads/
 ```
 
 Each entry is a JSON object with:
+- `id` (event id)
 - `timestamp` (UTC)
-- `command` (argv with sensitive values redacted)
-- `exit_code`
-- `cwd`
-- `context_root`
+- `type` (`cli`, `tool`, `fs`, `model`)
+- `source` (component name)
+- `op` (operation)
+- `metadata` (small attributes)
+- `payload` (inline payload when small) or `payload_ref` (payload file path)
 
 Disable logging by setting `AFS_HISTORY_DISABLED=1`.
+
+### Config Knobs (config.toml)
+
+```toml
+[history]
+enabled = true
+include_payloads = true
+max_inline_chars = 4000
+payload_dir_name = "payloads"
+redact_sensitive = true
+```
 
 ## 5. Memory to Dataset Export
 
@@ -234,6 +255,7 @@ Notes:
 - Default memory root: `<context_root>/memory`
 - Strict mode only exports entries with explicit `instruction` and `output`
 - `--allow-raw` uses `content` or `text` fields as output with a default instruction
+- Exports redact common secrets by default; use `--no-redact` to disable.
 
 ### Supported Input Types
 - `.jsonl`: one JSON entry per line
@@ -268,8 +290,13 @@ interval_seconds = 3600
 dataset_output = "~/src/training/datasets/memory_export.jsonl"
 report_output = "~/.context/scratchpad/afs_agents/memory_export.json"
 allow_raw = false
+allow_raw_tags = ["allow_raw"]
 default_instruction = "Recall the following memory entry."
 limit = 0
+require_quality = true
+min_quality_score = 0.5
+score_profile = "generic"
+enable_asar = false
 auto_start = false
 
 [[memory_export.routes]]
@@ -277,6 +304,81 @@ tags = ["scribe", "scribe_voice", "voice"]
 output = "~/src/training/datasets/scribe_voice.jsonl"
 domain = "scribe"
 ```
+
+### History Export (Training Data)
+
+Export history events into `TrainingSample` JSONL:
+```
+afs training history-export --output ~/src/training/datasets/history_export.jsonl
+```
+Notes:
+- Exports redact common secrets by default; use `--no-redact` to disable.
+- Scoring profiles include `generic`, `dialogue` (shorter responses), and `asm`.
+
+### Codex History Import (AFS Logs)
+
+Import Codex CLI sessions into the AFS history log:
+```
+afs training codex-history-import --history-root ~/.context/history
+```
+
+Notes:
+- Default roots: `~/.codex` (plus `~/src/.codex` if present).
+- Scans `~/src` for nested `.codex` folders by default (depth 4).
+- Exports redact common secrets by default; use `--no-redact` to disable.
+
+### Codex Export (Training Data)
+
+Export Codex CLI logs into `TrainingSample` JSONL:
+```
+afs training codex-export --output ~/src/training/datasets/codex_export.jsonl
+```
+
+Notes:
+- Default roots: `~/.codex` (plus `~/src/.codex` if present).
+- Scans `~/src` for nested `.codex` folders by default (depth 4).
+- Use `--include-system` to include system instructions in inputs.
+- Exports redact common secrets by default; use `--no-redact` to disable.
+
+### Antigravity Export (Training Data)
+
+Export Antigravity trajectory summaries into `TrainingSample` JSONL:
+```
+afs training antigravity-export --output ~/src/training/datasets/antigravity_export.jsonl
+```
+
+Notes:
+- Default DB path: `~/Library/Application Support/Antigravity/User/globalStorage/state.vscdb`
+- Use `--db-path` to override the database location.
+- Use `--include-paths-content` to inline `PathsToReview` contents (capped by `--max-path-chars`).
+- Exports redact common secrets by default; use `--no-redact` to disable.
+
+### Gemini Export (Training Data)
+
+Export Gemini CLI logs into `TrainingSample` JSONL:
+```
+afs training gemini-export --output ~/src/training/datasets/gemini_export.jsonl
+```
+
+Notes:
+- Default roots: `~/.gemini` plus `~/src/.gemini` (if present).
+- Scans `~/src` for nested `.gemini` folders by default (depth 4).
+- Includes `~/.gemini/disabled` session logs when present.
+- Use `--root` to add more `.gemini` directories.
+- Use `--scan-root` to control where nested `.gemini` scanning happens.
+- Exports redact common secrets by default; use `--no-redact` to disable.
+
+### Claude Export (Training Data)
+
+Export Claude Code logs into `TrainingSample` JSONL:
+```
+afs training claude-export --output ~/src/training/datasets/claude_export.jsonl
+```
+
+Notes:
+- Default roots: `~/.claude` plus `~/src/.claude` (if present).
+- Scans `~/src` for nested `.claude` folders by default (depth 4).
+- Exports redact common secrets by default; use `--no-redact` to disable.
 
 ## 6. Research Alignment (OCR Extracts)
 
@@ -511,6 +613,9 @@ Supported providers (when enabled):
 - `openai` - OpenAI embeddings API
 - `gemini` - Google Gemini embeddings
 - `local` - Local embedding model (MLX/llama.cpp)
+
+CLI note: `afs embeddings` currently supports `ollama` and `hf` providers for ad-hoc
+indexing/eval without enabling the config-based provider system.
 
 ### Query Patterns
 

@@ -19,16 +19,18 @@ Docs:
 - `docs/WORKSPACE_INTEGRATION.md`
 
 Quickstart:
-- `python -m afs init --context-root ~/src/context --workspace-name trunk`
-- `python -m afs status`
-- `python -m afs workspace sync --root ~/src`
-- `python -m afs context init --path ~/src/trunk`
-- `python -m afs context validate --path ~/src/trunk`
-- `python -m afs context discover --path ~/src/trunk`
-- `python -m afs context ensure-all --path ~/src/trunk`
-- `python -m afs graph export --path ~/src/trunk`
-- `python -m afs services list`
-- `python -m afs orchestrator list`
+- `afs` (shows defaults + command tree)
+- `afs help context`
+- `afs init --context-root ~/.context --workspace-name src`
+- `afs status`
+- `afs workspace sync --root ~/src`
+- `afs context init --path ~/src`
+- `afs context validate --path ~/src`
+- `afs context discover --path ~/src`
+- `afs context ensure-all --path ~/src`
+- `afs graph export --path ~/src`
+- `afs services list`
+- `afs orchestrator list`
 
 Workspace catalog and navigation live in `ws`; `afs workspace sync` bridges
 `WORKSPACE.toml` into AFS discovery.
@@ -47,18 +49,75 @@ Shell + agent access:
 - Use `scripts/afs-warm` for periodic context warming.
 - See `docs/AGENT_SURFACES.md` for CLI and MCP surfaces.
 
+Plugins (macOS/Linux friendly):
+- Set `AFS_PLUGIN_DIRS` (colon-separated on macOS/Linux) to add local plugin folders.
+- Set `AFS_ENABLED_PLUGINS` (comma or space separated) to load specific plugins.
+- Plugins can be a simple package or single `.py` module; no compilation required.
+
 Agent-friendly JSON output:
 ```bash
 afs status --json
 afs context discover --path ~/src --json
 afs context report --path ~/src --json
-afs fs list memory --path ~/src/trunk --json
+afs fs list memory --path ~/src --json
 afs embeddings search --project afs --query "context root" --json
+```
+
+Embedding eval:
+```bash
+afs embeddings eval --project afs --query-file examples/embedding_eval.jsonl --provider ollama --model nomic-embed-text --json
+afs embeddings eval --project afs --query-file examples/embedding_eval.jsonl --provider hf --model google/embeddinggemma-300m --json
+```
+
+Eval JSONL format:
+```json
+{"query":"history export command","expected_path":"docs/MEMORY_SYSTEM.md"}
+{"query":"embedding index CLI","expected":["src/afs/cli/embeddings.py","docs/AGENT_SURFACES.md"]}
 ```
 
 Memory export:
 ```bash
 afs training memory-export --output ~/src/training/datasets/memory_export.jsonl
+```
+
+History export:
+```bash
+afs training history-export --output ~/src/training/datasets/history_export.jsonl
+```
+
+Antigravity export:
+```bash
+afs training antigravity-export --output ~/src/training/datasets/antigravity_export.jsonl
+```
+
+Gemini export:
+```bash
+afs training gemini-export --output ~/src/training/datasets/gemini_export.jsonl
+```
+
+Claude export:
+```bash
+afs training claude-export --output ~/src/training/datasets/claude_export.jsonl
+```
+
+Codex export:
+```bash
+afs training codex-export --output ~/src/training/datasets/codex_export.jsonl
+```
+
+Codex history import:
+```bash
+afs training codex-history-import --history-root ~/.context/history
+```
+
+Rebalance datasets:
+```bash
+afs training rebalance --input ~/src/training/datasets/claude_export.jsonl \
+  --input ~/src/training/datasets/gemini_export.jsonl \
+  --input ~/src/training/datasets/codex_export.jsonl \
+  --input ~/src/training/datasets/history_export.jsonl \
+  --output ~/src/training/datasets/mix_export.jsonl \
+  --weight gemini=0.35 --weight claude=0.30 --weight history=0.20 --weight codex=0.15
 ```
 
 Background agent (manual control):
@@ -70,27 +129,36 @@ AFS_CONTEXT_WARM_INTERVAL=3600 afs services restart context-warm
 ```
 
 Agents:
-- `python -m afs agents list`
-- `python -m afs agents run context-audit -- --path ~/src --output ~/.context/scratchpad/afs_agents/context_audit.json`
-- `python -m afs agents run context-inventory -- --path ~/src --output ~/.context/scratchpad/afs_agents/context_inventory.json`
-- `python -m afs agents run scribe-draft -- --prompt "Draft a concise changelog."`
-- `python -m afs agents run context-warm -- --workspace-root ~/src`
+- `afs agents list`
+- `afs agents run context-audit -- --path ~/src --output ~/.context/scratchpad/afs_agents/context_audit.json`
+- `afs agents run context-inventory -- --path ~/src --output ~/.context/scratchpad/afs_agents/context_inventory.json`
+- `afs agents run scribe-draft -- --prompt "Draft a concise changelog."`
+- `afs agents run context-warm -- --workspace-root ~/src`
 
 Discovery skips directory names in `general.discovery_ignore` (default: legacy, archive, archives).
 
 Agentic filesystem:
-- `afs fs read scratchpad state.md --path ~/src/trunk`
-- `afs fs write scratchpad notes.md --path ~/src/trunk --content "Status update"`
-- `afs fs list knowledge --path ~/src/trunk --glob "*.md"`
+- `afs fs read scratchpad state.md --path ~/src`
+- `afs fs write scratchpad notes.md --path ~/src --content "Status update"`
+- `afs fs list knowledge --path ~/src --glob "*.md"`
+
+## Tooling Strategy: "Context as Files"
+Agents interact with the world by reading/writing to `~/.context`.
+- **Working Memory:** `~/.context/scratchpad/`
+- **Tool Use:** Agents are trained to output shell commands (e.g., `ws find`) and file operations instead of just text.
+- **Dataset:** Synthetic tooling examples in `training/datasets/afs_tooling_dataset.jsonl`.
+- **See also:** `lab/afs/docs/TOOLING_STRATEGY.md` for the full architecture.
 
 Embeddings:
 - `afs embeddings index --project afs --source ~/src/lab/afs/docs --provider none`
 - `afs embeddings search --project afs --query "context root"`
+ - `--provider none` falls back to keyword scoring when no embedding runtime is available.
 
 Studio:
-- `python -m afs studio build`
-- `python -m afs studio run --build`
-- `python -m afs studio install --prefix ~/.local`
+- `afs-studio-build`
+- `afs-studio` (builds if needed)
+- `afs studio install --prefix ~/.local`
+- `afs studio alias`
 - Set `AFS_STUDIO_ROOT` to the standalone repo if it lives outside `apps/studio`.
 
 Domain Capabilities (ALTTP/65816):

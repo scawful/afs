@@ -1,9 +1,0 @@
-{
-  "total_examples": 7,
-  "by_tool": {
-    "mesen2.run": 6,
-    "yaze_debugger.assemble": 1
-  },
-  "source": "agahnim_corpus_extraction",
-  "extraction_date": "2026-01-08"
-}

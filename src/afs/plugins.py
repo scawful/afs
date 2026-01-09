@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 import pkgutil
+import re
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -16,6 +18,51 @@ from .schema import AFSConfig, PluginsConfig
 logger = logging.getLogger(__name__)
 
 _LOADED_PLUGINS: dict[str, ModuleType] = {}
+
+
+def _merge_unique(items: Iterable[str], fallback: Iterable[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for entry in list(items) + list(fallback):
+        entry = entry.strip()
+        if not entry or entry in seen:
+            continue
+        merged.append(entry)
+        seen.add(entry)
+    return merged
+
+
+def _merge_unique_paths(items: Iterable[Path], fallback: Iterable[Path]) -> list[Path]:
+    merged: list[Path] = []
+    seen: set[str] = set()
+    for entry in list(items) + list(fallback):
+        entry_str = str(entry)
+        if not entry_str or entry_str in seen:
+            continue
+        merged.append(entry)
+        seen.add(entry_str)
+    return merged
+
+
+def _env_plugin_dirs() -> list[Path]:
+    raw = os.environ.get("AFS_PLUGIN_DIRS")
+    if not raw:
+        return []
+    entries = []
+    for item in raw.split(os.pathsep):
+        item = item.strip()
+        if not item:
+            continue
+        entries.append(Path(item).expanduser().resolve())
+    return entries
+
+
+def _env_enabled_plugins() -> list[str]:
+    raw = os.environ.get("AFS_ENABLED_PLUGINS")
+    if not raw:
+        return []
+    entries = [item.strip() for item in re.split(r"[,\s]+", raw) if item.strip()]
+    return entries
 
 
 def _iter_module_names(paths: list[Path] | None) -> set[str]:
@@ -61,12 +108,36 @@ def _normalize_plugins_config(config: AFSConfig | PluginsConfig | dict | None) -
     if config is None:
         return PluginsConfig()
     if isinstance(config, PluginsConfig):
-        return config
-    if isinstance(config, AFSConfig):
-        return config.plugins
-    if isinstance(config, dict):
-        return PluginsConfig.from_dict(config.get("plugins", config))
-    return PluginsConfig()
+        plugins_config = PluginsConfig(
+            enabled_plugins=list(config.enabled_plugins),
+            plugin_dirs=list(config.plugin_dirs),
+            auto_discover=config.auto_discover,
+            auto_discover_prefixes=list(config.auto_discover_prefixes),
+        )
+    elif isinstance(config, AFSConfig):
+        plugins = config.plugins
+        plugins_config = PluginsConfig(
+            enabled_plugins=list(plugins.enabled_plugins),
+            plugin_dirs=list(plugins.plugin_dirs),
+            auto_discover=plugins.auto_discover,
+            auto_discover_prefixes=list(plugins.auto_discover_prefixes),
+        )
+    elif isinstance(config, dict):
+        plugins_config = PluginsConfig.from_dict(config.get("plugins", config))
+    else:
+        plugins_config = PluginsConfig()
+
+    env_dirs = _env_plugin_dirs()
+    env_enabled = _env_enabled_plugins()
+    if env_dirs:
+        plugins_config.plugin_dirs = _merge_unique_paths(
+            env_dirs, plugins_config.plugin_dirs
+        )
+    if env_enabled:
+        plugins_config.enabled_plugins = _merge_unique(
+            env_enabled, plugins_config.enabled_plugins
+        )
+    return plugins_config
 
 
 def discover_plugins(
