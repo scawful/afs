@@ -7,7 +7,7 @@ Scope: core AFS primitives + internal workflow tooling.
 Provenance: avoid employer/internal sources; skip unclear origins.
 
 Docs:
-- `docs/ARCHITECTURE.md` - Module overview and training pipeline
+- `docs/ARCHITECTURE.md` - Module overview
 - `docs/GLOSSARY.md` - Term definitions
 - `docs/STATUS.md` - Current state
 - `docs/ROADMAP.md` - Planned work
@@ -17,6 +17,7 @@ Docs:
 - `docs/CLI_PLAN.md`
 - `docs/PORTING_MAP.md`
 - `docs/WORKSPACE_INTEGRATION.md`
+Training/model ops docs live in `afs-scawful/docs/afs/`.
 
 Quickstart:
 - `afs` (shows defaults + command tree)
