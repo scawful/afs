@@ -1,0 +1,23 @@
+{
+  "id": "synthetic_z3ed_037",
+  "source": "synthetic",
+  "context": {
+    "scenario": "ROM editing and validation",
+    "rom_path": "~/roms/zelda3.sfc",
+    "tool_category": "rom_editing"
+  },
+  "instruction": "Inspect ROM header information",
+  "tool_calls": [
+    {
+      "tool": "z3ed_cli.inspect",
+      "parameters": {
+        "rom_path": "~/roms/zelda3.sfc",
+        "what": "header"
+      },
+      "rationale": "Inspect ROM header information",
+      "expected_output": "ROM metadata retrieved"
+    }
+  ],
+  "success_criteria": "ROM metadata retrieved",
+  "difficulty": "simple"
+}

@@ -1,0 +1,23 @@
+{
+  "id": "synthetic_yaze_write_099",
+  "source": "synthetic",
+  "context": {
+    "scenario": "Fix Link behavior bug",
+    "rom_path": "~/roms/zelda3.sfc",
+    "tool_category": "rom_patching"
+  },
+  "instruction": "Apply patch to set priority bit",
+  "tool_calls": [
+    {
+      "tool": "yaze_debugger.write_memory",
+      "parameters": {
+        "address": "0x008000",
+        "data": "80"
+      },
+      "rationale": "Set priority bit",
+      "expected_output": "True if write successful"
+    }
+  ],
+  "success_criteria": "Patch applied successfully: 80",
+  "difficulty": "simple"
+}

@@ -1,0 +1,23 @@
+{
+  "id": "synthetic_mesen2_299",
+  "source": "synthetic",
+  "context": {
+    "scenario": "Emulator testing and debugging",
+    "rom_loaded": true,
+    "tool_category": "emulation"
+  },
+  "instruction": "Run emulation for 5 seconds to test changes",
+  "tool_calls": [
+    {
+      "tool": "mesen2.run",
+      "parameters": {
+        "speed": 1.0,
+        "frames": 300
+      },
+      "rationale": "Run emulation for 5 seconds to test changes",
+      "expected_output": "Emulation completed without errors"
+    }
+  ],
+  "success_criteria": "Emulation completed without errors",
+  "difficulty": "simple"
+}

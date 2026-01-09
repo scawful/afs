@@ -1,0 +1,23 @@
+{
+  "id": "synthetic_mesen2_131",
+  "source": "synthetic",
+  "context": {
+    "scenario": "Emulator testing and debugging",
+    "rom_loaded": false,
+    "tool_category": "emulation"
+  },
+  "instruction": "Load ROM into emulator for testing",
+  "tool_calls": [
+    {
+      "tool": "mesen2.load_rom",
+      "parameters": {
+        "path": "~/roms/zelda3.sfc",
+        "auto_save_state": true
+      },
+      "rationale": "Load ROM into emulator for testing",
+      "expected_output": "ROM loaded successfully"
+    }
+  ],
+  "success_criteria": "ROM loaded successfully",
+  "difficulty": "simple"
+}

@@ -1,0 +1,23 @@
+{
+  "id": "synthetic_yaze_write_117",
+  "source": "synthetic",
+  "context": {
+    "scenario": "Fix Keese behavior bug",
+    "rom_path": "~/roms/zelda3.sfc",
+    "tool_category": "rom_patching"
+  },
+  "instruction": "Apply patch to clear oam entry",
+  "tool_calls": [
+    {
+      "tool": "yaze_debugger.write_memory",
+      "parameters": {
+        "address": "0x008000",
+        "data": "A9 00 8D 00 03"
+      },
+      "rationale": "Clear OAM entry",
+      "expected_output": "True if write successful"
+    }
+  ],
+  "success_criteria": "Patch applied successfully: A9 00 8D 00 03",
+  "difficulty": "medium"
+}

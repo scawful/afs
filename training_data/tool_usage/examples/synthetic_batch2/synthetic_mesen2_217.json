@@ -1,0 +1,24 @@
+{
+  "id": "synthetic_mesen2_217",
+  "source": "synthetic",
+  "context": {
+    "scenario": "Emulator testing and debugging",
+    "rom_loaded": true,
+    "tool_category": "emulation"
+  },
+  "instruction": "Read OAM table during gameplay to debug sprite rendering",
+  "tool_calls": [
+    {
+      "tool": "mesen2.read_memory",
+      "parameters": {
+        "address": "0x0300",
+        "length": 64,
+        "memory_type": "work_ram"
+      },
+      "rationale": "Read OAM table during gameplay to debug sprite rendering",
+      "expected_output": "Runtime OAM data retrieved"
+    }
+  ],
+  "success_criteria": "Runtime OAM data retrieved",
+  "difficulty": "medium"
+}

@@ -1,0 +1,23 @@
+{
+  "total_examples": 683,
+  "by_tool": {
+    "yaze_debugger.read_memory": 47,
+    "yaze_debugger.write_memory": 127,
+    "mesen2.load_rom": 153,
+    "mesen2.read_memory": 111,
+    "mesen2.screenshot": 153,
+    "mesen2.run": 68,
+    "mesen2.write_memory": 68,
+    "z3ed_cli.inspect": 32,
+    "z3ed_cli.extract": 74,
+    "z3ed_cli.validate": 74,
+    "z3ed_cli.import": 73
+  },
+  "by_difficulty": {
+    "simple": 322,
+    "medium": 276,
+    "complex": 85
+  },
+  "source": "synthetic_generation",
+  "generation_date": "2026-01-08"
+}

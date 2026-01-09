@@ -1,0 +1,24 @@
+{
+  "id": "synthetic_yaze_read_002",
+  "source": "synthetic",
+  "context": {
+    "scenario": "ROM identification and validation",
+    "rom_path": "~/roms/zelda3.sfc",
+    "tool_category": "rom_analysis"
+  },
+  "instruction": "Read ROM header to verify version",
+  "tool_calls": [
+    {
+      "tool": "yaze_debugger.read_memory",
+      "parameters": {
+        "address": "0x00FFC0",
+        "length": 64,
+        "format": "hex"
+      },
+      "rationale": "Read ROM data to read rom header to verify version",
+      "expected_output": "Hex bytes showing ROM content at specified address"
+    }
+  ],
+  "success_criteria": "ROM header data retrieved",
+  "difficulty": "simple"
+}

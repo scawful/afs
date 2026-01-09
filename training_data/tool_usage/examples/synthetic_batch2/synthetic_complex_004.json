@@ -1,0 +1,64 @@
+{
+  "id": "synthetic_complex_004",
+  "source": "synthetic",
+  "context": {
+    "scenario": "Complex multi-tool workflow",
+    "requires_multiple_tools": true,
+    "tool_category": "workflow"
+  },
+  "instruction": "Extract, edit, and re-import graphics",
+  "tool_calls": [
+    {
+      "tool": "z3ed_cli.extract",
+      "parameters": {
+        "rom_path": "~/roms/zelda3.sfc",
+        "what": "graphics",
+        "output_dir": "~/extracted/",
+        "format": "png"
+      },
+      "rationale": "Step in workflow: Extract, edit, and re-import graphics",
+      "expected_output": "Step completed"
+    },
+    {
+      "tool": "z3ed_cli.import",
+      "parameters": {
+        "rom_path": "~/roms/zelda3.sfc",
+        "data_type": "graphics",
+        "input_path": "~/edited/sprite.png",
+        "target_id": 10
+      },
+      "rationale": "Step in workflow: Extract, edit, and re-import graphics",
+      "expected_output": "Step completed"
+    },
+    {
+      "tool": "z3ed_cli.validate",
+      "parameters": {
+        "rom_path": "~/roms/zelda3.sfc",
+        "checks": [
+          "all"
+        ]
+      },
+      "rationale": "Step in workflow: Extract, edit, and re-import graphics",
+      "expected_output": "Step completed"
+    },
+    {
+      "tool": "mesen2.load_rom",
+      "parameters": {
+        "path": "~/roms/zelda3.sfc",
+        "auto_save_state": true
+      },
+      "rationale": "Step in workflow: Extract, edit, and re-import graphics",
+      "expected_output": "Step completed"
+    },
+    {
+      "tool": "mesen2.screenshot",
+      "parameters": {
+        "format": "png"
+      },
+      "rationale": "Step in workflow: Extract, edit, and re-import graphics",
+      "expected_output": "Step completed"
+    }
+  ],
+  "success_criteria": "Graphics updated and verified visually",
+  "difficulty": "complex"
+}

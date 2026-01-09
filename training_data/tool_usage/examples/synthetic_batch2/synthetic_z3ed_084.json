@@ -1,0 +1,25 @@
+{
+  "id": "synthetic_z3ed_084",
+  "source": "synthetic",
+  "context": {
+    "scenario": "ROM editing and validation",
+    "rom_path": "~/roms/zelda3.sfc",
+    "tool_category": "rom_editing"
+  },
+  "instruction": "Import modified graphics back into ROM",
+  "tool_calls": [
+    {
+      "tool": "z3ed_cli.import",
+      "parameters": {
+        "rom_path": "~/roms/zelda3.sfc",
+        "data_type": "graphics",
+        "input_path": "~/edited/sprite.png",
+        "target_id": 10
+      },
+      "rationale": "Import modified graphics back into ROM",
+      "expected_output": "Graphics imported successfully"
+    }
+  ],
+  "success_criteria": "Graphics imported successfully",
+  "difficulty": "medium"
+}

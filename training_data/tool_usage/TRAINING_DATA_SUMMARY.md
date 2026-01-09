@@ -1,18 +1,19 @@
 # MCP Tool Usage Training Data Summary
 
-**Date:** 2026-01-08
-**Status:** ✅ **171 examples generated** (85.5% of 200 target)
+**Date:** 2026-01-08 (Updated: 2026-01-08 21:00 EST)
+**Status:** ✅ **854 examples generated** (427% of 200 target, 85.4% of 1000 goal)
 **Purpose:** Train small specialist models for yaze/z3ed/mesen2 tool calling
 
 ---
 
 ## Executive Summary
 
-Successfully generated **171 high-quality training examples** for MCP tool usage:
+Successfully generated **854 high-quality training examples** for MCP tool usage:
 
 - **Extracted from Agahnim corpus:** 7 examples
-- **Synthetically generated:** 164 examples
-- **Total:** 171 examples
+- **Synthetically generated (batch 1):** 164 examples
+- **Synthetically generated (batch 2, vast.ai):** 683 examples
+- **Total:** 854 examples
 
 These examples cover **12 distinct MCP tools** across 3 categories:
 1. **yaze-debugger** - ROM debugging and patching
@@ -27,18 +28,18 @@ These examples cover **12 distinct MCP tools** across 3 categories:
 
 | Tool | Count | Percentage | Coverage |
 |------|-------|------------|----------|
-| **yaze_debugger.read_memory** | 14 | 8.2% | Read operations |
-| **yaze_debugger.write_memory** | 30 | 17.5% | ROM patching |
-| **yaze_debugger.assemble** | 1 | 0.6% | Code assembly |
-| **mesen2.load_rom** | 36 | 21.1% | Emulator init |
-| **mesen2.read_memory** | 26 | 15.2% | Runtime state |
-| **mesen2.write_memory** | 16 | 9.4% | Test setup |
-| **mesen2.run** | 22 | 12.9% | Execution |
-| **mesen2.screenshot** | 36 | 21.1% | Visual testing |
-| **z3ed_cli.inspect** | 8 | 4.7% | ROM analysis |
-| **z3ed_cli.extract** | 18 | 10.5% | Data export |
-| **z3ed_cli.import** | 17 | 9.9% | Data import |
-| **z3ed_cli.validate** | 17 | 9.9% | Validation |
+| **yaze_debugger.read_memory** | 61 | 7.1% | Read operations |
+| **yaze_debugger.write_memory** | 157 | 18.4% | ROM patching |
+| **yaze_debugger.assemble** | 1 | 0.1% | Code assembly |
+| **mesen2.load_rom** | 189 | 22.1% | Emulator init |
+| **mesen2.read_memory** | 137 | 16.0% | Runtime state |
+| **mesen2.write_memory** | 84 | 9.8% | Test setup |
+| **mesen2.run** | 90 | 10.5% | Execution |
+| **mesen2.screenshot** | 189 | 22.1% | Visual testing |
+| **z3ed_cli.inspect** | 40 | 4.7% | ROM analysis |
+| **z3ed_cli.extract** | 92 | 10.8% | Data export |
+| **z3ed_cli.import** | 90 | 10.5% | Data import |
+| **z3ed_cli.validate** | 91 | 10.7% | Validation |
 
 **Tool coverage:** 12/12 tools (100%)
 
@@ -46,19 +47,21 @@ These examples cover **12 distinct MCP tools** across 3 categories:
 
 | Difficulty | Count | Percentage | Purpose |
 |------------|-------|------------|---------|
-| Simple | 78 | 45.6% | Single tool, basic parameters |
-| Medium | 66 | 38.6% | Multiple parameters, moderate complexity |
-| Complex | 20 | 11.7% | Multi-tool workflows |
-| N/A (extracted) | 7 | 4.1% | Real-world examples |
+| Simple | 400 | 46.8% | Single tool, basic parameters |
+| Medium | 342 | 40.0% | Multiple parameters, moderate complexity |
+| Complex | 105 | 12.3% | Multi-tool workflows |
+| N/A (extracted) | 7 | 0.8% | Real-world examples |
 
 **Difficulty distribution:** Well-balanced for training
 
 ### By Source
 
-| Source | Count | Purpose |
-|--------|-------|---------|
-| Agahnim corpus (extracted) | 7 | Real workflow examples |
-| Synthetic generation | 164 | Comprehensive coverage |
+| Source | Count | Purpose | Generated On |
+|--------|-------|---------|--------------|
+| Agahnim corpus (extracted) | 7 | Real workflow examples | MacBook |
+| Synthetic generation (batch 1) | 164 | Comprehensive coverage | MacBook |
+| Synthetic generation (batch 2) | 683 | Scale to 1000 goal | vast.ai instance |
+| **Total** | **854** | **Complete dataset** | **Multi-machine** |
 
 ---
 
@@ -77,13 +80,19 @@ tool_usage/
 │   │   ├── example_003_phase_2.json
 │   │   ├── ...
 │   │   └── extraction_summary.json
-│   └── synthetic/                  # 164 synthetic examples
-│       ├── synthetic_yaze_read_001.json
-│       ├── synthetic_mesen2_001.json
-│       ├── synthetic_z3ed_001.json
-│       ├── synthetic_complex_001.json
-│       ├── ...
-│       └── generation_summary.json
+│   ├── synthetic/                  # 164 synthetic examples (batch 1)
+│   │   ├── synthetic_yaze_read_001.json
+│   │   ├── synthetic_mesen2_001.json
+│   │   ├── synthetic_z3ed_001.json
+│   │   ├── synthetic_complex_001.json
+│   │   ├── ...
+│   │   └── generation_summary.json
+│   ├── synthetic_batch2/           # 683 synthetic examples (vast.ai)
+│   │   ├── synthetic_yaze_read_001.json
+│   │   ├── synthetic_mesen2_001.json
+│   │   ├── ...
+│   │   └── generation_summary.json
+│   └── COMBINED_SUMMARY.json       # Combined statistics (all 854 examples)
 └── TRAINING_DATA_SUMMARY.md        # This file
 ```
 
@@ -403,20 +412,31 @@ python3 scripts/generate_synthetic_examples.py \
 
 ## Conclusion
 
-Successfully generated **171 high-quality training examples** for MCP tool usage covering:
+Successfully generated **854 high-quality training examples** for MCP tool usage covering:
 - ✅ All 12 MCP tools (100% coverage)
 - ✅ Real-world examples from Agahnim corpus
-- ✅ Comprehensive synthetic coverage
-- ✅ Balanced difficulty distribution
+- ✅ Comprehensive synthetic coverage across 2 generation batches
+- ✅ Balanced difficulty distribution (47% simple, 40% medium, 12% complex)
+- ✅ Multi-machine autonomous generation (MacBook + vast.ai)
 - ✅ Ready for model training
 
 **Ready for:** Fine-tuning small specialist models for expert tool calling.
 
-**Next milestone:** Validation and coverage analysis, then scale to 1000 examples when MECHANICA available.
+**Deployment notes:**
+- Batch 1 (164 examples): Generated locally on MacBook
+- Batch 2 (683 examples): Generated on vast.ai instance (cost: ~$0.05)
+- MECHANICA was offline, successfully used vast.ai as alternative
+- Total generation time: ~2 hours (including infrastructure setup)
+
+**Next milestones:**
+1. ✅ Scale to 854 examples (85.4% of 1000 goal) - COMPLETE
+2. ⏳ Validation and coverage analysis - In progress
+3. ⏳ Fine-tune specialist models (VERAN-tools, FARORE-debug, NAYRU-editor)
+4. ⏳ Deploy to Codex for production testing
 
 ---
 
 **Generated:** 2026-01-08
-**Last Updated:** 2026-01-08
-**Total Examples:** 171
-**Status:** ✅ Ready for training
+**Last Updated:** 2026-01-08 21:00 EST
+**Total Examples:** 854 (427% of initial 200 target)
+**Status:** ✅ Ready for training and validation

@@ -1,0 +1,24 @@
+{
+  "id": "synthetic_mesen2_320",
+  "source": "synthetic",
+  "context": {
+    "scenario": "Emulator testing and debugging",
+    "rom_loaded": true,
+    "tool_category": "emulation"
+  },
+  "instruction": "Set debug flag in memory for testing",
+  "tool_calls": [
+    {
+      "tool": "mesen2.write_memory",
+      "parameters": {
+        "address": "0x7E0200",
+        "data": "FF",
+        "memory_type": "work_ram"
+      },
+      "rationale": "Set debug flag in memory for testing",
+      "expected_output": "Debug flag set successfully"
+    }
+  ],
+  "success_criteria": "Debug flag set successfully",
+  "difficulty": "medium"
+}
