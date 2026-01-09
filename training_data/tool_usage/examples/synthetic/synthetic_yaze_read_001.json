@@ -1,0 +1,24 @@
+{
+  "id": "synthetic_yaze_read_001",
+  "source": "synthetic",
+  "context": {
+    "scenario": "Debugging sprite rendering issues",
+    "rom_path": "~/roms/zelda3.sfc",
+    "tool_category": "rom_analysis"
+  },
+  "instruction": "Read OAM table to inspect sprite properties",
+  "tool_calls": [
+    {
+      "tool": "yaze_debugger.read_memory",
+      "parameters": {
+        "address": "0x0300",
+        "length": 64,
+        "format": "hex"
+      },
+      "rationale": "Read ROM data to read oam table to inspect sprite properties",
+      "expected_output": "Hex bytes showing ROM content at specified address"
+    }
+  ],
+  "success_criteria": "Successfully read OAM property bytes",
+  "difficulty": "simple"
+}

@@ -1,0 +1,24 @@
+{
+  "id": "synthetic_yaze_read_004",
+  "source": "synthetic",
+  "context": {
+    "scenario": "Sprite behavior analysis",
+    "rom_path": "~/roms/zelda3.sfc",
+    "tool_category": "rom_analysis"
+  },
+  "instruction": "Read Stalfos sprite definition from ROM",
+  "tool_calls": [
+    {
+      "tool": "yaze_debugger.read_memory",
+      "parameters": {
+        "address": "0x008000",
+        "length": 32,
+        "format": "hex"
+      },
+      "rationale": "Read ROM data to read stalfos sprite definition from rom",
+      "expected_output": "Hex bytes showing ROM content at specified address"
+    }
+  ],
+  "success_criteria": "Sprite data structure retrieved",
+  "difficulty": "simple"
+}

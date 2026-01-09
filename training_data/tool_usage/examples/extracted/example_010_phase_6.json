@@ -1,0 +1,25 @@
+{
+  "id": "example_010_phase_6",
+  "source": "example_010",
+  "context": {
+    "task_description": "Implement AI state machine for Puffstool enemy sprite and optimize draw code for performance",
+    "bug_symptoms": [],
+    "category": "refactor_optimization",
+    "difficulty": "hard",
+    "files": []
+  },
+  "instruction": "test_in_emulator",
+  "tool_calls": [
+    {
+      "tool": "mesen2.run",
+      "parameters": {
+        "speed": 1.0,
+        "frames": 300
+      },
+      "rationale": "Test changes in emulator for test_in_emulator",
+      "expected_output": "Emulation running"
+    }
+  ],
+  "success_criteria": "Tool call completes successfully",
+  "difficulty": "simple"
+}

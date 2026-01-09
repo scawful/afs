@@ -1,0 +1,32 @@
+{
+  "id": "example_048_phase_4",
+  "source": "example_048",
+  "context": {
+    "task_description": "Increase minecart corner tile direction change delay from 4 frames to 15 frames to create smoother corner transitions and prevent premature direction changes during tile-based movement",
+    "bug_symptoms": [],
+    "category": "timing_optimization",
+    "difficulty": "medium",
+    "files": []
+  },
+  "instruction": "validation_and_gameplay_testing",
+  "tool_calls": [
+    {
+      "tool": "mesen2.run",
+      "parameters": {
+        "speed": 1.0,
+        "frames": 300
+      },
+      "rationale": "Test changes in emulator for validation_and_gameplay_testing",
+      "expected_output": "Emulation running"
+    }
+  ],
+  "success_criteria": {
+    "smoothness_improvement": "Corner transitions 3.75x smoother (4 \u2192 15 frames)",
+    "visual_quality": "Animation now has time to blend directional changes",
+    "gameplay_feel": "Significantly more polished and satisfying",
+    "timing_accuracy": "15-frame delay consistent across all corner types",
+    "stability": "No regressions detected",
+    "player_perception": "Corners feel natural instead of broken"
+  },
+  "difficulty": "simple"
+}

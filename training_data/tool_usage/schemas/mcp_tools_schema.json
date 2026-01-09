@@ -1,0 +1,651 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "MCP Tools for SNES/Zelda Development",
+  "description": "Complete schema for yaze-debugger, mesen2, and z3ed tool usage",
+  "version": "1.0.0",
+  "tools": {
+    "yaze_debugger": {
+      "description": "YAZE ROM debugger integration via gRPC for reading/writing ROM data and debugging",
+      "tools": {
+        "read_memory": {
+          "description": "Read memory from ROM at specified address",
+          "parameters": {
+            "address": {
+              "type": "string",
+              "format": "0xHHHHHH",
+              "description": "ROM address in hexadecimal (PC format: 0x000000-0x3FFFFF)",
+              "examples": ["0x008000", "0x1C8000", "0x00FFC0"]
+            },
+            "length": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536,
+              "description": "Number of bytes to read",
+              "examples": [1, 16, 64, 256, 1024]
+            },
+            "format": {
+              "type": "string",
+              "enum": ["hex", "ascii", "decimal", "binary"],
+              "default": "hex",
+              "description": "Output format for the data"
+            }
+          },
+          "required": ["address", "length"],
+          "returns": {
+            "type": "string",
+            "description": "Memory contents in specified format"
+          },
+          "use_cases": [
+            "Read ROM header for version detection",
+            "Read sprite graphics data",
+            "Read level/dungeon data",
+            "Read text/dialogue strings",
+            "Verify patch application"
+          ],
+          "common_errors": [
+            {"error": "Address out of range", "fix": "Ensure address is within ROM bounds (0x000000-0x3FFFFF)"},
+            {"error": "Invalid address format", "fix": "Use 0xHHHHHH format with 0x prefix"}
+          ]
+        },
+        "write_memory": {
+          "description": "Write data to ROM at specified address",
+          "parameters": {
+            "address": {
+              "type": "string",
+              "format": "0xHHHHHH",
+              "description": "ROM address in hexadecimal (PC format)",
+              "examples": ["0x008000", "0x1C8000"]
+            },
+            "data": {
+              "type": "string",
+              "description": "Hex bytes to write (space-separated)",
+              "examples": ["20", "EA EA EA", "A9 00 8D 00 03"]
+            }
+          },
+          "required": ["address", "data"],
+          "returns": {
+            "type": "boolean",
+            "description": "True if write successful"
+          },
+          "use_cases": [
+            "Apply code patches",
+            "Fix bugs in ROM",
+            "Modify sprite properties",
+            "Change level data",
+            "Update text strings"
+          ],
+          "common_errors": [
+            {"error": "Write protected ROM", "fix": "Ensure ROM is not read-only"},
+            {"error": "Data format invalid", "fix": "Use space-separated hex bytes (e.g., 'A9 00 8D')"}
+          ]
+        },
+        "set_breakpoint": {
+          "description": "Set execution breakpoint for debugging",
+          "parameters": {
+            "address": {
+              "type": "string",
+              "format": "0xHHHHHH",
+              "description": "ROM address to break at (SNES bank format: 0x808000-0xFFFFFF)",
+              "examples": ["0x808000", "0x80C000", "0x81FFFF"]
+            },
+            "type": {
+              "type": "string",
+              "enum": ["execute", "read", "write"],
+              "default": "execute",
+              "description": "Type of breakpoint"
+            },
+            "condition": {
+              "type": "string",
+              "description": "Optional conditional expression (e.g., 'A == 0x05')",
+              "examples": ["A == 0x05", "X != 0x00", "Y < 0x10"]
+            }
+          },
+          "required": ["address"],
+          "returns": {
+            "type": "string",
+            "description": "Breakpoint ID for later management"
+          },
+          "use_cases": [
+            "Debug code execution flow",
+            "Find where data is modified",
+            "Track register values at specific points",
+            "Investigate crashes",
+            "Analyze subroutine behavior"
+          ]
+        },
+        "step": {
+          "description": "Execute single instruction and pause",
+          "parameters": {
+            "count": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 1,
+              "description": "Number of instructions to step"
+            }
+          },
+          "returns": {
+            "type": "object",
+            "properties": {
+              "pc": {"type": "string", "description": "Program counter after step"},
+              "instruction": {"type": "string", "description": "Instruction executed"}
+            }
+          },
+          "use_cases": [
+            "Step through subroutine",
+            "Debug complex logic",
+            "Verify instruction sequence",
+            "Investigate timing issues"
+          ]
+        },
+        "continue": {
+          "description": "Resume execution from paused state",
+          "parameters": {
+            "until": {
+              "type": "string",
+              "format": "0xHHHHHH",
+              "description": "Optional address to run until (temporary breakpoint)"
+            }
+          },
+          "returns": {
+            "type": "string",
+            "description": "Execution status (running/paused/breakpoint)"
+          }
+        },
+        "get_registers": {
+          "description": "Read current CPU register values",
+          "parameters": {},
+          "returns": {
+            "type": "object",
+            "properties": {
+              "A": {"type": "string", "description": "Accumulator (8/16-bit)"},
+              "X": {"type": "string", "description": "X index register"},
+              "Y": {"type": "string", "description": "Y index register"},
+              "PC": {"type": "string", "description": "Program counter"},
+              "SP": {"type": "string", "description": "Stack pointer"},
+              "DB": {"type": "string", "description": "Data bank"},
+              "P": {"type": "string", "description": "Processor status flags"}
+            }
+          },
+          "use_cases": [
+            "Check register state at breakpoint",
+            "Verify function inputs/outputs",
+            "Debug arithmetic operations",
+            "Investigate crashes (stack pointer)"
+          ]
+        },
+        "assemble": {
+          "description": "Assemble 65816 assembly code to bytes",
+          "parameters": {
+            "code": {
+              "type": "string",
+              "description": "65816 assembly code (one or more instructions)",
+              "examples": [
+                "LDA #$00",
+                "LDA #$00\nSTA $7E0200",
+                "JSR $8080\nRTS"
+              ]
+            },
+            "origin": {
+              "type": "string",
+              "format": "0xHHHHHH",
+              "description": "Base address for assembly (affects relative addressing)",
+              "default": "0x008000",
+              "examples": ["0x008000", "0x80C000"]
+            }
+          },
+          "required": ["code"],
+          "returns": {
+            "type": "object",
+            "properties": {
+              "bytes": {"type": "string", "description": "Assembled hex bytes"},
+              "size": {"type": "integer", "description": "Size in bytes"}
+            }
+          },
+          "use_cases": [
+            "Generate code patches",
+            "Calculate instruction sizes",
+            "Verify assembly syntax",
+            "Create test payloads"
+          ]
+        }
+      }
+    },
+    "mesen2": {
+      "description": "Mesen2 SNES emulator integration for runtime debugging and testing",
+      "tools": {
+        "load_rom": {
+          "description": "Load a ROM file into the emulator",
+          "parameters": {
+            "path": {
+              "type": "string",
+              "description": "Absolute path to ROM file (.sfc, .smc)",
+              "examples": [
+                "~/roms/zelda3.sfc",
+                "/Users/scawful/src/hobby/oracle-of-secrets/build/oos.sfc"
+              ]
+            },
+            "auto_save_state": {
+              "type": "boolean",
+              "default": true,
+              "description": "Automatically save state when loading"
+            }
+          },
+          "required": ["path"],
+          "returns": {
+            "type": "boolean",
+            "description": "True if ROM loaded successfully"
+          },
+          "use_cases": [
+            "Load ROM for testing",
+            "Switch between ROM versions",
+            "Load patched ROM",
+            "Start debugging session"
+          ]
+        },
+        "run": {
+          "description": "Start or resume emulation",
+          "parameters": {
+            "speed": {
+              "type": "number",
+              "minimum": 0.1,
+              "maximum": 10.0,
+              "default": 1.0,
+              "description": "Emulation speed multiplier (1.0 = normal speed)"
+            },
+            "frames": {
+              "type": "integer",
+              "description": "Optional frame count to run (for automated testing)",
+              "examples": [60, 300, 1800]
+            }
+          },
+          "returns": {
+            "type": "string",
+            "description": "Emulation status"
+          },
+          "use_cases": [
+            "Test code changes in-game",
+            "Run to specific frame for testing",
+            "Speed up testing with fast-forward",
+            "Automated regression testing"
+          ]
+        },
+        "pause": {
+          "description": "Pause emulation",
+          "parameters": {},
+          "returns": {
+            "type": "object",
+            "properties": {
+              "frame_count": {"type": "integer", "description": "Current frame number"},
+              "pc": {"type": "string", "description": "Current program counter"}
+            }
+          },
+          "use_cases": [
+            "Pause to inspect state",
+            "Stop before crash",
+            "Prepare for memory read",
+            "Take screenshot at specific moment"
+          ]
+        },
+        "step": {
+          "description": "Execute one frame or one instruction",
+          "parameters": {
+            "type": {
+              "type": "string",
+              "enum": ["frame", "instruction", "scanline"],
+              "default": "instruction",
+              "description": "Granularity of stepping"
+            },
+            "count": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 1,
+              "description": "Number of steps to execute"
+            }
+          },
+          "returns": {
+            "type": "object",
+            "properties": {
+              "pc": {"type": "string"},
+              "frame_count": {"type": "integer"}
+            }
+          },
+          "use_cases": [
+            "Step through code at breakpoint",
+            "Debug frame-by-frame animations",
+            "Analyze timing-sensitive code",
+            "Find exact crash location"
+          ]
+        },
+        "read_memory": {
+          "description": "Read memory from running emulator (SNES address space)",
+          "parameters": {
+            "address": {
+              "type": "string",
+              "format": "0xHHHH or 0xHHHHHH",
+              "description": "SNES memory address ($0000-$FFFF for WRAM/SRAM, $808000+ for ROM)",
+              "examples": ["0x0000", "0x7E0200", "0x808000"]
+            },
+            "length": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536,
+              "description": "Number of bytes to read"
+            },
+            "memory_type": {
+              "type": "string",
+              "enum": ["cpu", "ppu", "apu", "work_ram", "save_ram"],
+              "default": "cpu",
+              "description": "Memory region to read from"
+            }
+          },
+          "required": ["address", "length"],
+          "returns": {
+            "type": "string",
+            "description": "Memory contents as hex bytes"
+          },
+          "use_cases": [
+            "Read OAM table for sprite debugging ($0300-$033F)",
+            "Check variable values in WRAM",
+            "Read PPU registers during execution ($2100-$213F)",
+            "Verify DMA transfer results",
+            "Investigate memory corruption"
+          ]
+        },
+        "write_memory": {
+          "description": "Write memory in running emulator (for testing/debugging)",
+          "parameters": {
+            "address": {
+              "type": "string",
+              "format": "0xHHHH",
+              "description": "SNES memory address",
+              "examples": ["0x7E0200", "0x0300"]
+            },
+            "data": {
+              "type": "string",
+              "description": "Hex bytes to write (space-separated)",
+              "examples": ["00", "FF", "A9 00 8D"]
+            },
+            "memory_type": {
+              "type": "string",
+              "enum": ["cpu", "work_ram", "save_ram"],
+              "default": "work_ram"
+            }
+          },
+          "required": ["address", "data"],
+          "returns": {
+            "type": "boolean",
+            "description": "True if write successful"
+          },
+          "use_cases": [
+            "Set flags for testing",
+            "Simulate game states",
+            "Inject values for debugging",
+            "Test edge cases",
+            "Trigger specific code paths"
+          ]
+        },
+        "screenshot": {
+          "description": "Capture screenshot of current emulator frame",
+          "parameters": {
+            "path": {
+              "type": "string",
+              "description": "Optional output path (default: temp file)",
+              "examples": ["~/screenshots/test1.png", "/tmp/mesen_screenshot.png"]
+            },
+            "format": {
+              "type": "string",
+              "enum": ["png", "bmp"],
+              "default": "png"
+            }
+          },
+          "returns": {
+            "type": "string",
+            "description": "Path to saved screenshot"
+          },
+          "use_cases": [
+            "Visual regression testing",
+            "Document bugs",
+            "Verify graphics changes",
+            "Create test references",
+            "Debug rendering issues"
+          ]
+        }
+      }
+    },
+    "z3ed_cli": {
+      "description": "Z3ED command-line tool for scripted ROM operations (part of yaze)",
+      "tools": {
+        "inspect": {
+          "description": "Inspect ROM structure and metadata",
+          "parameters": {
+            "rom_path": {
+              "type": "string",
+              "description": "Path to ROM file"
+            },
+            "what": {
+              "type": "string",
+              "enum": ["header", "overworld", "dungeon", "sprites", "palettes", "text"],
+              "description": "What to inspect"
+            },
+            "id": {
+              "type": "integer",
+              "description": "Optional ID for specific item (e.g., overworld map 0, dungeon 0)",
+              "examples": [0, 1, 40, 160]
+            }
+          },
+          "required": ["rom_path", "what"],
+          "returns": {
+            "type": "object",
+            "description": "Structured data about requested ROM component"
+          },
+          "use_cases": [
+            "Read ROM header information",
+            "List all overworld maps",
+            "Get dungeon room data",
+            "Export sprite graphics",
+            "Read text strings"
+          ]
+        },
+        "modify": {
+          "description": "Modify ROM data via CLI",
+          "parameters": {
+            "rom_path": {
+              "type": "string",
+              "description": "Path to ROM file"
+            },
+            "component": {
+              "type": "string",
+              "enum": ["overworld", "dungeon", "sprite", "palette", "text"],
+              "description": "ROM component to modify"
+            },
+            "id": {
+              "type": "integer",
+              "description": "ID of specific item to modify"
+            },
+            "changes": {
+              "type": "object",
+              "description": "Changes to apply (component-specific schema)",
+              "examples": [
+                {"tileset": 5, "palette": 2},
+                {"message_text": "New dialogue here"},
+                {"graphics_sheet": 10}
+              ]
+            }
+          },
+          "required": ["rom_path", "component", "id", "changes"],
+          "returns": {
+            "type": "boolean",
+            "description": "True if modification successful"
+          },
+          "use_cases": [
+            "Change overworld tile graphics",
+            "Modify dungeon room layout",
+            "Update sprite properties",
+            "Change color palettes",
+            "Edit dialogue text"
+          ]
+        },
+        "extract": {
+          "description": "Extract data from ROM to files",
+          "parameters": {
+            "rom_path": {
+              "type": "string",
+              "description": "Path to ROM file"
+            },
+            "what": {
+              "type": "string",
+              "enum": ["graphics", "palettes", "maps", "sprites", "music", "text"],
+              "description": "Data type to extract"
+            },
+            "output_dir": {
+              "type": "string",
+              "description": "Directory to save extracted files"
+            },
+            "format": {
+              "type": "string",
+              "enum": ["json", "bin", "png", "chr", "txt"],
+              "default": "json",
+              "description": "Output format"
+            }
+          },
+          "required": ["rom_path", "what", "output_dir"],
+          "returns": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "List of extracted file paths"
+          },
+          "use_cases": [
+            "Export graphics for editing",
+            "Extract map data for analysis",
+            "Dump text for translation",
+            "Export music for remixing",
+            "Create ROM documentation"
+          ]
+        },
+        "import": {
+          "description": "Import external data into ROM",
+          "parameters": {
+            "rom_path": {
+              "type": "string",
+              "description": "Path to ROM file"
+            },
+            "data_type": {
+              "type": "string",
+              "enum": ["graphics", "palettes", "maps", "text"],
+              "description": "Type of data to import"
+            },
+            "input_path": {
+              "type": "string",
+              "description": "Path to data file to import"
+            },
+            "target_id": {
+              "type": "integer",
+              "description": "Optional target ID to replace (e.g., graphics sheet 10)"
+            }
+          },
+          "required": ["rom_path", "data_type", "input_path"],
+          "returns": {
+            "type": "boolean",
+            "description": "True if import successful"
+          },
+          "use_cases": [
+            "Import custom graphics",
+            "Update palettes from file",
+            "Import modified maps",
+            "Replace text strings",
+            "Apply batch changes"
+          ]
+        },
+        "validate": {
+          "description": "Validate ROM structure and data integrity",
+          "parameters": {
+            "rom_path": {
+              "type": "string",
+              "description": "Path to ROM file"
+            },
+            "checks": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["header", "checksum", "structure", "graphics", "all"]
+              },
+              "default": ["all"],
+              "description": "Validation checks to perform"
+            }
+          },
+          "required": ["rom_path"],
+          "returns": {
+            "type": "object",
+            "properties": {
+              "valid": {"type": "boolean"},
+              "errors": {"type": "array", "items": {"type": "string"}},
+              "warnings": {"type": "array", "items": {"type": "string"}}
+            }
+          },
+          "use_cases": [
+            "Verify ROM integrity after patching",
+            "Check for corruption",
+            "Validate custom modifications",
+            "Pre-release QA checks"
+          ]
+        }
+      }
+    }
+  },
+  "common_patterns": {
+    "debugging_workflow": {
+      "description": "Typical debugging workflow using yaze + mesen2",
+      "steps": [
+        "1. Read ROM with yaze_debugger.read_memory to understand structure",
+        "2. Set breakpoint with yaze_debugger.set_breakpoint at suspected code location",
+        "3. Load ROM in mesen2 with mesen2.load_rom",
+        "4. Run emulation with mesen2.run until breakpoint hit",
+        "5. Read runtime state with mesen2.read_memory (OAM, WRAM, etc)",
+        "6. Step through code with mesen2.step to find issue",
+        "7. Fix code with yaze_debugger.write_memory",
+        "8. Test fix with mesen2.run and verify with screenshot"
+      ]
+    },
+    "graphics_editing_workflow": {
+      "description": "Editing graphics using z3ed",
+      "steps": [
+        "1. Extract graphics with z3ed_cli.extract --what graphics",
+        "2. Edit PNG files externally",
+        "3. Import back with z3ed_cli.import --data_type graphics",
+        "4. Validate with z3ed_cli.validate",
+        "5. Test in mesen2 with visual screenshot verification"
+      ]
+    },
+    "testing_workflow": {
+      "description": "Automated testing with mesen2",
+      "steps": [
+        "1. Load ROM with mesen2.load_rom",
+        "2. Write test data to memory with mesen2.write_memory (set flags, states)",
+        "3. Run for N frames with mesen2.run --frames N",
+        "4. Read result state with mesen2.read_memory",
+        "5. Take screenshot with mesen2.screenshot for visual verification",
+        "6. Assert expected values (automated test)"
+      ]
+    }
+  },
+  "error_handling": {
+    "address_format": {
+      "error": "Invalid address format",
+      "solution": "Always use 0xHHHHHH format with 0x prefix. ROM uses PC format ($000000-$3FFFFF), emulator uses SNES format ($0000-$FFFF for WRAM, $808000+ for ROM)."
+    },
+    "out_of_bounds": {
+      "error": "Address out of bounds",
+      "solution": "Check address is within valid range. ROM: 0x000000-0x3FFFFF (4MB max). WRAM: $0000-$1FFF. SRAM: $6000-$7FFF."
+    },
+    "emulator_not_running": {
+      "error": "Emulator not running",
+      "solution": "Call mesen2.load_rom first, then mesen2.run before trying to read runtime memory."
+    },
+    "invalid_hex_data": {
+      "error": "Invalid hex data format",
+      "solution": "Use space-separated hex bytes (e.g., 'A9 00 8D 00 03'), not '0x' prefixes in data string."
+    }
+  }
+}

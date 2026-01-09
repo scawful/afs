@@ -1,0 +1,25 @@
+{
+  "id": "example_003_phase_2",
+  "source": "example_003",
+  "context": {
+    "task_description": "Add fist damage capability when Link has no sword equipped",
+    "bug_symptoms": [],
+    "category": "simple_feature",
+    "difficulty": "easy",
+    "files": []
+  },
+  "instruction": "generate_fist_damage_code",
+  "tool_calls": [
+    {
+      "tool": "yaze_debugger.assemble",
+      "parameters": {
+        "code": "LDA #$00\nSTA $0300",
+        "origin": "0x008000"
+      },
+      "rationale": "Assemble code for generate_fist_damage_code",
+      "expected_output": "Assembled bytes: A9 00 8D 00 03"
+    }
+  ],
+  "success_criteria": "Tool call completes successfully",
+  "difficulty": "simple"
+}

@@ -1,0 +1,25 @@
+{
+  "id": "example_011_phase_7",
+  "source": "example_011",
+  "context": {
+    "task_description": "Improve Goriya enemy collision detection and movement AI to fix direction change logic and boomerang attack timing",
+    "bug_symptoms": [],
+    "category": "refactor_optimization",
+    "difficulty": "medium",
+    "files": []
+  },
+  "instruction": "test_in_emulator",
+  "tool_calls": [
+    {
+      "tool": "mesen2.run",
+      "parameters": {
+        "speed": 1.0,
+        "frames": 300
+      },
+      "rationale": "Test changes in emulator for test_in_emulator",
+      "expected_output": "Emulation running"
+    }
+  ],
+  "success_criteria": "Tool call completes successfully",
+  "difficulty": "simple"
+}
