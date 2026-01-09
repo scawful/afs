@@ -13,6 +13,10 @@ the repo wrapper:
 
 The wrapper sets `AFS_ROOT` and `PYTHONPATH` automatically.
 
+Help:
+- `afs` (defaults + command tree)
+- `afs help <command>` or `afs <command> --help`
+
 ## Shell setup (bash/zsh)
 
 Add this to `~/.bashrc` or `~/.zshrc`:
@@ -26,12 +30,33 @@ This exports:
 - `AFS_CLI` (full path to the wrapper)
 - `PATH` updated to include `~/src/lab/afs/scripts`
 
+## Venv setup (recommended for agents)
+
+Bootstrap a repo-local venv:
+
+```bash
+~/src/lab/afs/scripts/afs-venv
+```
+
+Optional extras (comma-separated):
+
+```bash
+AFS_VENV_EXTRAS=test ~/src/lab/afs/scripts/afs-venv
+```
+
+For Gemini agents, point to the wrapper and venv so subprocess calls are stable:
+
+```bash
+export AFS_CLI=~/src/lab/afs/scripts/afs
+export AFS_VENV=~/src/lab/afs/.venv
+```
+
 ## Agent runtime (non-interactive)
 
 Use one of:
 - `AFS_CLI=~/src/lab/afs/scripts/afs`
 - `~/src/lab/afs/scripts/afs <command>`
-- `PYTHONPATH=~/src/lab/afs/src python -m afs <command>`
+- `PYTHONPATH=~/src/lab/afs/src python3 -m afs <command>`
 
 Warm context/cache:
 - `~/src/lab/afs/scripts/afs-warm`

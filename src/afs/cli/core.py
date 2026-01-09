@@ -67,13 +67,55 @@ def init_command(args: argparse.Namespace) -> int:
 def plugins_command(args: argparse.Namespace) -> int:
     """List or load plugins."""
     from ..config import load_config_model
-    from ..plugins import discover_plugins, load_plugins
+    from ..plugins import discover_plugins, load_plugins, resolve_plugins_config
 
     config_path = Path(args.config) if args.config else None
     config = load_config_model(config_path=config_path, merge_user=True)
-    plugin_names = discover_plugins(config)
+    plugins_config = resolve_plugins_config(config)
+    plugin_names = discover_plugins(plugins_config)
+    loaded = {}
     if args.load:
-        loaded = load_plugins(plugin_names, config.plugins.plugin_dirs)
+        loaded = load_plugins(plugin_names, plugins_config.plugin_dirs)
+
+    if args.json:
+        payload = {
+            "plugin_dirs": [str(path) for path in plugins_config.plugin_dirs],
+            "enabled_plugins": list(plugins_config.enabled_plugins),
+            "auto_discover": plugins_config.auto_discover,
+            "auto_discover_prefixes": list(plugins_config.auto_discover_prefixes),
+            "plugins": [
+                {
+                    "name": name,
+                    "status": "ok" if name in loaded else "failed" if args.load else "unknown",
+                }
+                for name in plugin_names
+            ],
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if args.details:
+        plugin_dirs = (
+            ", ".join(str(path) for path in plugins_config.plugin_dirs)
+            if plugins_config.plugin_dirs
+            else "(none)"
+        )
+        enabled = (
+            ", ".join(plugins_config.enabled_plugins)
+            if plugins_config.enabled_plugins
+            else "(none)"
+        )
+        prefixes = (
+            ", ".join(plugins_config.auto_discover_prefixes)
+            if plugins_config.auto_discover_prefixes
+            else "(none)"
+        )
+        print(f"plugin_dirs: {plugin_dirs}")
+        print(f"enabled_plugins: {enabled}")
+        print(f"auto_discover: {str(plugins_config.auto_discover).lower()}")
+        print(f"auto_discover_prefixes: {prefixes}")
+
+    if args.load:
         for name in plugin_names:
             status = "ok" if name in loaded else "failed"
             print(f"{name}\t{status}")
@@ -317,8 +359,8 @@ def studio_alias_command(args: argparse.Namespace) -> int:
     print(f"export AFS_ROOT=\"{afs_root}\"")
     if studio_root.resolve() != (afs_root / "apps" / "studio").resolve():
         print(f"export AFS_STUDIO_ROOT=\"{studio_root}\"")
-    print("alias afs-studio='PYTHONPATH=\"$AFS_ROOT/src\" python -m afs studio run --build'")
-    print("alias afs-studio-build='PYTHONPATH=\"$AFS_ROOT/src\" python -m afs studio build'")
+    print("alias afs-studio=\"$AFS_ROOT/scripts/afs-studio\"")
+    print("alias afs-studio-build=\"$AFS_ROOT/scripts/afs-studio-build\"")
     return 0
 
 
@@ -374,6 +416,10 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     plugins_parser = subparsers.add_parser("plugins", help="List or load plugins.")
     plugins_parser.add_argument("--config", help="Config path for plugin discovery.")
     plugins_parser.add_argument("--load", action="store_true", help="Attempt to import plugins.")
+    plugins_parser.add_argument(
+        "--details", action="store_true", help="Show resolved plugin configuration."
+    )
+    plugins_parser.add_argument("--json", action="store_true", help="Output JSON.")
     plugins_parser.set_defaults(func=plugins_command)
 
     # status
@@ -440,7 +486,10 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     orch_plan.set_defaults(func=orchestrator_plan_command)
 
     # studio
-    studio_parser = subparsers.add_parser("studio", help="AFS Studio GUI.")
+    studio_parser = subparsers.add_parser(
+        "studio",
+        help="AFS Studio tooling (build/install/path/alias).",
+    )
     studio_sub = studio_parser.add_subparsers(dest="studio_command")
 
     studio_build_p = studio_sub.add_parser("build", help="Build AFS Studio.")
@@ -448,14 +497,6 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     studio_build_p.add_argument("--build-type", help="CMake build type.")
     studio_build_p.add_argument("--config", help="Build configuration (multi-config).")
     studio_build_p.set_defaults(func=studio_build_command)
-
-    studio_run_p = studio_sub.add_parser("run", help="Run AFS Studio.")
-    studio_run_p.add_argument("--build-dir", help="Custom build directory.")
-    studio_run_p.add_argument("--config", help="Build configuration.")
-    studio_run_p.add_argument("--build", action="store_true", help="Build before run.")
-    studio_run_p.add_argument("--build-type", help="CMake build type.")
-    studio_run_p.add_argument("args", nargs="*", help="Arguments to pass.")
-    studio_run_p.set_defaults(func=studio_run_command)
 
     studio_install_p = studio_sub.add_parser("install", help="Install AFS Studio.")
     studio_install_p.add_argument("--build-dir", help="Custom build directory.")

@@ -78,6 +78,7 @@ loaded = load_plugins(plugin_names, plugin_dirs=[Path("~/.afs/plugins")])
 - Searches configured `plugin_dirs` plus system path
 - `AFS_PLUGIN_DIRS` (colon-separated on macOS/Linux) prepends extra plugin folders
 - `AFS_ENABLED_PLUGINS` (comma/space separated) appends explicit plugin names
+- Defaults to `~/.config/afs/plugins` and `~/.afs/plugins` if present
 - Plugins can register custom mount types, validators, or generators
 
 **Plugin Hooks (new surfaces):**

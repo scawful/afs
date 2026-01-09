@@ -14,6 +14,10 @@ AFS_ROOT="${AFS_ROOT:-$(cd "${AFS_SHELL_INIT_DIR}/.." && pwd)}"
 export AFS_ROOT
 export AFS_CLI="${AFS_ROOT}/scripts/afs"
 
+if [ -z "${AFS_VENV:-}" ] && [ -d "${AFS_ROOT}/.venv" ]; then
+  export AFS_VENV="${AFS_ROOT}/.venv"
+fi
+
 case ":${PATH}:" in
   *":${AFS_ROOT}/scripts:"*) ;;
   *) export PATH="${AFS_ROOT}/scripts:${PATH}" ;;

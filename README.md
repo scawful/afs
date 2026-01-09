@@ -17,6 +17,7 @@ Docs:
 - `docs/CLI_PLAN.md`
 - `docs/PORTING_MAP.md`
 - `docs/WORKSPACE_INTEGRATION.md`
+- `docs/PLUGINS.md`
 Training/model ops docs live in `afs-scawful/docs/afs/`.
 
 Quickstart:
@@ -44,6 +45,11 @@ pip install -e .
 afs status
 ```
 
+Or use the helper script:
+```bash
+./scripts/afs-venv
+```
+
 Shell + agent access:
 - Source `scripts/afs-shell-init.sh` in bash/zsh.
 - Use `scripts/afs` in non-interactive agents.
@@ -54,6 +60,7 @@ Plugins (macOS/Linux friendly):
 - Set `AFS_PLUGIN_DIRS` (colon-separated on macOS/Linux) to add local plugin folders.
 - Set `AFS_ENABLED_PLUGINS` (comma or space separated) to load specific plugins.
 - Plugins can be a simple package or single `.py` module; no compilation required.
+- Defaults to `~/.config/afs/plugins` and `~/.afs/plugins` if present.
 
 Agent-friendly JSON output:
 ```bash

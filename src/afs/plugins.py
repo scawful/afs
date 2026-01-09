@@ -65,6 +65,13 @@ def _env_enabled_plugins() -> list[str]:
     return entries
 
 
+def _default_plugin_dirs() -> list[Path]:
+    return [
+        Path("~/.config/afs/plugins").expanduser().resolve(),
+        Path("~/.afs/plugins").expanduser().resolve(),
+    ]
+
+
 def _iter_module_names(paths: list[Path] | None) -> set[str]:
     module_names: set[str] = set()
     if paths:
@@ -137,7 +144,17 @@ def _normalize_plugins_config(config: AFSConfig | PluginsConfig | dict | None) -
         plugins_config.enabled_plugins = _merge_unique(
             env_enabled, plugins_config.enabled_plugins
         )
+    default_dirs = _default_plugin_dirs()
+    if default_dirs:
+        plugins_config.plugin_dirs = _merge_unique_paths(
+            plugins_config.plugin_dirs, default_dirs
+        )
     return plugins_config
+
+
+def resolve_plugins_config(config: AFSConfig | PluginsConfig | dict | None = None) -> PluginsConfig:
+    """Resolve plugin configuration with env and default paths."""
+    return _normalize_plugins_config(config)
 
 
 def discover_plugins(
