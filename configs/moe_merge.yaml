@@ -1,0 +1,89 @@
+# MergeKit Mixture of Experts Configuration
+# Creates a sparse MoE from Oracle of Secrets expert models
+#
+# Usage (on vast.ai or GPU machine):
+#   mergekit-moe config.yaml ./output --copy-tokenizer --trust-remote-code
+#
+# Reference: https://github.com/arcee-ai/mergekit
+
+base_model: unsloth/Qwen2.5-7B-Instruct
+
+gate_mode: cheap_embed  # Use embedding similarity for routing (no separate router training needed)
+# Alternative: hidden (use hidden state, more accurate but needs training)
+
+dtype: bfloat16
+
+experts:
+  # Nayru - Code generation expert
+  - source_model: ./adapters/nayru-v8-lora
+    positive_prompts:
+      - "Write 65816 assembly code"
+      - "Implement a sprite routine"
+      - "Create new code for"
+      - "Add a new feature"
+    negative_prompts:
+      - "Explain how this works"
+      - "Debug this crash"
+
+  # Din - Optimization expert
+  - source_model: ./adapters/din-v4-lora
+    positive_prompts:
+      - "Optimize this code"
+      - "Reduce cycles"
+      - "Make this faster"
+      - "Compress the size"
+    negative_prompts:
+      - "Write new code"
+      - "Explain the concept"
+
+  # Farore - Debugging expert
+  - source_model: ./adapters/farore-v5-lora
+    positive_prompts:
+      - "Debug this crash"
+      - "Why does this fail"
+      - "Trace the bug"
+      - "Fix this issue"
+    negative_prompts:
+      - "Write new code"
+      - "Optimize performance"
+
+  # Veran - Hardware expert
+  - source_model: ./adapters/veran-v4-lora
+    positive_prompts:
+      - "Explain PPU register"
+      - "Configure DMA"
+      - "HDMA setup"
+      - "SNES hardware"
+    negative_prompts:
+      - "Write game code"
+      - "Debug gameplay"
+
+  # Majora - Codebase knowledge expert
+  - source_model: ./adapters/majora-v2-lora
+    positive_prompts:
+      - "Where is the code for"
+      - "How does Oracle of Secrets"
+      - "Show me the implementation"
+      - "Find the pattern"
+    negative_prompts:
+      - "Write new code"
+      - "Generic SNES question"
+
+  # Hylia - Narrative expert
+  - source_model: ./adapters/hylia-v1-lora
+    positive_prompts:
+      - "Write dialogue"
+      - "Create a dream sequence"
+      - "Design a quest"
+      - "NPC conversation"
+    negative_prompts:
+      - "Write assembly code"
+      - "Debug technical issue"
+
+# Expert activation settings
+experts_per_token: 2  # Use top 2 experts per token
+normalize_expert_weights: true
+
+# Output format
+# After merge, convert with:
+#   python convert_hf_to_gguf.py ./output --outfile oracle-moe-7b.gguf --outtype bf16
