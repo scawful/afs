@@ -51,7 +51,7 @@ def sync_workspace_config(
 def resolve_config_output(config_path: Path | None) -> Path:
     if config_path:
         return config_path.expanduser().resolve()
-    return Path.home() / ".config" / "afs" / "afs.toml"
+    return Path.home() / ".config" / "afs" / "config.toml"
 
 
 def _merge_workspace_entries(

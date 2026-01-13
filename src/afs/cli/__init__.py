@@ -113,6 +113,39 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _get_subparser_action(
+    parser: argparse.ArgumentParser,
+) -> argparse._SubParsersAction | None:
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action
+    return None
+
+
+def _get_command_parser(
+    parser: argparse.ArgumentParser, command: str
+) -> argparse.ArgumentParser | None:
+    sub_action = _get_subparser_action(parser)
+    if not sub_action:
+        return None
+    return sub_action.choices.get(command)
+
+
+def _requires_subcommand(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> bool:
+    command = getattr(args, "command", None)
+    if not command:
+        return False
+    command_parser = _get_command_parser(parser, command)
+    if not command_parser:
+        return False
+    sub_action = _get_subparser_action(command_parser)
+    if not sub_action:
+        return False
+    return not getattr(args, sub_action.dest, None)
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     """Main CLI entry point."""
     parser = build_parser()
@@ -122,38 +155,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         render_default_help(parser)
         return 1
 
-    # Check for subcommands that require a subcommand
-    subcommand_checks = [
-        ("workspace", "workspace_command"),
-        ("context", "context_command"),
-        ("graph", "graph_command"),
-        ("services", "services_command"),
-        ("agents", "agents_command"),
-        ("orchestrator", "orchestrator_command"),
-        ("studio", "studio_command"),
-        ("generators", "generators_command"),
-        ("training", "training_command"),
-        ("discriminator", "discriminator_command"),
-        ("tokenizer", "tokenizer_command"),
-        ("encoder", "encoder_command"),
-        ("entity", "entity_command"),
-        ("scoring", "scoring_command"),
-        ("pipeline", "pipeline_command"),
-        ("evaluation", "evaluation_command"),
-        ("active-learning", "active_learning_command"),
-        ("generator", "generator_command"),
-        ("gateway", "gateway_command"),
-        ("vastai", "vastai_command"),
-        ("benchmark", "benchmark_command"),
-        ("distill", "distill_command"),
-        ("fs", "fs_command"),
-        ("embeddings", "embeddings_command"),
-    ]
-
-    for cmd, subcmd_attr in subcommand_checks:
-        if args.command == cmd and not getattr(args, subcmd_attr, None):
+    if _requires_subcommand(parser, args):
+        command_parser = _get_command_parser(parser, args.command)
+        if command_parser:
+            command_parser.print_help()
+        else:
             parser.print_help()
-            return 1
+        return 1
 
     exit_code = args.func(args)
     try:

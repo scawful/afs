@@ -374,7 +374,9 @@ def workspace_add_command(args: argparse.Namespace) -> int:
     )
 
     from ._utils import write_config
-    output = Path(args.config) if args.config else Path.home() / ".config" / "afs" / "afs.toml"
+    from ..workspace_sync import resolve_config_output
+
+    output = resolve_config_output(Path(args.config) if args.config else None)
     output.parent.mkdir(parents=True, exist_ok=True)
     write_config(output, config)
     print(f"added workspace: {workspace_path}")
@@ -417,7 +419,9 @@ def workspace_remove_command(args: argparse.Namespace) -> int:
     config.general.workspace_directories = new_workspaces
 
     from ._utils import write_config
-    output = Path(args.config) if args.config else Path.home() / ".config" / "afs" / "afs.toml"
+    from ..workspace_sync import resolve_config_output
+
+    output = resolve_config_output(Path(args.config) if args.config else None)
     output.parent.mkdir(parents=True, exist_ok=True)
     write_config(output, config)
     print(f"removed workspace: {workspace_path}")
