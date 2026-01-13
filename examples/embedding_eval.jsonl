@@ -1,0 +1,10 @@
+{"query":"history export command","expected_path":"docs/MEMORY_SYSTEM.md"}
+{"query":"embedding index CLI","expected_path":"src/afs/cli/embeddings.py"}
+{"query":"rebalance dataset command","expected_path":"src/afs/cli/training.py"}
+{"query":"codex history import","expected_path":"src/afs/training/codex_export.py"}
+{"query":"nomic embed text host","expected_path":"src/afs/embeddings.py"}
+{"query":"memory export training","expected_path":"src/afs/training/memory_export.py"}
+{"query":"training pipeline stages","expected_path":"src/afs/training/pipeline.py"}
+{"query":"model deployment to ollama","expected_path":"docs/MODELS.md"}
+{"query":"triforce moe model status","expected_path":"docs/model-training-status.md"}
+{"query":"gateway API reference","expected_path":"docs/GATEWAY_API.md"}
