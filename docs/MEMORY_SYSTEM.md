@@ -817,7 +817,10 @@ afs orchestrator plan "update documentation" --role researcher
 
 ## Appendix: Configuration Reference
 
-### afs.toml
+### config.toml (user) / afs.toml (local)
+
+Defaults live in `~/.config/afs/config.toml`. Local overrides can be placed in
+`afs.toml` at a repo root.
 
 ```toml
 [general]

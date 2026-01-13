@@ -45,7 +45,7 @@ The `.context/` directory structure for agent state:
 
 ### Configuration & Schema
 
-- `AFSConfig` - Main configuration loaded from `afs.toml`
+- `AFSConfig` - Configuration loaded from `~/.config/afs/config.toml` and local `afs.toml`
 - `DirectoryConfig` - Per-directory policy definitions
 - `PolicyType` - Access policies (read-only, agent-writable, etc.)
 
@@ -223,7 +223,7 @@ converter.convert_dataset(input_path, output_path)
 
 | Category | Path | Description |
 |----------|------|-------------|
-| Core config | `~/.config/afs/afs.toml` | Global AFS configuration |
+| Core config | `~/.config/afs/config.toml` | Global AFS configuration |
 | Project context | `.context/` | Per-project agent state |
 | Trained models | `models/` | Saved tokenizers and models |
 | Training data | `data/` | JSONL training datasets |
