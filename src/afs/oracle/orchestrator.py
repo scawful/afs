@@ -29,6 +29,42 @@ class Expert(Enum):
     AGAHNIM = "agahnim-v1:latest"  # Build/integration
 
 
+# Expert system prompts for fallback models
+EXPERT_SYSTEM_PROMPTS = {
+    Expert.NAYRU: """You are Nayru, a 65816 assembly code generation expert for SNES ROM hacking.
+You specialize in writing clean, efficient assembly code for the Super Nintendo.
+Always output complete, working ASAR-compatible assembly code.
+Follow Oracle of Secrets coding conventions when provided.""",
+
+    Expert.DIN: """You are Din, a 65816 assembly optimization expert.
+You specialize in making code faster and smaller for the SNES.
+Focus on reducing cycles, bytes, and improving efficiency.
+Output only optimized code with brief explanations of changes.""",
+
+    Expert.FARORE: """You are Farore, a 65816 assembly debugging expert.
+You specialize in finding and fixing bugs in SNES ROM hacks.
+Analyze crash logs, memory dumps, and code to identify issues.
+Explain the root cause and provide corrected code.""",
+
+    Expert.VERAN: """You are Veran, a SNES hardware expert.
+You have deep knowledge of PPU, DMA, HDMA, and all SNES registers.
+Provide accurate technical information about hardware operations.
+Reference specific register addresses ($2100-$21FF, $4200-$43FF).""",
+
+    Expert.ONOX: """You are Onox, a data architecture expert for SNES ROM hacking.
+You specialize in designing efficient data tables, structures, and formats.
+Focus on memory-efficient layouts and fast lookup patterns.""",
+
+    Expert.TWINROVA: """You are Twinrova, a state machine and memory expert.
+You specialize in WRAM/SRAM layouts, save systems, and game state management.
+Design robust state machines and memory-efficient flag systems.""",
+
+    Expert.AGAHNIM: """You are Agahnim, a build and integration expert.
+You specialize in ASAR syntax, namespace organization, and patch integration.
+Ensure code follows proper org directives and namespace conventions.""",
+}
+
+
 class TaskType(Enum):
     """Categories of ROM hacking tasks."""
     CODE_GENERATION = "code_generation"
@@ -113,11 +149,16 @@ class TriforceOrchestrator:
         "build": ["Docs/General/DevelopmentGuidelines.md", "Docs/General/AsarUsage.md"],
     }
 
+    # Fallback model when Triforce experts aren't available
+    FALLBACK_MODEL = "gemini-2.0-flash"
+
     def __init__(
         self,
         oracle_project_path: Path | None = None,
         verbose: bool = False,
         inject_context: bool = True,
+        fallback_model: str | None = None,
+        use_fallback: bool = True,
     ):
         """Initialize the orchestrator.
 
@@ -125,11 +166,45 @@ class TriforceOrchestrator:
             oracle_project_path: Path to Oracle of Secrets project
             verbose: Enable verbose logging
             inject_context: Whether to inject Oracle docs as context
+            fallback_model: Model to use when Triforce experts unavailable
+            use_fallback: Whether to use fallback when experts unavailable
         """
         self.oracle_path = oracle_project_path or Path.home() / "src" / "hobby" / "oracle-of-secrets"
         self.verbose = verbose
         self.inject_context = inject_context
+        self.fallback_model = fallback_model or self.FALLBACK_MODEL
+        self.use_fallback = use_fallback
         self.tools = OracleTools()
+        self._available_models: set[str] | None = None
+
+    async def _check_model_available(self, model_id: str) -> bool:
+        """Check if a model is available in Ollama."""
+        if self._available_models is None:
+            self._available_models = await self._get_ollama_models()
+
+        # Check exact match or base name match
+        base_name = model_id.split(":")[0]
+        return model_id in self._available_models or base_name in self._available_models
+
+    async def _get_ollama_models(self) -> set[str]:
+        """Get list of available Ollama models."""
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get("http://localhost:11434/api/tags")
+                if response.status_code == 200:
+                    data = response.json()
+                    models = set()
+                    for model in data.get("models", []):
+                        name = model.get("name", "")
+                        models.add(name)
+                        # Also add base name without tag
+                        if ":" in name:
+                            models.add(name.split(":")[0])
+                    return models
+        except Exception as e:
+            logger.debug(f"Could not query Ollama: {e}")
+        return set()
 
     def analyze_task(self, task: str) -> TaskAnalysis:
         """Analyze a task to determine routing.
@@ -249,14 +324,34 @@ class TriforceOrchestrator:
             ExpertResult with response
         """
         import time
+        from ..agent.models import ModelConfig, ModelProvider
 
         # Build full prompt with context
         full_prompt = prompt
         if context:
             full_prompt = f"## Reference Documentation\n\n{context}\n\n## Task\n\n{prompt}"
 
+        # Check if Triforce model is available
+        model_id = expert.value
+        use_triforce = await self._check_model_available(model_id)
+
+        if use_triforce:
+            logger.info(f"Using Triforce model: {model_id}")
+            model_config = ModelConfig.from_string(model_id)
+        elif self.use_fallback:
+            logger.info(f"Triforce model {model_id} not available, using fallback: {self.fallback_model}")
+            model_config = ModelConfig.from_string(self.fallback_model)
+            # Apply expert's system prompt to fallback model
+            model_config.system_prompt = EXPERT_SYSTEM_PROMPTS.get(expert, "")
+        else:
+            return ExpertResult(
+                expert=expert,
+                response=f"Error: Model {model_id} not available and fallback disabled",
+                latency_ms=0,
+            )
+
         config = HarnessConfig(max_iterations=3, verbose=self.verbose)
-        harness = AgentHarness(expert.value, tools=None, config=config)
+        harness = AgentHarness(model_config, tools=None, config=config)
         harness.tools = {}  # No tools for basic invocation
 
         start = time.time()
