@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Iterable
 
 from ..generators.base import TrainingSample
+from .scoring import build_scoring_config, QualityScorer
+from .redaction import redact_sample
 
 
 @dataclass
@@ -17,12 +19,14 @@ class MemoryExportResult:
     total_entries: int = 0
     exported: int = 0
     skipped: int = 0
+    filtered: int = 0
     errors: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         return (
             f"total={self.total_entries} exported={self.exported} "
-            f"skipped={self.skipped} errors={len(self.errors)}"
+            f"skipped={self.skipped} filtered={self.filtered} "
+            f"errors={len(self.errors)}"
         )
 
 
@@ -32,10 +36,16 @@ def export_memory_to_dataset(
     *,
     default_domain: str = "memory",
     allow_raw: bool = False,
+    allow_raw_tags: Iterable[str] | None = None,
     default_instruction: str = "Recall the following memory entry.",
     include_tags: Iterable[str] | None = None,
     exclude_tags: Iterable[str] | None = None,
     limit: int | None = None,
+    require_quality: bool = True,
+    min_quality_score: float = 0.5,
+    score_profile: str = "generic",
+    enable_asar: bool = False,
+    redact: bool = True,
 ) -> MemoryExportResult:
     """Export memory entries into TrainingSample JSONL."""
     result = MemoryExportResult()
@@ -43,6 +53,7 @@ def export_memory_to_dataset(
 
     include_set = _normalize_tags(include_tags)
     exclude_set = _normalize_tags(exclude_tags)
+    allow_raw_set = _normalize_tags(allow_raw_tags)
 
     for entry, source_path in _iter_memory_entries(memory_root):
         result.total_entries += 1
@@ -51,6 +62,7 @@ def export_memory_to_dataset(
             source_path=source_path,
             default_domain=default_domain,
             allow_raw=allow_raw,
+            allow_raw_tags=allow_raw_set,
             default_instruction=default_instruction,
             include_tags=include_set,
             exclude_tags=exclude_set,
@@ -58,10 +70,30 @@ def export_memory_to_dataset(
         if sample is None:
             result.skipped += 1
             continue
+        if redact:
+            redact_sample(sample)
         samples.append(sample)
         result.exported += 1
         if limit and result.exported >= limit:
             break
+
+    if require_quality and samples:
+        scorer = QualityScorer(
+            config=build_scoring_config(
+                score_profile,
+                enable_asar=enable_asar,
+            )
+        )
+        scored = scorer.score_batch(samples, update_samples=True)
+        filtered_samples: list[TrainingSample] = []
+        for sample, score in zip(samples, scored):
+            if score.overall >= min_quality_score:
+                filtered_samples.append(sample)
+            else:
+                result.filtered += 1
+        samples = filtered_samples
+
+    result.exported = len(samples)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as handle:
@@ -137,6 +169,7 @@ def _entry_to_sample(
     source_path: Path,
     default_domain: str,
     allow_raw: bool,
+    allow_raw_tags: set[str],
     default_instruction: str,
     include_tags: set[str],
     exclude_tags: set[str],
@@ -158,6 +191,8 @@ def _entry_to_sample(
     if output is None and allow_raw:
         output = entry.get("content") or entry.get("text")
         if output:
+            if allow_raw_tags and not (allow_raw_tags & tags):
+                return None
             instruction = instruction or default_instruction
 
     if not instruction or not output:

@@ -30,6 +30,11 @@ from .scribe_draft import (
     AGENT_NAME as SCRIBE_DRAFT_NAME,
     main as scribe_draft_main,
 )
+from .claude_orchestrator import (
+    AGENT_DESCRIPTION as CLAUDE_ORCHESTRATOR_DESCRIPTION,
+    AGENT_NAME as CLAUDE_ORCHESTRATOR_NAME,
+    main as claude_orchestrator_main,
+)
 
 
 @dataclass(frozen=True)
@@ -64,6 +69,11 @@ AGENTS: dict[str, AgentSpec] = {
         name=CONTEXT_WARM_NAME,
         description=CONTEXT_WARM_DESCRIPTION,
         entrypoint=context_warm_main,
+    ),
+    CLAUDE_ORCHESTRATOR_NAME: AgentSpec(
+        name=CLAUDE_ORCHESTRATOR_NAME,
+        description=CLAUDE_ORCHESTRATOR_DESCRIPTION,
+        entrypoint=claude_orchestrator_main,
     ),
 }
 

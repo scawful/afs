@@ -27,7 +27,7 @@ Your system is architecturally sophisticated with a rich ecosystem spanning ROM 
 
 | Component | Current State | Paper Spec | Your Extension |
 |-----------|---------------|------------|----------------|
-| **History** | Empty | Transaction log (immutable) | Need: operation logging |
+| **History** | CLI/tool/model/fs logs | Transaction log (immutable) | Need: summarization/embedding pipeline |
 | **Memory** | 1 fear entry | Long-term facts/decisions | Need: structured facts |
 | **Scratchpad** | Active | Transient workspace | ✅ Enhanced with cognitive state |
 | **Hivemind** | 9 entries | N/A (your extension) | ✅ Cross-session learning |
@@ -48,7 +48,8 @@ From Section IV-A of the paper:
 - Compliance verification
 - Replay capability
 
-**Your gap:** `.context/history/` is empty. Should contain:
+**Your gap:** `.context/history/` has raw logs, but the summarize/embed/index
+pipeline is still missing. Target structure:
 ```
 history/
 ├── 2025-12-12T20:48:16.jsonl  # Raw operation log
@@ -128,11 +129,11 @@ Input/Output → History → [summarize/embed/index] → Memory → [convert] �
 - **Deployment:** Ubuntu server via `scripts/server-deploy.sh`
 - **AFS:** Has `.context/` and `.claude/agents/` with specialized agent profiles
 
-#### halext-server Websites
+#### NEXUS Websites (halext-nj)
 - **halext.org** - Personal site
 - **justinscofield.com** - Professional resume site
 - **zeniea.com** - Additional domain
-- **Infrastructure:** Nginx, systemd, Cloudflare
+- **Infrastructure:** Nginx, systemd, Cloudflare (legacy halext-server references archived)
 
 ### 4. macOS Automation
 
@@ -447,7 +448,7 @@ afs/src/afs/
 **Current afs state:**
 - `MountType.HISTORY` exists in enum ✅
 - `history/` directory created with `.keep` ✅
-- **Actual logging: NOT IMPLEMENTED** ❌
+- **Actual logging:** CLI/tool/model/fs events implemented ✅ (summarization/embedding still open)
 
 **Proposed afs Implementation:**
 
@@ -587,7 +588,7 @@ The research paper provides the theoretical foundation; your implementation exte
 | **afs** | AFS TUI tool | ~/src/lab/afs | Python/Textual, AFS paper implementation |
 | **halext-code** | AI TUI tool | ~/src/lab/web/halext-code | C++20/FTXUI |
 | **halext-org** | Web app | ~/src/lab/halext-org | FastAPI/React/SwiftUI |
-| **halext.org** | Website | halext-server | Personal site |
+| **halext.org** | Website | halext-nj | Personal site |
 | **halext** | C++ library | ~/src/lab/halext | HAL extensions |
 
 ---

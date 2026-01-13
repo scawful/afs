@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional, Callable, AsyncIterator
 
 from .teacher import TeacherEnsemble, TeacherResponse, ProviderConfig, Provider
+from ..history import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +251,26 @@ class DistillationDataGenerator:
 
             if response.success:
                 quality = self.quality_scorer(prompt, response.content)
+                log_event(
+                    "model",
+                    "afs.distillation",
+                    op="teacher_response",
+                    metadata={
+                        "provider": response.provider.value,
+                        "model": response.model,
+                        "domain": domain,
+                        "difficulty": difficulty,
+                        "quality_score": quality,
+                        "prompt_tokens": response.prompt_tokens,
+                        "completion_tokens": response.completion_tokens,
+                        "latency_ms": response.latency_ms,
+                    },
+                    payload={
+                        "prompt": prompt,
+                        "system": system_prompt,
+                        "response": response.content,
+                    },
+                )
 
                 if quality >= self.config.min_quality_score:
                     sample = DistillationSample(

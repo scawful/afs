@@ -22,6 +22,13 @@ def training_prepare_command(args: argparse.Namespace) -> int:
 
     output_dir = Path(args.output).expanduser().resolve()
 
+    if args.train_ratio <= 0 or args.val_ratio < 0:
+        print("Train ratio must be > 0 and validation ratio must be >= 0.")
+        return 1
+    if args.train_ratio + args.val_ratio >= 1.0:
+        print("Train ratio + validation ratio must be < 1.0.")
+        return 1
+
     result = split_dataset(
         input_path=input_path,
         output_dir=output_dir,
@@ -165,19 +172,370 @@ def training_memory_export_command(args: argparse.Namespace) -> int:
     )
     output_path = Path(args.output).expanduser().resolve()
 
+    require_quality = memory_cfg.require_quality
+    if args.require_quality is True:
+        require_quality = True
+    elif args.no_require_quality is True:
+        require_quality = False
+
     result = export_memory_to_dataset(
         memory_root,
         output_path,
         default_domain=args.domain,
         allow_raw=args.allow_raw or memory_cfg.allow_raw,
+        allow_raw_tags=args.allow_raw_tag or memory_cfg.allow_raw_tags,
         default_instruction=args.default_instruction or memory_cfg.default_instruction,
         include_tags=args.include_tag,
         exclude_tags=args.exclude_tag,
         limit=args.limit if args.limit is not None else (memory_cfg.limit or None),
+        require_quality=require_quality,
+        min_quality_score=(
+            args.min_quality_score
+            if args.min_quality_score is not None
+            else memory_cfg.min_quality_score
+        ),
+        score_profile=args.score_profile or memory_cfg.score_profile,
+        enable_asar=args.enable_asar or memory_cfg.enable_asar,
+        redact=not args.no_redact,
     )
 
     print(result.summary())
     print(f"output: {output_path}")
+    return 0
+
+
+def training_history_export_command(args: argparse.Namespace) -> int:
+    """Export history events to TrainingSample JSONL."""
+    from ..config import load_config_model
+    from ..training import export_history_to_dataset
+
+    config = load_config_model(config_path=Path(args.config) if args.config else None)
+    history_root = (
+        Path(args.history_root).expanduser().resolve()
+        if args.history_root
+        else (config.general.context_root / "history")
+    )
+    output_path = Path(args.output).expanduser().resolve()
+
+    require_quality = config.memory_export.require_quality
+    if args.require_quality is True:
+        require_quality = True
+    elif args.no_require_quality is True:
+        require_quality = False
+
+    if args.event_type:
+        event_types = args.event_type
+    else:
+        event_types = ["model"]
+        if args.include_tools:
+            event_types.append("tool")
+        if args.include_fs:
+            event_types.append("fs")
+        if args.include_cli:
+            event_types.append("cli")
+
+    result = export_history_to_dataset(
+        history_root,
+        output_path,
+        event_types=event_types,
+        include_tools=args.include_tools,
+        include_fs=args.include_fs,
+        include_cli=args.include_cli,
+        default_domain=args.domain,
+        tool_domain=args.tool_domain,
+        limit=args.limit,
+        require_quality=require_quality,
+        min_quality_score=(
+            args.min_quality_score
+            if args.min_quality_score is not None
+            else config.memory_export.min_quality_score
+        ),
+        score_profile=args.score_profile or config.memory_export.score_profile,
+        enable_asar=args.enable_asar or config.memory_export.enable_asar,
+        redact=not args.no_redact,
+    )
+
+    print(result.summary())
+    print(f"output: {output_path}")
+    return 0
+
+
+# =============================================================================
+# Antigravity Export
+# =============================================================================
+
+
+def training_antigravity_export_command(args: argparse.Namespace) -> int:
+    """Export Antigravity logs to TrainingSample JSONL."""
+    from ..config import load_config_model
+    from ..training import export_antigravity_to_dataset
+    from ..training.antigravity_export import DEFAULT_ANTIGRAVITY_DB
+
+    config = load_config_model(config_path=Path(args.config) if args.config else None)
+    output_path = Path(args.output).expanduser().resolve()
+    db_path = (
+        Path(args.db_path).expanduser().resolve()
+        if args.db_path
+        else None
+    )
+
+    require_quality = config.memory_export.require_quality
+    if args.require_quality is True:
+        require_quality = True
+    elif args.no_require_quality is True:
+        require_quality = False
+
+    result = export_antigravity_to_dataset(
+        db_path=db_path or DEFAULT_ANTIGRAVITY_DB,
+        output_path=output_path,
+        state_keys=args.state_key,
+        default_domain=args.domain,
+        limit=args.limit,
+        include_paths_content=args.include_paths_content,
+        max_path_chars=args.max_path_chars,
+        require_quality=require_quality,
+        min_quality_score=(
+            args.min_quality_score
+            if args.min_quality_score is not None
+            else config.memory_export.min_quality_score
+        ),
+        score_profile=args.score_profile or config.memory_export.score_profile,
+        enable_asar=args.enable_asar or config.memory_export.enable_asar,
+        redact=not args.no_redact,
+    )
+
+    print(result.summary())
+    print(f"output: {output_path}")
+    return 0
+
+
+# =============================================================================
+# Gemini Export
+# =============================================================================
+
+
+def training_gemini_export_command(args: argparse.Namespace) -> int:
+    """Export Gemini CLI logs to TrainingSample JSONL."""
+    from ..config import load_config_model
+    from ..training import export_gemini_logs_to_dataset
+
+    config = load_config_model(config_path=Path(args.config) if args.config else None)
+    output_path = Path(args.output).expanduser().resolve()
+    roots = [Path(root).expanduser().resolve() for root in (args.root or [])]
+    scan_roots = [Path(root).expanduser().resolve() for root in (args.scan_root or [])]
+
+    require_quality = config.memory_export.require_quality
+    if args.require_quality is True:
+        require_quality = True
+    elif args.no_require_quality is True:
+        require_quality = False
+
+    result = export_gemini_logs_to_dataset(
+        roots if roots else None,
+        output_path=output_path,
+        scan_roots=scan_roots if scan_roots else None,
+        max_scan_depth=args.max_scan_depth,
+        default_domain=args.domain,
+        include_tools=not args.no_tools,
+        include_thoughts=args.include_thoughts,
+        max_tool_output_chars=args.max_tool_output_chars,
+        limit=args.limit,
+        require_quality=require_quality,
+        min_quality_score=(
+            args.min_quality_score
+            if args.min_quality_score is not None
+            else config.memory_export.min_quality_score
+        ),
+        score_profile=args.score_profile or config.memory_export.score_profile,
+        enable_asar=args.enable_asar or config.memory_export.enable_asar,
+        redact=not args.no_redact,
+    )
+
+    print(result.summary())
+    print(f"output: {output_path}")
+    return 0
+
+
+# =============================================================================
+# Claude Export
+# =============================================================================
+
+
+def training_claude_export_command(args: argparse.Namespace) -> int:
+    """Export Claude Code logs to TrainingSample JSONL."""
+    from ..config import load_config_model
+    from ..training import export_claude_logs_to_dataset
+
+    config = load_config_model(config_path=Path(args.config) if args.config else None)
+    output_path = Path(args.output).expanduser().resolve()
+    roots = [Path(root).expanduser().resolve() for root in (args.root or [])]
+    scan_roots = [Path(root).expanduser().resolve() for root in (args.scan_root or [])]
+
+    require_quality = config.memory_export.require_quality
+    if args.require_quality is True:
+        require_quality = True
+    elif args.no_require_quality is True:
+        require_quality = False
+
+    result = export_claude_logs_to_dataset(
+        roots if roots else None,
+        output_path=output_path,
+        scan_roots=scan_roots if scan_roots else None,
+        max_scan_depth=args.max_scan_depth,
+        default_domain=args.domain,
+        include_tools=not args.no_tools,
+        max_tool_output_chars=args.max_tool_output_chars,
+        limit=args.limit,
+        require_quality=require_quality,
+        min_quality_score=(
+            args.min_quality_score
+            if args.min_quality_score is not None
+            else config.memory_export.min_quality_score
+        ),
+        score_profile=args.score_profile or config.memory_export.score_profile,
+        enable_asar=args.enable_asar or config.memory_export.enable_asar,
+        redact=not args.no_redact,
+    )
+
+    print(result.summary())
+    print(f"output: {output_path}")
+    return 0
+
+
+# =============================================================================
+# Codex Export
+# =============================================================================
+
+
+def training_codex_export_command(args: argparse.Namespace) -> int:
+    """Export Codex CLI logs to TrainingSample JSONL."""
+    from ..config import load_config_model
+    from ..training import export_codex_logs_to_dataset
+
+    config = load_config_model(config_path=Path(args.config) if args.config else None)
+    output_path = Path(args.output).expanduser().resolve()
+    roots = [Path(root).expanduser().resolve() for root in (args.root or [])]
+    scan_roots = [Path(root).expanduser().resolve() for root in (args.scan_root or [])]
+
+    require_quality = config.memory_export.require_quality
+    if args.require_quality is True:
+        require_quality = True
+    elif args.no_require_quality is True:
+        require_quality = False
+
+    result = export_codex_logs_to_dataset(
+        roots if roots else None,
+        output_path=output_path,
+        scan_roots=scan_roots if scan_roots else None,
+        max_scan_depth=args.max_scan_depth,
+        default_domain=args.domain,
+        include_tools=not args.no_tools,
+        include_system=args.include_system,
+        max_tool_output_chars=args.max_tool_output_chars,
+        limit=args.limit,
+        require_quality=require_quality,
+        min_quality_score=(
+            args.min_quality_score
+            if args.min_quality_score is not None
+            else config.memory_export.min_quality_score
+        ),
+        score_profile=args.score_profile or config.memory_export.score_profile,
+        enable_asar=args.enable_asar or config.memory_export.enable_asar,
+        redact=not args.no_redact,
+    )
+
+    print(result.summary())
+    print(f"output: {output_path}")
+    return 0
+
+
+# =============================================================================
+# Codex History Import
+# =============================================================================
+
+
+def training_codex_history_import_command(args: argparse.Namespace) -> int:
+    """Import Codex CLI logs into AFS history."""
+    from ..config import load_config_model
+    from ..training import import_codex_logs_to_history
+
+    config = load_config_model(config_path=Path(args.config) if args.config else None)
+    history_root = (
+        Path(args.history_root).expanduser().resolve()
+        if args.history_root
+        else (config.general.context_root / "history")
+    )
+    roots = [Path(root).expanduser().resolve() for root in (args.root or [])]
+    scan_roots = [Path(root).expanduser().resolve() for root in (args.scan_root or [])]
+
+    result = import_codex_logs_to_history(
+        roots if roots else None,
+        history_root=history_root,
+        scan_roots=scan_roots if scan_roots else None,
+        max_scan_depth=args.max_scan_depth,
+        include_tools=not args.no_tools,
+        include_system=args.include_system,
+        max_tool_output_chars=args.max_tool_output_chars,
+        limit=args.limit,
+        redact=not args.no_redact,
+    )
+
+    print(result.summary())
+    print(f"history_root: {history_root}")
+    return 0
+
+
+# =============================================================================
+# Rebalance
+# =============================================================================
+
+
+def training_rebalance_command(args: argparse.Namespace) -> int:
+    """Rebalance training datasets by source or domain."""
+    from ..training import rebalance_dataset
+
+    raw_inputs = args.input or []
+    flattened: list[str] = []
+    for item in raw_inputs:
+        if isinstance(item, list):
+            flattened.extend(item)
+        else:
+            flattened.append(item)
+    input_paths = [Path(path).expanduser().resolve() for path in flattened]
+    output_path = Path(args.output).expanduser().resolve()
+    append_paths = [Path(path).expanduser().resolve() for path in (args.append or [])]
+
+    weights: dict[str, float] = {}
+    for item in args.weight or []:
+        if "=" not in item:
+            print(f"Invalid weight: {item} (expected name=value)")
+            return 1
+        name, value = item.split("=", 1)
+        try:
+            weights[name.strip()] = float(value)
+        except ValueError:
+            print(f"Invalid weight value: {item}")
+            return 1
+
+    result = rebalance_dataset(
+        input_paths=input_paths,
+        output_path=output_path,
+        group_by=args.group_by,
+        weights=weights or None,
+        max_total=args.max_total,
+        allow_oversample=args.allow_oversample,
+        include_unweighted=args.include_unweighted,
+        seed=args.seed,
+        shuffle=not args.no_shuffle,
+        append_paths=append_paths or None,
+    )
+
+    print(result.summary())
+    print(f"output: {output_path}")
+    if result.errors:
+        print("errors:")
+        for err in result.errors:
+            print(f"- {err}")
     return 0
 
 
@@ -390,6 +748,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Allow raw content entries without explicit instruction/output.",
     )
     train_memory.add_argument(
+        "--allow-raw-tag",
+        action="append",
+        help="Tag required to include raw content entries (repeatable).",
+    )
+    train_memory.add_argument(
         "--include-tag",
         action="append",
         help="Only export entries matching this tag (repeatable).",
@@ -403,12 +766,529 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--default-instruction",
         help="Instruction to use when allow-raw is set.",
     )
+    quality_group = train_memory.add_mutually_exclusive_group()
+    quality_group.add_argument(
+        "--require-quality",
+        dest="require_quality",
+        action="store_true",
+        default=None,
+        help="Require quality scoring (overrides config).",
+    )
+    quality_group.add_argument(
+        "--no-require-quality",
+        dest="no_require_quality",
+        action="store_true",
+        default=None,
+        help="Disable quality scoring (overrides config).",
+    )
+    train_memory.add_argument(
+        "--min-quality-score",
+        type=float,
+        help="Minimum quality score to export.",
+    )
+    train_memory.add_argument(
+        "--score-profile",
+        help="Scoring profile (generic, dialogue, or asm).",
+    )
+    train_memory.add_argument(
+        "--enable-asar",
+        action="store_true",
+        help="Enable asar validation in scoring.",
+    )
+    train_memory.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="Disable secret redaction.",
+    )
     train_memory.add_argument(
         "--limit",
         type=int,
         help="Maximum number of exported samples.",
     )
     train_memory.set_defaults(func=training_memory_export_command)
+
+    # training history-export
+    train_history = training_sub.add_parser(
+        "history-export", help="Export history events to TrainingSample JSONL."
+    )
+    train_history.add_argument("--config", help="Config path.")
+    train_history.add_argument("--history-root", help="History directory override.")
+    train_history.add_argument("--output", required=True, help="Output JSONL path.")
+    train_history.add_argument("--domain", default="history", help="Default domain.")
+    train_history.add_argument("--tool-domain", default="history_tools", help="Domain for tool/FS/CLI events.")
+    train_history.add_argument(
+        "--event-type",
+        action="append",
+        help="Event type to include (repeatable).",
+    )
+    train_history.add_argument(
+        "--include-tools",
+        action="store_true",
+        help="Include tool execution events.",
+    )
+    train_history.add_argument(
+        "--include-fs",
+        action="store_true",
+        help="Include filesystem read/write events.",
+    )
+    train_history.add_argument(
+        "--include-cli",
+        action="store_true",
+        help="Include CLI invocation events.",
+    )
+    train_history.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of exported samples.",
+    )
+    history_quality = train_history.add_mutually_exclusive_group()
+    history_quality.add_argument(
+        "--require-quality",
+        dest="require_quality",
+        action="store_true",
+        default=None,
+        help="Require quality scoring (overrides config).",
+    )
+    history_quality.add_argument(
+        "--no-require-quality",
+        dest="no_require_quality",
+        action="store_true",
+        default=None,
+        help="Disable quality scoring (overrides config).",
+    )
+    train_history.add_argument(
+        "--min-quality-score",
+        type=float,
+        help="Minimum quality score to export.",
+    )
+    train_history.add_argument(
+        "--score-profile",
+        help="Scoring profile (generic, dialogue, or asm).",
+    )
+    train_history.add_argument(
+        "--enable-asar",
+        action="store_true",
+        help="Enable asar validation in scoring.",
+    )
+    train_history.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="Disable secret redaction.",
+    )
+    train_history.set_defaults(func=training_history_export_command)
+
+    # training antigravity-export
+    train_antigravity = training_sub.add_parser(
+        "antigravity-export",
+        help="Export Antigravity trajectory summaries to TrainingSample JSONL.",
+    )
+    train_antigravity.add_argument("--config", help="Config path.")
+    train_antigravity.add_argument("--db-path", help="Antigravity state.vscdb path.")
+    train_antigravity.add_argument("--output", required=True, help="Output JSONL path.")
+    train_antigravity.add_argument("--domain", default="general", help="Default domain.")
+    train_antigravity.add_argument(
+        "--state-key",
+        action="append",
+        help="State key to read from the DB (repeatable).",
+    )
+    train_antigravity.add_argument(
+        "--include-paths-content",
+        action="store_true",
+        help="Include file contents for PathsToReview.",
+    )
+    train_antigravity.add_argument(
+        "--max-path-chars",
+        type=int,
+        default=2000,
+        help="Maximum characters to include per path.",
+    )
+    train_antigravity.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of exported samples.",
+    )
+    antigravity_quality = train_antigravity.add_mutually_exclusive_group()
+    antigravity_quality.add_argument(
+        "--require-quality",
+        dest="require_quality",
+        action="store_true",
+        default=None,
+        help="Require quality scoring (overrides config).",
+    )
+    antigravity_quality.add_argument(
+        "--no-require-quality",
+        dest="no_require_quality",
+        action="store_true",
+        default=None,
+        help="Disable quality scoring (overrides config).",
+    )
+    train_antigravity.add_argument(
+        "--min-quality-score",
+        type=float,
+        help="Minimum quality score to export.",
+    )
+    train_antigravity.add_argument(
+        "--score-profile",
+        help="Scoring profile (generic, dialogue, or asm).",
+    )
+    train_antigravity.add_argument(
+        "--enable-asar",
+        action="store_true",
+        help="Enable asar validation in scoring.",
+    )
+    train_antigravity.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="Disable secret redaction.",
+    )
+    train_antigravity.set_defaults(func=training_antigravity_export_command)
+
+    # training gemini-export
+    train_gemini = training_sub.add_parser(
+        "gemini-export", help="Export Gemini CLI logs to TrainingSample JSONL."
+    )
+    train_gemini.add_argument("--config", help="Config path.")
+    train_gemini.add_argument(
+        "--root",
+        action="append",
+        help="Gemini root directory (repeatable).",
+    )
+    train_gemini.add_argument(
+        "--scan-root",
+        action="append",
+        help="Scan for .gemini directories under this root (repeatable).",
+    )
+    train_gemini.add_argument(
+        "--max-scan-depth",
+        type=int,
+        default=4,
+        help="Maximum .gemini scan depth.",
+    )
+    train_gemini.add_argument("--output", required=True, help="Output JSONL path.")
+    train_gemini.add_argument("--domain", default="gemini", help="Default domain.")
+    train_gemini.add_argument(
+        "--no-tools",
+        action="store_true",
+        help="Exclude tool outputs from the input field.",
+    )
+    train_gemini.add_argument(
+        "--include-thoughts",
+        action="store_true",
+        help="Include Gemini thoughts in the thinking field.",
+    )
+    train_gemini.add_argument(
+        "--max-tool-output-chars",
+        type=int,
+        default=2000,
+        help="Maximum characters per tool output.",
+    )
+    train_gemini.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of exported samples.",
+    )
+    gemini_quality = train_gemini.add_mutually_exclusive_group()
+    gemini_quality.add_argument(
+        "--require-quality",
+        dest="require_quality",
+        action="store_true",
+        default=None,
+        help="Require quality scoring (overrides config).",
+    )
+    gemini_quality.add_argument(
+        "--no-require-quality",
+        dest="no_require_quality",
+        action="store_true",
+        default=None,
+        help="Disable quality scoring (overrides config).",
+    )
+    train_gemini.add_argument(
+        "--min-quality-score",
+        type=float,
+        help="Minimum quality score to export.",
+    )
+    train_gemini.add_argument(
+        "--score-profile",
+        help="Scoring profile (generic, dialogue, or asm).",
+    )
+    train_gemini.add_argument(
+        "--enable-asar",
+        action="store_true",
+        help="Enable asar validation in scoring.",
+    )
+    train_gemini.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="Disable secret redaction.",
+    )
+    train_gemini.set_defaults(func=training_gemini_export_command)
+
+    # training claude-export
+    train_claude = training_sub.add_parser(
+        "claude-export", help="Export Claude Code logs to TrainingSample JSONL."
+    )
+    train_claude.add_argument("--config", help="Config path.")
+    train_claude.add_argument(
+        "--root",
+        action="append",
+        help="Claude root directory (repeatable).",
+    )
+    train_claude.add_argument(
+        "--scan-root",
+        action="append",
+        help="Scan for .claude directories under this root (repeatable).",
+    )
+    train_claude.add_argument(
+        "--max-scan-depth",
+        type=int,
+        default=4,
+        help="Maximum .claude scan depth.",
+    )
+    train_claude.add_argument("--output", required=True, help="Output JSONL path.")
+    train_claude.add_argument("--domain", default="claude", help="Default domain.")
+    train_claude.add_argument(
+        "--no-tools",
+        action="store_true",
+        help="Exclude tool outputs from the input field.",
+    )
+    train_claude.add_argument(
+        "--max-tool-output-chars",
+        type=int,
+        default=2000,
+        help="Maximum characters per tool output.",
+    )
+    train_claude.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of exported samples.",
+    )
+    claude_quality = train_claude.add_mutually_exclusive_group()
+    claude_quality.add_argument(
+        "--require-quality",
+        dest="require_quality",
+        action="store_true",
+        default=None,
+        help="Require quality scoring (overrides config).",
+    )
+    claude_quality.add_argument(
+        "--no-require-quality",
+        dest="no_require_quality",
+        action="store_true",
+        default=None,
+        help="Disable quality scoring (overrides config).",
+    )
+    train_claude.add_argument(
+        "--min-quality-score",
+        type=float,
+        help="Minimum quality score to export.",
+    )
+    train_claude.add_argument(
+        "--score-profile",
+        help="Scoring profile (generic, dialogue, or asm).",
+    )
+    train_claude.add_argument(
+        "--enable-asar",
+        action="store_true",
+        help="Enable asar validation in scoring.",
+    )
+    train_claude.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="Disable secret redaction.",
+    )
+    train_claude.set_defaults(func=training_claude_export_command)
+
+    # training codex-export
+    train_codex = training_sub.add_parser(
+        "codex-export", help="Export Codex CLI logs to TrainingSample JSONL."
+    )
+    train_codex.add_argument("--config", help="Config path.")
+    train_codex.add_argument(
+        "--root",
+        action="append",
+        help="Codex root directory (repeatable).",
+    )
+    train_codex.add_argument(
+        "--scan-root",
+        action="append",
+        help="Scan for .codex directories under this root (repeatable).",
+    )
+    train_codex.add_argument(
+        "--max-scan-depth",
+        type=int,
+        default=4,
+        help="Maximum .codex scan depth.",
+    )
+    train_codex.add_argument("--output", required=True, help="Output JSONL path.")
+    train_codex.add_argument("--domain", default="codex", help="Default domain.")
+    train_codex.add_argument(
+        "--no-tools",
+        action="store_true",
+        help="Exclude tool outputs from the input field.",
+    )
+    train_codex.add_argument(
+        "--include-system",
+        action="store_true",
+        help="Include system instructions in the input field.",
+    )
+    train_codex.add_argument(
+        "--max-tool-output-chars",
+        type=int,
+        default=2000,
+        help="Maximum characters per tool output.",
+    )
+    train_codex.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of exported samples.",
+    )
+    codex_quality = train_codex.add_mutually_exclusive_group()
+    codex_quality.add_argument(
+        "--require-quality",
+        dest="require_quality",
+        action="store_true",
+        default=None,
+        help="Require quality scoring (overrides config).",
+    )
+    codex_quality.add_argument(
+        "--no-require-quality",
+        dest="no_require_quality",
+        action="store_true",
+        default=None,
+        help="Disable quality scoring (overrides config).",
+    )
+    train_codex.add_argument(
+        "--min-quality-score",
+        type=float,
+        help="Minimum quality score to export.",
+    )
+    train_codex.add_argument(
+        "--score-profile",
+        help="Scoring profile (generic, dialogue, or asm).",
+    )
+    train_codex.add_argument(
+        "--enable-asar",
+        action="store_true",
+        help="Enable asar validation in scoring.",
+    )
+    train_codex.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="Disable secret redaction.",
+    )
+    train_codex.set_defaults(func=training_codex_export_command)
+
+    # training codex-history-import
+    train_codex_history = training_sub.add_parser(
+        "codex-history-import",
+        help="Import Codex CLI logs into AFS history.",
+    )
+    train_codex_history.add_argument("--config", help="Config path.")
+    train_codex_history.add_argument("--history-root", help="History directory override.")
+    train_codex_history.add_argument(
+        "--root",
+        action="append",
+        help="Codex root directory (repeatable).",
+    )
+    train_codex_history.add_argument(
+        "--scan-root",
+        action="append",
+        help="Scan for .codex directories under this root (repeatable).",
+    )
+    train_codex_history.add_argument(
+        "--max-scan-depth",
+        type=int,
+        default=4,
+        help="Maximum .codex scan depth.",
+    )
+    train_codex_history.add_argument(
+        "--no-tools",
+        action="store_true",
+        help="Skip tool execution events.",
+    )
+    train_codex_history.add_argument(
+        "--include-system",
+        action="store_true",
+        help="Include system instructions in model payloads.",
+    )
+    train_codex_history.add_argument(
+        "--max-tool-output-chars",
+        type=int,
+        default=4000,
+        help="Maximum characters per tool output.",
+    )
+    train_codex_history.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of model events to import.",
+    )
+    train_codex_history.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="Disable secret redaction.",
+    )
+    train_codex_history.set_defaults(func=training_codex_history_import_command)
+
+    # training rebalance
+    train_rebalance = training_sub.add_parser(
+        "rebalance",
+        help="Rebalance datasets by source or domain.",
+    )
+    train_rebalance.add_argument(
+        "--input",
+        action="append",
+        nargs="+",
+        required=True,
+        help="Input JSONL files.",
+    )
+    train_rebalance.add_argument(
+        "--output",
+        required=True,
+        help="Output JSONL path.",
+    )
+    train_rebalance.add_argument(
+        "--group-by",
+        choices=["source", "domain"],
+        default="source",
+        help="Field to rebalance by.",
+    )
+    train_rebalance.add_argument(
+        "--weight",
+        action="append",
+        help="Weight as name=value (repeatable).",
+    )
+    train_rebalance.add_argument(
+        "--max-total",
+        type=int,
+        help="Maximum total samples (optional).",
+    )
+    train_rebalance.add_argument(
+        "--allow-oversample",
+        action="store_true",
+        help="Allow oversampling smaller groups.",
+    )
+    train_rebalance.add_argument(
+        "--include-unweighted",
+        action="store_true",
+        help="Include groups without weights.",
+    )
+    train_rebalance.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed.",
+    )
+    train_rebalance.add_argument(
+        "--no-shuffle",
+        action="store_true",
+        help="Preserve original ordering.",
+    )
+    train_rebalance.add_argument(
+        "--append",
+        action="append",
+        help="Append JSONL files without rebalancing.",
+    )
+    train_rebalance.set_defaults(func=training_rebalance_command)
 
     # =========================================================================
     # Discriminator

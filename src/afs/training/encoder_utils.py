@@ -34,6 +34,7 @@ class EncoderConfig:
     # Diversity sampling
     num_clusters: int = 100  # For k-means clustering
     samples_per_cluster: int = 10  # Samples to keep per cluster
+    random_seed: int | None = 42
 
     # Quality
     min_instruction_tokens: int = 5
@@ -351,8 +352,13 @@ class EncoderDataProcessor:
         """
         from sklearn.cluster import KMeans
 
+        if not samples:
+            return []
+
         n_clusters = n_clusters or self.config.num_clusters
         n_clusters = min(n_clusters, len(samples))
+        if n_clusters <= 0:
+            return []
 
         # Get embeddings
         embeddings = []
@@ -363,7 +369,11 @@ class EncoderDataProcessor:
         X = np.array(embeddings)
 
         # Cluster
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        kmeans = KMeans(
+            n_clusters=n_clusters,
+            random_state=self.config.random_seed,
+            n_init=10,
+        )
         labels = kmeans.fit_predict(X)
 
         # Group by cluster
@@ -391,13 +401,24 @@ class EncoderDataProcessor:
         Returns:
             Diverse sample subset
         """
+        if not samples:
+            return []
+
         if n_samples is None:
             n_samples = self.config.num_clusters * self.config.samples_per_cluster
+        if n_samples <= 0:
+            return []
 
-        n_clusters = min(self.config.num_clusters, len(samples) // 2)
+        n_samples = min(n_samples, len(samples))
+        if len(samples) == 1:
+            return samples[:n_samples]
+
+        n_clusters = min(self.config.num_clusters, max(1, len(samples) // 2))
         samples_per = max(1, n_samples // n_clusters)
 
         clusters = self.cluster_samples(samples, n_clusters, field)
+        if not clusters:
+            return samples[:n_samples]
 
         # Sample from each cluster
         selected_indices = set()

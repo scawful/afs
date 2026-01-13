@@ -60,6 +60,7 @@ from .scoring import (
     ScoringConfig,
     QualityScore,
     QualityScorer,
+    build_scoring_config,
     score_samples,
     score_jsonl,
     analyze_scores,
@@ -73,6 +74,32 @@ from .pipeline import (
 from .memory_export import (
     MemoryExportResult,
     export_memory_to_dataset,
+)
+from .history_export import (
+    HistoryExportResult,
+    export_history_to_dataset,
+)
+from .antigravity_export import (
+    AntigravityExportResult,
+    export_antigravity_to_dataset,
+)
+from .gemini_export import (
+    GeminiExportResult,
+    export_gemini_logs_to_dataset,
+)
+from .claude_export import (
+    ClaudeExportResult,
+    export_claude_logs_to_dataset,
+)
+from .rebalance import (
+    RebalanceResult,
+    rebalance_dataset,
+)
+from .codex_export import (
+    CodexExportResult,
+    CodexHistoryImportResult,
+    export_codex_logs_to_dataset,
+    import_codex_logs_to_history,
 )
 
 __all__ = [
@@ -119,6 +146,7 @@ __all__ = [
     "ScoringConfig",
     "QualityScore",
     "QualityScorer",
+    "build_scoring_config",
     "score_samples",
     "score_jsonl",
     "analyze_scores",
@@ -130,4 +158,24 @@ __all__ = [
     # Memory export
     "MemoryExportResult",
     "export_memory_to_dataset",
+    # History export
+    "HistoryExportResult",
+    "export_history_to_dataset",
+    # Antigravity export
+    "AntigravityExportResult",
+    "export_antigravity_to_dataset",
+    # Gemini export
+    "GeminiExportResult",
+    "export_gemini_logs_to_dataset",
+    # Claude export
+    "ClaudeExportResult",
+    "export_claude_logs_to_dataset",
+    # Rebalance
+    "RebalanceResult",
+    "rebalance_dataset",
+    # Codex export / history import
+    "CodexExportResult",
+    "CodexHistoryImportResult",
+    "export_codex_logs_to_dataset",
+    "import_codex_logs_to_history",
 ]

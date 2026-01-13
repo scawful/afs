@@ -29,7 +29,9 @@ from . import benchmark
 from . import distillation
 from . import fs
 from . import embeddings
+from . import review
 from ..history import log_cli_invocation
+from ._help import render_default_help, render_topic_help
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -82,6 +84,22 @@ def build_parser() -> argparse.ArgumentParser:
     # Register embedding commands
     embeddings.register_parsers(subparsers)
 
+    # Register review commands
+    review.register_parsers(subparsers)
+
+    # help
+    help_parser = subparsers.add_parser("help", help="Show help for commands.")
+    help_parser.add_argument(
+        "topic",
+        nargs=argparse.REMAINDER,
+        help="Command path to show help for (e.g., context init).",
+    )
+    help_parser.set_defaults(
+        func=lambda args, root_parser=parser: render_topic_help(
+            root_parser, args.topic
+        )
+    )
+
     # Allow plugins to extend the CLI surface.
     try:
         from ..plugins import call_plugin_hook, load_enabled_plugins
@@ -101,7 +119,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if not getattr(args, "command", None):
-        parser.print_help()
+        render_default_help(parser)
         return 1
 
     # Check for subcommands that require a subcommand

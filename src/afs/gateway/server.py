@@ -29,6 +29,7 @@ from .models import (
     DeltaMessage,
     Usage,
 )
+from ..history import log_event
 from ..moe.router import MoERouter, RouterConfig
 from ..moe.classifier import QueryIntent
 
@@ -236,6 +237,23 @@ async def chat_completions(request: ChatRequest):
         )
 
         content = result.get("message", {}).get("content", "")
+        log_event(
+            "model",
+            "afs.gateway",
+            op="chat",
+            metadata={
+                "display_model": request.model,
+                "backend_model": model_id,
+                "temperature": temperature,
+                "top_p": top_p,
+                "prompt_tokens": result.get("prompt_eval_count", 0),
+                "completion_tokens": result.get("eval_count", 0),
+            },
+            payload={
+                "messages": messages,
+                "response": content,
+            },
+        )
 
         return ChatResponse(
             model=request.model,
@@ -266,6 +284,8 @@ async def stream_chat(
     """Stream chat completion as SSE."""
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
     created = int(time.time())
+    chunks: list[str] = []
+    error_message = None
 
     # Send role delta first
     first_chunk = StreamResponse(
@@ -290,6 +310,7 @@ async def stream_chat(
                 model=display_model,
                 choices=[StreamChoice(delta=DeltaMessage(content=token))],
             )
+            chunks.append(token)
             yield f"data: {chunk.model_dump_json()}\n\n"
 
         # Send finish
@@ -303,6 +324,7 @@ async def stream_chat(
         yield "data: [DONE]\n\n"
 
     except Exception as e:
+        error_message = str(e)
         logger.error(f"Stream error: {e}")
         error_chunk = StreamResponse(
             id=chat_id,
@@ -315,6 +337,23 @@ async def stream_chat(
         )
         yield f"data: {error_chunk.model_dump_json()}\n\n"
         yield "data: [DONE]\n\n"
+    finally:
+        log_event(
+            "model",
+            "afs.gateway",
+            op="chat_stream",
+            metadata={
+                "display_model": display_model,
+                "backend_model": model_id,
+                "temperature": temperature,
+                "top_p": top_p,
+                "error": error_message,
+            },
+            payload={
+                "messages": messages,
+                "response": "".join(chunks),
+            },
+        )
 
 
 # Backend management endpoints

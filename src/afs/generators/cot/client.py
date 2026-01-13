@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .prompts import ASM_COT_SYSTEM_PROMPT
+from ...history import log_event
 
 
 class LLMClient(ABC):
@@ -104,7 +105,24 @@ class GeminiClient(LLMClient):
             },
         )
 
-        return response.text
+        content = response.text
+        log_event(
+            "model",
+            "afs.generators.cot",
+            op="generate",
+            metadata={
+                "provider": "gemini",
+                "model": self.model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+            payload={
+                "prompt": prompt,
+                "system": system,
+                "response": content,
+            },
+        )
+        return content
 
 
 class ClaudeClient(LLMClient):
@@ -153,7 +171,24 @@ class ClaudeClient(LLMClient):
             messages=[{"role": "user", "content": prompt}],
         )
 
-        return message.content[0].text
+        content = message.content[0].text
+        log_event(
+            "model",
+            "afs.generators.cot",
+            op="generate",
+            metadata={
+                "provider": "claude",
+                "model": self.model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+            payload={
+                "prompt": prompt,
+                "system": system_prompt or ASM_COT_SYSTEM_PROMPT,
+                "response": content,
+            },
+        )
+        return content
 
 
 class OpenAIClient(LLMClient):
@@ -205,7 +240,24 @@ class OpenAIClient(LLMClient):
             max_tokens=max_tokens,
         )
 
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        log_event(
+            "model",
+            "afs.generators.cot",
+            op="generate",
+            metadata={
+                "provider": "openai",
+                "model": self.model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+            payload={
+                "prompt": prompt,
+                "system": system_prompt or ASM_COT_SYSTEM_PROMPT,
+                "response": content,
+            },
+        )
+        return content
 
 
 def get_client(provider: str, **kwargs) -> LLMClient:

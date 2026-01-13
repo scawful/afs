@@ -47,6 +47,36 @@ Stage: Prototype
 
 See [model-training-status.md](model-training-status.md) for detailed documentation.
 
+### Triforce Experts v9/v2 - Completed (2026-01-12)
+
+**Current Status:** ✅ **COMPLETE** - All models trained and deployed
+
+| Model | Base | Samples | GGUF | Size | Status |
+|-------|------|---------|------|------|--------|
+| **Nayru v9** | Qwen2.5-Coder-7B | - | Q8_0 | 8.1GB | ✅ Windows (GGUF + LoRA) |
+| **Hylia v2** | Qwen2.5-7B | - | Q8_0 | 8.1GB | ✅ Windows (GGUF + LoRA) |
+| **Agahnim v2** | Qwen2.5-Coder-7B | 518 | Q8_0 | 8.1GB | ✅ Windows (GGUF + LoRA) |
+| **Router v2** | Qwen2.5-3B | - | Q8_0 | 3.3GB | ✅ Windows (GGUF + LoRA) |
+
+**Deployment:**
+- Windows (LMStudio): `C:\Users\starw\.lmstudio\models\` (junction -> `D:\models\gguf\lmstudio`)
+- Windows (archive): `D:\models\gguf\afs` (GGUF) + `D:\models\adapters\afs` (LoRA)
+- Mac: code-only (no model binaries)
+
+**Infrastructure:**
+- Hylia v2 training instance stopped after backup (29892849); GGUF conversion completed on Windows.
+- See [GGUF_CONVERSION.md](GGUF_CONVERSION.md) for Windows setup guide.
+
+**Training Configuration:**
+- Base Model: Qwen2.5-Coder-7B-Instruct (7B), Qwen2.5-7B-Instruct (Hylia), Qwen2.5-3B-Instruct (Router)
+- Quantization: 8-bit (fits 24GB VRAM)
+- LoRA: r=16, α=32, dropout=0.05, ~40M trainable params
+- GGUF: Q8_0 (excellent quality, reasonable size)
+
+---
+
+### Previous Versions (v1-v3)
+
 **Summary:**
 
 | Model | Intent | Base | Status | Ollama Tag |

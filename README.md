@@ -14,11 +14,14 @@ Docs:
 - `docs/REPO_FACTS.json`
 - `docs/NARRATIVE.md`
 - `docs/RESEARCH_SOURCES.md`
+- `docs/RESEARCH_INFIAGENT.md` - InfiAgent analysis & integration
 - `docs/CLI_PLAN.md`
 - `docs/PORTING_MAP.md`
 - `docs/WORKSPACE_INTEGRATION.md`
 - `docs/PLUGINS.md`
 - `docs/TRAINING_INFRA.md`
+- `docs/GGUF_CONVERSION.md` - LoRA to GGUF conversion for LMStudio
+- `docs/NETWORK_INFERENCE.md` - LMStudio network server setup
 
 Quickstart:
 - `afs` (shows defaults + command tree)
@@ -142,6 +145,7 @@ Agents:
 - `afs agents run context-inventory -- --path ~/src --output ~/.context/scratchpad/afs_agents/context_inventory.json`
 - `afs agents run scribe-draft -- --prompt "Draft a concise changelog."`
 - `afs agents run context-warm -- --workspace-root ~/src`
+- `python3 -m afs.agents.researcher <input_dir> <output_file>` - InfiAgent Researcher (Literature Review).
 
 Discovery skips directory names in `general.discovery_ignore` (default: legacy, archive, archives).
 

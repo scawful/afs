@@ -369,6 +369,60 @@ class QualityScorer:
         return scores
 
 
+def build_scoring_config(
+    profile: str,
+    *,
+    electra_model_path: Path | None = None,
+    enable_asar: bool = False,
+) -> ScoringConfig:
+    """Build a scoring config for common profiles."""
+    normalized = (profile or "generic").strip().lower()
+
+    if normalized in {"asm", "assembly"}:
+        weights = ScoringWeights()
+        if not enable_asar:
+            weights.asar = 0.0
+        config = ScoringConfig(
+            electra_model_path=electra_model_path,
+            weights=weights,
+            include_hardware_entities=True,
+        )
+        config.skip_asar_if_no_model = not enable_asar
+        return config
+
+    if normalized in {"dialogue", "chat", "assistant"}:
+        weights = ScoringWeights(
+            electra=0.0,
+            asar=0.0,
+            entity=0.0,
+            length=1.0,
+        )
+        config = ScoringConfig(
+            electra_model_path=None,
+            weights=weights,
+            include_hardware_entities=False,
+        )
+        config.min_output_length = 20
+        config.ideal_output_length = 200
+        config.max_output_length = 2000
+        config.skip_asar_if_no_model = True
+        return config
+
+    weights = ScoringWeights(
+        electra=0.0,
+        asar=0.0,
+        entity=0.0,
+        length=1.0,
+    )
+    config = ScoringConfig(
+        electra_model_path=None,
+        weights=weights,
+        include_hardware_entities=False,
+    )
+    config.skip_asar_if_no_model = True
+    return config
+
+
 def score_samples(
     samples: list["TrainingSample"],
     electra_path: Path | None = None,

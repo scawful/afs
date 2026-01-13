@@ -31,7 +31,15 @@ def encoder_analyze_command(args: argparse.Namespace) -> int:
     with open(input_path) as f:
         for line in f:
             if line.strip():
-                samples.append(json.loads(line))
+                sample = json.loads(line)
+                if args.field and args.field != "output":
+                    sample = dict(sample)
+                    sample["output"] = sample.get(args.field, "")
+                samples.append(sample)
+
+    if not samples:
+        print("No samples found to analyze.")
+        return 0
 
     print(f"Analyzing {len(samples)} samples...")
 
@@ -39,22 +47,32 @@ def encoder_analyze_command(args: argparse.Namespace) -> int:
     issues_count: dict[str, int] = {}
     valid_count = 0
     unk_ratios = []
+    detailed_issues: list[tuple[int, list[str]]] = []
 
-    for sample in samples:
+    for idx, sample in enumerate(samples):
         analysis = processor.analyze_sample(sample)
         if analysis["is_valid"]:
             valid_count += 1
         unk_ratios.append(analysis["output_unk_ratio"])
         for issue in analysis["issues"]:
             issues_count[issue] = issues_count.get(issue, 0) + 1
+        if analysis["issues"]:
+            detailed_issues.append((idx, analysis["issues"]))
 
     # Report
+    total = len(samples)
+    mean_unk = sum(unk_ratios) / total if total else 0.0
     print(f"\nResults:")
-    print(f"  Valid samples: {valid_count}/{len(samples)} ({100*valid_count/len(samples):.1f}%)")
-    print(f"  Mean UNK ratio: {sum(unk_ratios)/len(unk_ratios):.3f}")
+    print(f"  Valid samples: {valid_count}/{total} ({100*valid_count/total:.1f}%)")
+    print(f"  Mean UNK ratio: {mean_unk:.3f}")
     print(f"\nIssues:")
     for issue, count in sorted(issues_count.items(), key=lambda x: -x[1]):
-        print(f"  {issue}: {count} ({100*count/len(samples):.1f}%)")
+        print(f"  {issue}: {count} ({100*count/total:.1f}%)")
+
+    if args.detailed and detailed_issues:
+        print(f"\nDetailed issues (first 20):")
+        for idx, issues in detailed_issues[:20]:
+            print(f"  {idx + 1}: {', '.join(issues)}")
 
     return 0
 
@@ -70,9 +88,14 @@ def encoder_filter_command(args: argparse.Namespace) -> int:
     else:
         tokenizer = ASMTokenizer()
 
+    min_instruction_tokens = args.min_instruction_tokens
+    min_output_tokens = args.min_output_tokens
+    if args.min_tokens is not None:
+        min_output_tokens = args.min_tokens
+
     config = EncoderConfig(
-        min_instruction_tokens=getattr(args, "min_instruction_tokens", 5),
-        min_output_tokens=getattr(args, "min_output_tokens", 10),
+        min_instruction_tokens=min_instruction_tokens,
+        min_output_tokens=min_output_tokens,
         max_unk_ratio=args.max_unk_ratio,
     )
     processor = EncoderDataProcessor(config=config, tokenizer=tokenizer)
@@ -85,10 +108,26 @@ def encoder_filter_command(args: argparse.Namespace) -> int:
             if line.strip():
                 samples.append(json.loads(line))
 
+    if not samples:
+        print("No samples found to filter.")
+        return 0
+
     print(f"Filtering {len(samples)} samples...")
 
     # Filter
-    passed, failed = processor.filter_by_quality(samples, verbose=True)
+    passed = []
+    failed = []
+    for sample in samples:
+        analysis = processor.analyze_sample(sample)
+        issues = list(analysis["issues"])
+        if args.max_tokens is not None and analysis["output_tokens"] > args.max_tokens:
+            issues.append("output_too_long")
+
+        if issues:
+            sample["_quality_issues"] = issues
+            failed.append(sample)
+        else:
+            passed.append(sample)
 
     # Save passed
     output_path = Path(args.output)
@@ -141,8 +180,10 @@ def encoder_dedupe_command(args: argparse.Namespace) -> int:
         for sample in deduped:
             f.write(json.dumps(sample) + "\n")
 
-    removed = len(samples) - len(deduped)
-    print(f"Kept: {len(deduped)}, Removed: {removed} ({100*removed/len(samples):.1f}% duplicates)")
+    total = len(samples)
+    removed = total - len(deduped)
+    removed_pct = (100 * removed / total) if total else 0.0
+    print(f"Kept: {len(deduped)}, Removed: {removed} ({removed_pct:.1f}% duplicates)")
     print(f"Saved to {output_path}")
 
     return 0
@@ -159,7 +200,7 @@ def encoder_sample_command(args: argparse.Namespace) -> int:
     else:
         tokenizer = ASMTokenizer()
 
-    config = EncoderConfig(num_clusters=args.clusters)
+    config = EncoderConfig(num_clusters=args.clusters, random_seed=args.seed)
     processor = EncoderDataProcessor(config=config, tokenizer=tokenizer)
 
     # Load samples
@@ -212,6 +253,9 @@ def encoder_pipeline_command(args: argparse.Namespace) -> int:
             if line.strip():
                 samples.append(json.loads(line))
     print(f"  Loaded {len(samples)} samples from {input_path}")
+    if not samples:
+        print("No samples loaded; aborting pipeline.")
+        return 1
 
     # Step 2: Expand vocabulary
     if not getattr(args, "skip_vocab_expansion", False):
@@ -269,7 +313,8 @@ def encoder_pipeline_command(args: argparse.Namespace) -> int:
     print("Pipeline Complete")
     print("=" * 60)
     print(f"  Input:    {len(samples)} samples")
-    print(f"  Output:   {len(final)} samples ({100*len(final)/len(samples):.1f}% retained)")
+    retained_pct = 100 * len(final) / len(samples) if samples else 0.0
+    print(f"  Output:   {len(final)} samples ({retained_pct:.1f}% retained)")
     print(f"  Cleaned:  {cleaned_path}")
     print(f"  Rejected: {rejected_path}")
     print(f"  Tokenizer: {output_dir / 'tokenizer'}")
@@ -399,7 +444,21 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--tokenizer", help="Path to tokenizer."
     )
     enc_filter.add_argument(
-        "--min-tokens", type=int, help="Minimum tokens to keep sample."
+        "--min-instruction-tokens",
+        type=int,
+        default=5,
+        help="Minimum instruction tokens (default: 5).",
+    )
+    enc_filter.add_argument(
+        "--min-output-tokens",
+        type=int,
+        default=10,
+        help="Minimum output tokens (default: 10).",
+    )
+    enc_filter.add_argument(
+        "--min-tokens",
+        type=int,
+        help="Alias for --min-output-tokens.",
     )
     enc_filter.add_argument(
         "--max-tokens", type=int, help="Maximum tokens to keep sample."

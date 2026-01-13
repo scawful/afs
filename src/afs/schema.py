@@ -287,6 +287,25 @@ class ServicesConfig:
 
 
 @dataclass
+class HistoryConfig:
+    enabled: bool = True
+    include_payloads: bool = True
+    max_inline_chars: int = 4000
+    payload_dir_name: str = "payloads"
+    redact_sensitive: bool = True
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "HistoryConfig":
+        return cls(
+            enabled=bool(data.get("enabled", True)),
+            include_payloads=bool(data.get("include_payloads", True)),
+            max_inline_chars=int(data.get("max_inline_chars", cls().max_inline_chars)),
+            payload_dir_name=str(data.get("payload_dir_name", cls().payload_dir_name)),
+            redact_sensitive=bool(data.get("redact_sensitive", True)),
+        )
+
+
+@dataclass
 class MemoryExportConfig:
     interval_seconds: int = 0
     dataset_output: Path = field(
@@ -294,8 +313,13 @@ class MemoryExportConfig:
     )
     report_output: Path | None = None
     allow_raw: bool = False
+    allow_raw_tags: list[str] = field(default_factory=lambda: ["allow_raw"])
     default_instruction: str = "Recall the following memory entry."
     limit: int = 0
+    require_quality: bool = True
+    min_quality_score: float = 0.5
+    score_profile: str = "generic"
+    enable_asar: bool = False
     auto_start: bool = False
     routes: list["MemoryExportRoute"] = field(default_factory=list)
 
@@ -305,8 +329,13 @@ class MemoryExportConfig:
         dataset_output = data.get("dataset_output", cls().dataset_output)
         report_output = data.get("report_output")
         allow_raw = data.get("allow_raw", cls().allow_raw)
+        allow_raw_tags = data.get("allow_raw_tags", cls().allow_raw_tags)
         default_instruction = data.get("default_instruction", cls().default_instruction)
         limit = data.get("limit", cls().limit)
+        require_quality = data.get("require_quality", cls().require_quality)
+        min_quality_score = data.get("min_quality_score", cls().min_quality_score)
+        score_profile = data.get("score_profile", cls().score_profile)
+        enable_asar = data.get("enable_asar", cls().enable_asar)
         auto_start = data.get("auto_start", cls().auto_start)
         routes = data.get("routes")
         parsed_routes: list[MemoryExportRoute] = []
@@ -327,10 +356,19 @@ class MemoryExportConfig:
             if isinstance(report_output, (str, Path))
             else None,
             allow_raw=bool(allow_raw),
+            allow_raw_tags=[str(tag) for tag in allow_raw_tags if isinstance(tag, str)],
             default_instruction=str(default_instruction)
             if isinstance(default_instruction, str)
             else cls().default_instruction,
             limit=int(limit) if isinstance(limit, (int, float)) else cls().limit,
+            require_quality=bool(require_quality),
+            min_quality_score=float(min_quality_score)
+            if isinstance(min_quality_score, (int, float))
+            else cls().min_quality_score,
+            score_profile=str(score_profile)
+            if isinstance(score_profile, str)
+            else cls().score_profile,
+            enable_asar=bool(enable_asar),
             auto_start=bool(auto_start),
             routes=parsed_routes,
         )
@@ -398,6 +436,7 @@ class AFSConfig:
     cognitive: CognitiveConfig = field(default_factory=CognitiveConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     services: ServicesConfig = field(default_factory=ServicesConfig)
+    history: HistoryConfig = field(default_factory=HistoryConfig)
     memory_export: MemoryExportConfig = field(default_factory=MemoryExportConfig)
 
     @classmethod
@@ -409,6 +448,7 @@ class AFSConfig:
         cognitive = CognitiveConfig.from_dict(data.get("cognitive", {}))
         orchestrator = OrchestratorConfig.from_dict(data.get("orchestrator", {}))
         services = ServicesConfig.from_dict(data.get("services", {}))
+        history = HistoryConfig.from_dict(data.get("history", {}))
         memory_export = MemoryExportConfig.from_dict(data.get("memory_export", {}))
         return cls(
             general=general,
@@ -417,6 +457,7 @@ class AFSConfig:
             cognitive=cognitive,
             orchestrator=orchestrator,
             services=services,
+            history=history,
             memory_export=memory_export,
         )
 

@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .manager import AFSManager
+from .history import log_event
 from .models import MountType
 from .policy import PolicyEnforcer
 
@@ -102,7 +103,20 @@ class ContextFileSystem:
             raise FileNotFoundError(f"Path not found: {target}")
         if target.is_dir():
             raise IsADirectoryError(f"Path is a directory: {target}")
-        return target.read_text(encoding=encoding, errors=errors)
+        content = target.read_text(encoding=encoding, errors=errors)
+        log_event(
+            "fs",
+            "afs.context_fs",
+            op="read",
+            metadata={
+                "mount_type": mount_type.value,
+                "relative_path": relative_path,
+                "context_path": str(self._context_path),
+                "encoding": encoding,
+            },
+            payload={"content": content},
+        )
+        return content
 
     def write_text(
         self,
@@ -127,6 +141,20 @@ class ContextFileSystem:
         mode = "a" if append else "w"
         with target.open(mode, encoding=encoding) as handle:
             handle.write(content)
+        log_event(
+            "fs",
+            "afs.context_fs",
+            op="write",
+            metadata={
+                "mount_type": mount_type.value,
+                "relative_path": relative_path,
+                "context_path": str(self._context_path),
+                "encoding": encoding,
+                "append": append,
+                "mkdirs": mkdirs,
+            },
+            payload={"content": content},
+        )
         return target
 
     def stat_entry(

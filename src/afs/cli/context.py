@@ -251,6 +251,32 @@ def context_report_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def context_protect_command(args: argparse.Namespace) -> int:
+    """Protect a path (manual only)."""
+    config_path = Path(args.config) if args.config else None
+    manager = load_manager(config_path)
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+        args, manager
+    )
+    metadata = manager.protect(args.path_to_protect, context_path=context_path)
+    print(f"protected: {args.path_to_protect}")
+    print(f"manual_only: {', '.join(metadata.manual_only)}")
+    return 0
+
+
+def context_unprotect_command(args: argparse.Namespace) -> int:
+    """Unprotect a path."""
+    config_path = Path(args.config) if args.config else None
+    manager = load_manager(config_path)
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+        args, manager
+    )
+    metadata = manager.unprotect(args.path_to_unprotect, context_path=context_path)
+    print(f"unprotected: {args.path_to_unprotect}")
+    print(f"manual_only: {', '.join(metadata.manual_only)}")
+    return 0
+
+
 def context_ensure_all_command(args: argparse.Namespace) -> int:
     """Ensure contexts for all discovered projects."""
     from ..config import load_config_model
@@ -522,6 +548,18 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     ctx_ensure_all.add_argument("--ignore", action="append", help="Directories to ignore.")
     ctx_ensure_all.add_argument("--dry-run", action="store_true", help="Show what would be done.")
     ctx_ensure_all.set_defaults(func=context_ensure_all_command)
+
+    # context protect
+    ctx_protect = context_sub.add_parser("protect", help="Protect a path (manual only).")
+    add_context_args(ctx_protect)
+    ctx_protect.add_argument("path_to_protect", help="Path to protect.")
+    ctx_protect.set_defaults(func=context_protect_command)
+
+    # context unprotect
+    ctx_unprotect = context_sub.add_parser("unprotect", help="Unprotect a path.")
+    add_context_args(ctx_unprotect)
+    ctx_unprotect.add_argument("path_to_unprotect", help="Path to unprotect.")
+    ctx_unprotect.set_defaults(func=context_unprotect_command)
 
     # graph
     graph_parser = subparsers.add_parser("graph", help="Project graph operations.")

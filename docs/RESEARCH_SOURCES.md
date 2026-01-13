@@ -51,3 +51,10 @@ excerpts are auto-extracted; verify against the PDFs before quoting.
 - Authors (metadata): Unknown / not present in PDF metadata
 - Abstract excerpt (auto-extracted, truncated): We introduce a novel Bayesian Item Response Theory framework to quantify human-AI synergy, separating individual and collaborative ability while controlling for task difficulty in interactive settings... We validate the framework by applying it to human-AI benchmark data and find significant synergy...
 - Used in: `docs/TRAINING_PLAN.md`
+
+## R8 — InfiAgent: An Infinite-Horizon Framework for General-Purpose Autonomous Agents
+- File: `/Users/scawful/Documents/Research/2601.03204.pdf`
+- Title (metadata): InfiAgent: An Infinite-Horizon Framework for General-Purpose Autonomous Agents
+- Authors (metadata): Chenglin Yu; Yuchen Wang; Songmiao Wang; Hongxia Yang; Ming Li
+- Abstract excerpt (auto-extracted, truncated): LLM agents can reason and use tools, but they often break down on long-horizon tasks due to unbounded context growth... We present InfiAgent, a general-purpose framework that keeps the agent’s reasoning context strictly bounded regardless of task duration by externalizing persistent state into a file-centric state abstraction...
+- Used in: `docs/RESEARCH_INFIAGENT.md`

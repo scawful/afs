@@ -40,6 +40,7 @@ class ProjectMetadata:
     description: str = ""
     agents: list[str] = field(default_factory=list)
     directories: dict[str, str] = field(default_factory=dict)
+    manual_only: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ProjectMetadata":
@@ -51,6 +52,7 @@ class ProjectMetadata:
             created_at = datetime.now().isoformat()
         description = data.get("description") if isinstance(data.get("description"), str) else ""
         agents = [agent for agent in data.get("agents", []) if isinstance(agent, str)]
+        manual_only = [p for p in data.get("manual_only", []) if isinstance(p, str)]
         directories: dict[str, str] = {}
         raw_dirs = data.get("directories")
         if isinstance(raw_dirs, dict):
@@ -61,6 +63,7 @@ class ProjectMetadata:
             description=description,
             agents=agents,
             directories=directories,
+            manual_only=manual_only,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -69,6 +72,7 @@ class ProjectMetadata:
             "description": self.description,
             "agents": list(self.agents),
             "directories": dict(self.directories),
+            "manual_only": list(self.manual_only),
         }
 
 

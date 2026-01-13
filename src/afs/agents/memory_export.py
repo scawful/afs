@@ -94,8 +94,13 @@ def _run_export(args: argparse.Namespace, config) -> AgentResult:
         dataset_output,
         default_domain=args.domain,
         allow_raw=args.allow_raw or config.memory_export.allow_raw,
+        allow_raw_tags=config.memory_export.allow_raw_tags,
         default_instruction=args.default_instruction or config.memory_export.default_instruction,
         limit=_resolve_limit(args, config),
+        require_quality=config.memory_export.require_quality,
+        min_quality_score=config.memory_export.min_quality_score,
+        score_profile=config.memory_export.score_profile,
+        enable_asar=config.memory_export.enable_asar,
     )
     route_results = []
     for route in config.memory_export.routes:
@@ -107,15 +112,21 @@ def _run_export(args: argparse.Namespace, config) -> AgentResult:
             route_output,
             default_domain=route.domain or args.domain,
             allow_raw=args.allow_raw or config.memory_export.allow_raw,
+            allow_raw_tags=config.memory_export.allow_raw_tags,
             default_instruction=args.default_instruction or config.memory_export.default_instruction,
             include_tags=route.tags,
             limit=_resolve_limit(args, config),
+            require_quality=config.memory_export.require_quality,
+            min_quality_score=config.memory_export.min_quality_score,
+            score_profile=config.memory_export.score_profile,
+            enable_asar=config.memory_export.enable_asar,
         )
         route_results.append({
             "tags": list(route.tags),
             "output": str(route_output),
             "exported": route_result.exported,
             "skipped": route_result.skipped,
+            "filtered": route_result.filtered,
         })
     duration = time.monotonic() - start
 
@@ -129,6 +140,7 @@ def _run_export(args: argparse.Namespace, config) -> AgentResult:
             "total_entries": export_result.total_entries,
             "exported": export_result.exported,
             "skipped": export_result.skipped,
+            "filtered": export_result.filtered,
             "errors": len(export_result.errors),
         },
         notes=export_result.errors[:5],

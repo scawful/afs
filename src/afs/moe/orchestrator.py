@@ -28,6 +28,7 @@ from typing import Any, Callable
 from google import genai
 from google.genai import types
 
+from ..history import log_event
 from .router import MoERouter, RouterConfig
 from .classifier import QueryIntent
 
@@ -348,7 +349,7 @@ class Orchestrator:
             if verbose:
                 logger.info(f"Step {i}: {step.tool.value} - {step.description}")
 
-            result = await self._execute_step(step, step_outputs)
+            result = await self._execute_step(step, step_outputs, step_index=i)
             result.step_index = i  # Set correct step index
             results.append(result)
 
@@ -382,6 +383,7 @@ class Orchestrator:
         self,
         step: PlanStep,
         previous_outputs: dict[int, str],
+        step_index: int,
     ) -> StepResult:
         """Execute a single plan step."""
 
@@ -406,6 +408,23 @@ class Orchestrator:
                     error=f"Tool {step.tool.value} not implemented",
                 )
 
+            log_event(
+                "tool",
+                "afs.orchestrator",
+                op="execute",
+                metadata={
+                    "tool": step.tool.value,
+                    "description": step.description,
+                    "depends_on": step.depends_on,
+                    "step_index": step_index,
+                    "success": True,
+                },
+                payload={
+                    "input": input_data,
+                    "output": output,
+                },
+            )
+
             return StepResult(
                 step_index=-1,  # Set by caller
                 tool=step.tool,
@@ -415,6 +434,22 @@ class Orchestrator:
 
         except Exception as e:
             logger.error(f"Step execution failed: {e}")
+            log_event(
+                "tool",
+                "afs.orchestrator",
+                op="execute",
+                metadata={
+                    "tool": step.tool.value,
+                    "description": step.description,
+                    "depends_on": step.depends_on,
+                    "step_index": step_index,
+                    "success": False,
+                },
+                payload={
+                    "input": step.input_data,
+                    "error": str(e),
+                },
+            )
             return StepResult(
                 step_index=-1,  # Set by caller
                 tool=step.tool,
@@ -488,11 +523,13 @@ class Orchestrator:
             return result.content
 
         # Try local Ollama first, fallback to Gemini
+        import os
         import httpx
-        host = "http://localhost:11435"
+        host = os.environ.get("AFS_OLLAMA_HOST", "http://localhost:11435")
+        timeout = float(os.environ.get("AFS_OLLAMA_TIMEOUT", "120"))
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     f"{host}/api/generate",
                     json={

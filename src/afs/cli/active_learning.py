@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 from pathlib import Path
 
 
@@ -12,6 +13,10 @@ def active_learning_sample_command(args: argparse.Namespace) -> int:
     from ..generators.base import TrainingSample
     from ..active_learning import UncertaintySampler
     from ..training.scoring import QualityScorer, ScoringConfig
+
+    if args.n <= 0:
+        print("Number of samples (--n) must be greater than 0.")
+        return 1
 
     # Load samples
     samples = []
@@ -22,24 +27,48 @@ def active_learning_sample_command(args: argparse.Namespace) -> int:
 
     print(f"Loaded {len(samples)} samples")
 
-    # Score if needed
-    config = ScoringConfig()
-    if args.electra:
-        config.electra_model_path = Path(args.electra)
-    scorer = QualityScorer(config=config)
-    scorer.score_batch(samples, update_samples=True)
+    if not samples:
+        print("No samples available for sampling.")
+        return 0
 
     # Sample
-    sampler = UncertaintySampler()
-    selected = sampler.sample(samples, args.n, scorer=None)  # Already scored
+    if args.strategy == "uncertainty":
+        config = ScoringConfig()
+        if args.electra:
+            config.electra_model_path = Path(args.electra)
+        scorer = QualityScorer(config=config)
+        scorer.score_batch(samples, update_samples=True)
 
-    print(f"Selected {len(selected)} samples by uncertainty")
+        sampler = UncertaintySampler()
+        selected = sampler.sample(samples, args.n, scorer=None)  # Already scored
 
-    # Show distribution
-    dist = sampler.get_uncertainty_distribution(samples)
-    print(f"\nUncertainty distribution (all samples):")
-    for level, count in dist.items():
-        print(f"  {level}: {count}")
+        print(f"Selected {len(selected)} samples by uncertainty")
+
+        # Show distribution
+        dist = sampler.get_uncertainty_distribution(samples)
+        print(f"\nUncertainty distribution (all samples):")
+        for level, count in dist.items():
+            print(f"  {level}: {count}")
+    elif args.strategy == "random":
+        if args.n >= len(samples):
+            selected = list(samples)
+        else:
+            selected = random.sample(samples, args.n)
+        print(f"Selected {len(selected)} samples by random sampling")
+    elif args.strategy == "diverse":
+        from ..training import EncoderConfig, EncoderDataProcessor
+
+        processor = EncoderDataProcessor(config=EncoderConfig())
+        selected_dicts = processor.sample_diverse(
+            [sample.to_dict() for sample in samples],
+            n_samples=min(args.n, len(samples)),
+            field="output",
+        )
+        selected = [TrainingSample.from_dict(item) for item in selected_dicts]
+        print(f"Selected {len(selected)} samples by diversity sampling")
+    else:
+        print(f"Unknown strategy: {args.strategy}")
+        return 1
 
     # Save if output specified
     if args.output:
@@ -86,6 +115,10 @@ def active_learning_curriculum_command(args: argparse.Namespace) -> int:
         return 0
 
     # Get samples for specific stage
+    if not args.stage:
+        print("Error: --stage is required unless --plan is specified.")
+        return 1
+
     stage = CurriculumStage(args.stage)
     stage_samples = manager.get_samples_for_stage(samples, stage)
 

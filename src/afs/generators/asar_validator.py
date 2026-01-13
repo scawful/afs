@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -94,6 +95,9 @@ class AsarValidatorConfig:
     # ROM mapping mode for asar
     # lorom, hirom, exlorom, exhirom, sa1rom, sfxrom, norom
     mapping: str = "lorom"
+
+    # Optional base ROM to patch (copied into temp workspace)
+    base_rom_path: Path | None = None
 
     # Include paths for asar
     include_paths: list[Path] = field(default_factory=list)
@@ -258,6 +262,9 @@ class AsarValidator:
         else:
             header = MINIMAL_HEADER
 
+        if self.config.mapping:
+            header = self._apply_mapping(header)
+
         # If code has its own ORG, use minimal header without ORG
         if has_org:
             header = re.sub(r"org \$[0-9A-Fa-f]+\s*\n?", "", header)
@@ -269,6 +276,23 @@ class AsarValidator:
         content += "\n; === End Sample ===\n"
 
         return content
+
+    def _apply_mapping(self, header: str) -> str:
+        """Ensure the header contains the configured mapping directive."""
+        mapping = (self.config.mapping or "").strip()
+        if not mapping:
+            return header
+
+        pattern = r"^(lorom|hirom|exlorom|exhirom|sa1rom|sfxrom|norom)\s*$"
+        if re.search(pattern, header, flags=re.IGNORECASE | re.MULTILINE):
+            return re.sub(pattern, mapping, header, flags=re.IGNORECASE | re.MULTILINE)
+
+        lines = header.splitlines()
+        insert_at = 0
+        while insert_at < len(lines) and lines[insert_at].strip().startswith(";"):
+            insert_at += 1
+        lines.insert(insert_at, mapping)
+        return "\n".join(lines) + ("\n" if header.endswith("\n") else "")
 
     def _extract_asm_blocks(self, text: str) -> list[str]:
         """Extract assembly code blocks from text.
@@ -329,6 +353,8 @@ class AsarValidator:
         rom_file = temp_dir / f"{sample.sample_id}.sfc"
 
         try:
+            if self.config.base_rom_path:
+                shutil.copy(self.config.base_rom_path, rom_file)
             asm_file.write_text(asm_content, encoding="utf-8")
         except Exception as e:
             return ValidationResult(
@@ -429,6 +455,7 @@ class AsarValidator:
         input_path: Path,
         output_pass_path: Path | None = None,
         output_fail_path: Path | None = None,
+        workers: int | None = None,
     ) -> tuple[ValidationStats, list[TrainingSample], list[TrainingSample]]:
         """Validate all samples in a JSONL file.
 
@@ -436,6 +463,7 @@ class AsarValidator:
             input_path: Path to input JSONL file
             output_pass_path: Path to write passing samples (optional)
             output_fail_path: Path to write failing samples (optional)
+            workers: Number of parallel workers (optional)
 
         Returns:
             Tuple of (stats, passed_samples, failed_samples)
@@ -446,27 +474,55 @@ class AsarValidator:
         passed_samples: list[TrainingSample] = []
         failed_samples: list[TrainingSample] = []
 
-        for i, sample in enumerate(samples):
-            try:
-                result = self.validate_sample(sample)
+        worker_count = max(1, workers or 1)
+        if worker_count > 1:
+            self._get_temp_dir()
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_map = {
+                    executor.submit(self.validate_sample, sample): (i, sample)
+                    for i, sample in enumerate(samples)
+                }
+                for future in as_completed(future_map):
+                    i, sample = future_map[future]
+                    try:
+                        result = future.result()
 
-                if "Skipped:" in result.error_message:
-                    stats.skipped += 1
-                    # Skipped samples go to failed output
-                    failed_samples.append(sample)
-                elif result.passed:
-                    stats.passed += 1
-                    passed_samples.append(sample)
-                else:
-                    stats.failed += 1
-                    # Store error info in metadata
-                    sample._metadata["validation_error"] = result.error_message
-                    sample._metadata["asar_output"] = result.asar_output
-                    failed_samples.append(sample)
+                        if "Skipped:" in result.error_message:
+                            stats.skipped += 1
+                            failed_samples.append(sample)
+                        elif result.passed:
+                            stats.passed += 1
+                            passed_samples.append(sample)
+                        else:
+                            stats.failed += 1
+                            sample._metadata["validation_error"] = result.error_message
+                            sample._metadata["asar_output"] = result.asar_output
+                            failed_samples.append(sample)
+                    except Exception as e:
+                        stats.errors.append(f"Sample {i}: {e}")
+                        failed_samples.append(sample)
+        else:
+            for i, sample in enumerate(samples):
+                try:
+                    result = self.validate_sample(sample)
 
-            except Exception as e:
-                stats.errors.append(f"Sample {i}: {e}")
-                failed_samples.append(sample)
+                    if "Skipped:" in result.error_message:
+                        stats.skipped += 1
+                        # Skipped samples go to failed output
+                        failed_samples.append(sample)
+                    elif result.passed:
+                        stats.passed += 1
+                        passed_samples.append(sample)
+                    else:
+                        stats.failed += 1
+                        # Store error info in metadata
+                        sample._metadata["validation_error"] = result.error_message
+                        sample._metadata["asar_output"] = result.asar_output
+                        failed_samples.append(sample)
+
+                except Exception as e:
+                    stats.errors.append(f"Sample {i}: {e}")
+                    failed_samples.append(sample)
 
         # Write output files
         if output_pass_path:
@@ -505,6 +561,7 @@ def validate_training_data(
     output_fail_path: Path,
     config: AsarValidatorConfig | None = None,
     verbose: bool = False,
+    workers: int | None = None,
 ) -> ValidationStats:
     """Validate training data and split into pass/fail files.
 
@@ -516,11 +573,12 @@ def validate_training_data(
         output_fail_path: Path to write failing samples
         config: Validator configuration
         verbose: Print progress information
+        workers: Number of parallel workers
 
     Returns:
         ValidationStats with results
     """
-    if not check_asar_available():
+    if not check_asar_available() and not (config and config.asar_path):
         raise FileNotFoundError(
             "asar not found. Install asar SNES assembler and ensure it's in PATH."
         )
@@ -536,6 +594,7 @@ def validate_training_data(
         input_path=input_path,
         output_pass_path=output_pass_path,
         output_fail_path=output_fail_path,
+        workers=workers,
     )
 
     if verbose:

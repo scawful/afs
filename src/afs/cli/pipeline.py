@@ -114,6 +114,13 @@ def pipeline_run_command(args: argparse.Namespace) -> int:
     # Parse input paths
     input_paths = [Path(p) for p in args.input]
 
+    if args.train_ratio <= 0 or args.val_ratio < 0:
+        print("Train ratio must be > 0 and validation ratio must be >= 0.")
+        return 1
+    if args.train_ratio + args.val_ratio >= 1.0:
+        print("Train ratio + validation ratio must be < 1.0.")
+        return 1
+
     # Build config
     config = PipelineConfig(
         input_paths=input_paths,

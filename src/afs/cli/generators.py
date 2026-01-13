@@ -147,6 +147,7 @@ def generators_clean_command(args: argparse.Namespace) -> int:
 
 def generators_validate_command(args: argparse.Namespace) -> int:
     """Validate assembly code in training samples using asar."""
+    import json
     from ..generators.asar_validator import (
         AsarValidatorConfig,
         check_asar_available,
@@ -158,7 +159,12 @@ def generators_validate_command(args: argparse.Namespace) -> int:
         print(f"Input file not found: {input_path}")
         return 1
 
-    if not check_asar_available():
+    asar_path = Path(args.asar_path).expanduser().resolve() if args.asar_path else None
+    if asar_path and not asar_path.is_file():
+        print(f"Error: asar not found at {asar_path}")
+        return 1
+
+    if not asar_path and not check_asar_available():
         print("Error: asar not found. Install asar SNES assembler and ensure it's in PATH.")
         print("  - macOS: brew install asar (if available) or build from source")
         print("  - Linux: build from source at https://github.com/RPGHacker/asar")
@@ -176,19 +182,31 @@ def generators_validate_command(args: argparse.Namespace) -> int:
     else:
         output_fail_path = input_path.parent / f"{input_path.stem}_invalid.jsonl"
 
+    base_rom = Path(args.base_rom).expanduser().resolve() if args.base_rom else None
+    if base_rom and not base_rom.is_file():
+        print(f"Error: base ROM not found at {base_rom}")
+        return 1
+
     # Build config
     config = AsarValidatorConfig(
-        asar_path=args.asar_path if hasattr(args, 'asar_path') else None,
-        include_alttp_context=not getattr(args, 'no_alttp_context', False),
-        min_output_length=getattr(args, 'min_length', 10),
-        keep_temp_files=getattr(args, 'keep_temp', False),
+        asar_path=str(asar_path) if asar_path else None,
+        include_alttp_context=not getattr(args, "no_alttp_context", False),
+        min_output_length=getattr(args, "min_length", 10),
+        keep_temp_files=getattr(args, "keep_temp", False),
         timeout=args.timeout,
     )
+    if args.workers is not None and args.workers <= 0:
+        print("Error: --workers must be >= 1")
+        return 1
+    if getattr(args, "mapping", None):
+        config.mapping = args.mapping
+    if base_rom:
+        config.base_rom_path = base_rom
 
-    if hasattr(args, 'include_path') and args.include_path:
+    if hasattr(args, "include_path") and args.include_path:
         config.include_paths = [Path(p).expanduser().resolve() for p in args.include_path]
 
-    if hasattr(args, 'skip_domain') and args.skip_domain:
+    if hasattr(args, "skip_domain") and args.skip_domain:
         config.skip_domains = list(args.skip_domain)
 
     print(f"Input: {input_path}")
@@ -202,6 +220,7 @@ def generators_validate_command(args: argparse.Namespace) -> int:
         output_fail_path=output_fail_path,
         config=config,
         verbose=True,
+        workers=args.workers,
     )
 
     print()
@@ -214,6 +233,24 @@ def generators_validate_command(args: argparse.Namespace) -> int:
             print(f"  - {error}")
         if len(stats.errors) > 10:
             print(f"  ... and {len(stats.errors) - 10} more")
+
+    if args.stats_output:
+        stats_payload = {
+            "total": stats.total,
+            "passed": stats.passed,
+            "failed": stats.failed,
+            "skipped": stats.skipped,
+            "pass_rate": stats.pass_rate,
+            "skip_rate": stats.skip_rate,
+            "errors": stats.errors,
+        }
+        stats_path = Path(args.stats_output).expanduser().resolve()
+        stats_path.parent.mkdir(parents=True, exist_ok=True)
+        stats_path.write_text(
+            json.dumps(stats_payload, indent=2, ensure_ascii=True) + "\n",
+            encoding="utf-8",
+        )
+        print(f"Stats written to: {stats_path}")
 
     return 0
 
@@ -353,6 +390,40 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     gen_validate.add_argument(
         "--invalid-output", help="Output JSONL path for invalid samples."
+    )
+    gen_validate.add_argument(
+        "--asar-path", help="Path to asar executable."
+    )
+    gen_validate.add_argument(
+        "--include-path",
+        action="append",
+        help="Include path(s) for asar (repeatable).",
+    )
+    gen_validate.add_argument(
+        "--skip-domain",
+        action="append",
+        help="Skip samples in these domains (repeatable).",
+    )
+    gen_validate.add_argument(
+        "--mapping",
+        choices=["lorom", "hirom", "exlorom", "exhirom", "sa1rom", "sfxrom", "norom"],
+        help="Asar ROM mapping mode.",
+    )
+    gen_validate.add_argument(
+        "--min-length",
+        type=int,
+        default=10,
+        help="Minimum output length to validate (default: 10).",
+    )
+    gen_validate.add_argument(
+        "--no-alttp-context",
+        action="store_true",
+        help="Disable ALTTP-specific include context.",
+    )
+    gen_validate.add_argument(
+        "--keep-temp",
+        action="store_true",
+        help="Keep temp files for debugging.",
     )
     gen_validate.add_argument(
         "--stats-output", help="Output JSON path for validation statistics."

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import load_config_model
+from .history import log_event
 from .mapping import resolve_directory_map, resolve_directory_name
 from .models import ContextRoot, MountPoint, MountType, ProjectMetadata
 from .schema import AFSConfig, DirectoryConfig
@@ -152,6 +153,18 @@ class AFSManager:
             )
 
         destination.symlink_to(source)
+        log_event(
+            "context",
+            "afs.manager",
+            op="mount",
+            metadata={
+                "mount_type": mount_type.value,
+                "alias": alias,
+                "context_path": str(context_path),
+                "source": str(source),
+                "destination": str(destination),
+            },
+        )
         return MountPoint(
             name=alias,
             source=source,
@@ -177,6 +190,17 @@ class AFSManager:
         mount_path = context_path / directory_name / alias
         if mount_path.exists() or mount_path.is_symlink():
             mount_path.unlink()
+            log_event(
+                "context",
+                "afs.manager",
+                op="unmount",
+                metadata={
+                    "mount_type": mount_type.value,
+                    "alias": alias,
+                    "context_path": str(context_path),
+                    "mount_path": str(mount_path),
+                },
+            )
             return True
         return False
 
@@ -261,6 +285,42 @@ class AFSManager:
             metadata.agents = agents
 
         self._write_metadata(metadata_path, metadata)
+        return metadata
+
+    def protect(
+        self,
+        path_str: str,
+        context_path: Optional[Path] = None,
+    ) -> ProjectMetadata:
+        if context_path is None:
+            context_path = Path(".") / self.CONTEXT_DIR_DEFAULT
+
+        metadata_path = context_path / self.METADATA_FILE
+        if not metadata_path.exists():
+            raise FileNotFoundError("No AFS initialized")
+
+        metadata = self._load_metadata(context_path) or ProjectMetadata()
+        if path_str not in metadata.manual_only:
+            metadata.manual_only.append(path_str)
+            self._write_metadata(metadata_path, metadata)
+        return metadata
+
+    def unprotect(
+        self,
+        path_str: str,
+        context_path: Optional[Path] = None,
+    ) -> ProjectMetadata:
+        if context_path is None:
+            context_path = Path(".") / self.CONTEXT_DIR_DEFAULT
+
+        metadata_path = context_path / self.METADATA_FILE
+        if not metadata_path.exists():
+            raise FileNotFoundError("No AFS initialized")
+
+        metadata = self._load_metadata(context_path) or ProjectMetadata()
+        if path_str in metadata.manual_only:
+            metadata.manual_only.remove(path_str)
+            self._write_metadata(metadata_path, metadata)
         return metadata
 
     def _ensure_context_dirs(self, context_path: Path) -> None:
