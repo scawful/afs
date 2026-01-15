@@ -67,9 +67,18 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     # Load model in 4-bit for memory efficiency
+    from transformers import BitsAndBytesConfig
+
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True
+    )
+
     model = AutoModelForCausalLM.from_pretrained(
         args.base_model,
-        load_in_4bit=True,
+        quantization_config=bnb_config,
         torch_dtype=torch.float16,
         device_map="auto",
         trust_remote_code=True
