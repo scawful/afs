@@ -65,7 +65,7 @@ async def run_research_task(
     output_file: Path,
     query: str,
     glob_pattern: str = "*.pdf",
-    model: str = "gemini-2.5-flash-preview"
+    model: str = "gemini-3-flash-preview"
 ):
     """Run the research loop."""
     if not input_dir.exists():
@@ -119,7 +119,7 @@ async def main():
     parser.add_argument("output_file", help="Path to the markdown report file")
     parser.add_argument("--query", default="Summarize the key findings.", help="Research query")
     parser.add_argument("--glob", default="*.txt", help="File pattern (e.g. *.md, *.txt)")
-    parser.add_argument("--model", default="gemini-2.5-flash-preview", help="Model to use")
+    parser.add_argument("--model", default="gemini-3-flash-preview", help="Model to use")
     
     args = parser.parse_args()
     
