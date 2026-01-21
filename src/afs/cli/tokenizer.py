@@ -74,7 +74,7 @@ def tokenizer_train_command(args: argparse.Namespace) -> int:
     # Show unknown tokens if requested
     if args.show_unknowns:
         unknowns = tokenizer.get_unknown_tokens()
-        print(f"\nTop unknown tokens (not added):")
+        print("\nTop unknown tokens (not added):")
         for token, count in list(unknowns.items())[:20]:
             print(f"  {token}: {count}")
 
@@ -129,7 +129,7 @@ def tokenizer_info_command(args: argparse.Namespace) -> int:
     print(f"Vocab size: {len(tokenizer)}")
     print(f"Max length: {tokenizer.max_length}")
     print(f"Split addresses: {tokenizer.split_addresses}")
-    print(f"\nSpecial tokens:")
+    print("\nSpecial tokens:")
     for name, token in tokenizer.special_tokens_map.items():
         token_id = tokenizer.convert_tokens_to_ids(token)
         print(f"  {name}: {token} (id={token_id})")

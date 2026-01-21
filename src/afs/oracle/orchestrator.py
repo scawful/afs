@@ -6,14 +6,12 @@ task analysis and manages multi-expert pipelines.
 
 import asyncio
 import logging
-import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
 
 from ..agent import AgentHarness, HarnessConfig
-from .tools import ORACLE_TOOLS, OracleTools, execute_tool
+from .tools import OracleTools
 
 logger = logging.getLogger(__name__)
 
@@ -331,7 +329,8 @@ class TriforceOrchestrator:
             ExpertResult with response
         """
         import time
-        from ..agent.models import ModelConfig, ModelProvider
+
+        from ..agent.models import ModelConfig
 
         # Build full prompt with context
         full_prompt = prompt
@@ -449,7 +448,7 @@ class TriforceOrchestrator:
         analysis = self.analyze_task(task)
 
         if self.verbose:
-            logger.info(f"Task analysis:")
+            logger.info("Task analysis:")
             logger.info(f"  Type: {analysis.task_type.value}")
             logger.info(f"  Primary: {analysis.primary_expert.name}")
             logger.info(f"  Pipeline: {[e.name for e in analysis.pipeline]}")

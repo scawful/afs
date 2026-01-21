@@ -6,7 +6,6 @@ import argparse
 import json
 from pathlib import Path
 
-
 # =============================================================================
 # Scoring Commands
 # =============================================================================
@@ -14,7 +13,7 @@ from pathlib import Path
 
 def scoring_score_command(args: argparse.Namespace) -> int:
     """Score training samples."""
-    from ..training.scoring import score_jsonl, ScoringWeights
+    from ..training.scoring import ScoringWeights, score_jsonl
 
     input_path = Path(args.input)
     output_path = Path(args.output)
@@ -40,7 +39,7 @@ def scoring_score_command(args: argparse.Namespace) -> int:
         min_score=getattr(args, "min_score", None),
     )
 
-    print(f"\nScoring Complete")
+    print("\nScoring Complete")
     print(f"  Input: {stats['input_count']} samples")
     print(f"  Output: {stats['output_count']} samples")
     if getattr(args, "min_score", None):
@@ -75,26 +74,26 @@ def scoring_analyze_command(args: argparse.Namespace) -> int:
 
     analysis = analyze_scores(scores)
 
-    print(f"\nScore Analysis")
+    print("Score Analysis")
     print("=" * 60)
     print(f"  Total samples: {analysis['count']}")
-    print(f"\nOverall Score:")
+    print("\nOverall Score:")
     print(f"  Mean: {analysis['overall']['mean']:.3f}")
     print(f"  Min:  {analysis['overall']['min']:.3f}")
     print(f"  Max:  {analysis['overall']['max']:.3f}")
 
     if args.histogram:
-        print(f"\n  Distribution:")
+        print("\n  Distribution:")
         for bucket, count in sorted(analysis['overall']['histogram'].items()):
             bar = "#" * (count * 40 // len(samples)) if samples else ""
             print(f"    {bucket}: {count:4} {bar}")
 
-    print(f"\nComponent Scores:")
+    print("\nComponent Scores:")
     print(f"  ELECTRA mean: {analysis['electra']['mean']:.3f}")
     print(f"  Entity coverage mean: {analysis['entity_coverage']['mean']:.3f}")
     print(f"  Asar pass rate: {100 * analysis['asar_pass_rate']:.1f}%")
 
-    print(f"\nEntity Stats:")
+    print("\nEntity Stats:")
     print(f"  Total entities: {analysis['entity_stats']['total_entities']}")
     print(f"  Known entities: {analysis['entity_stats']['known_entities']}")
 
@@ -109,7 +108,6 @@ def scoring_analyze_command(args: argparse.Namespace) -> int:
 def pipeline_run_command(args: argparse.Namespace) -> int:
     """Run the full data pipeline."""
     from ..training.pipeline import DataPipeline, PipelineConfig
-    from ..training.scoring import ScoringWeights
 
     # Parse input paths
     input_paths = [Path(p) for p in args.input]
@@ -179,15 +177,15 @@ def pipeline_status_command(args: argparse.Namespace) -> int:
     print(f"  Filtered: {result['filtered_count']}")
     print(f"  Augmented: {result['augmented_count']}")
     print(f"  Deduped: {result['dedupe_removed']}")
-    print(f"\nQuality:")
+    print("\nQuality:")
     print(f"  Mean score: {result['mean_quality_score']:.3f}")
     print(f"  Range: {result['min_quality_score']:.3f} - {result['max_quality_score']:.3f}")
-    print(f"\nEntities:")
+    print("\nEntities:")
     print(f"  Total: {result['total_entities']}")
     print(f"  Known: {result['known_entities']}")
     print(f"  Coverage: {100 * result['entity_coverage']:.1f}%")
     print(f"\nDuration: {result['duration_seconds']:.1f} seconds")
-    print(f"\nOutput files:")
+    print("\nOutput files:")
     for name, path in result['output_paths'].items():
         print(f"  {name}: {path}")
 
@@ -201,8 +199,8 @@ def pipeline_status_command(args: argparse.Namespace) -> int:
 
 def evaluation_run_command(args: argparse.Namespace) -> int:
     """Run evaluation on training samples."""
-    from ..generators.base import TrainingSample
     from ..evaluation import EvaluationHarness
+    from ..generators.base import TrainingSample
     from ..training.scoring import QualityScorer, ScoringConfig
 
     # Load samples
@@ -238,8 +236,8 @@ def evaluation_run_command(args: argparse.Namespace) -> int:
 
 def evaluation_compare_command(args: argparse.Namespace) -> int:
     """Compare two datasets."""
-    from ..generators.base import TrainingSample
     from ..evaluation import EvaluationHarness
+    from ..generators.base import TrainingSample
     from ..training.scoring import QualityScorer, ScoringConfig
 
     def load_samples(path: str) -> list[TrainingSample]:
@@ -279,8 +277,8 @@ def evaluation_compare_command(args: argparse.Namespace) -> int:
 
 def evaluation_human_create_command(args: argparse.Namespace) -> int:
     """Create human evaluation batch."""
-    from ..generators.base import TrainingSample
     from ..evaluation.human import HumanEvaluationManager, SamplingStrategy
+    from ..generators.base import TrainingSample
     from ..training.scoring import QualityScorer, ScoringConfig
 
     # Load samples
@@ -349,7 +347,7 @@ def evaluation_human_import_command(args: argparse.Namespace) -> int:
 
     # Show summary
     summary = manager.get_batch_summary(batch)
-    print(f"\nBatch Summary:")
+    print("\nBatch Summary:")
     print(f"  Completed: {summary['completed']}/{summary['total_tasks']}")
     if summary['ratings']['count'] > 0:
         print(f"  Mean rating: {summary['ratings']['mean']:.2f}")

@@ -6,7 +6,6 @@ import json
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from .config import load_config_model
 from .history import log_event
@@ -124,8 +123,8 @@ class AFSManager:
         self,
         source: Path,
         mount_type: MountType,
-        alias: Optional[str] = None,
-        context_path: Optional[Path] = None,
+        alias: str | None = None,
+        context_path: Path | None = None,
     ) -> MountPoint:
         if context_path is None:
             context_path = Path(".") / self.CONTEXT_DIR_DEFAULT
@@ -176,7 +175,7 @@ class AFSManager:
         self,
         alias: str,
         mount_type: MountType,
-        context_path: Optional[Path] = None,
+        context_path: Path | None = None,
     ) -> bool:
         if context_path is None:
             context_path = Path(".") / self.CONTEXT_DIR_DEFAULT
@@ -206,7 +205,7 @@ class AFSManager:
 
     def list_context(
         self,
-        context_path: Optional[Path] = None,
+        context_path: Path | None = None,
         metadata: ProjectMetadata | None = None,
     ) -> ContextRoot:
         if context_path is None:
@@ -256,7 +255,7 @@ class AFSManager:
             mounts=mounts,
         )
 
-    def clean(self, context_path: Optional[Path] = None) -> None:
+    def clean(self, context_path: Path | None = None) -> None:
         if context_path is None:
             context_path = Path(".") / self.CONTEXT_DIR_DEFAULT
 
@@ -265,10 +264,10 @@ class AFSManager:
 
     def update_metadata(
         self,
-        context_path: Optional[Path] = None,
+        context_path: Path | None = None,
         *,
-        description: Optional[str] = None,
-        agents: Optional[list[str]] = None,
+        description: str | None = None,
+        agents: list[str] | None = None,
     ) -> ProjectMetadata:
         if context_path is None:
             context_path = Path(".") / self.CONTEXT_DIR_DEFAULT
@@ -290,7 +289,7 @@ class AFSManager:
     def protect(
         self,
         path_str: str,
-        context_path: Optional[Path] = None,
+        context_path: Path | None = None,
     ) -> ProjectMetadata:
         if context_path is None:
             context_path = Path(".") / self.CONTEXT_DIR_DEFAULT
@@ -308,7 +307,7 @@ class AFSManager:
     def unprotect(
         self,
         path_str: str,
-        context_path: Optional[Path] = None,
+        context_path: Path | None = None,
     ) -> ProjectMetadata:
         if context_path is None:
             context_path = Path(".") / self.CONTEXT_DIR_DEFAULT

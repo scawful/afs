@@ -1,24 +1,21 @@
 """Tests for continuous learning system."""
 
-import pytest
-import tempfile
-from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from afs.continuous import (
-    UsageLogger,
-    UsageRecord,
-    TrainingDataGenerator,
+    ABTestManager,
+    ContinuousLearningLoop,
     DataGeneratorConfig,
+    LoopConfig,
+    ModelStatus,
+    ModelVersion,
     RetrainTrigger,
+    TrainingDataGenerator,
     TriggerConfig,
     TriggerType,
-    ABTestManager,
-    ABTestConfig,
-    ModelVersion,
-    ModelStatus,
-    ContinuousLearningLoop,
-    LoopConfig,
+    UsageLogger,
 )
 
 

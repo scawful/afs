@@ -8,17 +8,16 @@ assembly code generation.
 from __future__ import annotations
 
 import re
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .base import BaseGenerator, GenerationResult, TrainingSample
 from .model_generator import ModelGenerator, ModelGeneratorConfig
 
 if TYPE_CHECKING:
-    from afs.knowledge.entity_extractor import EntityExtractor
     from afs.knowledge.alttp_addresses import AddressInfo
+    from afs.knowledge.entity_extractor import EntityExtractor
 
 
 @dataclass
@@ -68,7 +67,7 @@ class KnowledgeAwareGenerator(BaseGenerator):
     def __init__(
         self,
         config: KnowledgeGeneratorConfig,
-        entity_extractor: "EntityExtractor | None" = None,
+        entity_extractor: EntityExtractor | None = None,
         model_generator: ModelGenerator | None = None,
     ):
         super().__init__(name="KnowledgeAwareGenerator", domain=config.domain)
@@ -78,7 +77,7 @@ class KnowledgeAwareGenerator(BaseGenerator):
         self._address_info_cache: dict[str, Any] = {}
 
     @property
-    def entity_extractor(self) -> "EntityExtractor":
+    def entity_extractor(self) -> EntityExtractor:
         """Lazy load entity extractor."""
         if self._entity_extractor is None:
             from afs.knowledge.entity_extractor import EntityExtractor
@@ -213,7 +212,7 @@ class KnowledgeAwareGenerator(BaseGenerator):
 
         return list(set(hints))
 
-    def _lookup_address(self, address: str) -> "AddressInfo | None":
+    def _lookup_address(self, address: str) -> AddressInfo | None:
         """Look up address in knowledge base."""
         from afs.knowledge.alttp_addresses import get_address_info
 
@@ -308,7 +307,7 @@ class KnowledgeAwareGenerator(BaseGenerator):
         required_entities_list = required_entities_list or [None] * len(instructions)
         results = []
 
-        for instruction, required in zip(instructions, required_entities_list):
+        for instruction, required in zip(instructions, required_entities_list, strict=False):
             sample = self.generate_with_context(instruction, required_entities=required)
             if sample is not None:
                 results.append(sample)

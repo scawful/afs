@@ -10,7 +10,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Any
+from typing import Any
 
 from ..config import load_config_model
 from ..schema import AFSConfig, ServiceConfig

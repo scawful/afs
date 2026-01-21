@@ -32,14 +32,13 @@ generating high-quality training data.
 """
 
 import asyncio
+import logging
 import os
 import time
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, AsyncIterator
-
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +55,7 @@ class ProviderConfig:
     """Configuration for a provider."""
     provider: Provider
     model: str
-    api_key: Optional[str] = None  # Uses env var if None
+    api_key: str | None = None  # Uses env var if None
     requests_per_minute: int = 10
     max_tokens: int = 4096
     temperature: float = 0.7
@@ -99,7 +98,7 @@ class TeacherResponse:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     latency_ms: float = 0
-    error: Optional[str] = None
+    error: str | None = None
 
     @property
     def success(self) -> bool:
@@ -126,7 +125,7 @@ class TeacherModel(ABC):
     async def generate(
         self,
         prompt: str,
-        system_prompt: Optional[str] = None,
+        system_prompt: str | None = None,
     ) -> TeacherResponse:
         """Generate a response from the teacher model."""
         pass
@@ -149,7 +148,7 @@ class OpenAITeacher(TeacherModel):
     - gpt-4.1: Previous generation
     """
 
-    def __init__(self, config: Optional[ProviderConfig] = None):
+    def __init__(self, config: ProviderConfig | None = None):
         if config is None:
             config = ProviderConfig.openai_default()
         super().__init__(config)
@@ -168,7 +167,7 @@ class OpenAITeacher(TeacherModel):
     async def generate(
         self,
         prompt: str,
-        system_prompt: Optional[str] = None,
+        system_prompt: str | None = None,
     ) -> TeacherResponse:
         await self._rate_limit()
 
@@ -221,7 +220,7 @@ class GoogleTeacher(TeacherModel):
     - gemini-2.5-pro: Legacy Gemini 2.5 Pro (avoid for new work)
     """
 
-    def __init__(self, config: Optional[ProviderConfig] = None):
+    def __init__(self, config: ProviderConfig | None = None):
         if config is None:
             config = ProviderConfig.google_default()
         super().__init__(config)
@@ -240,7 +239,7 @@ class GoogleTeacher(TeacherModel):
     async def generate(
         self,
         prompt: str,
-        system_prompt: Optional[str] = None,
+        system_prompt: str | None = None,
     ) -> TeacherResponse:
         await self._rate_limit()
 
@@ -295,7 +294,7 @@ class AnthropicTeacher(TeacherModel):
     Note: Uses CLAUDE_API_KEY env var (Anthropic SDK also accepts ANTHROPIC_API_KEY).
     """
 
-    def __init__(self, config: Optional[ProviderConfig] = None):
+    def __init__(self, config: ProviderConfig | None = None):
         if config is None:
             config = ProviderConfig.anthropic_default()
         super().__init__(config)
@@ -314,7 +313,7 @@ class AnthropicTeacher(TeacherModel):
     async def generate(
         self,
         prompt: str,
-        system_prompt: Optional[str] = None,
+        system_prompt: str | None = None,
     ) -> TeacherResponse:
         await self._rate_limit()
 
@@ -416,7 +415,7 @@ class TeacherEnsemble:
     async def generate(
         self,
         prompt: str,
-        system_prompt: Optional[str] = None,
+        system_prompt: str | None = None,
         max_retries: int = 3,
     ) -> TeacherResponse:
         """Generate with automatic failover to other providers."""
@@ -449,7 +448,7 @@ class TeacherEnsemble:
     async def generate_parallel(
         self,
         prompts: list[str],
-        system_prompt: Optional[str] = None,
+        system_prompt: str | None = None,
         batch_size: int = 5,
     ) -> AsyncIterator[TeacherResponse]:
         """Generate responses in parallel with batch processing."""

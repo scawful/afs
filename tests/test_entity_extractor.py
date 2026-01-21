@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from afs.knowledge.alttp_addresses import AddressCategory
 from afs.knowledge.entity_extractor import (
     EntityExtractor,
     ExtractedEntity,
@@ -11,7 +12,6 @@ from afs.knowledge.entity_extractor import (
     extract_entities,
     extract_with_stats,
 )
-from afs.knowledge.alttp_addresses import AddressCategory
 
 
 class TestExtractedEntity:

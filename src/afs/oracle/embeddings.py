@@ -12,9 +12,9 @@ Uses the AFS embedding infrastructure for vector storage.
 import json
 import logging
 import re
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterator
 
 logger = logging.getLogger(__name__)
 

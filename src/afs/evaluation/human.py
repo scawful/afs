@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from afs.generators.base import TrainingSample
@@ -84,7 +84,7 @@ class HumanEvalTask:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "HumanEvalTask":
+    def from_dict(cls, data: dict[str, Any]) -> HumanEvalTask:
         return cls(
             task_id=data["task_id"],
             sample_id=data["sample_id"],
@@ -105,11 +105,11 @@ class HumanEvalTask:
     @classmethod
     def from_sample(
         cls,
-        sample: "TrainingSample",
+        sample: TrainingSample,
         batch_id: str,
         quality_score: float = 0.0,
         electra_score: float = 0.0,
-    ) -> "HumanEvalTask":
+    ) -> HumanEvalTask:
         """Create task from a training sample."""
         return cls(
             task_id=str(uuid.uuid4()),
@@ -152,7 +152,7 @@ class HumanEvalBatch:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "HumanEvalBatch":
+    def from_dict(cls, data: dict[str, Any]) -> HumanEvalBatch:
         batch = cls(
             batch_id=data["batch_id"],
             name=data["name"],
@@ -186,7 +186,7 @@ class HumanEvaluationManager:
 
     def create_batch(
         self,
-        samples: list["TrainingSample"],
+        samples: list[TrainingSample],
         name: str = "",
         n: int = 50,
         strategy: SamplingStrategy = SamplingStrategy.UNCERTAINTY,
@@ -230,10 +230,10 @@ class HumanEvaluationManager:
 
     def _select_samples(
         self,
-        samples: list["TrainingSample"],
+        samples: list[TrainingSample],
         n: int,
         strategy: SamplingStrategy,
-    ) -> list["TrainingSample"]:
+    ) -> list[TrainingSample]:
         """Select samples using the specified strategy."""
         import random
 
@@ -247,7 +247,7 @@ class HumanEvaluationManager:
 
         elif strategy == SamplingStrategy.UNCERTAINTY:
             # Sort by distance from 0.5 ELECTRA score (most uncertain first)
-            def uncertainty(s: "TrainingSample") -> float:
+            def uncertainty(s: TrainingSample) -> float:
                 electra = s._metadata.get("quality_components", {}).get("electra", 0.5)
                 return abs(electra - 0.5)
 
@@ -266,11 +266,11 @@ class HumanEvaluationManager:
             # Select proportionally from each domain
             from collections import defaultdict
 
-            by_domain: dict[str, list["TrainingSample"]] = defaultdict(list)
+            by_domain: dict[str, list[TrainingSample]] = defaultdict(list)
             for s in samples:
                 by_domain[s.domain].append(s)
 
-            selected: list["TrainingSample"] = []
+            selected: list[TrainingSample] = []
             domains = list(by_domain.keys())
             per_domain = max(1, n // len(domains))
 
@@ -418,9 +418,9 @@ class HumanEvaluationManager:
     def update_training_data(
         self,
         batch: HumanEvalBatch,
-        samples: list["TrainingSample"],
+        samples: list[TrainingSample],
         threshold: float = 0.7,
-    ) -> tuple[list["TrainingSample"], list["TrainingSample"]]:
+    ) -> tuple[list[TrainingSample], list[TrainingSample]]:
         """Update training samples based on human ratings.
 
         Samples rated above threshold are kept, below are filtered.
@@ -481,7 +481,7 @@ class HumanEvaluationManager:
 
 
 def create_eval_batch(
-    samples: list["TrainingSample"],
+    samples: list[TrainingSample],
     n: int = 50,
     strategy: str = "uncertainty",
     output_path: Path | None = None,

@@ -43,7 +43,7 @@ class ProjectMetadata:
     manual_only: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "ProjectMetadata":
+    def from_dict(cls, data: dict[str, Any] | None) -> ProjectMetadata:
         data = data or {}
         created_at = data.get("created_at")
         if isinstance(created_at, datetime):

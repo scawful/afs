@@ -10,15 +10,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import random
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Iterator, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .base import BaseGenerator, GenerationResult, TrainingSample, write_jsonl
 
@@ -419,7 +419,7 @@ class GenerationProgress:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "GenerationProgress":
+    def from_dict(cls, data: dict[str, Any]) -> GenerationProgress:
         """Deserialize from checkpoint."""
         progress = cls(
             total_generated=data.get("total_generated", 0),
@@ -493,11 +493,11 @@ class CurriculumGenerator(BaseGenerator):
         super().__init__(name="CurriculumGenerator", domain=domain.value)
         self.expert_domain = domain
         self.config = config or ScaleConfig()
-        self._clients: dict[str, "LLMClient"] = {}
+        self._clients: dict[str, LLMClient] = {}
         self._rate_limiters: dict[str, RateLimiter] = {}
         self._progress = GenerationProgress()
 
-    def _get_client(self, provider: ProviderConfig) -> "LLMClient":
+    def _get_client(self, provider: ProviderConfig) -> LLMClient:
         """Get or create LLM client for provider."""
         if provider.name not in self._clients:
             from afs.generators.cot.client import get_client
@@ -536,9 +536,9 @@ class CurriculumGenerator(BaseGenerator):
         from .template_libraries import (
             get_din_pattern,
             get_farore_bug,
+            get_hardware_context,
             get_nayru_template,
             get_veran_example,
-            get_hardware_context,
         )
 
         base_instruction = random.choice(template.instruction_templates)
@@ -688,7 +688,7 @@ CRITICAL: Output code using ASAR assembler syntax.
 
 Analyze the code carefully and provide fixes in a ```asm block with detailed explanations.""",
 
-            ExpertDomain.VERAN: f"""You are Veran, a 65816 assembly code analysis expert for SNES/ALTTP.
+            ExpertDomain.VERAN: """You are Veran, a 65816 assembly code analysis expert for SNES/ALTTP.
 Your role is to:
 - Explain what assembly code does step by step
 - Describe register usage and memory access

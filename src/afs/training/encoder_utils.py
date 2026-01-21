@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import numpy as np
 
@@ -79,7 +79,6 @@ class EncoderDataProcessor:
     def encoder(self) -> Any:
         """Lazy load encoder model."""
         if self._encoder is None and self.config.encoder_path:
-            import torch
             from transformers import BertModel
 
             self._encoder = BertModel.from_pretrained(self.config.encoder_path)

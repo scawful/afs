@@ -5,8 +5,8 @@ for 65816 assembly validation and context retrieval.
 """
 
 import re
-from typing import Optional
-from ..graph_core import KnowledgeGraph, GraphNode, GraphEdge, GraphConstraint
+
+from ..graph_core import GraphConstraint, GraphEdge, GraphNode, KnowledgeGraph
 
 
 class ALTTPNodeType:
@@ -178,7 +178,7 @@ class ALTTPKnowledgeGraph(KnowledgeGraph):
 
         return results
 
-    def lookup_address(self, address: str) -> Optional[GraphNode]:
+    def lookup_address(self, address: str) -> GraphNode | None:
         """Look up an address and return its node."""
         node_id = self._address_patterns.get(address.upper())
         if node_id:

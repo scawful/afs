@@ -14,7 +14,6 @@ Key ASAR syntax rules:
 
 from __future__ import annotations
 
-
 # =============================================================================
 # ASAR SYNTAX REFERENCE - Critical for correct code generation
 # =============================================================================
@@ -1457,7 +1456,7 @@ def get_hardware_context(topics: list[str]) -> str:
 
             if "addresses" in hw:
                 context_parts.append("\nAddresses:")
-                for name, (addr, desc) in hw["addresses"].items():
+                for _name, (addr, desc) in hw["addresses"].items():
                     context_parts.append(f"  {addr}: {desc}")
 
             if "registers" in hw:

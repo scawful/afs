@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,7 +26,7 @@ class ExperimentMetrics:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ExperimentMetrics":
+    def from_dict(cls, data: dict[str, Any]) -> ExperimentMetrics:
         """Create from dictionary."""
         return cls(**data)
 
@@ -66,7 +66,7 @@ class ModelExperiment:
         return data
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ModelExperiment":
+    def from_dict(cls, data: dict[str, Any]) -> ModelExperiment:
         """Create from dictionary."""
         metrics_data = data.pop("metrics", {})
         metrics = ExperimentMetrics.from_dict(metrics_data)

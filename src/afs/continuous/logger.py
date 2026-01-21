@@ -7,10 +7,10 @@ Supports quality scoring, deduplication, and efficient querying.
 import hashlib
 import sqlite3
 import time
-from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta
+from collections.abc import Iterator
+from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Iterator
 
 
 @dataclass
@@ -22,14 +22,14 @@ class UsageRecord:
     query: str
     response: str
     model: str
-    expert: Optional[str] = None
+    expert: str | None = None
     latency_ms: float = 0
     token_count: int = 0
     quality_score: float = 0.0
-    user_feedback: Optional[int] = None  # -1, 0, 1
-    feedback_text: Optional[str] = None
-    context_hash: Optional[str] = None
-    dedupe_hash: Optional[str] = None
+    user_feedback: int | None = None  # -1, 0, 1
+    feedback_text: str | None = None
+    context_hash: str | None = None
+    dedupe_hash: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "UsageRecord":
@@ -120,7 +120,7 @@ class UsageDatabase:
         self,
         record_id: str,
         feedback: int,
-        feedback_text: Optional[str] = None,
+        feedback_text: str | None = None,
     ) -> bool:
         """Update user feedback for a record."""
         with sqlite3.connect(self.db_path) as conn:
@@ -147,11 +147,11 @@ class UsageDatabase:
 
     def query(
         self,
-        since: Optional[datetime] = None,
-        model: Optional[str] = None,
-        min_quality: Optional[float] = None,
+        since: datetime | None = None,
+        model: str | None = None,
+        min_quality: float | None = None,
         with_feedback_only: bool = False,
-        limit: Optional[int] = None,
+        limit: int | None = None,
     ) -> Iterator[UsageRecord]:
         """Query usage records with filters."""
         conditions = []
@@ -196,7 +196,7 @@ class UsageDatabase:
                     dedupe_hash=row["dedupe_hash"],
                 )
 
-    def get_statistics(self, since: Optional[datetime] = None) -> dict:
+    def get_statistics(self, since: datetime | None = None) -> dict:
         """Get usage statistics."""
         conditions = []
         params = []
@@ -269,7 +269,7 @@ class UsageDatabase:
 
             if not dry_run:
                 # Keep newest record for each duplicate
-                for dedupe_hash, count in dupes:
+                for dedupe_hash, _count in dupes:
                     conn.execute(
                         """
                         DELETE FROM usage
@@ -299,7 +299,7 @@ class UsageLogger:
         query: str,
         response: str,
         model: str,
-        expert: Optional[str] = None,
+        expert: str | None = None,
         latency_ms: float = 0,
         quality_score: float = 0.0,
     ) -> str:
@@ -335,22 +335,22 @@ class UsageLogger:
         self,
         record_id: str,
         feedback: int,
-        feedback_text: Optional[str] = None,
+        feedback_text: str | None = None,
     ) -> bool:
         """Record user feedback."""
         return self.db.update_feedback(record_id, feedback, feedback_text)
 
     def get_records(
         self,
-        since: Optional[datetime] = None,
-        model: Optional[str] = None,
-        min_quality: Optional[float] = None,
+        since: datetime | None = None,
+        model: str | None = None,
+        min_quality: float | None = None,
         with_feedback_only: bool = False,
-        limit: Optional[int] = None,
+        limit: int | None = None,
     ) -> Iterator[UsageRecord]:
         """Query usage records."""
         return self.db.query(since, model, min_quality, with_feedback_only, limit)
 
-    def get_statistics(self, since: Optional[datetime] = None) -> dict:
+    def get_statistics(self, since: datetime | None = None) -> dict:
         """Get usage statistics."""
         return self.db.get_statistics(since)

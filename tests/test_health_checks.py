@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from afs.health.daemon import HealthMonitoringDaemon
 from afs.health.enhanced_checks import (
     EnhancedHealthChecker,
     HealthCheckLevel,
@@ -16,7 +17,6 @@ from afs.health.enhanced_checks import (
     HealthScore,
     HealthStatus,
 )
-from afs.health.daemon import HealthMonitoringDaemon
 
 
 class TestHealthScore:

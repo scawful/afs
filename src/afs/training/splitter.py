@@ -16,9 +16,9 @@ if TYPE_CHECKING:
 class SplitResult:
     """Result of dataset splitting."""
 
-    train: list["TrainingSample"]
-    val: list["TrainingSample"]
-    test: list["TrainingSample"]
+    train: list[TrainingSample]
+    val: list[TrainingSample]
+    test: list[TrainingSample]
     stats: dict[str, dict[str, int]]  # Split -> domain -> count
 
     @property
@@ -29,7 +29,7 @@ class SplitResult:
     def summary(self) -> str:
         """Generate a summary string."""
         lines = [
-            f"Dataset Split Summary:",
+            "Dataset Split Summary:",
             f"  Train: {len(self.train)} samples",
             f"  Val:   {len(self.val)} samples",
             f"  Test:  {len(self.test)} samples",
@@ -82,7 +82,7 @@ class DatasetSplitter:
         if abs(total - 1.0) > 0.001:
             raise ValueError(f"Ratios must sum to 1.0, got {total}")
 
-    def split(self, samples: list["TrainingSample"]) -> SplitResult:
+    def split(self, samples: list[TrainingSample]) -> SplitResult:
         """Split samples into train/val/test sets.
 
         Args:
@@ -99,7 +99,7 @@ class DatasetSplitter:
         else:
             return self._random_split(samples)
 
-    def _random_split(self, samples: list["TrainingSample"]) -> SplitResult:
+    def _random_split(self, samples: list[TrainingSample]) -> SplitResult:
         """Simple random split without stratification."""
         if self.shuffle:
             samples = samples.copy()
@@ -116,18 +116,18 @@ class DatasetSplitter:
         stats = self._compute_stats(train, val, test)
         return SplitResult(train=train, val=val, test=test, stats=stats)
 
-    def _stratified_split(self, samples: list["TrainingSample"]) -> SplitResult:
+    def _stratified_split(self, samples: list[TrainingSample]) -> SplitResult:
         """Split with stratification by a field (e.g., domain)."""
         # Group by stratification field
-        groups: dict[str, list["TrainingSample"]] = defaultdict(list)
+        groups: dict[str, list[TrainingSample]] = defaultdict(list)
 
         for sample in samples:
             key = getattr(sample, self.stratify_by, "unknown")
             groups[key].append(sample)
 
-        train: list["TrainingSample"] = []
-        val: list["TrainingSample"] = []
-        test: list["TrainingSample"] = []
+        train: list[TrainingSample] = []
+        val: list[TrainingSample] = []
+        test: list[TrainingSample] = []
 
         # Split each group proportionally
         for group_name, group_samples in groups.items():
@@ -153,9 +153,9 @@ class DatasetSplitter:
 
     def _compute_stats(
         self,
-        train: list["TrainingSample"],
-        val: list["TrainingSample"],
-        test: list["TrainingSample"],
+        train: list[TrainingSample],
+        val: list[TrainingSample],
+        test: list[TrainingSample],
     ) -> dict[str, dict[str, int]]:
         """Compute domain distribution stats for each split."""
         stats = {}

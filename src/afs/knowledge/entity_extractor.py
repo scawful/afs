@@ -17,7 +17,6 @@ from .alttp_addresses import (
     ALTTP_ADDRESSES,
     AddressCategory,
     AddressInfo,
-    get_address_info,
     lookup_by_address,
 )
 

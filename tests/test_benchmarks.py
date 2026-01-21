@@ -1,7 +1,5 @@
 """Tests for benchmark system."""
 
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -9,8 +7,8 @@ import pytest
 def test_speed_benchmark_imports():
     """Test that speed benchmark modules import correctly."""
     from afs.benchmarks.speed import (
-        SpeedBenchmark,
         LatencyMetrics,
+        SpeedBenchmark,
         ThroughputMetrics,
         measure_tokens_per_second,
     )
@@ -24,10 +22,10 @@ def test_speed_benchmark_imports():
 def test_quality_benchmark_imports():
     """Test that quality benchmark modules import correctly."""
     from afs.benchmarks.quality import (
-        QualityBenchmark,
         AccuracyMetrics,
-        ConsistencyMetrics,
         CodeCorrectnessChecker,
+        ConsistencyMetrics,
+        QualityBenchmark,
     )
 
     assert QualityBenchmark is not None
@@ -39,11 +37,11 @@ def test_quality_benchmark_imports():
 def test_resource_benchmark_imports():
     """Test that resource benchmark modules import correctly."""
     from afs.benchmarks.resources import (
-        ResourceBenchmark,
-        MemoryMonitor,
-        VRAMMonitor,
         CPUMonitor,
+        MemoryMonitor,
         PowerMonitor,
+        ResourceBenchmark,
+        VRAMMonitor,
     )
 
     assert ResourceBenchmark is not None
@@ -156,8 +154,8 @@ def test_cpu_monitor():
 def test_speed_benchmark_result_serialization():
     """Test speed benchmark result serialization."""
     from afs.benchmarks.speed import (
-        SpeedBenchmarkResult,
         LatencyMetrics,
+        SpeedBenchmarkResult,
         ThroughputMetrics,
     )
 
@@ -189,10 +187,10 @@ def test_speed_benchmark_result_serialization():
 def test_quality_benchmark_result_serialization():
     """Test quality benchmark result serialization."""
     from afs.benchmarks.quality import (
-        QualityBenchmarkResult,
         AccuracyMetrics,
-        ConsistencyMetrics,
         CodeCorrectnessResult,
+        ConsistencyMetrics,
+        QualityBenchmarkResult,
     )
 
     accuracy = AccuracyMetrics(100, 80, 15, 5, 0.80, 0.95)
@@ -223,10 +221,10 @@ def test_quality_benchmark_result_serialization():
 def test_resource_benchmark_result_serialization():
     """Test resource benchmark result serialization."""
     from afs.benchmarks.resources import (
-        ResourceBenchmarkResult,
-        MemoryMetrics,
         CPUMetrics,
+        MemoryMetrics,
         PowerMetrics,
+        ResourceBenchmarkResult,
     )
 
     memory = MemoryMetrics(1000.0, 800.0, 1200.0, 900.0, 20.0, 15.0, 100)

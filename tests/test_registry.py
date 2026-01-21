@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import tempfile
 from pathlib import Path
 
@@ -13,7 +12,6 @@ from afs.registry import (
     LineageTracker,
     ModelRegistry,
     ModelVersion,
-    TrainingMetadata,
     VersionStatus,
 )
 

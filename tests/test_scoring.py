@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from afs.generators.base import TrainingSample
 from afs.training.scoring import (
     QualityScore,
     QualityScorer,
@@ -11,7 +12,6 @@ from afs.training.scoring import (
     ScoringWeights,
     analyze_scores,
 )
-from afs.generators.base import TrainingSample
 
 
 class TestScoringWeights:

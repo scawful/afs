@@ -18,11 +18,11 @@ Usage:
 
 from __future__ import annotations
 
-import re
 import json
-from pathlib import Path
+import re
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator
+from pathlib import Path
 
 from ..generators.base import BaseGenerator, TrainingSample
 
@@ -131,7 +131,7 @@ class MarkdownDocParser:
                 while i < len(lines) and '|' in lines[i]:
                     row = [col.strip() for col in lines[i].split('|')[1:-1]]
                     if len(row) == len(header):
-                        rows.append(dict(zip(header, row)))
+                        rows.append(dict(zip(header, row, strict=False)))
                     i += 1
 
                 if rows:

@@ -1,8 +1,8 @@
 """AFS Gateway - OpenAI-compatible API for MoE router."""
 
-from .server import app, run_server
-from .backends import BackendManager, BackendConfig
+from .backends import BackendConfig, BackendManager
 from .models import ChatRequest, ChatResponse, Model
+from .server import app, run_server
 
 __all__ = [
     "app",

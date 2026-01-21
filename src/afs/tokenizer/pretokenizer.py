@@ -10,10 +10,10 @@ Preserves:
 """
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator
 
-from .vocab import OPCODES, DIRECTIVES
+from .vocab import DIRECTIVES, OPCODES
 
 
 @dataclass

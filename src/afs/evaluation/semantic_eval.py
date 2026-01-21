@@ -9,14 +9,13 @@ Uses the yaze emulator to validate that generated assembly code:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from afs.generators.base import TrainingSample
@@ -80,7 +79,7 @@ class CPUState:
             f"{'Z' if self.flag_z else '-'}{'C' if self.flag_c else '-'}"
         )
 
-    def diff(self, other: "CPUState") -> dict[str, tuple[Any, Any]]:
+    def diff(self, other: CPUState) -> dict[str, tuple[Any, Any]]:
         """Return differences between two CPU states."""
         changes = {}
         for field_name in ["a", "x", "y", "sp", "pc", "db", "pb", "d", "status"]:
@@ -385,7 +384,7 @@ class SemanticEvaluator:
 
     def evaluate_sample(
         self,
-        sample: "TrainingSample",
+        sample: TrainingSample,
         expected_behavior: dict[str, Any] | None = None,
     ) -> tuple[SemanticScore, ExecutionResult]:
         """Evaluate a training sample semantically.
@@ -444,7 +443,7 @@ class SemanticEvaluator:
 
     def _evaluate_behavior(
         self,
-        sample: "TrainingSample",
+        sample: TrainingSample,
         result: ExecutionResult,
         expected: dict[str, Any] | None,
     ) -> float:
@@ -519,7 +518,7 @@ class SemanticEvaluator:
 
     def batch_evaluate(
         self,
-        samples: list["TrainingSample"],
+        samples: list[TrainingSample],
         skip_execution: bool = False,
     ) -> list[tuple[SemanticScore, ExecutionResult]]:
         """Evaluate multiple samples.

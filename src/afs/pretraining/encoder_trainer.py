@@ -5,9 +5,9 @@ Trains BERT-style encoders on domain corpora using masked language modeling.
 
 import logging
 import random
-from dataclasses import dataclass, field
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Iterator
 
 from .corpus_builder import CorpusBuilder, CorpusChunk
 
@@ -43,7 +43,7 @@ class EncoderPretrainer:
     def __init__(
         self,
         corpus_builder: CorpusBuilder,
-        config: Optional[PretrainConfig] = None,
+        config: PretrainConfig | None = None,
     ):
         self.corpus = corpus_builder
         self.config = config or PretrainConfig()
@@ -80,7 +80,7 @@ class EncoderPretrainer:
     def create_mlm_samples(
         self,
         chunks: Iterator[CorpusChunk],
-        max_samples: Optional[int] = None,
+        max_samples: int | None = None,
     ) -> Iterator[MaskedSample]:
         """Create masked language modeling samples from chunks."""
         tokenizer = self._load_tokenizer()
@@ -129,11 +129,11 @@ class EncoderPretrainer:
             )
             count += 1
 
-    def train(self, resume_from: Optional[Path] = None) -> dict:
+    def train(self, resume_from: Path | None = None) -> dict:
         """Run pre-training loop."""
         try:
-            from transformers import Trainer, TrainingArguments
             import torch
+            from transformers import Trainer, TrainingArguments
         except ImportError:
             raise ImportError("transformers and torch required for pre-training")
 
@@ -208,8 +208,8 @@ class EncoderPretrainer:
     ) -> int:
         """Export embeddings for texts to FAISS index."""
         try:
-            import torch
             import numpy as np
+            import torch
         except ImportError:
             raise ImportError("torch and numpy required for embeddings")
 

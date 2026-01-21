@@ -22,20 +22,20 @@ from .analyzer import (
     QualityReport,
     analyze_dataset,
 )
-from .metrics import (
-    QualityMetrics,
-    InstructionClarity,
-    OutputCorrectness,
-    DuplicateDetector,
-    AnomalyDetector,
-)
 from .bias import (
     BiasAnalyzer,
     BiasReport,
-    GenderBiasDetector,
     CulturalBiasDetector,
+    GenderBiasDetector,
     TechnicalBiasDetector,
     detect_biases,
+)
+from .metrics import (
+    AnomalyDetector,
+    DuplicateDetector,
+    InstructionClarity,
+    OutputCorrectness,
+    QualityMetrics,
 )
 
 __all__ = [

@@ -7,18 +7,18 @@ Provides tools for:
 - Iterative model improvement
 """
 
-from .sampler import (
-    UncertaintySampler,
-    CurriculumManager,
-    CurriculumStage,
-    sample_by_uncertainty,
-    get_curriculum_samples,
-)
 from .priority_queue import (
     PriorityQueue,
     QueueItem,
     create_queue,
     get_next_batch,
+)
+from .sampler import (
+    CurriculumManager,
+    CurriculumStage,
+    UncertaintySampler,
+    get_curriculum_samples,
+    sample_by_uncertainty,
 )
 
 __all__ = [

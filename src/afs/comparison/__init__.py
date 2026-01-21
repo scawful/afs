@@ -5,6 +5,7 @@ different model versions and variants.
 """
 
 from .framework import (
+    BasicScorer,
     ComparisonMode,
     ComparisonReport,
     ComparisonResult,
@@ -13,7 +14,6 @@ from .framework import (
     ResponseScorer,
     ScoreDimension,
     ScoredResponse,
-    BasicScorer,
     StatisticalTester,
 )
 

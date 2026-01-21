@@ -55,7 +55,7 @@ class ModelConfig:
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_string(cls, model_str: str) -> "ModelConfig":
+    def from_string(cls, model_str: str) -> ModelConfig:
         """Parse model string like 'ollama:nayru-v5:latest' or 'gemini-3-flash-preview'."""
         if ":" in model_str:
             parts = model_str.split(":", 1)
@@ -89,7 +89,7 @@ class ModelConfig:
 
     # Preset configurations for Triforce experts
     @classmethod
-    def din(cls) -> "ModelConfig":
+    def din(cls) -> ModelConfig:
         """Din - Optimization expert."""
         return cls(
             provider=ModelProvider.OLLAMA,
@@ -99,7 +99,7 @@ class ModelConfig:
         )
 
     @classmethod
-    def nayru(cls) -> "ModelConfig":
+    def nayru(cls) -> ModelConfig:
         """Nayru - Generation expert."""
         return cls(
             provider=ModelProvider.OLLAMA,
@@ -109,7 +109,7 @@ class ModelConfig:
         )
 
     @classmethod
-    def farore(cls) -> "ModelConfig":
+    def farore(cls) -> ModelConfig:
         """Farore - Debugging expert."""
         return cls(
             provider=ModelProvider.OLLAMA,
@@ -119,7 +119,7 @@ class ModelConfig:
         )
 
     @classmethod
-    def veran(cls) -> "ModelConfig":
+    def veran(cls) -> ModelConfig:
         """Veran - Hardware knowledge expert."""
         return cls(
             provider=ModelProvider.OLLAMA,
@@ -130,7 +130,7 @@ class ModelConfig:
 
     # LMStudio-based Triforce experts (GGUF models)
     @classmethod
-    def din_lmstudio(cls) -> "ModelConfig":
+    def din_lmstudio(cls) -> ModelConfig:
         """Din - Optimization expert (LMStudio/GGUF)."""
         return cls(
             provider=ModelProvider.LMSTUDIO,
@@ -140,7 +140,7 @@ class ModelConfig:
         )
 
     @classmethod
-    def farore_lmstudio(cls) -> "ModelConfig":
+    def farore_lmstudio(cls) -> ModelConfig:
         """Farore - Debugging expert (LMStudio/GGUF)."""
         return cls(
             provider=ModelProvider.LMSTUDIO,
@@ -150,7 +150,7 @@ class ModelConfig:
         )
 
     @classmethod
-    def veran_lmstudio(cls) -> "ModelConfig":
+    def veran_lmstudio(cls) -> ModelConfig:
         """Veran - Hardware knowledge expert (LMStudio/GGUF)."""
         return cls(
             provider=ModelProvider.LMSTUDIO,
@@ -160,7 +160,7 @@ class ModelConfig:
         )
 
     @classmethod
-    def majora_lmstudio(cls) -> "ModelConfig":
+    def majora_lmstudio(cls) -> ModelConfig:
         """Majora - Oracle of Secrets codebase expert (LMStudio/GGUF)."""
         return cls(
             provider=ModelProvider.LMSTUDIO,

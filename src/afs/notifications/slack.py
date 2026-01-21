@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import os
-from typing import Optional
 
 import requests
 
@@ -20,8 +18,8 @@ class SlackNotifier(NotificationHandler):
 
     def __init__(
         self,
-        webhook_url: Optional[str] = None,
-        channel: Optional[str] = None,
+        webhook_url: str | None = None,
+        channel: str | None = None,
         username: str = "AFS Notifier"
     ):
         """Initialize Slack notifier.
@@ -187,8 +185,8 @@ class SlackNotifier(NotificationHandler):
 
 def send_slack_message(
     message: str,
-    title: Optional[str] = None,
-    webhook_url: Optional[str] = None
+    title: str | None = None,
+    webhook_url: str | None = None
 ) -> bool:
     """Convenience function to send a Slack message.
 

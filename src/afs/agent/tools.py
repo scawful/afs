@@ -6,14 +6,13 @@ Includes AFS context tools and Triforce-specific assembly tools.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import os
 import subprocess
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Awaitable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -338,21 +337,21 @@ async def fs_query_handler(args: dict[str, Any]) -> ToolResult:
     """Query a file using an external agent (External Attention)."""
     path = args.get("path", "")
     query = args.get("query", "")
-    
+
     if not path or not query:
         return ToolResult(success=False, content="", error="Path and query required")
 
     script_path = args.get("script_path", str(DEFAULT_QUERY_TOOL_PATH))
-    
+
     # Resolve path relative to context root if not absolute
     # This aligns with read_context_handler behavior if path is relative
     # But read_file handles absolute. Let's support both via simple expansion
     # or rely on the script to handle it.
     # The script uses Path(path).expanduser().
-    
+
     try:
         cmd = ["python3", script_path, path, query]
-        
+
         result = subprocess.run(
             cmd,
             capture_output=True,

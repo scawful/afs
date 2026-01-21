@@ -47,8 +47,8 @@ def generators_asm_augment_command(args: argparse.Namespace) -> int:
 
 def generators_cot_command(args: argparse.Namespace) -> int:
     """Generate Chain of Thought reasoning for samples."""
-    from ..generators.cot import CotConfig, CotGenerator, CotFormat
     from ..generators import write_jsonl
+    from ..generators.cot import CotConfig, CotFormat, CotGenerator
 
     input_path = Path(args.input).expanduser().resolve()
     if not input_path.exists():
@@ -148,6 +148,7 @@ def generators_clean_command(args: argparse.Namespace) -> int:
 def generators_validate_command(args: argparse.Namespace) -> int:
     """Validate assembly code in training samples using asar."""
     import json
+
     from ..generators.asar_validator import (
         AsarValidatorConfig,
         check_asar_available,

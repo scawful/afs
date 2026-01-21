@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import os
 import smtplib
-from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import Optional
+from email.mime.text import MIMEText
 
 from afs.logging_config import get_logger
 
@@ -21,12 +19,12 @@ class EmailNotifier(NotificationHandler):
 
     def __init__(
         self,
-        smtp_host: Optional[str] = None,
-        smtp_port: Optional[int] = None,
-        smtp_user: Optional[str] = None,
-        smtp_password: Optional[str] = None,
-        from_email: Optional[str] = None,
-        to_emails: Optional[list[str]] = None,
+        smtp_host: str | None = None,
+        smtp_port: int | None = None,
+        smtp_user: str | None = None,
+        smtp_password: str | None = None,
+        from_email: str | None = None,
+        to_emails: list[str] | None = None,
         use_tls: bool = True
     ):
         """Initialize email notifier.

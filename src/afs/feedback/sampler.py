@@ -4,10 +4,11 @@ Prioritizes which examples to collect feedback on or use for retraining.
 """
 
 import random
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterator, Optional
-from .logger import InferenceRecord, InferenceLogger
+
+from .logger import InferenceLogger, InferenceRecord
 
 
 class SamplingStrategy(Enum):
@@ -34,7 +35,7 @@ class FeedbackSampler:
     def __init__(
         self,
         logger: InferenceLogger,
-        config: Optional[SamplerConfig] = None,
+        config: SamplerConfig | None = None,
     ):
         self.logger = logger
         self.config = config or SamplerConfig()

@@ -18,19 +18,19 @@ Usage:
 """
 
 from .asm_tokenizer import ASMTokenizer, create_tokenizer
-from .vocab import (
-    BASE_VOCAB,
-    OPCODES,
-    REGISTERS,
-    DIRECTIVES,
-    SPECIAL_TOKENS,
-    VOCAB_SIZE,
-)
 from .pretokenizer import (
     AssemblyPreTokenizer,
     Token,
     normalize_token,
     split_address,
+)
+from .vocab import (
+    BASE_VOCAB,
+    DIRECTIVES,
+    OPCODES,
+    REGISTERS,
+    SPECIAL_TOKENS,
+    VOCAB_SIZE,
 )
 
 __all__ = [

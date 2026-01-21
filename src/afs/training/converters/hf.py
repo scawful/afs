@@ -21,7 +21,7 @@ class AlpacaConverter(BaseConverter):
     }
     """
 
-    def convert_sample(self, sample: "TrainingSample") -> dict[str, Any]:
+    def convert_sample(self, sample: TrainingSample) -> dict[str, Any]:
         """Convert sample to Alpaca format.
 
         Args:
@@ -65,7 +65,7 @@ class ChatMLConverter(BaseConverter):
     def __init__(
         self,
         include_cot: bool = True,
-        cot_mode: "CotInclusionMode" = None,
+        cot_mode: CotInclusionMode = None,
         system_prompt: str | None = None,
         as_text: bool = False,
     ):
@@ -84,7 +84,7 @@ class ChatMLConverter(BaseConverter):
         )
         self.as_text = as_text
 
-    def convert_sample(self, sample: "TrainingSample") -> dict[str, Any]:
+    def convert_sample(self, sample: TrainingSample) -> dict[str, Any]:
         """Convert sample to ChatML format.
 
         Args:
@@ -131,7 +131,7 @@ class ShareGPTConverter(BaseConverter):
     def __init__(
         self,
         include_cot: bool = True,
-        cot_mode: "CotInclusionMode" = None,
+        cot_mode: CotInclusionMode = None,
         system_prompt: str | None = None,
     ):
         """Initialize ShareGPT converter."""
@@ -141,7 +141,7 @@ class ShareGPTConverter(BaseConverter):
             system_prompt=system_prompt or self.DEFAULT_SYSTEM,
         )
 
-    def convert_sample(self, sample: "TrainingSample") -> dict[str, Any]:
+    def convert_sample(self, sample: TrainingSample) -> dict[str, Any]:
         """Convert sample to ShareGPT format.
 
         Args:
@@ -196,7 +196,7 @@ class UnslothThinkingConverter(BaseConverter):
         self.thinking_start = thinking_start
         self.thinking_end = thinking_end
 
-    def convert_sample(self, sample: "TrainingSample") -> dict[str, Any]:
+    def convert_sample(self, sample: TrainingSample) -> dict[str, Any]:
         """Convert sample with explicit thinking section.
 
         Args:

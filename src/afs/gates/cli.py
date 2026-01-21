@@ -14,9 +14,8 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Optional
 
-from .ci_integration import GitHubActionsIntegration, LocalFileIntegration
+from .ci_integration import LocalFileIntegration
 from .quality_gates import (
     DeploymentContext,
     ModelMetrics,
@@ -24,7 +23,7 @@ from .quality_gates import (
     SecurityScanResults,
     TestMetrics,
 )
-from .registry_integration import DeploymentController, RegistryIntegration
+from .registry_integration import RegistryIntegration
 
 logger = logging.getLogger(__name__)
 
@@ -512,7 +511,7 @@ def _handle_report_command(args: argparse.Namespace) -> int:
         return 1
 
 
-def _load_test_metrics(path: str) -> Optional[TestMetrics]:
+def _load_test_metrics(path: str) -> TestMetrics | None:
     """Load test metrics from JSON file."""
     try:
         with open(path) as f:
@@ -523,7 +522,7 @@ def _load_test_metrics(path: str) -> Optional[TestMetrics]:
         return None
 
 
-def _load_model_metrics(path: str) -> Optional[ModelMetrics]:
+def _load_model_metrics(path: str) -> ModelMetrics | None:
     """Load model metrics from JSON file."""
     try:
         with open(path) as f:
@@ -534,7 +533,7 @@ def _load_model_metrics(path: str) -> Optional[ModelMetrics]:
         return None
 
 
-def _load_security_results(path: str) -> Optional[SecurityScanResults]:
+def _load_security_results(path: str) -> SecurityScanResults | None:
     """Load security scan results from JSON file."""
     try:
         with open(path) as f:

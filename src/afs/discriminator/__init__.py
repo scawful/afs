@@ -7,16 +7,16 @@ to distinguish real assembly code from LLM-generated errors, enabling:
 - Inference-time rejection sampling
 """
 
+from .data import ElectraDataset, ElectraSample, create_training_data
 from .electra import ASMElectra, ElectraConfig
 from .fake_generators import (
-    FakeGenerator,
-    SyntaxErrorGenerator,
     AddressingErrorGenerator,
-    OpcodeSwapGenerator,
     CompositeGenerator,
+    FakeGenerator,
+    OpcodeSwapGenerator,
+    SyntaxErrorGenerator,
 )
-from .data import ElectraDataset, ElectraSample, create_training_data
-from .filter import SampleFilter, FilterConfig
+from .filter import FilterConfig, SampleFilter
 
 __all__ = [
     # Core

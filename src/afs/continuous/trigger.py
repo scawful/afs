@@ -8,14 +8,14 @@ Monitors usage metrics and triggers retraining based on:
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Callable
 
+from .generator import DataGeneratorConfig, TrainingDataGenerator
 from .logger import UsageLogger
-from .generator import TrainingDataGenerator, DataGeneratorConfig
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ class TriggerResult:
     """Result of a trigger check."""
 
     triggered: bool
-    trigger_type: Optional[TriggerType] = None
+    trigger_type: TriggerType | None = None
     reason: str = ""
     metrics: dict = field(default_factory=dict)
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -75,12 +75,12 @@ class RetrainTrigger:
     def __init__(
         self,
         usage_logger: UsageLogger,
-        config: Optional[TriggerConfig] = None,
+        config: TriggerConfig | None = None,
     ):
         self.logger = usage_logger
         self.config = config or TriggerConfig()
-        self._last_retrain_time: Optional[datetime] = None
-        self._baseline_quality: Optional[float] = None
+        self._last_retrain_time: datetime | None = None
+        self._baseline_quality: float | None = None
 
     def check_triggers(self) -> TriggerResult:
         """Check all enabled triggers.
@@ -246,8 +246,8 @@ class AutoRetrainer:
     def __init__(
         self,
         usage_logger: UsageLogger,
-        trigger_config: Optional[TriggerConfig] = None,
-        generator_config: Optional[DataGeneratorConfig] = None,
+        trigger_config: TriggerConfig | None = None,
+        generator_config: DataGeneratorConfig | None = None,
         output_dir: Path = Path("~/.context/training/continuous").expanduser(),
     ):
         self.usage_logger = usage_logger
@@ -258,8 +258,8 @@ class AutoRetrainer:
 
     def check_and_retrain(
         self,
-        train_fn: Optional[Callable[[Path], dict]] = None,
-    ) -> Optional[dict]:
+        train_fn: Callable[[Path], dict] | None = None,
+    ) -> dict | None:
         """Check triggers and retrain if needed.
 
         Args:

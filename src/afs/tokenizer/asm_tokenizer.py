@@ -21,19 +21,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Optional, List, Union
+from typing import Any, Union
 
-from .vocab import BASE_VOCAB, ID_TO_TOKEN, SPECIAL_TOKENS, OPCODES
 from .pretokenizer import (
     AssemblyPreTokenizer,
     Token,
     normalize_token,
     split_address,
 )
-
+from .vocab import BASE_VOCAB, SPECIAL_TOKENS
 
 # Type aliases for HuggingFace compatibility
-TextInput = Union[str, List[str]]
+TextInput = str | list[str]
 BatchEncoding = dict[str, Any]
 
 
@@ -128,13 +127,13 @@ class ASMTokenizer:
         """Return vocabulary dictionary."""
         return self.vocab.copy()
 
-    def convert_tokens_to_ids(self, tokens: Union[str, List[str]]) -> Union[int, List[int]]:
+    def convert_tokens_to_ids(self, tokens: str | list[str]) -> int | list[int]:
         """Convert token(s) to ID(s)."""
         if isinstance(tokens, str):
             return self._token_to_id(tokens)
         return [self._token_to_id(t) for t in tokens]
 
-    def convert_ids_to_tokens(self, ids: Union[int, List[int]]) -> Union[str, List[str]]:
+    def convert_ids_to_tokens(self, ids: int | list[int]) -> str | list[str]:
         """Convert ID(s) to token(s)."""
         if isinstance(ids, int):
             return self.id_to_token.get(ids, "[UNK]")
@@ -498,7 +497,7 @@ class ASMTokenizer:
             json.dump(config, f, indent=2)
 
     @classmethod
-    def load(cls, path: str | Path) -> "ASMTokenizer":
+    def load(cls, path: str | Path) -> ASMTokenizer:
         """Load tokenizer from directory.
 
         Args:

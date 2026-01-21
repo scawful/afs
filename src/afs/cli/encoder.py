@@ -10,7 +10,7 @@ from pathlib import Path
 def encoder_analyze_command(args: argparse.Namespace) -> int:
     """Analyze training data quality using encoder."""
     from ..tokenizer import ASMTokenizer
-    from ..training import EncoderDataProcessor, EncoderConfig
+    from ..training import EncoderConfig, EncoderDataProcessor
 
     # Load tokenizer
     if args.tokenizer:
@@ -62,15 +62,15 @@ def encoder_analyze_command(args: argparse.Namespace) -> int:
     # Report
     total = len(samples)
     mean_unk = sum(unk_ratios) / total if total else 0.0
-    print(f"\nResults:")
+    print("\nResults:")
     print(f"  Valid samples: {valid_count}/{total} ({100*valid_count/total:.1f}%)")
     print(f"  Mean UNK ratio: {mean_unk:.3f}")
-    print(f"\nIssues:")
+    print("\nIssues:")
     for issue, count in sorted(issues_count.items(), key=lambda x: -x[1]):
         print(f"  {issue}: {count} ({100*count/total:.1f}%)")
 
     if args.detailed and detailed_issues:
-        print(f"\nDetailed issues (first 20):")
+        print("\nDetailed issues (first 20):")
         for idx, issues in detailed_issues[:20]:
             print(f"  {idx + 1}: {', '.join(issues)}")
 
@@ -80,7 +80,7 @@ def encoder_analyze_command(args: argparse.Namespace) -> int:
 def encoder_filter_command(args: argparse.Namespace) -> int:
     """Filter training data by quality."""
     from ..tokenizer import ASMTokenizer
-    from ..training import EncoderDataProcessor, EncoderConfig
+    from ..training import EncoderConfig, EncoderDataProcessor
 
     # Load tokenizer
     if args.tokenizer:
@@ -150,7 +150,7 @@ def encoder_filter_command(args: argparse.Namespace) -> int:
 def encoder_dedupe_command(args: argparse.Namespace) -> int:
     """Deduplicate training data using semantic similarity."""
     from ..tokenizer import ASMTokenizer
-    from ..training import EncoderDataProcessor, EncoderConfig
+    from ..training import EncoderConfig, EncoderDataProcessor
 
     # Load tokenizer
     if args.tokenizer:
@@ -192,7 +192,7 @@ def encoder_dedupe_command(args: argparse.Namespace) -> int:
 def encoder_sample_command(args: argparse.Namespace) -> int:
     """Sample diverse subset from training data."""
     from ..tokenizer import ASMTokenizer
-    from ..training import EncoderDataProcessor, EncoderConfig
+    from ..training import EncoderConfig, EncoderDataProcessor
 
     # Load tokenizer
     if args.tokenizer:
@@ -230,7 +230,7 @@ def encoder_sample_command(args: argparse.Namespace) -> int:
 def encoder_pipeline_command(args: argparse.Namespace) -> int:
     """Run full preprocessing pipeline: expand vocab, filter, dedupe."""
     from ..tokenizer import ASMTokenizer
-    from ..training import EncoderDataProcessor, EncoderConfig
+    from ..training import EncoderConfig, EncoderDataProcessor
 
     print("=" * 60)
     print("AFS Pretraining Data Pipeline")
@@ -324,8 +324,8 @@ def encoder_pipeline_command(args: argparse.Namespace) -> int:
 
 def encoder_train_command(args: argparse.Namespace) -> int:
     """Train ASM encoder model."""
-    from ..training import ASMTrainer, ASMTrainerConfig
     from ..tokenizer import ASMTokenizer
+    from ..training import ASMTrainer, ASMTrainerConfig
 
     tokenizer_path = Path(args.tokenizer)
     output_path = Path(args.output)
@@ -377,7 +377,7 @@ def encoder_train_command(args: argparse.Namespace) -> int:
     )
 
     # Train
-    print(f"\nTraining encoder with config:")
+    print("\nTraining encoder with config:")
     print(f"  Epochs: {config.num_epochs}")
     print(f"  Batch size: {config.batch_size}")
     print(f"  Hidden size: {config.hidden_size}")
@@ -387,7 +387,7 @@ def encoder_train_command(args: argparse.Namespace) -> int:
     trainer = ASMTrainer(tokenizer=tokenizer, config=config)
     metrics = trainer.train(train_texts, val_texts)
 
-    print(f"\nTraining complete!")
+    print("\nTraining complete!")
     print(f"  Final loss: {metrics.get('train_loss', 'N/A')}")
     print(f"  Model saved to: {output_path}")
 

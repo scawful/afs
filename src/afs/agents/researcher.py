@@ -14,9 +14,7 @@ This demonstrates:
 import argparse
 import asyncio
 import logging
-import sys
 from pathlib import Path
-from typing import List
 
 from afs.agent.harness import run_agent
 
@@ -41,20 +39,20 @@ Be concise.
 Question: {query}
 
 --- BEGIN FILE CONTENT ---
-{content[:50000]} 
+{content[:50000]}
 --- END FILE CONTENT ---
 (Content truncated to 50k chars if longer)
 
 Answer:
 """
-    
+
     result = await run_agent(
         model=model,
         prompt=prompt,
         tools=[], # No tools needed for pure analysis
         verbose=False
     )
-    
+
     if result.success:
         return result.response
     else:
@@ -73,9 +71,9 @@ async def run_research_task(
         return
 
     # 1. Initialize State
-    files = sorted(list(input_dir.glob(glob_pattern)))
+    files = sorted(input_dir.glob(glob_pattern))
     logger.info(f"Found {len(files)} files to process in {input_dir}")
-    
+
     # Check if we are resuming
     processed_files = set()
     if output_file.exists():
@@ -93,22 +91,22 @@ async def run_research_task(
         if file_path.name in processed_files:
             logger.info(f"Skipping already processed: {file_path.name}")
             continue
-            
+
         logger.info(f"Processing [{i+1}/{len(files)}]: {file_path.name}")
-        
+
         # 3. External Attention Step
         # This spawns a separate context. The main loop's context is effectively just 'i' and 'file_path'.
         # We manually bridge the result to the persistent state.
         analysis = await analyze_document(file_path, query, model)
-        
+
         # 4. State Consolidation
         # Write immediately to disk. This is the "File-Centric State".
         # Even if the script crashes, progress is saved.
         report_entry = f"\n## Analysis of {file_path.name}\n\n{analysis}\n\n---"
-        
+
         with output_file.open("a", encoding="utf-8") as f:
             f.write(report_entry)
-            
+
         logger.info(f"Saved analysis for {file_path.name}")
 
     logger.info("Research task complete.")
@@ -120,9 +118,9 @@ async def main():
     parser.add_argument("--query", default="Summarize the key findings.", help="Research query")
     parser.add_argument("--glob", default="*.txt", help="File pattern (e.g. *.md, *.txt)")
     parser.add_argument("--model", default="gemini-3-flash-preview", help="Model to use")
-    
+
     args = parser.parse_args()
-    
+
     await run_research_task(
         Path(args.input_dir),
         Path(args.output_file),

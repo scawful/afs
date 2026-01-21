@@ -18,8 +18,6 @@ The validator:
 
 from __future__ import annotations
 
-import json
-import os
 import re
 import shutil
 import subprocess
@@ -29,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .base import GenerationResult, TrainingSample, read_jsonl, write_jsonl
+from .base import TrainingSample, read_jsonl, write_jsonl
 
 
 @dataclass

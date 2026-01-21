@@ -21,7 +21,7 @@ class BaseConverter(ABC):
     def __init__(
         self,
         include_cot: bool = True,
-        cot_mode: "CotInclusionMode" = None,
+        cot_mode: CotInclusionMode = None,
         system_prompt: str | None = None,
     ):
         """Initialize converter.
@@ -38,7 +38,7 @@ class BaseConverter(ABC):
         self.system_prompt = system_prompt
 
     @abstractmethod
-    def convert_sample(self, sample: "TrainingSample") -> dict[str, Any]:
+    def convert_sample(self, sample: TrainingSample) -> dict[str, Any]:
         """Convert a single sample to target format.
 
         Args:
@@ -49,7 +49,7 @@ class BaseConverter(ABC):
         """
         pass
 
-    def convert_all(self, samples: list["TrainingSample"]) -> list[dict[str, Any]]:
+    def convert_all(self, samples: list[TrainingSample]) -> list[dict[str, Any]]:
         """Convert all samples.
 
         Args:
@@ -88,7 +88,7 @@ class BaseConverter(ABC):
 
         return len(converted)
 
-    def _format_output_with_cot(self, sample: "TrainingSample") -> str:
+    def _format_output_with_cot(self, sample: TrainingSample) -> str:
         """Format output with CoT based on inclusion mode.
 
         Args:
@@ -120,7 +120,7 @@ Based on this analysis, here is the solution:
         else:  # SEPARATE - return just output, thinking handled separately
             return sample.output
 
-    def _build_user_message(self, sample: "TrainingSample") -> str:
+    def _build_user_message(self, sample: TrainingSample) -> str:
         """Build user message from instruction and input.
 
         Args:

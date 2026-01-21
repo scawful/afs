@@ -8,7 +8,6 @@ import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +30,13 @@ class OptimizationRecommendation:
     title: str
     description: str
     estimated_savings: float  # Estimated cost savings in dollars
-    estimated_time_saved: Optional[float] = None  # Hours saved
+    estimated_time_saved: float | None = None  # Hours saved
     confidence: float = 0.8  # 0-1, confidence in recommendation
     action: str = ""
-    risks: List[str] = field(default_factory=list)
+    risks: list[str] = field(default_factory=list)
     timestamp: datetime = field(default_factory=_utc_now)
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         data = asdict(self)
         data["timestamp"] = self.timestamp.isoformat()
@@ -47,7 +46,7 @@ class OptimizationRecommendation:
 class CostOptimizer:
     """Optimizes training costs through recommendations."""
 
-    def __init__(self, data_dir: Optional[Path] = None):
+    def __init__(self, data_dir: Path | None = None):
         """Initialize cost optimizer.
 
         Args:
@@ -59,7 +58,7 @@ class CostOptimizer:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        self.recommendations: List[OptimizationRecommendation] = []
+        self.recommendations: list[OptimizationRecommendation] = []
         self._load_recommendations()
 
     def _load_recommendations(self) -> None:
@@ -100,7 +99,7 @@ class CostOptimizer:
         current_throughput: float,
         gpu_price_per_hour: float,
         epoch_hours: float,
-    ) -> Optional[OptimizationRecommendation]:
+    ) -> OptimizationRecommendation | None:
         """Recommend batch size optimization.
 
         Args:
@@ -158,12 +157,12 @@ class CostOptimizer:
 
     def recommend_early_stopping(
         self,
-        validation_loss_history: List[float],
+        validation_loss_history: list[float],
         gpu_price_per_hour: float,
         hours_per_epoch: float,
         improvement_threshold: float = 0.001,
         patience: int = 3,
-    ) -> Optional[OptimizationRecommendation]:
+    ) -> OptimizationRecommendation | None:
         """Recommend early stopping.
 
         Args:
@@ -217,11 +216,11 @@ class CostOptimizer:
 
     def recommend_epoch_count(
         self,
-        validation_scores: List[float],
+        validation_scores: list[float],
         gpu_price_per_hour: float,
         hours_per_epoch: float,
         score_type: str = "accuracy",
-    ) -> Optional[OptimizationRecommendation]:
+    ) -> OptimizationRecommendation | None:
         """Recommend optimal epoch count based on diminishing returns.
 
         Args:
@@ -284,11 +283,11 @@ class CostOptimizer:
     def recommend_dataset_size(
         self,
         dataset_size: int,
-        validation_accuracy_curve: Dict[int, float],
+        validation_accuracy_curve: dict[int, float],
         gpu_price_per_hour: float,
         hours_per_epoch: float,
         num_epochs: int,
-    ) -> Optional[OptimizationRecommendation]:
+    ) -> OptimizationRecommendation | None:
         """Recommend dataset size based on accuracy vs data size curve.
 
         Args:
@@ -355,9 +354,9 @@ class CostOptimizer:
         current_gpu: str,
         current_price_per_hour: float,
         current_throughput: float,
-        alternative_gpus: Dict[str, Tuple[float, float]],
+        alternative_gpus: dict[str, tuple[float, float]],
         daily_training_hours: float = 8.0,
-    ) -> Optional[OptimizationRecommendation]:
+    ) -> OptimizationRecommendation | None:
         """Recommend switching to a different compute tier.
 
         Args:
@@ -406,7 +405,7 @@ class CostOptimizer:
         self._save_recommendations()
         return rec
 
-    def get_all_recommendations(self, hours: int = 24) -> List[OptimizationRecommendation]:
+    def get_all_recommendations(self, hours: int = 24) -> list[OptimizationRecommendation]:
         """Get recent recommendations.
 
         Args:
@@ -430,7 +429,7 @@ class CostOptimizer:
 
     def get_high_confidence_recommendations(
         self, confidence_threshold: float = 0.8
-    ) -> List[OptimizationRecommendation]:
+    ) -> list[OptimizationRecommendation]:
         """Get recommendations with high confidence.
 
         Args:

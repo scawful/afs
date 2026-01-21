@@ -2,38 +2,62 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Callable, Sequence
 
+from .claude_orchestrator import (
+    AGENT_DESCRIPTION as CLAUDE_ORCHESTRATOR_DESCRIPTION,
+)
+from .claude_orchestrator import (
+    AGENT_NAME as CLAUDE_ORCHESTRATOR_NAME,
+)
+from .claude_orchestrator import (
+    main as claude_orchestrator_main,
+)
 from .context_audit import (
     AGENT_DESCRIPTION as CONTEXT_AUDIT_DESCRIPTION,
-    AGENT_NAME as CONTEXT_AUDIT_NAME,
-    main as context_audit_main,
 )
-from .context_warm import (
-    AGENT_DESCRIPTION as CONTEXT_WARM_DESCRIPTION,
-    AGENT_NAME as CONTEXT_WARM_NAME,
-    main as context_warm_main,
+from .context_audit import (
+    AGENT_NAME as CONTEXT_AUDIT_NAME,
+)
+from .context_audit import (
+    main as context_audit_main,
 )
 from .context_inventory import (
     AGENT_DESCRIPTION as CONTEXT_INVENTORY_DESCRIPTION,
+)
+from .context_inventory import (
     AGENT_NAME as CONTEXT_INVENTORY_NAME,
+)
+from .context_inventory import (
     main as context_inventory_main,
+)
+from .context_warm import (
+    AGENT_DESCRIPTION as CONTEXT_WARM_DESCRIPTION,
+)
+from .context_warm import (
+    AGENT_NAME as CONTEXT_WARM_NAME,
+)
+from .context_warm import (
+    main as context_warm_main,
 )
 from .memory_export import (
     AGENT_DESCRIPTION as MEMORY_EXPORT_DESCRIPTION,
+)
+from .memory_export import (
     AGENT_NAME as MEMORY_EXPORT_NAME,
+)
+from .memory_export import (
     main as memory_export_main,
 )
 from .scribe_draft import (
     AGENT_DESCRIPTION as SCRIBE_DRAFT_DESCRIPTION,
-    AGENT_NAME as SCRIBE_DRAFT_NAME,
-    main as scribe_draft_main,
 )
-from .claude_orchestrator import (
-    AGENT_DESCRIPTION as CLAUDE_ORCHESTRATOR_DESCRIPTION,
-    AGENT_NAME as CLAUDE_ORCHESTRATOR_NAME,
-    main as claude_orchestrator_main,
+from .scribe_draft import (
+    AGENT_NAME as SCRIBE_DRAFT_NAME,
+)
+from .scribe_draft import (
+    main as scribe_draft_main,
 )
 
 

@@ -89,7 +89,7 @@ class TrainingExportHook:
                 logger.warning("QualityScorer not available, using simple heuristics")
                 self._scorer = SimpleQualityScorer()
 
-    async def on_agent_complete(self, result: "AgentResult") -> None:
+    async def on_agent_complete(self, result: AgentResult) -> None:
         """Called when agent completes a task.
 
         Converts the interaction to training samples, scores them,
@@ -122,7 +122,7 @@ class TrainingExportHook:
         if exported:
             logger.info(f"Exported {exported} training samples")
 
-    def _result_to_samples(self, result: "AgentResult") -> list[TrainingSample]:
+    def _result_to_samples(self, result: AgentResult) -> list[TrainingSample]:
         """Convert agent result to training samples.
 
         Creates samples from:

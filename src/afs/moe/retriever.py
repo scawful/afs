@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 
@@ -89,7 +89,7 @@ class RetrieverConfig:
     preload_embeddings: bool = False  # Load all into memory at startup
 
     @classmethod
-    def default(cls) -> "RetrieverConfig":
+    def default(cls) -> RetrieverConfig:
         """Default config using ~/.context/knowledge/"""
         knowledge_root = Path.home() / ".context" / "knowledge"
         return cls(

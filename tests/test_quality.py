@@ -1,13 +1,12 @@
 """Tests for quality analysis module."""
 
-import pytest
 
 from afs.quality import (
+    AnomalyDetector,
+    BiasAnalyzer,
     DatasetAnalyzer,
     DatasetStatistics,
-    BiasAnalyzer,
     DuplicateDetector,
-    AnomalyDetector,
     QualityMetrics,
 )
 

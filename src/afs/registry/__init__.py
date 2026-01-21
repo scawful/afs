@@ -48,8 +48,8 @@ from .models import (
     ModelMetadata,
     ModelVersion,
     TrainingMetadata,
-    VersionStatus,
     VersionInfo,
+    VersionStatus,
 )
 
 __all__ = [

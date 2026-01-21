@@ -15,7 +15,7 @@ import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .quality_gates import QualityGateReport
 
@@ -31,8 +31,8 @@ class ApprovalRecord:
     approved: bool
     context: str  # development, staging, production
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    gates_report: Optional[dict[str, Any]] = None
-    approved_by: Optional[str] = None
+    gates_report: dict[str, Any] | None = None
+    approved_by: str | None = None
     notes: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -43,7 +43,7 @@ class ApprovalRecord:
 class RegistryIntegration:
     """Integration with model registry for approval management."""
 
-    def __init__(self, registry_path: Optional[str] = None):
+    def __init__(self, registry_path: str | None = None):
         """Initialize registry integration.
 
         Args:
@@ -56,7 +56,7 @@ class RegistryIntegration:
     def approve_version(
         self,
         report: QualityGateReport,
-        approved_by: Optional[str] = None,
+        approved_by: str | None = None,
         notes: str = "",
     ) -> bool:
         """Approve a model version based on gate results.
@@ -105,7 +105,7 @@ class RegistryIntegration:
         model_version: str,
         context: str,
         reason: str = "",
-        rejected_by: Optional[str] = None,
+        rejected_by: str | None = None,
     ) -> bool:
         """Reject a model version.
 
@@ -141,7 +141,7 @@ class RegistryIntegration:
 
     def get_approval_status(
         self, model_name: str, model_version: str, context: str
-    ) -> Optional[ApprovalRecord]:
+    ) -> ApprovalRecord | None:
         """Get approval status for a version.
 
         Args:
@@ -295,7 +295,7 @@ class DeploymentController:
 
     def __init__(
         self,
-        registry_integration: Optional[RegistryIntegration] = None,
+        registry_integration: RegistryIntegration | None = None,
     ):
         """Initialize deployment controller.
 

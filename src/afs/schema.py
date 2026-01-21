@@ -32,7 +32,7 @@ class DirectoryConfig:
     role: MountType | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "DirectoryConfig":
+    def from_dict(cls, data: dict[str, Any]) -> DirectoryConfig:
         name = str(data.get("name", "")).strip()
         role_raw = data.get("role")
         role = None
@@ -103,7 +103,7 @@ class WorkspaceDirectory:
     description: str | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "WorkspaceDirectory":
+    def from_dict(cls, data: dict[str, Any]) -> WorkspaceDirectory:
         path = _as_path(data.get("path", ""))
         description = data.get("description")
         return cls(path=path, description=description)
@@ -120,7 +120,7 @@ class GeneralConfig:
     discovery_ignore: list[str] = field(default_factory=default_discovery_ignore)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "GeneralConfig":
+    def from_dict(cls, data: dict[str, Any]) -> GeneralConfig:
         context_root = data.get("context_root")
         agent_workspaces_dir = data.get("agent_workspaces_dir")
         python_executable = data.get("python_executable")
@@ -159,7 +159,7 @@ class PluginsConfig:
     )
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "PluginsConfig":
+    def from_dict(cls, data: dict[str, Any]) -> PluginsConfig:
         enabled_plugins = [
             item for item in data.get("enabled_plugins", []) if isinstance(item, str)
         ]
@@ -192,7 +192,7 @@ class AgentConfig:
     auto_start: bool = False
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "AgentConfig":
+    def from_dict(cls, data: dict[str, Any]) -> AgentConfig:
         tags = data.get("tags", [])
         if isinstance(tags, list):
             tags = [tag for tag in tags if isinstance(tag, str)]
@@ -216,7 +216,7 @@ class OrchestratorConfig:
     auto_routing: bool = True
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "OrchestratorConfig":
+    def from_dict(cls, data: dict[str, Any]) -> OrchestratorConfig:
         agents_raw = data.get("default_agents", [])
         agents = [
             AgentConfig.from_dict(item)
@@ -242,7 +242,7 @@ class ServiceConfig:
     environment: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ServiceConfig":
+    def from_dict(cls, data: dict[str, Any]) -> ServiceConfig:
         command = data.get("command", [])
         if isinstance(command, list):
             command = [str(item) for item in command]
@@ -272,7 +272,7 @@ class ServicesConfig:
     services: dict[str, ServiceConfig] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ServicesConfig":
+    def from_dict(cls, data: dict[str, Any]) -> ServicesConfig:
         enabled = bool(data.get("enabled", False))
         raw_services = data.get("services", {})
         parsed: dict[str, ServiceConfig] = {}
@@ -295,7 +295,7 @@ class HistoryConfig:
     redact_sensitive: bool = True
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "HistoryConfig":
+    def from_dict(cls, data: dict[str, Any]) -> HistoryConfig:
         return cls(
             enabled=bool(data.get("enabled", True)),
             include_payloads=bool(data.get("include_payloads", True)),
@@ -321,10 +321,10 @@ class MemoryExportConfig:
     score_profile: str = "generic"
     enable_asar: bool = False
     auto_start: bool = False
-    routes: list["MemoryExportRoute"] = field(default_factory=list)
+    routes: list[MemoryExportRoute] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "MemoryExportConfig":
+    def from_dict(cls, data: dict[str, Any]) -> MemoryExportConfig:
         interval_seconds = data.get("interval_seconds", cls().interval_seconds)
         dataset_output = data.get("dataset_output", cls().dataset_output)
         report_output = data.get("report_output")
@@ -381,7 +381,7 @@ class MemoryExportRoute:
     domain: str | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "MemoryExportRoute":
+    def from_dict(cls, data: dict[str, Any]) -> MemoryExportRoute:
         tags = data.get("tags")
         if isinstance(data.get("tag"), str):
             tags = [data.get("tag")]
@@ -418,7 +418,7 @@ class CognitiveConfig:
     record_epistemic: bool = False
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "CognitiveConfig":
+    def from_dict(cls, data: dict[str, Any]) -> CognitiveConfig:
         return cls(
             enabled=bool(data.get("enabled", False)),
             record_emotions=bool(data.get("record_emotions", False)),
@@ -440,7 +440,7 @@ class AFSConfig:
     memory_export: MemoryExportConfig = field(default_factory=MemoryExportConfig)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "AFSConfig":
+    def from_dict(cls, data: dict[str, Any] | None) -> AFSConfig:
         data = data or {}
         general = GeneralConfig.from_dict(data.get("general", {}))
         plugins = PluginsConfig.from_dict(data.get("plugins", {}))

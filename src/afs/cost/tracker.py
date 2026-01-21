@@ -8,7 +8,6 @@ import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import requests
 
@@ -33,23 +32,23 @@ class GPUPrice:
     provider: str  # 'vast.ai', 'lambda', 'paperspace', etc.
     price_per_hour: float
     availability: int = 0
-    cuda_version: Optional[str] = None
-    vram_gb: Optional[int] = None
-    instance_id: Optional[str] = None
-    region: Optional[str] = None
+    cuda_version: str | None = None
+    vram_gb: int | None = None
+    instance_id: str | None = None
+    region: str | None = None
     timestamp: datetime = field(default_factory=_utc_now)
 
     def __post_init__(self) -> None:
         self.timestamp = _ensure_utc(self.timestamp)
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         data = asdict(self)
         data["timestamp"] = self.timestamp.isoformat()
         return data
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "GPUPrice":
+    def from_dict(cls, data: dict) -> "GPUPrice":
         """Create from dictionary."""
         data = data.copy()
         if isinstance(data.get("timestamp"), str):
@@ -63,9 +62,9 @@ class PriceHistory:
 
     gpu_name: str
     provider: str
-    prices: List[Tuple[datetime, float]] = field(default_factory=list)
+    prices: list[tuple[datetime, float]] = field(default_factory=list)
 
-    def add_price(self, price: float, timestamp: Optional[datetime] = None) -> None:
+    def add_price(self, price: float, timestamp: datetime | None = None) -> None:
         """Add a price point to history."""
         if timestamp is None:
             timestamp = _utc_now()
@@ -79,7 +78,7 @@ class PriceHistory:
         recent = [p for t, p in self.prices if t >= cutoff]
         return sum(recent) / len(recent) if recent else 0.0
 
-    def get_min_max(self, hours: int = 24) -> Tuple[float, float]:
+    def get_min_max(self, hours: int = 24) -> tuple[float, float]:
         """Get min/max price over the last N hours."""
         cutoff = _utc_now() - timedelta(hours=hours)
         recent = [p for t, p in self.prices if t >= cutoff]
@@ -115,7 +114,7 @@ class PriceAlert:
     provider: str
     alert_type: str  # 'drop', 'surge', 'low'
     current_price: float
-    previous_price: Optional[float]
+    previous_price: float | None
     change_percent: float
     timestamp: datetime = field(default_factory=_utc_now)
     message: str = ""
@@ -143,7 +142,7 @@ class PriceAlert:
 class GPUPriceTracker:
     """Tracks GPU prices from various cloud providers."""
 
-    def __init__(self, data_dir: Optional[Path] = None):
+    def __init__(self, data_dir: Path | None = None):
         """Initialize price tracker.
 
         Args:
@@ -155,9 +154,9 @@ class GPUPriceTracker:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        self.histories: Dict[Tuple[str, str], PriceHistory] = {}
-        self.current_prices: Dict[Tuple[str, str], float] = {}
-        self.alerts: List[PriceAlert] = []
+        self.histories: dict[tuple[str, str], PriceHistory] = {}
+        self.current_prices: dict[tuple[str, str], float] = {}
+        self.alerts: list[PriceAlert] = []
 
         self._load_histories()
 
@@ -199,7 +198,7 @@ class GPUPriceTracker:
 
         logger.debug(f"Saved {len(self.histories)} price histories")
 
-    def track_price(self, gpu_price: GPUPrice) -> Optional[PriceAlert]:
+    def track_price(self, gpu_price: GPUPrice) -> PriceAlert | None:
         """Track a GPU price and check for alerts.
 
         Args:
@@ -258,7 +257,7 @@ class GPUPriceTracker:
         self._save_histories()
         return alert
 
-    def fetch_vastai_prices(self) -> List[GPUPrice]:
+    def fetch_vastai_prices(self) -> list[GPUPrice]:
         """Fetch current prices from vast.ai.
 
         Returns:
@@ -294,7 +293,7 @@ class GPUPriceTracker:
             logger.error(f"Failed to fetch vast.ai prices: {e}")
             return []
 
-    def get_cheapest_gpu(self, gpu_type: Optional[str] = None) -> Optional[Tuple[GPUPrice, float]]:
+    def get_cheapest_gpu(self, gpu_type: str | None = None) -> tuple[GPUPrice, float] | None:
         """Get cheapest GPU instance.
 
         Args:
@@ -321,7 +320,7 @@ class GPUPriceTracker:
 
         return min(candidates, key=lambda x: x[0].price_per_hour)
 
-    def get_price_recommendations(self, gpu_type: str, max_price: float) -> List[Tuple[GPUPrice, str]]:
+    def get_price_recommendations(self, gpu_type: str, max_price: float) -> list[tuple[GPUPrice, str]]:
         """Get recommendations for GPU purchases.
 
         Args:
@@ -351,14 +350,14 @@ class GPUPriceTracker:
             elif current < avg_24h * 0.9:
                 reason = f"Below 24h average (${avg_24h:.3f})"
             else:
-                reason = f"Within price range"
+                reason = "Within price range"
 
             recommendations.append((price_obj, reason))
 
         # Sort by price
         return sorted(recommendations, key=lambda x: x[0].price_per_hour)
 
-    def get_alerts(self, hours: int = 24) -> List[PriceAlert]:
+    def get_alerts(self, hours: int = 24) -> list[PriceAlert]:
         """Get recent alerts.
 
         Args:
@@ -370,7 +369,7 @@ class GPUPriceTracker:
         cutoff = _utc_now() - timedelta(hours=hours)
         return [a for a in self.alerts if a.timestamp >= cutoff]
 
-    def get_price_statistics(self) -> Dict:
+    def get_price_statistics(self) -> dict:
         """Get statistics on tracked prices.
 
         Returns:

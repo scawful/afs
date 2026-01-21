@@ -11,7 +11,6 @@ from typing import Any
 from ..config import load_config_model
 from ..schema import AFSConfig, GeneralConfig
 
-
 _TOP_LEVEL_ORDER = [
     "fs",
     "context",

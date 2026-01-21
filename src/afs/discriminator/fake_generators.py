@@ -4,12 +4,11 @@ These generators introduce intentional errors into real 65816 assembly
 to create "fake" examples for discriminator training.
 """
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
 import random
 import re
-from typing import Iterator
-
+from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from dataclasses import dataclass
 
 # Valid 65816 opcodes
 VALID_OPCODES = {
@@ -214,7 +213,7 @@ class OpcodeSwapGenerator(FakeGenerator):
             tokens = self._tokenize_line(line)
 
             # Find opcode token
-            for j, token in enumerate(tokens):
+            for _j, token in enumerate(tokens):
                 if token.upper() in VALID_OPCODES and random.random() < self.error_rate:
                     # Swap with fake opcode
                     fake = random.choice(list(FAKE_OPCODES))

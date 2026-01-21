@@ -274,7 +274,9 @@ class FaroreBenchmark(BenchmarkRunner):
         fix_matches = False
         if fixed_code and expected_fix:
             # Normalize and compare
-            normalize = lambda s: re.sub(r'\s+', ' ', s.strip().lower())
+            def normalize(s: str) -> str:
+                return re.sub(r'\s+', ' ', s.strip().lower())
+
             fix_matches = normalize(fixed_code) == normalize(expected_fix)
 
         # Calculate score
@@ -368,7 +370,7 @@ class VeranBenchmark(BenchmarkRunner):
         # Check expected concepts
         expected_concepts = item.metadata.get("concepts", [])
         if expected_concepts:
-            matched = len(set(c.lower() for c in expected_concepts) & set(c.lower() for c in concepts_found))
+            matched = len({c.lower() for c in expected_concepts} & {c.lower() for c in concepts_found})
             concept_recall = matched / len(expected_concepts)
         else:
             concept_recall = min(1.0, len(concepts_found) / 5)  # Expect at least 5 concepts

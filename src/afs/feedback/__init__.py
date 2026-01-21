@@ -7,9 +7,9 @@ Provides:
 - Drift detection
 """
 
-from .logger import InferenceLogger, FeedbackCollector, InferenceRecord
-from .sampler import FeedbackSampler, SamplingStrategy
+from .logger import FeedbackCollector, InferenceLogger, InferenceRecord
 from .retrainer import PeriodicRetrainer, RetrainConfig
+from .sampler import FeedbackSampler, SamplingStrategy
 
 __all__ = [
     "InferenceLogger",

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from .base import ServiceAdapter
 from ..models import ServiceDefinition, ServiceType
+from .base import ServiceAdapter
 
 
 class SystemdAdapter(ServiceAdapter):

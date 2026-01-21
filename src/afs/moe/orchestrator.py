@@ -21,16 +21,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 from google import genai
 from google.genai import types
 
 from ..history import log_event
 from .router import MoERouter, RouterConfig
-from .classifier import QueryIntent
 
 logger = logging.getLogger(__name__)
 
@@ -278,7 +278,7 @@ class Orchestrator:
         if self.config.enable_debug_tools:
             self._tools[ToolType.YAZE_DEBUG] = self._tool_yaze_debug
 
-    async def __aenter__(self) -> "Orchestrator":
+    async def __aenter__(self) -> Orchestrator:
         """Async context manager entry."""
         moe_config = self.config.moe_config or RouterConfig.default()
         self._router = MoERouter(moe_config)
@@ -524,6 +524,7 @@ class Orchestrator:
 
         # Try local Ollama first, fallback to Gemini
         import os
+
         import httpx
         host = os.environ.get("AFS_OLLAMA_HOST", "http://localhost:11435")
         timeout = float(os.environ.get("AFS_OLLAMA_TIMEOUT", "120"))
@@ -727,7 +728,6 @@ Output the diagnosis and fixed code in a ```asm block.""",
         import os
         import re
         import subprocess
-        import tempfile
 
         code = (
             input_data.get("code", "")

@@ -12,11 +12,11 @@ from __future__ import annotations
 import heapq
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from afs.generators.base import TrainingSample
@@ -60,7 +60,7 @@ class QueueItem:
     human_rating: float | None = None
     review_notes: str = ""
 
-    def __lt__(self, other: "QueueItem") -> bool:
+    def __lt__(self, other: QueueItem) -> bool:
         """Compare for heap ordering (higher priority = comes first)."""
         return self.priority > other.priority
 
@@ -84,7 +84,7 @@ class QueueItem:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "QueueItem":
+    def from_dict(cls, data: dict[str, Any]) -> QueueItem:
         return cls(
             item_id=data["item_id"],
             sample_id=data["sample_id"],
@@ -106,9 +106,9 @@ class QueueItem:
     @classmethod
     def from_sample(
         cls,
-        sample: "TrainingSample",
+        sample: TrainingSample,
         priority: float | None = None,
-    ) -> "QueueItem":
+    ) -> QueueItem:
         """Create queue item from training sample."""
         electra = sample._metadata.get("quality_components", {}).get("electra", 0.5)
         uncertainty = 1.0 - abs(electra - 0.5)
@@ -176,8 +176,8 @@ class PriorityQueue:
 
     def add(
         self,
-        samples: list["TrainingSample"],
-        scorer: "QualityScorer | None" = None,
+        samples: list[TrainingSample],
+        scorer: QualityScorer | None = None,
     ) -> int:
         """Add samples to the queue.
 
@@ -217,7 +217,7 @@ class PriorityQueue:
         self._save()
         return added
 
-    def _compute_priority(self, sample: "TrainingSample") -> float:
+    def _compute_priority(self, sample: TrainingSample) -> float:
         """Compute priority for a sample."""
         c = self.config
 
@@ -369,7 +369,7 @@ class PriorityQueue:
                 del self._domain_counts[item.domain]
 
         # Rebuild heap
-        self._heap = [item for item in self._items.values()]
+        self._heap = list(self._items.values())
         heapq.heapify(self._heap)
 
         self._save()
@@ -428,9 +428,9 @@ class PriorityQueue:
 
 
 def create_queue(
-    samples: list["TrainingSample"],
+    samples: list[TrainingSample],
     storage_path: Path | None = None,
-    scorer: "QualityScorer | None" = None,
+    scorer: QualityScorer | None = None,
 ) -> PriorityQueue:
     """Create a new priority queue from samples.
 

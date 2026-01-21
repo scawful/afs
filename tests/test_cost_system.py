@@ -1,6 +1,5 @@
 """Tests for cost optimization system."""
 
-import json
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,9 +12,7 @@ from afs.cost import (
     GPUPrice,
     GPUPriceTracker,
     OptimizationRecommendation,
-    PriceAlert,
     PriceHistory,
-    TrainingCostReport,
     TrainingMetrics,
 )
 

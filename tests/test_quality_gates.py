@@ -1,9 +1,8 @@
 """Tests for quality gate system."""
 
-import json
 import tempfile
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
@@ -19,12 +18,9 @@ from afs.gates import (
     TestMetrics,
 )
 from afs.gates.ci_integration import (
-    GitHubActionsIntegration,
-    JenkinsIntegration,
     LocalFileIntegration,
 )
 from afs.gates.registry_integration import (
-    ApprovalRecord,
     DeploymentController,
     RegistryIntegration,
 )

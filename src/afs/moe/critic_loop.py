@@ -5,8 +5,8 @@ reviews another's output and provides feedback for improvement.
 """
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Awaitable
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ class CriticLoop:
         self,
         generator: Callable[[str, str], Awaitable[str]],
         critic: Callable[[str, str], Awaitable[CriticFeedback]],
-        config: Optional[CriticConfig] = None,
+        config: CriticConfig | None = None,
     ):
         """
         Args:
@@ -70,7 +70,7 @@ class CriticLoop:
     async def run(
         self,
         prompt: str,
-        initial_output: Optional[str] = None,
+        initial_output: str | None = None,
     ) -> tuple[str, list[RefinementResult]]:
         """Run the critic loop until pass or max iterations.
 
@@ -228,7 +228,7 @@ Respond with:
 async def create_din_farore_loop(
     din_handler: Callable,
     farore_handler: Callable,
-    config: Optional[CriticConfig] = None,
+    config: CriticConfig | None = None,
 ) -> CriticLoop:
     """Create a Din (optimizer) + Farore (critic) loop."""
 

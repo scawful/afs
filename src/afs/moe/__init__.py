@@ -1,8 +1,8 @@
 """Mixture of Experts router for 65816 assembly models."""
 
-from .router import MoERouter, ExpertConfig, RouterConfig, RoutingDecision, GenerationResult
-from .classifier import IntentClassifier, QueryIntent, ClassificationResult
-from .retriever import Retriever, RetrieverConfig, RetrievalResult, KnowledgeBase
+from .classifier import ClassificationResult, IntentClassifier, QueryIntent
+from .retriever import KnowledgeBase, RetrievalResult, Retriever, RetrieverConfig
+from .router import ExpertConfig, GenerationResult, MoERouter, RouterConfig, RoutingDecision
 
 __all__ = [
     # Router

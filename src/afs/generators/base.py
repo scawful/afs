@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
 
 # =============================================================================
 # Instruction Cleaning Utilities
@@ -108,7 +107,7 @@ def is_malformed_output(output: str, instruction: str) -> bool:
     return False
 
 
-def clean_sample_instruction(sample: "TrainingSample") -> "TrainingSample":
+def clean_sample_instruction(sample: TrainingSample) -> TrainingSample:
     """
     Clean a sample's instruction in-place and return it.
 
@@ -178,7 +177,7 @@ class TrainingSample:
         self,
         extractor: Any | None = None,
         validate: bool = False,
-    ) -> "TrainingSample":
+    ) -> TrainingSample:
         """Populate kg_entities field by extracting entities from output.
 
         Uses the EntityExtractor to find ALTTP memory addresses and labels
@@ -242,7 +241,7 @@ class BaseGenerator:
 def read_jsonl(path: Path) -> list[TrainingSample]:
     """Read training samples from JSONL file."""
     samples = []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:

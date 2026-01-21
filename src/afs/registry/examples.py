@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from .database import ModelRegistry
 from .lineage import LineageTracker
-from .models import EvaluationScores, TrainingMetadata
 
 
 def example_register_model() -> None:
@@ -46,7 +43,7 @@ def example_list_versions() -> None:
     registry = ModelRegistry()
 
     versions = registry.list_versions("majora")
-    print(f"\nVersions of majora:")
+    print("\nVersions of majora:")
     for v in versions:
         print(f"  {v.version}: {v.status.value}")
         if v.evaluation_scores.accuracy:
@@ -81,7 +78,7 @@ def example_compare_versions() -> None:
 
     diff = registry.compare_versions("majora", "v1", "v2")
 
-    print(f"\nDifferences between v1 and v2:")
+    print("\nDifferences between v1 and v2:")
     for key, values in diff.items():
         print(f"  {key}:")
         print(f"    v1: {values['v1']}")

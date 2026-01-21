@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 
-from .base import ServiceAdapter
 from ..models import ServiceDefinition
+from .base import ServiceAdapter
 
 
 class LaunchdAdapter(ServiceAdapter):

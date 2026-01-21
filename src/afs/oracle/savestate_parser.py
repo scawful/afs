@@ -26,9 +26,9 @@ from __future__ import annotations
 
 import struct
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 from ..generators.base import TrainingSample
 

@@ -4,7 +4,7 @@ Handles loading TOML configuration with fallback for standard library support.
 """
 import sys
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any
 
 try:
     if sys.version_info >= (3, 11):
@@ -16,7 +16,7 @@ except ImportError:
     # We will use a simple parser for our specific use case or fail gracefully
     tomllib = None
 
-def load_toml(path: Path) -> Dict[str, Any]:
+def load_toml(path: Path) -> dict[str, Any]:
     """Load TOML file with fallback."""
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
@@ -28,7 +28,7 @@ def load_toml(path: Path) -> Dict[str, Any]:
             # Very basic fallback or error
             raise ImportError("Python 3.11+ or 'tomli' package required to parse TOML configuration.")
 
-def get_chat_registry(root_path: Path = None) -> Dict[str, Any]:
+def get_chat_registry(root_path: Path = None) -> dict[str, Any]:
     """Load the chat registry configuration."""
     if root_path is None:
         # Try to find from common locations relative to this file
@@ -44,5 +44,5 @@ def get_chat_registry(root_path: Path = None) -> Dict[str, Any]:
     if not config_path.exists():
          # Fallback absolute path for scawful user
         config_path = Path("/Users/scawful/src/lab/afs-scawful/config/chat_registry.toml")
-    
+
     return load_toml(config_path)

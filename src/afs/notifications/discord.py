@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import os
-from typing import Optional
 
 import requests
 
@@ -20,7 +18,7 @@ class DiscordNotifier(NotificationHandler):
 
     def __init__(
         self,
-        webhook_url: Optional[str] = None,
+        webhook_url: str | None = None,
         username: str = "AFS"
     ):
         """Initialize Discord notifier.
@@ -195,8 +193,8 @@ class DiscordNotifier(NotificationHandler):
 
 def send_discord_message(
     message: str,
-    title: Optional[str] = None,
-    webhook_url: Optional[str] = None,
+    title: str | None = None,
+    webhook_url: str | None = None,
     color: int = 0x0099FF
 ) -> bool:
     """Convenience function to send a Discord message.

@@ -12,11 +12,10 @@ import pickle
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
 
 import numpy as np
 
-from .classifier import QueryIntent, ClassificationResult
+from .classifier import ClassificationResult, QueryIntent
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +38,7 @@ class RoutingExample:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "RoutingExample":
+    def from_dict(cls, data: dict) -> RoutingExample:
         return cls(
             instruction=data["instruction"],
             expert=QueryIntent(data["expert"]),
@@ -300,7 +299,7 @@ class HybridRouter:
         self.config = config or RouterTrainingConfig()
         self.keyword_boost = keyword_boost
         self._learned: LearnedRouter | None = None
-        self._keyword: "IntentClassifier" = None
+        self._keyword: IntentClassifier = None
 
     def load(self, path: Path | None = None) -> None:
         """Load learned model and initialize keyword classifier."""
@@ -619,7 +618,7 @@ def train_router(
     # Save
     router.save()
 
-    print(f"\nTraining Results:")
+    print("\nTraining Results:")
     print(f"  Samples: {metrics['n_samples']}")
     print(f"  Accuracy: {metrics['train_accuracy']:.1%}")
     print(f"  Loss: {metrics['final_loss']:.4f}")

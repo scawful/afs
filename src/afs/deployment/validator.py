@@ -15,16 +15,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
-import subprocess
-import tempfile
 import time
-from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
-from datetime import timezone
+from typing import Any
 
 from afs.logging_config import get_logger
 from afs.notifications.base import EventType, NotificationLevel, NotificationManager
@@ -84,7 +80,7 @@ class ValidationReport:
     model_path: Path
     model_name: str
     version: str
-    baseline_version: Optional[str] = None
+    baseline_version: str | None = None
     results: list[ValidationResult] = field(default_factory=list)
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     test_queries: list[str] = field(default_factory=list)
@@ -257,8 +253,8 @@ class PreDeploymentValidator:
         model_path: Path,
         model_name: str = "unknown",
         version: str = "v1",
-        baseline_version: Optional[str] = None,
-        notification_manager: Optional[NotificationManager] = None,
+        baseline_version: str | None = None,
+        notification_manager: NotificationManager | None = None,
     ):
         """Initialize validator.
 
@@ -845,7 +841,7 @@ class PreDeploymentValidator:
             tags=["deployment", "validation"],
         )
 
-    def get_rollback_recommendation(self) -> Optional[str]:
+    def get_rollback_recommendation(self) -> str | None:
         """Get rollback recommendation if deployment should be blocked."""
         if self.report.passed:
             return None

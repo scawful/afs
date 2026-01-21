@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import sys
-from typing import Iterable
+from collections.abc import Iterable
 
-from .router import MoERouter, RouterConfig
-from .classifier import QueryIntent
+from .router import MoERouter
 
 
 async def _test_routing(queries: list[str]) -> None:
@@ -112,7 +110,7 @@ def _list_command(args: argparse.Namespace) -> int:
 
 def _eval_command(args: argparse.Namespace) -> int:
     """Run evaluations."""
-    from .evals.runner import EvalRunner, run_routing_eval, run_full_eval
+    from .evals.runner import run_full_eval, run_routing_eval
 
     if args.routing_only:
         metrics = run_routing_eval()
@@ -131,8 +129,9 @@ def _eval_command(args: argparse.Namespace) -> int:
 
 def _orchestrate_command(args: argparse.Namespace) -> int:
     """Run orchestrated query with Gemini planning."""
-    from .orchestrator import orchestrate
     import json
+
+    from .orchestrator import orchestrate
 
     result = asyncio.run(orchestrate(args.query, verbose=args.verbose))
 

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Callable, Any
+from typing import Any
 
 from .logger import UsageLogger
 
@@ -143,9 +143,9 @@ class ABTestManager:
     def __init__(
         self,
         usage_logger: UsageLogger | None = None,
-        config: Optional[ABTestConfig] = None,
+        config: ABTestConfig | None = None,
         *,
-        ab_config: Optional[ABTestConfig] = None,
+        ab_config: ABTestConfig | None = None,
         registry: Any | None = None,
         state_file: Path = Path("~/.context/training/continuous/ab_test_state.json").expanduser(),
     ):
@@ -157,8 +157,8 @@ class ABTestManager:
         self.state_file = state_file
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
 
-        self.champion: Optional[ModelVersion] = None
-        self.challenger: Optional[ModelVersion] = None
+        self.champion: ModelVersion | None = None
+        self.challenger: ModelVersion | None = None
         self.traffic_split = TrafficSplit(
             champion_weight=1.0 - self.config.initial_challenger_traffic,
             challenger_weight=self.config.initial_challenger_traffic,
@@ -170,7 +170,7 @@ class ABTestManager:
         self,
         model_name: str,
         model_path: Path,
-        traffic_weight: Optional[float] = None,
+        traffic_weight: float | None = None,
     ) -> ModelVersion:
         """Deploy a new challenger model.
 
@@ -211,7 +211,7 @@ class ABTestManager:
 
         return self.challenger
 
-    def route_request(self) -> Optional[ModelVersion]:
+    def route_request(self) -> ModelVersion | None:
         """Route a request to a model based on traffic split.
 
         Returns:
@@ -234,7 +234,7 @@ class ABTestManager:
     def get_model_metrics(
         self,
         model_version: ModelVersion,
-        window_hours: Optional[int] = None,
+        window_hours: int | None = None,
     ) -> dict:
         """Get metrics for a specific model version.
 
@@ -263,7 +263,7 @@ class ABTestManager:
             "total_requests": stats.get("total", 0),
         }
 
-    def compare_models(self) -> Optional[ABTestResult]:
+    def compare_models(self) -> ABTestResult | None:
         """Compare champion and challenger performance.
 
         Returns:

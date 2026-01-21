@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from ..discovery import get_project_stats
 from ..models import MountType

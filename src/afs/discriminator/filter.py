@@ -1,12 +1,12 @@
 """Filter training samples using ASM-ELECTRA discriminator."""
 
+import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-import json
-from typing import Iterator
 
-from .electra import ASMElectra
 from .data import extract_code_blocks
+from .electra import ASMElectra
 
 
 @dataclass
@@ -134,7 +134,7 @@ class SampleFilter:
             texts = [s.get(self.config.score_field, "") for s in samples]
 
             # Extract code and score
-            for i, (sample, text) in enumerate(zip(samples, texts)):
+            for i, (sample, text) in enumerate(zip(samples, texts, strict=False)):
                 blocks = extract_code_blocks(text)
                 if blocks:
                     scores = self.electra.score_batch(blocks)

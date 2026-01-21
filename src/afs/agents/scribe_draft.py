@@ -6,8 +6,8 @@ import argparse
 import asyncio
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from ..gateway.backends import BackendManager
 from ..gateway.server import PERSONAS

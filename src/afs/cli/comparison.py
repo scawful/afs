@@ -20,7 +20,6 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +34,7 @@ def comparison_compare_command(args: argparse.Namespace) -> int:
     - Efficiency
     - Speed
     """
-    from ..comparison import ModelComparator, ComparisonMode
+    from ..comparison import ComparisonMode, ModelComparator
     from ..generators.model_generator import create_generator
 
     # Parse model specifications
@@ -127,7 +126,7 @@ def comparison_tournament_command(args: argparse.Namespace) -> int:
 
     Evaluates all models on the same prompts and ranks them.
     """
-    from ..comparison import ModelComparator, ComparisonMode
+    from ..comparison import ComparisonMode, ModelComparator
     from ..generators.model_generator import create_generator
 
     # Parse model specifications
@@ -220,7 +219,7 @@ def comparison_regression_command(args: argparse.Namespace) -> int:
     Compares a new candidate model against a baseline model on
     historical test questions, looking for regressions.
     """
-    from ..comparison import ModelComparator, ComparisonMode, StatisticalTester
+    from ..comparison import ComparisonMode, ModelComparator, StatisticalTester
     from ..generators.model_generator import create_generator
 
     baseline_model = args.baseline
@@ -320,7 +319,7 @@ def comparison_regression_command(args: argparse.Namespace) -> int:
     print(f"Candidate Model: {candidate_model}")
     print(f"  Mean Score: {sum(candidate_scores)/len(candidate_scores):.3f}")
     print()
-    print(f"Statistical Test Results:")
+    print("Statistical Test Results:")
     print(f"  t-statistic: {t_stat:.3f}")
     print(f"  Significant: {'YES ⚠️' if is_significant else 'NO ✓'}")
     print(f"  Effect Size (Cohen's d): {effect_size:.3f}")
@@ -388,7 +387,7 @@ def comparison_ab_test_command(args: argparse.Namespace) -> int:
     print(f"  Samples: {len(results_b)}")
     print(f"  Mean Score: {sum(scores_b)/len(scores_b):.3f}")
     print()
-    print(f"Statistical Results:")
+    print("Statistical Results:")
     print(f"  t-statistic: {t_stat:.3f}")
     print(f"  Significant (α=0.05): {'YES' if is_significant else 'NO'}")
     print(f"  Effect Size (Cohen's d): {effect_size:.3f}")

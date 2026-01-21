@@ -16,7 +16,6 @@ import os
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from .quality_gates import QualityGateReport
 
@@ -68,7 +67,7 @@ class CIPipelineIntegration(ABC):
 class GitHubActionsIntegration(CIPipelineIntegration):
     """Integration with GitHub Actions CI/CD system."""
 
-    def __init__(self, repo_path: Optional[str] = None):
+    def __init__(self, repo_path: str | None = None):
         """Initialize GitHub Actions integration.
 
         Args:
@@ -102,7 +101,7 @@ class GitHubActionsIntegration(CIPipelineIntegration):
             # Create check annotations
             self._create_annotations(report)
 
-            logger.info(f"Reported gate results to GitHub Actions")
+            logger.info("Reported gate results to GitHub Actions")
             return True
         except Exception as e:
             logger.error(f"Failed to report to GitHub Actions: {e}")
@@ -160,12 +159,12 @@ class GitHubActionsIntegration(CIPipelineIntegration):
             return
 
         summary_lines = [
-            f"## Quality Gate Report",
+            "## Quality Gate Report",
             f"**Context:** {report.context.value.upper()}",
             f"**Model:** {report.model_name} v{report.model_version}",
             f"**Status:** {'✅ PASSED' if report.all_passed() else '❌ FAILED'}",
             "",
-            f"### Summary",
+            "### Summary",
             f"- Total Checks: {len(report.checks)}",
             f"- Passed: {sum(1 for c in report.checks if c.passed)}",
             f"- Failed: {len(report.failed_checks())}",
@@ -250,7 +249,7 @@ class GitHubActionsIntegration(CIPipelineIntegration):
 class JenkinsIntegration(CIPipelineIntegration):
     """Integration with Jenkins CI/CD system."""
 
-    def __init__(self, build_path: Optional[str] = None):
+    def __init__(self, build_path: str | None = None):
         """Initialize Jenkins integration.
 
         Args:
@@ -278,7 +277,7 @@ class JenkinsIntegration(CIPipelineIntegration):
             # Write JUnit XML
             self._write_junit_xml(report)
 
-            logger.info(f"Reported gate results to Jenkins")
+            logger.info("Reported gate results to Jenkins")
             return True
         except Exception as e:
             logger.error(f"Failed to report to Jenkins: {e}")
@@ -355,7 +354,7 @@ class JenkinsIntegration(CIPipelineIntegration):
 class LocalFileIntegration(CIPipelineIntegration):
     """Local file-based integration for testing/local development."""
 
-    def __init__(self, report_dir: Optional[str] = None):
+    def __init__(self, report_dir: str | None = None):
         """Initialize local file integration.
 
         Args:

@@ -22,14 +22,15 @@ import logging
 import statistics
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from afs.generators.model_generator import ModelGenerator
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,7 @@ class ComparisonResult:
 
     prompt: str
     responses: dict[str, ScoredResponse] = field(default_factory=dict)
-    winner: Optional[str] = None  # Model name of best performer
+    winner: str | None = None  # Model name of best performer
     confidence_score: float = 0.0  # 0.0-1.0 confidence in winner
     is_significant: bool = False  # Statistical significance
 
@@ -272,7 +273,7 @@ class ResponseScorer(ABC):
     """Abstract base for response scoring."""
 
     @abstractmethod
-    def score(self, response: ModelResponse, reference: Optional[str] = None) -> ScoredResponse:
+    def score(self, response: ModelResponse, reference: str | None = None) -> ScoredResponse:
         """Score a response across all dimensions."""
         pass
 
@@ -283,7 +284,7 @@ class BasicScorer(ResponseScorer):
     def score(
         self,
         response: ModelResponse,
-        reference: Optional[str] = None,
+        reference: str | None = None,
     ) -> ScoredResponse:
         """Score response using basic heuristics."""
         scored = ScoredResponse(model_response=response)
@@ -340,7 +341,7 @@ class ModelComparator:
     def __init__(
         self,
         comparison_mode: ComparisonMode = ComparisonMode.TOURNAMENT,
-        scorer: Optional[ResponseScorer] = None,
+        scorer: ResponseScorer | None = None,
     ):
         """Initialize comparator.
 
@@ -351,7 +352,7 @@ class ModelComparator:
         self.comparison_mode = comparison_mode
         self.models: dict[str, Any] = {}
         self.scorer = scorer or BasicScorer()
-        self.report: Optional[ComparisonReport] = None
+        self.report: ComparisonReport | None = None
 
     def load_model(
         self,
@@ -378,7 +379,7 @@ class ModelComparator:
     def run_prompts(
         self,
         prompts: list[str],
-        generation_config: Optional[dict[str, Any]] = None,
+        generation_config: dict[str, Any] | None = None,
     ) -> ComparisonReport:
         """Run comparison on prompts.
 

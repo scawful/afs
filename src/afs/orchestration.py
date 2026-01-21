@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable
 
 from .config import load_config_model
 from .schema import AgentConfig, OrchestratorConfig

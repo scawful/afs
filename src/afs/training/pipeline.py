@@ -15,13 +15,11 @@ Combines all preprocessing steps into a single pipeline:
 from __future__ import annotations
 
 import json
-import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .config import DatasetConfig
 from .encoder_utils import EncoderConfig, EncoderDataProcessor
 from .scoring import QualityScorer, ScoringConfig, ScoringWeights
 from .splitter import DatasetSplitter
@@ -156,7 +154,6 @@ class DataPipeline:
         Returns:
             PipelineResult with statistics and output paths
         """
-        from afs.generators.base import TrainingSample
 
         result = PipelineResult()
         result.start_time = datetime.now().isoformat()
@@ -422,10 +419,10 @@ class DataPipeline:
     def _augment_samples(self, samples: list) -> list:
         """Apply augmentation to samples."""
         from afs.generators.asm_augment import (
-            AsmAugmentGenerator,
             AsmAugmentConfig,
-            Phase2Augmenter,
+            AsmAugmentGenerator,
             Phase2AugmentConfig,
+            Phase2Augmenter,
         )
 
         result = list(samples)  # Keep originals

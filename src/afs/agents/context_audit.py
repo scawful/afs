@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from ..validator import AFSValidator
 from .base import (

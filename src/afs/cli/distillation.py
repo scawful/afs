@@ -120,16 +120,15 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 def cmd_generate(args: argparse.Namespace) -> int:
     """Generate training data from teacher ensemble."""
     from ..distillation import (
-        TeacherEnsemble,
-        DistillationDataGenerator,
         DistillationConfig,
-        ProviderConfig,
+        DistillationDataGenerator,
         Provider,
+        TeacherEnsemble,
     )
     from ..distillation.teacher import (
-        OpenAITeacher,
-        GoogleTeacher,
         AnthropicTeacher,
+        GoogleTeacher,
+        OpenAITeacher,
     )
 
     logging.basicConfig(
@@ -194,7 +193,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         generator.export_training_data(output_path)
 
         stats = generator.get_statistics()
-        logger.info(f"\nGeneration complete!")
+        logger.info("\nGeneration complete!")
         logger.info(f"Total samples: {stats['total_samples']}")
         logger.info(f"Provider distribution: {stats['providers']}")
         logger.info(f"Domain distribution: {stats['domains']}")
@@ -234,19 +233,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     difficulties = Counter(s.get("difficulty", "unknown") for s in samples)
     qualities = [s.get("quality_score", 0) for s in samples]
 
-    print(f"\nDistillation Progress")
-    print(f"=" * 50)
+    print("\nDistillation Progress")
+    print("=" * 50)
     print(f"Total samples: {len(samples)}")
-    print(f"\nBy Provider:")
+    print("\nBy Provider:")
     for provider, count in providers.most_common():
         print(f"  {provider}: {count}")
-    print(f"\nBy Domain:")
+    print("\nBy Domain:")
     for domain, count in domains.most_common():
         print(f"  {domain}: {count}")
-    print(f"\nBy Difficulty:")
+    print("\nBy Difficulty:")
     for diff, count in difficulties.most_common():
         print(f"  {diff}: {count}")
-    print(f"\nQuality Scores:")
+    print("\nQuality Scores:")
     print(f"  Average: {sum(qualities) / len(qualities):.2f}")
     print(f"  Min: {min(qualities):.2f}")
     print(f"  Max: {max(qualities):.2f}")

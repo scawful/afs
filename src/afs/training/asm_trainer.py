@@ -33,14 +33,14 @@ Example:
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 # Lazy import torch to allow module loading without it
 if TYPE_CHECKING:
-    import torch
-    from torch.utils.data import Dataset, DataLoader
+    pass
 
 
 @dataclass
@@ -104,7 +104,7 @@ class ASMTrainerConfig:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ASMTrainerConfig":
+    def from_dict(cls, data: dict[str, Any]) -> ASMTrainerConfig:
         """Create from dictionary."""
         if "output_dir" in data:
             data["output_dir"] = Path(data["output_dir"])
@@ -421,9 +421,10 @@ class ASMTrainer:
             json.dump(self.config.to_dict(), f, indent=2)
 
     @classmethod
-    def load(cls, path: Path | str) -> "ASMTrainer":
+    def load(cls, path: Path | str) -> ASMTrainer:
         """Load trainer from path."""
         from transformers import BertForMaskedLM
+
         from afs.tokenizer import ASMTokenizer
 
         path = Path(path)

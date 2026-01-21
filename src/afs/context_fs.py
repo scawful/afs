@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from .manager import AFSManager
 from .history import log_event
+from .manager import AFSManager
 from .models import MountType
 from .policy import PolicyEnforcer
 
@@ -25,7 +25,7 @@ class ContextEntry:
     modified_at: str | None
 
     @classmethod
-    def from_path(cls, path: Path, relative_path: str) -> "ContextEntry":
+    def from_path(cls, path: Path, relative_path: str) -> ContextEntry:
         try:
             stat = path.stat()
             size = stat.st_size

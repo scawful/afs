@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -367,7 +367,7 @@ class AgenticTestLoop:
         """
         # Import the orchestrator for actual model invocation
         try:
-            from .orchestrator import TriforceOrchestrator, Expert
+            from .orchestrator import Expert, TriforceOrchestrator
 
             expert_map = {
                 "nayru": Expert.NAYRU,

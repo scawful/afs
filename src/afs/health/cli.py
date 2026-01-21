@@ -6,11 +6,11 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
 
 from afs.logging_config import get_logger
-from .enhanced_checks import EnhancedHealthChecker, HealthCheckLevel
+
 from .daemon import run_daemon_cli
+from .enhanced_checks import EnhancedHealthChecker, HealthCheckLevel
 
 logger = get_logger(__name__)
 

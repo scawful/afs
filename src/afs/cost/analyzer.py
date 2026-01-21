@@ -6,9 +6,8 @@ Analyzes training costs and provides detailed cost breakdowns.
 import json
 import logging
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -36,14 +35,14 @@ class TrainingMetrics:
     total_duration_hours: float = 0.0
     gpu_name: str = ""
     gpu_price_per_hour: float = 0.0
-    validation_loss: Optional[float] = None
-    test_accuracy: Optional[float] = None
-    tokens_processed: Optional[int] = None
-    provider: Optional[str] = None
-    hours_used: Optional[float] = None
-    total_cost: Optional[float] = None
-    throughput: Optional[float] = None
-    accuracy: Optional[float] = None
+    validation_loss: float | None = None
+    test_accuracy: float | None = None
+    tokens_processed: int | None = None
+    provider: str | None = None
+    hours_used: float | None = None
+    total_cost: float | None = None
+    throughput: float | None = None
+    accuracy: float | None = None
     timestamp: datetime = field(default_factory=_utc_now)
 
     def __post_init__(self) -> None:
@@ -63,14 +62,14 @@ class TrainingMetrics:
         ):
             self.total_cost = self.total_duration_hours * self.gpu_price_per_hour
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         data = asdict(self)
         data["timestamp"] = self.timestamp.isoformat()
         return data
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "TrainingMetrics":
+    def from_dict(cls, data: dict) -> "TrainingMetrics":
         """Create from dictionary."""
         data = data.copy()
         if isinstance(data.get("timestamp"), str):
@@ -88,16 +87,16 @@ class TrainingCostReport:
     gpu_hours: float
     cost_per_sample: float
     cost_per_epoch: float
-    cost_per_token: Optional[float] = None
+    cost_per_token: float | None = None
     efficiency_score: float = 0.0  # 0-1, based on accuracy per dollar
-    cost_per_accuracy_point: Optional[float] = None
-    metrics: Optional[TrainingMetrics] = None
+    cost_per_accuracy_point: float | None = None
+    metrics: TrainingMetrics | None = None
     timestamp: datetime = field(default_factory=_utc_now)
 
     def __post_init__(self) -> None:
         self.timestamp = _ensure_utc(self.timestamp)
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         data = asdict(self)
         if isinstance(self.timestamp, datetime):
@@ -129,7 +128,7 @@ class BudgetAlert:
 class CostAnalyzer:
     """Analyzes training costs and generates reports."""
 
-    def __init__(self, data_dir: Optional[Path] = None):
+    def __init__(self, data_dir: Path | None = None):
         """Initialize cost analyzer.
 
         Args:
@@ -141,10 +140,10 @@ class CostAnalyzer:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        self.reports: Dict[str, TrainingCostReport] = {}
-        self.metrics: Dict[str, TrainingMetrics] = {}
-        self.budgets: Dict[str, float] = {}
-        self.alerts: List[BudgetAlert] = []
+        self.reports: dict[str, TrainingCostReport] = {}
+        self.metrics: dict[str, TrainingMetrics] = {}
+        self.budgets: dict[str, float] = {}
+        self.alerts: list[BudgetAlert] = []
 
         self._load_history()
 
@@ -286,7 +285,7 @@ class CostAnalyzer:
         self._save_history()
         logger.info(f"Set budget for {model_name}: ${budget_limit:.2f}")
 
-    def check_budget(self, model_name: str, current_cost: float) -> Optional[BudgetAlert]:
+    def check_budget(self, model_name: str, current_cost: float) -> BudgetAlert | None:
         """Check if budget threshold has been crossed.
 
         Args:
@@ -345,7 +344,7 @@ class CostAnalyzer:
 
         return alert
 
-    def get_cost_comparison(self) -> Dict[str, Dict]:
+    def get_cost_comparison(self) -> dict[str, dict]:
         """Compare costs across all training runs.
 
         Returns:
@@ -353,9 +352,8 @@ class CostAnalyzer:
         """
         comparison = {}
 
-        for run_id, report in self.reports.items():
+        for _run_id, report in self.reports.items():
             model = report.model_name
-
             if model not in comparison:
                 comparison[model] = {
                     "runs": 0,
@@ -390,7 +388,7 @@ class CostAnalyzer:
             # Get average cost per sample/epoch from metrics
             sample_costs = []
             epoch_costs = []
-            for run_id, report in self.reports.items():
+            for _run_id, report in self.reports.items():
                 if report.model_name == model:
                     sample_costs.append(report.cost_per_sample)
                     epoch_costs.append(report.cost_per_epoch)
@@ -406,8 +404,8 @@ class CostAnalyzer:
         self,
         model_name: str,
         planned_runs: int,
-        avg_cost_per_run: Optional[float] = None,
-    ) -> Dict:
+        avg_cost_per_run: float | None = None,
+    ) -> dict:
         """Forecast cost for future training.
 
         Args:
@@ -448,7 +446,7 @@ class CostAnalyzer:
 
         return forecast
 
-    def get_roi_analysis(self, model_name: str) -> Dict:
+    def get_roi_analysis(self, model_name: str) -> dict:
         """Calculate ROI of training investments.
 
         Args:

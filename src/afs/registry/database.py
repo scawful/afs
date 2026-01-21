@@ -82,7 +82,7 @@ class ModelRegistry:
         self.registry_path = self._normalize_registry_path(self.registry_path)
         if self.registry_path.exists():
             try:
-                with open(self.registry_path, "r") as f:
+                with open(self.registry_path) as f:
                     data = json.load(f)
                     if isinstance(data, dict) and "version" in data:
                         # Format with metadata wrapper
@@ -90,7 +90,7 @@ class ModelRegistry:
                     else:
                         # Legacy format or direct models dict
                         self.models = data
-            except (json.JSONDecodeError, IOError) as e:
+            except (OSError, json.JSONDecodeError) as e:
                 print(f"Warning: Failed to load registry: {e}")
                 self.models = {}
         else:

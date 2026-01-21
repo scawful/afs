@@ -3,14 +3,13 @@
 Logs all inference requests and responses for continuous learning.
 """
 
+import hashlib
 import json
 import logging
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
-import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +22,11 @@ class InferenceRecord:
     prompt: str
     response: str
     model: str
-    expert: Optional[str] = None
+    expert: str | None = None
     latency_ms: float = 0
     token_count: int = 0
-    feedback_score: Optional[float] = None  # User feedback: -1, 0, or 1
-    feedback_text: Optional[str] = None
+    feedback_score: float | None = None  # User feedback: -1, 0, or 1
+    feedback_text: str | None = None
     metadata: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -57,7 +56,7 @@ class InferenceLogger:
         self.rotate_size_mb = rotate_size_mb
 
         self._buffer: list[InferenceRecord] = []
-        self._current_file: Optional[Path] = None
+        self._current_file: Path | None = None
         self._file_size = 0
 
     def _get_log_file(self) -> Path:
@@ -80,9 +79,9 @@ class InferenceLogger:
         prompt: str,
         response: str,
         model: str,
-        expert: Optional[str] = None,
+        expert: str | None = None,
         latency_ms: float = 0,
-        metadata: Optional[dict] = None,
+        metadata: dict | None = None,
     ) -> str:
         """Log an inference request/response.
 
@@ -130,9 +129,9 @@ class InferenceLogger:
 
     def get_records(
         self,
-        since: Optional[datetime] = None,
-        model: Optional[str] = None,
-        expert: Optional[str] = None,
+        since: datetime | None = None,
+        model: str | None = None,
+        expert: str | None = None,
         with_feedback_only: bool = False,
     ):
         """Iterate over logged records."""
@@ -191,7 +190,7 @@ class FeedbackCollector:
         self,
         record_id: str,
         score: float,  # -1, 0, or 1
-        text: Optional[str] = None,
+        text: str | None = None,
     ) -> bool:
         """Record feedback for an inference record."""
         feedback = {
@@ -207,7 +206,7 @@ class FeedbackCollector:
         logger.info(f"Recorded feedback for {record_id}: score={score}")
         return True
 
-    def get_feedback(self, record_id: Optional[str] = None):
+    def get_feedback(self, record_id: str | None = None):
         """Get feedback records."""
         if not self._feedback_file.exists():
             return
@@ -239,7 +238,7 @@ class FeedbackCollector:
         count = 0
 
         with open(output_path, "w") as f:
-            for record, feedback in self.get_positive_examples(min_score):
+            for record, _feedback in self.get_positive_examples(min_score):
                 if format_type == "chatml":
                     sample = {
                         "messages": [

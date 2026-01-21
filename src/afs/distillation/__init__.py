@@ -7,21 +7,21 @@ This module provides:
 - Capability evaluation
 """
 
-from .teacher import (
-    TeacherModel,
-    OpenAITeacher,
-    GoogleTeacher,
-    AnthropicTeacher,
-    TeacherEnsemble,
-    TeacherResponse,
-    ProviderConfig,
-    Provider,
-)
 from .data_gen import (
+    DistillationConfig,
     DistillationDataGenerator,
     DistillationSample,
-    DistillationConfig,
     GenerationProgress,
+)
+from .teacher import (
+    AnthropicTeacher,
+    GoogleTeacher,
+    OpenAITeacher,
+    Provider,
+    ProviderConfig,
+    TeacherEnsemble,
+    TeacherModel,
+    TeacherResponse,
 )
 
 __all__ = [

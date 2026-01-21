@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import AsyncIterator
 
 import httpx
 
@@ -93,7 +93,7 @@ class BackendManager:
             ),
         ]
 
-    async def __aenter__(self) -> "BackendManager":
+    async def __aenter__(self) -> BackendManager:
         self._client = httpx.AsyncClient(timeout=30.0)
         await self.check_all()
         return self

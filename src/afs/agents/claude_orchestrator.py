@@ -15,9 +15,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from .base import (
     AgentResult,
@@ -154,7 +155,7 @@ async def run_orchestrator(
     than SDK MCP servers (which can't be serialized across process boundaries).
     """
     try:
-        from claude_agent_sdk import query, ClaudeAgentOptions
+        from claude_agent_sdk import ClaudeAgentOptions, query
     except ImportError:
         return {
             "status": "error",

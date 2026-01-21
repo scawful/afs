@@ -1,19 +1,19 @@
 """Tests for Oracle testing integration module."""
 
 import json
+import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from afs.oracle.testing import (
     AgenticTestLoop,
+    AssertionResult,
     OracleTodo,
     PatchTestResult,
     TestStatus,
-    AssertionResult,
     YazeMCPClient,
     load_oracle_todos,
 )

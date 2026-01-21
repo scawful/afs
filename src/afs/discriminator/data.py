@@ -1,10 +1,10 @@
 """Data utilities for ASM-ELECTRA training."""
 
-from dataclasses import dataclass, field
-from pathlib import Path
 import json
 import random
-from typing import Iterator
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from .fake_generators import CompositeGenerator, FakeGenerator
 
@@ -197,7 +197,7 @@ def create_training_data(
                     blocks = [content]
 
                 for block in blocks:
-                    lines = [l for l in block.split("\n") if l.strip()]
+                    lines = [line for line in block.split("\n") if line.strip()]
                     if min_lines <= len(lines) <= max_lines:
                         real_samples.append((block, str(file)))
             except Exception:

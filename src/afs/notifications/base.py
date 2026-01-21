@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 from afs.logging_config import get_logger
 
@@ -72,13 +71,13 @@ class NotificationEvent:
     timestamp: datetime = field(default_factory=datetime.now)
 
     # Optional context
-    model_name: Optional[str] = None
-    run_id: Optional[str] = None
-    epoch: Optional[int] = None
-    batch: Optional[int] = None
-    cost: Optional[float] = None
+    model_name: str | None = None
+    run_id: str | None = None
+    epoch: int | None = None
+    batch: int | None = None
+    cost: float | None = None
     metrics: dict[str, Any] = field(default_factory=dict)
-    error_details: Optional[str] = None
+    error_details: str | None = None
     tags: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -242,7 +241,7 @@ class NotificationManager:
         run_id: str,
         duration: float,
         final_loss: float,
-        eval_metrics: Optional[dict] = None
+        eval_metrics: dict | None = None
     ) -> bool:
         """Notify that training has completed."""
         message_lines = [
@@ -290,7 +289,7 @@ class NotificationManager:
         self,
         current_cost: float,
         threshold: float,
-        model_name: Optional[str] = None
+        model_name: str | None = None
     ) -> bool:
         """Notify cost threshold exceeded."""
         return self.notify(
@@ -331,8 +330,8 @@ class NotificationManager:
     def notify_error(
         self,
         error_message: str,
-        model_name: Optional[str] = None,
-        run_id: Optional[str] = None
+        model_name: str | None = None,
+        run_id: str | None = None
     ) -> bool:
         """Notify generic error."""
         return self.notify(

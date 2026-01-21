@@ -8,10 +8,11 @@ import os
 import pkgutil
 import re
 import sys
+from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Iterable
+from typing import Any
 
 from .schema import AFSConfig, PluginsConfig
 

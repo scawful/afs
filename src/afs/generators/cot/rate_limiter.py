@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TypeVar, Callable, Any
+from typing import TypeVar
 
 T = TypeVar("T")
 

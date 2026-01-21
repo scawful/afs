@@ -11,19 +11,18 @@ Features:
 
 from __future__ import annotations
 
-import asyncio
 import json
-import logging
 import os
 import subprocess
 import sys
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field, asdict
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional, Callable
+from typing import Any
 
 try:
     import psutil
@@ -96,7 +95,7 @@ class CheckResult:
     name: str
     passed: bool
     duration_ms: float
-    error: Optional[str] = None
+    error: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=datetime.now)
 

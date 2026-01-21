@@ -7,8 +7,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .models import ModelVersion
-
 
 class LineageTracker:
     """Track model lineage, training history, and dependencies.
@@ -59,13 +57,13 @@ class LineageTracker:
         """Load lineage data from disk."""
         if self.lineage_path.exists():
             try:
-                with open(self.lineage_path, "r") as f:
+                with open(self.lineage_path) as f:
                     data = json.load(f)
                     if isinstance(data, dict) and "version" in data:
                         self.lineages = data.get("lineages", {})
                     else:
                         self.lineages = data
-            except (json.JSONDecodeError, IOError) as e:
+            except (OSError, json.JSONDecodeError) as e:
                 print(f"Warning: Failed to load lineage: {e}")
                 self.lineages = {}
 

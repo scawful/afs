@@ -6,15 +6,13 @@ Runs health checks on a schedule and alerts on score drops.
 from __future__ import annotations
 
 import asyncio
-import json
-import logging
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 from afs.logging_config import get_logger
-from .enhanced_checks import EnhancedHealthChecker, HealthCheckLevel, HealthStatus
+
+from .enhanced_checks import EnhancedHealthChecker, HealthCheckLevel
 
 logger = get_logger(__name__)
 
@@ -47,14 +45,14 @@ class HealthMonitoringDaemon:
         self.checker = EnhancedHealthChecker(context_root=context_root)
 
         self.running = False
-        self.last_score: Optional[float] = None
-        self.last_check: Optional[datetime] = None
+        self.last_score: float | None = None
+        self.last_check: datetime | None = None
         self.check_history: list[tuple[datetime, float]] = []
 
     async def start(
         self,
         check_level: HealthCheckLevel = HealthCheckLevel.STANDARD,
-        duration_s: Optional[int] = None,
+        duration_s: int | None = None,
     ) -> None:
         """Start continuous monitoring.
 
@@ -152,7 +150,7 @@ class HealthMonitoringDaemon:
 
         # Would integrate with notification system here
         try:
-            from afs.notifications.base import NotificationEvent, NotificationLevel, EventType
+            from afs.notifications.base import EventType, NotificationEvent, NotificationLevel
 
             alert_event = NotificationEvent(
                 event_type=EventType.ERROR_OCCURRED,
@@ -194,7 +192,7 @@ class HealthMonitoringDaemon:
 def run_daemon_cli(
     interval: int = 60,
     level: str = "standard",
-    duration: Optional[int] = None,
+    duration: int | None = None,
     auto_heal: bool = False,
 ) -> None:
     """Run health monitoring daemon from CLI."""
@@ -208,7 +206,7 @@ def run_daemon_cli(
         check_level = HealthCheckLevel(level)
     except ValueError:
         print(f"Invalid check level: {level}")
-        print(f"Valid options: {', '.join([l.value for l in HealthCheckLevel])}")
+        print(f"Valid options: {', '.join([lvl.value for lvl in HealthCheckLevel])}")
         return
 
     logger.info(

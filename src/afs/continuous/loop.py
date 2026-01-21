@@ -12,15 +12,15 @@ Orchestrates the full continuous improvement cycle:
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Callable
 
+from .ab_test import ABTestConfig, ABTestManager
+from .generator import DataGeneratorConfig
 from .logger import UsageLogger
-from .generator import TrainingDataGenerator, DataGeneratorConfig
 from .trigger import AutoRetrainer, TriggerConfig
-from .ab_test import ABTestManager, ABTestConfig
 
 logger = logging.getLogger(__name__)
 
@@ -50,18 +50,18 @@ class LoopStatus:
     """Status of the continuous learning loop."""
 
     running: bool = False
-    last_check: Optional[str] = None
-    last_retrain: Optional[str] = None
+    last_check: str | None = None
+    last_retrain: str | None = None
     total_retrains: int = 0
-    champion_model: Optional[str] = None
-    challenger_model: Optional[str] = None
+    champion_model: str | None = None
+    challenger_model: str | None = None
     errors: list[str] = field(default_factory=list)
 
 
 class ContinuousLearningLoop:
     """Main continuous learning orchestrator."""
 
-    def __init__(self, config: Optional[LoopConfig] = None):
+    def __init__(self, config: LoopConfig | None = None):
         self.config = config or LoopConfig()
 
         # Initialize components
@@ -73,7 +73,7 @@ class ContinuousLearningLoop:
             output_dir=self.config.output_dir,
         )
 
-        self.ab_test_manager: Optional[ABTestManager] = None
+        self.ab_test_manager: ABTestManager | None = None
         if self.config.enable_ab_testing:
             self.ab_test_manager = ABTestManager(
                 self.usage_logger,
@@ -92,7 +92,7 @@ class ContinuousLearningLoop:
 
     def run_iteration(
         self,
-        train_fn: Optional[Callable[[Path], dict]] = None,
+        train_fn: Callable[[Path], dict] | None = None,
     ) -> dict:
         """Run one iteration of the continuous learning loop.
 
@@ -179,8 +179,8 @@ class ContinuousLearningLoop:
 
     def run_loop(
         self,
-        train_fn: Optional[Callable[[Path], dict]] = None,
-        max_iterations: Optional[int] = None,
+        train_fn: Callable[[Path], dict] | None = None,
+        max_iterations: int | None = None,
     ) -> None:
         """Run the continuous learning loop indefinitely.
 
@@ -233,7 +233,7 @@ class ContinuousLearningLoop:
         query: str,
         response: str,
         model: str,
-        expert: Optional[str] = None,
+        expert: str | None = None,
         latency_ms: float = 0,
         quality_score: float = 0.0,
     ) -> str:
@@ -254,7 +254,7 @@ class ContinuousLearningLoop:
         self,
         record_id: str,
         feedback: int,
-        feedback_text: Optional[str] = None,
+        feedback_text: str | None = None,
     ) -> bool:
         """Record user feedback."""
         return self.usage_logger.record_feedback(record_id, feedback, feedback_text)
@@ -288,7 +288,7 @@ class ContinuousLearningLoop:
 
         return summary
 
-    def _get_model_path_from_result(self, retrain_result: dict) -> Optional[Path]:
+    def _get_model_path_from_result(self, retrain_result: dict) -> Path | None:
         """Extract model path from retrain result.
 
         This is a hook for the training function to communicate the model path.

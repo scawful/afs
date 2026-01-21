@@ -198,13 +198,12 @@ def generator_batch_command(args: argparse.Namespace) -> int:
 
 def generator_scale_command(args: argparse.Namespace) -> int:
     """Generate large-scale training data using curriculum learning."""
-    import asyncio
+    from ..generators import write_jsonl
     from ..generators.curriculum_generator import (
-        create_curriculum_generator,
         Difficulty,
         ExpertDomain,
+        create_curriculum_generator,
     )
-    from ..generators import write_jsonl
 
     # Validate domain
     try:

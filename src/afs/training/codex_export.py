@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Any
+from typing import Any
 
 from ..generators.base import TrainingSample
 from ..history import append_history_event
-from .scoring import build_scoring_config, QualityScorer
 from .redaction import redact_sample, redact_text
-
+from .scoring import QualityScorer, build_scoring_config
 
 DEFAULT_CODEX_ROOTS = (
     Path.home() / ".codex",
@@ -111,7 +111,7 @@ def export_codex_logs_to_dataset(
         )
         scored = scorer.score_batch(samples, update_samples=True)
         filtered_samples: list[TrainingSample] = []
-        for sample, score in zip(samples, scored):
+        for sample, score in zip(samples, scored, strict=False):
             if score.overall >= min_quality_score:
                 filtered_samples.append(sample)
             else:

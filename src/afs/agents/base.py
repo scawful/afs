@@ -6,10 +6,11 @@ import argparse
 import json
 import logging
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..config import load_config_model
 from ..discovery import discover_contexts

@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from ...generators.base import TrainingSample
 
 
-def parse_toolbench_parquet(parquet_path: Path) -> list["TrainingSample"]:
+def parse_toolbench_parquet(parquet_path: Path) -> list[TrainingSample]:
     """Parse ToolBench parquet file into TrainingSample objects.
 
     Args:
@@ -56,7 +56,7 @@ def parse_toolbench_parquet(parquet_path: Path) -> list["TrainingSample"]:
         value_array = conversations['value']
 
         # Build conversation turns
-        turns = list(zip(from_array, value_array))
+        turns = list(zip(from_array, value_array, strict=False))
 
         # Parse conversation
         user_query = None
@@ -202,7 +202,7 @@ def load_toolbench_dataset(
     dataset_dir: Path,
     split: str = "train",
     max_samples: int | None = None
-) -> list["TrainingSample"]:
+) -> list[TrainingSample]:
     """Load ToolBench dataset from directory.
 
     Args:

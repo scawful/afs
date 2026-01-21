@@ -2,36 +2,32 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 import time
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from sse_starlette.sse import EventSourceResponse
 
-from .backends import BackendManager, BackendConfig, BackendType
+from ..history import log_event
+from ..moe.router import MoERouter, RouterConfig
+from .backends import BackendManager
 from .models import (
+    ChatChoice,
     ChatRequest,
     ChatResponse,
-    ChatChoice,
+    DeltaMessage,
+    HealthResponse,
     Message,
     Model,
     ModelsResponse,
-    HealthResponse,
-    StreamResponse,
     StreamChoice,
-    DeltaMessage,
+    StreamResponse,
     Usage,
 )
-from ..history import log_event
-from ..moe.router import MoERouter, RouterConfig
-from ..moe.classifier import QueryIntent
 
 logger = logging.getLogger(__name__)
 

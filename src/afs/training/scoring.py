@@ -15,14 +15,14 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from afs.generators.base import TrainingSample
     from afs.discriminator.electra import ASMElectra
     from afs.generators.asar_validator import AsarValidator
+    from afs.generators.base import TrainingSample
     from afs.knowledge.entity_extractor import EntityExtractor
 
 
@@ -35,7 +35,7 @@ class ScoringWeights:
     entity: float = 0.2  # Entity coverage weight
     length: float = 0.1  # Length/structure weight
 
-    def normalize(self) -> "ScoringWeights":
+    def normalize(self) -> ScoringWeights:
         """Normalize weights to sum to 1.0."""
         total = self.electra + self.asar + self.entity + self.length
         if total == 0:
@@ -56,7 +56,7 @@ class ScoringWeights:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, float]) -> "ScoringWeights":
+    def from_dict(cls, data: dict[str, float]) -> ScoringWeights:
         return cls(
             electra=data.get("electra", 0.4),
             asar=data.get("asar", 0.3),
@@ -126,9 +126,9 @@ class QualityScorer:
     def __init__(
         self,
         config: ScoringConfig | None = None,
-        electra: "ASMElectra | None" = None,
-        asar_validator: "AsarValidator | None" = None,
-        entity_extractor: "EntityExtractor | None" = None,
+        electra: ASMElectra | None = None,
+        asar_validator: AsarValidator | None = None,
+        entity_extractor: EntityExtractor | None = None,
     ):
         """Initialize scorer.
 
@@ -145,7 +145,7 @@ class QualityScorer:
         self._electra_loaded = False
 
     @property
-    def electra(self) -> "ASMElectra | None":
+    def electra(self) -> ASMElectra | None:
         """Lazy load ELECTRA model."""
         if self._electra is None and not self._electra_loaded:
             self._electra_loaded = True
@@ -156,7 +156,7 @@ class QualityScorer:
         return self._electra
 
     @property
-    def asar(self) -> "AsarValidator":
+    def asar(self) -> AsarValidator:
         """Lazy load asar validator."""
         if self._asar is None:
             from afs.generators.asar_validator import AsarValidator, AsarValidatorConfig
@@ -167,7 +167,7 @@ class QualityScorer:
         return self._asar
 
     @property
-    def entity_extractor(self) -> "EntityExtractor":
+    def entity_extractor(self) -> EntityExtractor:
         """Lazy load entity extractor."""
         if self._entity_extractor is None:
             from afs.knowledge.entity_extractor import EntityExtractor
@@ -177,7 +177,7 @@ class QualityScorer:
             )
         return self._entity_extractor
 
-    def score(self, sample: "TrainingSample") -> QualityScore:
+    def score(self, sample: TrainingSample) -> QualityScore:
         """Compute unified quality score for a sample.
 
         Args:
@@ -275,7 +275,7 @@ class QualityScorer:
 
     def score_batch(
         self,
-        samples: list["TrainingSample"],
+        samples: list[TrainingSample],
         update_samples: bool = True,
     ) -> list[QualityScore]:
         """Score multiple samples efficiently.
@@ -424,7 +424,7 @@ def build_scoring_config(
 
 
 def score_samples(
-    samples: list["TrainingSample"],
+    samples: list[TrainingSample],
     electra_path: Path | None = None,
     weights: ScoringWeights | None = None,
 ) -> list[QualityScore]:
@@ -485,7 +485,7 @@ def score_jsonl(
     # Filter if threshold set
     output_samples = []
     filtered_count = 0
-    for sample, score in zip(samples, scores):
+    for sample, score in zip(samples, scores, strict=False):
         if min_score is None or score.overall >= min_score:
             output_samples.append(sample)
         else:

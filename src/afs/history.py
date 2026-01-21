@@ -6,14 +6,14 @@ import hashlib
 import json
 import os
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .config import load_config_model
 from .core import find_root, resolve_context_root
-
 
 SENSITIVE_MARKERS = ("key", "token", "secret", "password")
 EVENT_FILE_PREFIX = "events"

@@ -1,5 +1,5 @@
 """Evaluation suite for MoE router and expert models."""
 
-from .runner import EvalRunner, EvalResult, EvalMetrics
+from .runner import EvalMetrics, EvalResult, EvalRunner
 
 __all__ = ["EvalRunner", "EvalResult", "EvalMetrics"]

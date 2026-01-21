@@ -5,17 +5,18 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from ..history import log_event
-from .classifier import IntentClassifier, QueryIntent, ClassificationResult
-from .router_trainer import HybridRouter, RouterTrainingConfig
+from .classifier import ClassificationResult, IntentClassifier, QueryIntent
+from .router_trainer import HybridRouter
 
 if TYPE_CHECKING:
-    from .retriever import Retriever, RetrievalResult
+    from .retriever import RetrievalResult, Retriever
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,7 @@ class RouterConfig:
     router_model_path: str | None = None  # Path to trained hybrid model
 
     @classmethod
-    def default(cls) -> "RouterConfig":
+    def default(cls) -> RouterConfig:
         """Create default configuration with din/nayru experts."""
         host = os.environ.get("AFS_OLLAMA_HOST", "http://localhost:11435")
         embedding_host = os.environ.get("AFS_OLLAMA_EMBEDDING_HOST", host)
@@ -154,7 +155,7 @@ class GenerationResult:
     expert_name: str | None
     classification: ClassificationResult
     tokens_generated: int = 0
-    retrieved_context: list["RetrievalResult"] = field(default_factory=list)
+    retrieved_context: list[RetrievalResult] = field(default_factory=list)
 
 
 class MoERouter:
@@ -163,7 +164,7 @@ class MoERouter:
     def __init__(
         self,
         config: RouterConfig | None = None,
-        retriever: "Retriever | None" = None,
+        retriever: Retriever | None = None,
     ):
         """Initialize router with configuration.
 
@@ -224,7 +225,7 @@ class MoERouter:
             expert.intent: expert for expert in self.config.experts
         }
 
-    async def __aenter__(self) -> "MoERouter":
+    async def __aenter__(self) -> MoERouter:
         """Async context manager entry."""
         self._client = httpx.AsyncClient(timeout=120.0)
         return self
@@ -258,7 +259,7 @@ class MoERouter:
             reason=reason,
         )
 
-    def retrieve_context(self, query: str) -> list["RetrievalResult"]:
+    def retrieve_context(self, query: str) -> list[RetrievalResult]:
         """Retrieve relevant context for a query."""
         if not self._retriever or not self.config.enable_rag:
             return []
@@ -279,7 +280,7 @@ class MoERouter:
         model_id: str,
         expert_name: str | None,
         classification: ClassificationResult,
-        retrieved: list["RetrievalResult"] | None = None,
+        retrieved: list[RetrievalResult] | None = None,
         tokens_generated: int | None = None,
         error: str | None = None,
     ) -> None:
@@ -456,7 +457,7 @@ class MoERouter:
         payload: dict[str, Any],
         expert_name: str | None,
         classification: ClassificationResult,
-        retrieved: list["RetrievalResult"] | None = None,
+        retrieved: list[RetrievalResult] | None = None,
     ) -> AsyncIterator[str]:
         """Streaming generation."""
         chunks: list[str] = []

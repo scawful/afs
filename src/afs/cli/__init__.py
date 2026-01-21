@@ -12,27 +12,29 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Iterable
+from collections.abc import Iterable
 
-from . import core
-from . import context
-from . import training
-from . import generators
-from . import tokenizer
-from . import encoder
-from . import entity
-from . import pipeline
-from . import active_learning
-from . import generator
-from . import gateway
-from . import benchmark
-from . import distillation
-from . import fs
-from . import embeddings
-from . import review
-from . import comparison
 from ..health import cli as health_cli
 from ..history import log_cli_invocation
+from . import (
+    active_learning,
+    benchmark,
+    comparison,
+    context,
+    core,
+    distillation,
+    embeddings,
+    encoder,
+    entity,
+    fs,
+    gateway,
+    generator,
+    generators,
+    pipeline,
+    review,
+    tokenizer,
+    training,
+)
 from ._help import render_default_help, render_topic_help
 
 

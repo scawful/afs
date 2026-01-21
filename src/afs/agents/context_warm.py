@@ -5,15 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
 
+from ..cli._utils import write_config
 from ..core import resolve_context_root
 from ..discovery import discover_contexts, get_project_stats
 from ..embeddings import build_embedding_index, create_ollama_embed_fn
 from ..workspace_sync import load_workspace_entries, resolve_config_output, sync_workspace_config
-from ..cli._utils import write_config
 from .base import (
     AgentResult,
     build_base_parser,

@@ -30,7 +30,7 @@ class MLXConverter(BaseConverter):
     def __init__(
         self,
         include_cot: bool = True,
-        cot_mode: "CotInclusionMode" = None,
+        cot_mode: CotInclusionMode = None,
         system_prompt: str | None = None,
         include_system: bool = True,
     ):
@@ -49,7 +49,7 @@ class MLXConverter(BaseConverter):
         )
         self.include_system = include_system
 
-    def convert_sample(self, sample: "TrainingSample") -> dict[str, Any]:
+    def convert_sample(self, sample: TrainingSample) -> dict[str, Any]:
         """Convert sample to MLX chat format.
 
         Args:
@@ -113,7 +113,7 @@ class MLXCompletionConverter(BaseConverter):
     def __init__(
         self,
         include_cot: bool = True,
-        cot_mode: "CotInclusionMode" = None,
+        cot_mode: CotInclusionMode = None,
         prompt_template: str | None = None,
     ):
         """Initialize completion converter.
@@ -126,7 +126,7 @@ class MLXCompletionConverter(BaseConverter):
         super().__init__(include_cot=include_cot, cot_mode=cot_mode)
         self.prompt_template = prompt_template or "### Instruction:\n{instruction}\n\n### Response:\n"
 
-    def convert_sample(self, sample: "TrainingSample") -> dict[str, Any]:
+    def convert_sample(self, sample: TrainingSample) -> dict[str, Any]:
         """Convert sample to completion format.
 
         Args:

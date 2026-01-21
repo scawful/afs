@@ -5,12 +5,12 @@ Manages continuous learning by periodically retraining on new feedback data.
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Callable
 
-from .logger import InferenceLogger, FeedbackCollector
+from .logger import FeedbackCollector, InferenceLogger
 from .sampler import FeedbackSampler
 
 logger = logging.getLogger(__name__)
@@ -65,8 +65,8 @@ class RetrainJob:
     created_at: str
     samples_count: int
     status: str  # pending, running, completed, failed
-    data_path: Optional[str] = None
-    model_path: Optional[str] = None
+    data_path: str | None = None
+    model_path: str | None = None
     metrics: dict = field(default_factory=dict)
 
 
@@ -76,7 +76,7 @@ class PeriodicRetrainer:
     def __init__(
         self,
         feedback_logger: InferenceLogger,
-        config: Optional[RetrainConfig] = None,
+        config: RetrainConfig | None = None,
     ):
         self.logger = feedback_logger
         self.config = config or RetrainConfig()
@@ -132,8 +132,8 @@ class PeriodicRetrainer:
 
     def run_retrain_cycle(
         self,
-        train_fn: Optional[Callable[[Path], dict]] = None,
-    ) -> Optional[RetrainJob]:
+        train_fn: Callable[[Path], dict] | None = None,
+    ) -> RetrainJob | None:
         """Run a full retrain cycle.
 
         Args:
@@ -190,7 +190,7 @@ class PeriodicRetrainer:
 
         return job
 
-    def _get_last_job(self) -> Optional[RetrainJob]:
+    def _get_last_job(self) -> RetrainJob | None:
         """Get the most recent retrain job."""
         if not self._jobs_file.exists():
             return None

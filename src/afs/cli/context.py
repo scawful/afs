@@ -378,8 +378,8 @@ def workspace_add_command(args: argparse.Namespace) -> int:
         WorkspaceDirectory(path=workspace_path, description=args.description)
     )
 
-    from ._utils import write_config
     from ..workspace_sync import resolve_config_output
+    from ._utils import write_config
 
     output = resolve_config_output(Path(args.config) if args.config else None)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -423,8 +423,8 @@ def workspace_remove_command(args: argparse.Namespace) -> int:
 
     config.general.workspace_directories = new_workspaces
 
-    from ._utils import write_config
     from ..workspace_sync import resolve_config_output
+    from ._utils import write_config
 
     output = resolve_config_output(Path(args.config) if args.config else None)
     output.parent.mkdir(parents=True, exist_ok=True)

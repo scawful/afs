@@ -11,7 +11,6 @@ from ._utils import (
     AFS_DIRS,
     build_config,
     ensure_context_root,
-    load_manager,
     resolve_studio_root,
     run_command,
     studio_binary_name,

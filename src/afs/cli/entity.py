@@ -9,8 +9,8 @@ from pathlib import Path
 
 def entity_extract_command(args: argparse.Namespace) -> int:
     """Extract entities from training data."""
-    from ..knowledge import EntityExtractor
     from ..generators.base import TrainingSample
+    from ..knowledge import EntityExtractor
 
     input_path = Path(args.input)
     output_path = Path(args.output) if args.output else input_path.with_suffix(".entities.jsonl")
@@ -40,7 +40,7 @@ def entity_extract_command(args: argparse.Namespace) -> int:
         for sample in samples:
             f.write(json.dumps(sample.to_dict()) + "\n")
 
-    print(f"\nEntity Extraction Complete")
+    print("\nEntity Extraction Complete")
     print(f"  Samples processed: {len(samples)}")
     print(f"  Total entities found: {total_entities}")
     print(f"  Known entities: {known_entities}")

@@ -12,8 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .models import ModelBackend, ModelConfig, GenerateResult, ToolCall, create_backend
-from .tools import Tool, ToolResult, AFS_TOOLS
+from .models import ModelBackend, ModelConfig, ToolCall, create_backend
+from .tools import AFS_TOOLS, Tool, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ class AgentHarness:
         self._backend: ModelBackend | None = None
         self._hooks: list[Any] = []
 
-    async def __aenter__(self) -> "AgentHarness":
+    async def __aenter__(self) -> AgentHarness:
         """Initialize backend."""
         self._backend = create_backend(self._model_config)
         return self
@@ -174,23 +174,23 @@ class AgentHarness:
             # and force reliance on external state (scratchpad/files).
             if len(messages) > self.config.max_history_messages:
                 logger.info("Context limit exceeded. Truncating history.")
-                
+
                 # Preserve system prompt if it exists (usually index 0)
                 new_messages = []
                 if messages and messages[0]["role"] == "system":
                     new_messages.append(messages[0])
-                    
+
                 # Keep the last N messages
-                # We subtract 2 to leave room for system prompt + warning
-                retain_count = self.config.max_history_messages - 2
-                if retain_count < 1: retain_count = 1
+                                # We subtract 2 to leave room for system prompt + warning
+                                retain_count = self.config.max_history_messages - 2
+                                if retain_count < 1:
+                                    retain_count = 1
                 
-                new_messages.append({
-                    "role": "system", 
+                                new_messages.append({                    "role": "system",
                     "content": "Context truncated due to length limits. Please read 'scratchpad/state.md' or query files to restore your understanding of the task state."
                 })
                 new_messages.extend(messages[-retain_count:])
-                
+
                 messages = new_messages
 
             # Generate
@@ -341,7 +341,6 @@ async def run_agent(
 async def main():
     """CLI for testing agent harness."""
     import argparse
-    import asyncio
 
     logging.basicConfig(
         level=logging.INFO,

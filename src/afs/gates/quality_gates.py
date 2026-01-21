@@ -15,11 +15,11 @@ Key features:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -103,17 +103,17 @@ class ModelMetrics:
     """Model quality and performance metrics."""
 
     quality_score: float  # 0.0-1.0
-    accuracy: Optional[float] = None
-    f1_score: Optional[float] = None
-    perplexity: Optional[float] = None
-    latency_ms: Optional[float] = None
-    throughput_tokens_per_sec: Optional[float] = None
-    memory_mb: Optional[float] = None
+    accuracy: float | None = None
+    f1_score: float | None = None
+    perplexity: float | None = None
+    latency_ms: float | None = None
+    throughput_tokens_per_sec: float | None = None
+    memory_mb: float | None = None
 
     # Baseline comparison
-    baseline_quality_score: Optional[float] = None
-    baseline_latency_ms: Optional[float] = None
-    baseline_memory_mb: Optional[float] = None
+    baseline_quality_score: float | None = None
+    baseline_latency_ms: float | None = None
+    baseline_memory_mb: float | None = None
 
     def regression_percent(self) -> float:
         """Calculate regression vs baseline as percentage."""
@@ -245,7 +245,7 @@ class QualityGate:
     def __init__(
         self,
         context: DeploymentContext = DeploymentContext.STAGING,
-        thresholds: Optional[GateThresholds] = None,
+        thresholds: GateThresholds | None = None,
     ):
         """Initialize quality gate.
 
@@ -258,7 +258,7 @@ class QualityGate:
         self._callbacks: dict[str, list[Callable]] = {}
 
     @classmethod
-    def development(cls, thresholds: Optional[GateThresholds] = None) -> QualityGate:
+    def development(cls, thresholds: GateThresholds | None = None) -> QualityGate:
         """Create development context gate (relaxed)."""
         default_thresholds = GateThresholds(
             min_test_pass_rate=0.80,
@@ -274,14 +274,14 @@ class QualityGate:
         return cls(DeploymentContext.DEVELOPMENT, merged)
 
     @classmethod
-    def staging(cls, thresholds: Optional[GateThresholds] = None) -> QualityGate:
+    def staging(cls, thresholds: GateThresholds | None = None) -> QualityGate:
         """Create staging context gate (standard)."""
         default_thresholds = GateThresholds()  # Uses all defaults
         merged = cls._merge_thresholds(default_thresholds, thresholds)
         return cls(DeploymentContext.STAGING, merged)
 
     @classmethod
-    def production(cls, thresholds: Optional[GateThresholds] = None) -> QualityGate:
+    def production(cls, thresholds: GateThresholds | None = None) -> QualityGate:
         """Create production context gate (strict)."""
         default_thresholds = GateThresholds(
             min_test_pass_rate=0.98,
@@ -299,7 +299,7 @@ class QualityGate:
 
     @staticmethod
     def _merge_thresholds(
-        defaults: GateThresholds, custom: Optional[GateThresholds]
+        defaults: GateThresholds, custom: GateThresholds | None
     ) -> GateThresholds:
         """Merge custom thresholds with defaults."""
         if not custom:
@@ -404,7 +404,7 @@ class QualityGate:
         return result
 
     def check_model_quality(
-        self, metrics: ModelMetrics, baseline: Optional[ModelMetrics] = None
+        self, metrics: ModelMetrics, baseline: ModelMetrics | None = None
     ) -> GateCheckResult:
         """Check model quality metrics against thresholds.
 
@@ -549,10 +549,10 @@ class QualityGate:
         self,
         model_name: str,
         model_version: str,
-        test_metrics: Optional[TestMetrics] = None,
-        model_metrics: Optional[ModelMetrics] = None,
-        security_results: Optional[SecurityScanResults] = None,
-        baseline_model_metrics: Optional[ModelMetrics] = None,
+        test_metrics: TestMetrics | None = None,
+        model_metrics: ModelMetrics | None = None,
+        security_results: SecurityScanResults | None = None,
+        baseline_model_metrics: ModelMetrics | None = None,
     ) -> QualityGateReport:
         """Run all quality gate checks.
 

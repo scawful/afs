@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-
 # =============================================================================
 # Training Commands
 # =============================================================================
@@ -644,7 +643,7 @@ def discriminator_train_command(args: argparse.Namespace) -> int:
 
 def discriminator_filter_command(args: argparse.Namespace) -> int:
     """Filter training data using trained discriminator."""
-    from ..discriminator import SampleFilter, FilterConfig
+    from ..discriminator import FilterConfig, SampleFilter
 
     model_path = Path(args.model).expanduser()
     input_path = Path(args.input).expanduser()

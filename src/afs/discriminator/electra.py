@@ -7,13 +7,13 @@ Can be used for:
 - Inference-time rejection sampling
 """
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-import json
 
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 
 
 @dataclass
@@ -153,12 +153,12 @@ class ASMElectra:
         Returns:
             Training metrics
         """
+        from sklearn.metrics import accuracy_score, precision_recall_fscore_support
         from transformers import (
+            EarlyStoppingCallback,
             Trainer,
             TrainingArguments,
-            EarlyStoppingCallback,
         )
-        from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
         if self.model is None:
             self._load_base_model()

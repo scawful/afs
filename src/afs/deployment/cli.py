@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
-from typing import Optional
 
 import click
 
@@ -74,8 +72,8 @@ def validate_command(
     model_path: Path,
     model_name: str,
     version: str,
-    baseline: Optional[str],
-    output_dir: Optional[Path],
+    baseline: str | None,
+    output_dir: Path | None,
     output_json: bool,
     output_markdown: bool,
     notify: bool,
@@ -181,8 +179,8 @@ def validate_command(
 )
 def registry_check_command(
     model_name: str,
-    version: Optional[str],
-    registry_path: Optional[Path],
+    version: str | None,
+    registry_path: Path | None,
 ) -> None:
     """Check model status in registry."""
     try:
@@ -257,7 +255,7 @@ def registry_check_command(
 def rollback_command(
     model_name: str,
     target_version: str,
-    registry_path: Optional[Path],
+    registry_path: Path | None,
     force: bool,
 ) -> None:
     """Rollback to a previous model version."""
@@ -315,7 +313,7 @@ def compare_command(
     model_name: str,
     version1: str,
     version2: str,
-    registry_path: Optional[Path],
+    registry_path: Path | None,
 ) -> None:
     """Compare two model versions."""
     try:

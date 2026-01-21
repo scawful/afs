@@ -5,9 +5,9 @@ preferences, and persona consistency.
 """
 
 import re
-from typing import Optional
 from pathlib import Path
-from ..graph_core import KnowledgeGraph, GraphNode, GraphEdge, GraphConstraint
+
+from ..graph_core import GraphConstraint, GraphNode, KnowledgeGraph
 
 
 class PersonalNodeType:
@@ -127,9 +127,9 @@ class PersonalKnowledgeGraph(KnowledgeGraph):
     def add_memory(
         self,
         content: str,
-        timestamp: Optional[str] = None,
+        timestamp: str | None = None,
         importance: float = 0.5,
-        tags: Optional[list[str]] = None,
+        tags: list[str] | None = None,
     ) -> GraphNode:
         """Add a memory/experience to the graph."""
         import hashlib

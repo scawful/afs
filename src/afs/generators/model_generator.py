@@ -10,10 +10,11 @@ from __future__ import annotations
 import logging
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from .base import BaseGenerator, GenerationResult, TrainingSample
 
@@ -34,7 +35,7 @@ class ModelType(str, Enum):
     API = "api"  # External API (Gemini, Claude, etc.)
 
 
-def _normalize_model_type(value: str | "ModelType") -> str:
+def _normalize_model_type(value: str | ModelType) -> str:
     if isinstance(value, ModelType):
         return value.value
     return str(value).strip().lower()
@@ -107,7 +108,7 @@ class MLXBackend(ModelBackend):
             return
 
         try:
-            from mlx_lm import load, generate
+            from mlx_lm import generate, load
 
             self._model, self._tokenizer = load(str(self.model_path))
             self._generate_fn = generate
@@ -206,8 +207,8 @@ class HuggingFaceBackend(ModelBackend):
             return
 
         try:
-            from transformers import AutoModelForCausalLM, AutoTokenizer
             import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
 
             self._tokenizer = AutoTokenizer.from_pretrained(str(self.model_path))
             self._model = AutoModelForCausalLM.from_pretrained(
@@ -382,9 +383,9 @@ class ModelGenerator(BaseGenerator):
     def __init__(
         self,
         config: ModelGeneratorConfig,
-        discriminator: "ASMElectra | None" = None,
-        validator: "AsarValidator | None" = None,
-        scorer: "QualityScorer | None" = None,
+        discriminator: ASMElectra | None = None,
+        validator: AsarValidator | None = None,
+        scorer: QualityScorer | None = None,
     ):
         super().__init__(name="ModelGenerator", domain=config.domain)
         self.config = config
@@ -416,7 +417,7 @@ class ModelGenerator(BaseGenerator):
         return factory(self.config)
 
     @property
-    def discriminator(self) -> "ASMElectra | None":
+    def discriminator(self) -> ASMElectra | None:
         """Lazy load discriminator."""
         if self._discriminator is None and self.config.use_discriminator:
             if self.config.discriminator_model_path:
@@ -450,7 +451,7 @@ class ModelGenerator(BaseGenerator):
         return self._discriminator
 
     @property
-    def validator(self) -> "AsarValidator":
+    def validator(self) -> AsarValidator:
         """Lazy load validator."""
         if self._validator is None:
             from afs.generators.asar_validator import AsarValidator, AsarValidatorConfig
@@ -609,7 +610,7 @@ class ModelGenerator(BaseGenerator):
         contexts = contexts or [""] * len(instructions)
         results = []
 
-        for instruction, context in zip(instructions, contexts):
+        for instruction, context in zip(instructions, contexts, strict=False):
             sample = self.generate_one(instruction, context)
             if sample is not None:
                 results.append(sample)

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .base import BenchmarkResult
 
 
 @dataclass
@@ -22,9 +25,8 @@ class LeaderboardEntry:
     version: str = "1.0"
 
     @classmethod
-    def from_result(cls, result: "BenchmarkResult") -> "LeaderboardEntry":
+    def from_result(cls, result: "BenchmarkResult") -> LeaderboardEntry:
         """Create from a BenchmarkResult."""
-        from .base import BenchmarkResult
         return cls(
             model=result.model,
             domain=result.domain,
@@ -47,7 +49,7 @@ class LeaderboardEntry:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "LeaderboardEntry":
+    def from_dict(cls, data: dict[str, Any]) -> LeaderboardEntry:
         """Create from dictionary."""
         return cls(
             model=data["model"],
@@ -132,7 +134,6 @@ class LeaderboardManager:
 
         Returns True if this is a new best for the model/domain.
         """
-        from .base import BenchmarkResult
 
         entry = LeaderboardEntry.from_result(result)
 

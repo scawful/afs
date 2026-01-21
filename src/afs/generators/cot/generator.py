@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +17,7 @@ from ..base import (
 )
 from .client import LLMClient, get_client
 from .formats import CotFormat, format_cot_sample
-from .prompts import build_analysis_prompt, ASM_COT_SYSTEM_PROMPT
+from .prompts import ASM_COT_SYSTEM_PROMPT, build_analysis_prompt
 from .rate_limiter import RateLimiter, batch_items
 
 if TYPE_CHECKING:

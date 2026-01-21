@@ -6,13 +6,13 @@ deduplication, and format conversion.
 
 import json
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Iterator
 
 from afs.generators.base import TrainingSample
-from afs.training.scoring import QualityScorer, ScoringConfig, QualityScore
+from afs.training.scoring import QualityScorer, ScoringConfig
 
 from .logger import UsageLogger, UsageRecord
 
@@ -27,8 +27,8 @@ class DataGeneratorConfig:
     min_user_feedback: int = 1  # Only positive feedback
     deduplicate: bool = True
     include_existing_data: bool = True
-    existing_data_path: Optional[Path] = None
-    max_samples: Optional[int] = None
+    existing_data_path: Path | None = None
+    max_samples: int | None = None
     format_type: str = "chatml"  # chatml, alpaca, completion
 
 
@@ -41,7 +41,7 @@ class GenerationResult:
     filtered_by_feedback: int = 0
     duplicates_removed: int = 0
     final_count: int = 0
-    output_path: Optional[Path] = None
+    output_path: Path | None = None
     quality_stats: dict = field(default_factory=dict)
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
@@ -52,7 +52,7 @@ class TrainingDataGenerator:
     def __init__(
         self,
         usage_logger: UsageLogger,
-        config: Optional[DataGeneratorConfig] = None,
+        config: DataGeneratorConfig | None = None,
     ):
         self.logger = usage_logger
         self.config = config or DataGeneratorConfig()
@@ -64,7 +64,7 @@ class TrainingDataGenerator:
     def generate(
         self,
         output_path: Path,
-        since: Optional[datetime] = None,
+        since: datetime | None = None,
     ) -> GenerationResult:
         """Generate training data from usage logs.
 
@@ -163,11 +163,10 @@ class TrainingDataGenerator:
         return result
 
     def _collect_candidates(
-        self, since: Optional[datetime]
+        self, since: datetime | None
     ) -> Iterator[UsageRecord]:
         """Collect candidate records from usage logs."""
-        for record in self.logger.get_records(since=since):
-            yield record
+        yield from self.logger.get_records(since=since)
 
     def _score_quality(self, records: list[UsageRecord]) -> list[UsageRecord]:
         """Score quality of records if not already scored."""
@@ -297,4 +296,4 @@ class TrainingDataGenerator:
             raise ValueError(f"Unknown format type: {self.config.format_type}")
 
 
-import hashlib  # Add missing import
+

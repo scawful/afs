@@ -70,7 +70,7 @@ class LlamaCppConverter(BaseConverter):
     def __init__(
         self,
         include_cot: bool = True,
-        cot_mode: "CotInclusionMode" = None,
+        cot_mode: CotInclusionMode = None,
         system_prompt: str | None = None,
         template: str = "chatml",
         as_prompt_completion: bool = False,
@@ -98,7 +98,7 @@ class LlamaCppConverter(BaseConverter):
         self.template = self.TEMPLATES[template]
         self.as_prompt_completion = as_prompt_completion
 
-    def convert_sample(self, sample: "TrainingSample") -> dict[str, Any]:
+    def convert_sample(self, sample: TrainingSample) -> dict[str, Any]:
         """Convert sample to llama.cpp format.
 
         Args:
@@ -154,7 +154,7 @@ class GGUFTrainConverter(BaseConverter):
     def __init__(
         self,
         include_cot: bool = True,
-        cot_mode: "CotInclusionMode" = None,
+        cot_mode: CotInclusionMode = None,
         separator: str = "\n<|endoftext|>\n",
     ):
         """Initialize GGUF train converter.
@@ -167,7 +167,7 @@ class GGUFTrainConverter(BaseConverter):
         super().__init__(include_cot=include_cot, cot_mode=cot_mode)
         self.separator = separator
 
-    def convert_sample(self, sample: "TrainingSample") -> dict[str, Any]:
+    def convert_sample(self, sample: TrainingSample) -> dict[str, Any]:
         """Convert sample to simple text format.
 
         Args:
@@ -185,7 +185,7 @@ class GGUFTrainConverter(BaseConverter):
 
     def convert_to_text_file(
         self,
-        samples: list["TrainingSample"],
+        samples: list[TrainingSample],
         output_path: str,
     ) -> int:
         """Convert samples to a single text file.

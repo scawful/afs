@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 
 @dataclass
@@ -24,7 +25,7 @@ class BenchmarkItem:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "BenchmarkItem":
+    def from_dict(cls, data: dict[str, Any]) -> BenchmarkItem:
         """Create from dictionary."""
         return cls(
             id=data["id"],
@@ -88,7 +89,7 @@ class BenchmarkResult:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "BenchmarkResult":
+    def from_dict(cls, data: dict[str, Any]) -> BenchmarkResult:
         """Create from dictionary."""
         return cls(
             model=data["model"],

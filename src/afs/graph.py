@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
 
+from . import __version__
 from .config import load_config_model
 from .discovery import discover_contexts
 from .mapping import resolve_directory_name
 from .models import ContextRoot, MountType
 from .schema import AFSConfig
-from . import __version__
 
 
 def build_graph(

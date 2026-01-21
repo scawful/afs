@@ -1,18 +1,17 @@
 """Tests for Triforce orchestrator."""
 
+import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch, AsyncMock
 
-import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from afs.oracle.orchestrator import (
-    TriforceOrchestrator,
     Expert,
-    TaskType,
-    TaskAnalysis,
     ExpertResult,
+    TaskAnalysis,
+    TaskType,
+    TriforceOrchestrator,
 )
 
 

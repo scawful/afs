@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from typing import Optional
 
 from afs.logging_config import get_logger
 
-from .base import NotificationEvent, NotificationHandler, NotificationLevel
+from .base import NotificationEvent, NotificationHandler
 
 logger = get_logger(__name__)
 
@@ -90,7 +89,7 @@ class DesktopNotifier(NotificationHandler):
         message = event.message.replace('"', '\\"')
 
         # Build notification with sound if enabled
-        sound_part = f'sound name "Glass"' if self.enable_sound else ""
+        sound_part = 'sound name "Glass"' if self.enable_sound else ""
 
         # Map notification level to icon
         subtitle = f"[{event.level.upper()}]"
@@ -102,7 +101,7 @@ class DesktopNotifier(NotificationHandler):
         )
 
         if self.enable_sound:
-            script += f'sound name "Glass"'
+            script += 'sound name "Glass"'
 
         return script
 
@@ -110,7 +109,7 @@ class DesktopNotifier(NotificationHandler):
         self,
         title: str,
         message: str,
-        sound: Optional[bool] = None
+        sound: bool | None = None
     ) -> bool:
         """Send a simple notification without event object.
 

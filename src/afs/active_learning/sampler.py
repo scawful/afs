@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from afs.generators.base import TrainingSample
@@ -55,10 +55,10 @@ class UncertaintySampler:
 
     def sample(
         self,
-        candidates: list["TrainingSample"],
+        candidates: list[TrainingSample],
         n: int,
-        scorer: "QualityScorer | None" = None,
-    ) -> list["TrainingSample"]:
+        scorer: QualityScorer | None = None,
+    ) -> list[TrainingSample]:
         """Select n most uncertain samples.
 
         Args:
@@ -104,7 +104,7 @@ class UncertaintySampler:
 
     def get_uncertainty_distribution(
         self,
-        samples: list["TrainingSample"],
+        samples: list[TrainingSample],
     ) -> dict[str, int]:
         """Get distribution of samples by uncertainty level.
 
@@ -169,7 +169,7 @@ class CurriculumManager:
     def current_stage(self) -> CurriculumStage:
         return self._current_stage
 
-    def classify_sample(self, sample: "TrainingSample") -> CurriculumStage:
+    def classify_sample(self, sample: TrainingSample) -> CurriculumStage:
         """Classify a sample into a curriculum stage.
 
         Args:
@@ -209,9 +209,9 @@ class CurriculumManager:
 
     def get_samples_for_stage(
         self,
-        samples: list["TrainingSample"],
+        samples: list[TrainingSample],
         stage: CurriculumStage | None = None,
-    ) -> list["TrainingSample"]:
+    ) -> list[TrainingSample]:
         """Get samples for a curriculum stage.
 
         Args:
@@ -235,7 +235,7 @@ class CurriculumManager:
 
     def get_stage_distribution(
         self,
-        samples: list["TrainingSample"],
+        samples: list[TrainingSample],
     ) -> dict[str, int]:
         """Get distribution of samples across stages."""
         distribution = {stage.value: 0 for stage in CurriculumStage}
@@ -267,7 +267,7 @@ class CurriculumManager:
 
     def get_curriculum_plan(
         self,
-        samples: list["TrainingSample"],
+        samples: list[TrainingSample],
     ) -> dict[str, Any]:
         """Generate a curriculum plan showing samples per stage.
 
@@ -301,10 +301,10 @@ class CurriculumManager:
 
 
 def sample_by_uncertainty(
-    samples: list["TrainingSample"],
+    samples: list[TrainingSample],
     n: int,
-    scorer: "QualityScorer | None" = None,
-) -> list["TrainingSample"]:
+    scorer: QualityScorer | None = None,
+) -> list[TrainingSample]:
     """Convenience function for uncertainty sampling.
 
     Args:
@@ -319,22 +319,6 @@ def sample_by_uncertainty(
     return sampler.sample(samples, n, scorer)
 
 
-def get_curriculum_samples(
-    samples: list["TrainingSample"],
-    stage: str = "simple",
-) -> list["TrainingSample"]:
-    """Get samples for a curriculum stage.
-
-    Args:
-        samples: All samples
-        stage: Stage name (simple, moderate, complex, advanced)
-
-    Returns:
-        Samples matching stage
     """
-    manager = CurriculumManager()
-    return manager.get_samples_for_stage(samples, CurriculumStage(stage))
+    return [s for s in samples if s.metadata.get("stage") == stage]
 
-
-# Type hint for get_curriculum_plan return
-from typing import Any

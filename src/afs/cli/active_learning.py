@@ -10,8 +10,8 @@ from pathlib import Path
 
 def active_learning_sample_command(args: argparse.Namespace) -> int:
     """Sample using uncertainty strategy."""
-    from ..generators.base import TrainingSample
     from ..active_learning import UncertaintySampler
+    from ..generators.base import TrainingSample
     from ..training.scoring import QualityScorer, ScoringConfig
 
     if args.n <= 0:
@@ -46,7 +46,7 @@ def active_learning_sample_command(args: argparse.Namespace) -> int:
 
         # Show distribution
         dist = sampler.get_uncertainty_distribution(samples)
-        print(f"\nUncertainty distribution (all samples):")
+        print("\nUncertainty distribution (all samples):")
         for level, count in dist.items():
             print(f"  {level}: {count}")
     elif args.strategy == "random":
@@ -82,8 +82,8 @@ def active_learning_sample_command(args: argparse.Namespace) -> int:
 
 def active_learning_curriculum_command(args: argparse.Namespace) -> int:
     """Get samples for curriculum stage."""
-    from ..generators.base import TrainingSample
     from ..active_learning import CurriculumManager, CurriculumStage
+    from ..generators.base import TrainingSample
     from ..knowledge import EntityExtractor
 
     # Load samples
@@ -135,8 +135,8 @@ def active_learning_curriculum_command(args: argparse.Namespace) -> int:
 
 def active_learning_queue_add_command(args: argparse.Namespace) -> int:
     """Add samples to priority queue."""
-    from ..generators.base import TrainingSample
     from ..active_learning import PriorityQueue
+    from ..generators.base import TrainingSample
     from ..training.scoring import QualityScorer, ScoringConfig
 
     # Load samples
@@ -214,19 +214,19 @@ def active_learning_queue_status_command(args: argparse.Namespace) -> int:
     queue = PriorityQueue(storage_path=queue_path)
     stats = queue.get_stats()
 
-    print(f"Priority Queue Status")
+    print("Priority Queue Status")
     print("=" * 40)
     print(f"Total items: {stats['total_items']}")
-    print(f"\nBy status:")
+    print("\nBy status:")
     for status, count in stats['by_status'].items():
         print(f"  {status}: {count}")
 
-    print(f"\nBy domain:")
+    print("\nBy domain:")
     for domain, count in stats['by_domain'].items():
         print(f"  {domain}: {count}")
 
     if stats['ratings']['count'] > 0:
-        print(f"\nRatings:")
+        print("\nRatings:")
         print(f"  Count: {stats['ratings']['count']}")
         print(f"  Mean: {stats['ratings']['mean']:.2f}")
         print(f"  Range: {stats['ratings']['min']:.2f} - {stats['ratings']['max']:.2f}")

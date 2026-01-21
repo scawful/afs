@@ -87,7 +87,7 @@ class RehearsalBuffer:
             raise FileNotFoundError(f"Training data not found: {path}")
 
         loaded = 0
-        with open(path, 'r') as f:
+        with open(path) as f:
             for line in f:
                 if max_samples and loaded >= max_samples:
                     break

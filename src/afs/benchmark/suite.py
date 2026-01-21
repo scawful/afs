@@ -9,7 +9,7 @@ from typing import Any
 
 from .base import BenchmarkConfig, BenchmarkResult
 from .din import DinBenchmark
-from .nayru import NayruBenchmark, FaroreBenchmark, VeranBenchmark
+from .nayru import FaroreBenchmark, NayruBenchmark, VeranBenchmark
 
 
 class BenchmarkSuite:

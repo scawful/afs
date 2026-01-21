@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from pathlib import Path
 from typing import Any
 
 
@@ -201,7 +200,7 @@ class ModelMetadata:
     owner: str | None = None
     tags: list[str] = field(default_factory=list)
     notes: str = ""
-    versions: list["ModelVersion"] = field(default_factory=list)
+    versions: list[ModelVersion] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""

@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Any
 
-from .prompts import ASM_COT_SYSTEM_PROMPT
 from ...history import log_event
+from .prompts import ASM_COT_SYSTEM_PROMPT
 
 
 class LLMClient(ABC):

@@ -4,11 +4,11 @@ Provides a unified model interface that can route to specialized experts
 using special tokens like <INVOKE_EXPERT:din>.
 """
 
-import re
 import logging
-from dataclasses import dataclass, field
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Callable, AsyncIterator
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ class ExpertInvocation:
     """Represents a parsed expert invocation."""
     expert_name: str
     context: str  # Text before invocation
-    response: Optional[str] = None
+    response: str | None = None
 
 
 @dataclass
@@ -50,8 +50,8 @@ class GeneralistModel:
 
     def __init__(
         self,
-        config: Optional[GeneralistConfig] = None,
-        expert_handlers: Optional[dict[str, Callable]] = None,
+        config: GeneralistConfig | None = None,
+        expert_handlers: dict[str, Callable] | None = None,
     ):
         self.config = config or GeneralistConfig()
         self.expert_handlers = expert_handlers or {}
@@ -82,7 +82,7 @@ class GeneralistModel:
     async def generate(
         self,
         prompt: str,
-        system_prompt: Optional[str] = None,
+        system_prompt: str | None = None,
         execute_experts: bool = True,
     ) -> str:
         """Generate response, optionally executing expert invocations."""
@@ -118,7 +118,7 @@ class GeneralistModel:
     async def _generate_base(
         self,
         prompt: str,
-        system_prompt: Optional[str] = None,
+        system_prompt: str | None = None,
     ) -> str:
         """Generate from base model."""
         # Try ollama first

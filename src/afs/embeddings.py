@@ -7,10 +7,10 @@ import hashlib
 import json
 import math
 import os
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable
 
 
 @dataclass

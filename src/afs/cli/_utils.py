@@ -38,7 +38,7 @@ def _default_studio_build_dir(studio_root: Path) -> Path:
     return studio_root / "build"
 
 
-def parse_mount_type(value: str) -> "MountType":
+def parse_mount_type(value: str) -> MountType:
     """Parse mount type from string."""
     from ..models import MountType
     try:
@@ -131,7 +131,7 @@ def studio_build(
     return run_command(build_cmd)
 
 
-def load_manager(config_path: Path | None) -> "AFSManager":
+def load_manager(config_path: Path | None) -> AFSManager:
     """Load the AFS manager with configuration."""
     from ..config import load_config_model
     from ..manager import AFSManager
@@ -141,7 +141,7 @@ def load_manager(config_path: Path | None) -> "AFSManager":
 
 
 def resolve_context_paths(
-    args: argparse.Namespace, manager: "AFSManager"
+    args: argparse.Namespace, manager: AFSManager
 ) -> tuple[Path, Path, Path | None, str | None]:
     """Resolve context paths from arguments."""
     project_path = Path(args.path).expanduser().resolve() if args.path else Path.cwd()
@@ -165,7 +165,7 @@ def ensure_context_root(root: Path) -> None:
     (root / "workspaces").mkdir(parents=True, exist_ok=True)
 
 
-def write_config(path: Path, config: "AFSConfig") -> None:
+def write_config(path: Path, config: AFSConfig) -> None:
     """Write configuration to TOML file."""
     general = config.general
     lines: list[str] = [
@@ -199,7 +199,7 @@ def build_config(
     context_root: Path,
     workspace_path: Path | None,
     workspace_name: str | None,
-) -> "AFSConfig":
+) -> AFSConfig:
     """Build an AFS configuration object."""
     from ..schema import AFSConfig, GeneralConfig, WorkspaceDirectory
 

@@ -1,21 +1,17 @@
 """Tests for notification system."""
 
-import json
 import os
-from datetime import datetime
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from afs.notifications import (
-    NotificationManager,
-    NotificationEvent,
-    EventType,
-    NotificationLevel,
     DesktopNotifier,
-    EmailNotifier,
-    SlackNotifier,
     DiscordNotifier,
+    EmailNotifier,
+    EventType,
+    NotificationEvent,
+    NotificationLevel,
+    NotificationManager,
+    SlackNotifier,
 )
 
 

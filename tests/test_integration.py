@@ -14,43 +14,37 @@ import json
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from afs.generators.base import TrainingSample
-from afs.training.pipeline import DataPipeline, PipelineConfig
-from afs.training.rehearsal import RehearsalBuffer, RehearsalBufferConfig
-from afs.registry import ModelRegistry, ModelVersion, EvaluationScores
-from afs.registry.models import VersionStatus
 from afs.continuous import (
-    UsageLogger,
-    TrainingDataGenerator,
-    DataGeneratorConfig,
-    RetrainTrigger,
-    TriggerConfig,
-    TriggerType,
-    ABTestManager,
     ABTestConfig,
+    ABTestManager,
     ContinuousLearningLoop,
+    DataGeneratorConfig,
     LoopConfig,
+    TrainingDataGenerator,
+    TriggerConfig,
+    UsageLogger,
 )
 from afs.cost import (
     CostAnalyzer,
     CostOptimizer,
     GPUPrice,
     GPUPriceTracker,
-    TrainingCostReport,
     TrainingMetrics,
 )
+from afs.generators.base import TrainingSample
 from afs.notifications import (
-    NotificationManager,
-    NotificationEvent,
     EventType,
     NotificationLevel,
+    NotificationManager,
 )
 from afs.quality import QualityMetrics
-
+from afs.registry import EvaluationScores, ModelRegistry
+from afs.registry.models import VersionStatus
+from afs.training.pipeline import DataPipeline, PipelineConfig
 
 # ============================================================================
 # FIXTURES
@@ -1060,7 +1054,7 @@ class TestCompleteWorkflowIntegration:
         assert model is not None
 
         # Verify dataset file has correct content
-        with open(dataset_file, 'r') as f:
+        with open(dataset_file) as f:
             lines = f.readlines()
             assert len(lines) == 10
 

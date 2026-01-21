@@ -7,9 +7,9 @@ Collects and processes large corpora from:
 
 import logging
 import re
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, Optional, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ class CorpusChunk:
 class CorpusBuilder:
     """Builds training corpora from source files."""
 
-    def __init__(self, config: Optional[CorpusConfig] = None):
+    def __init__(self, config: CorpusConfig | None = None):
         self.config = config or CorpusConfig()
         self._skip_regex = [re.compile(p) for p in self.config.skip_patterns]
 
@@ -56,7 +56,7 @@ class CorpusBuilder:
     def process_file(self, file_path: Path) -> Iterator[str]:
         """Process a single file and yield cleaned lines."""
         try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(file_path, encoding="utf-8", errors="ignore") as f:
                 for line in f:
                     cleaned = self._clean_line(line)
                     if cleaned:
@@ -64,7 +64,7 @@ class CorpusBuilder:
         except Exception as e:
             logger.warning(f"Error processing {file_path}: {e}")
 
-    def _clean_line(self, line: str) -> Optional[str]:
+    def _clean_line(self, line: str) -> str | None:
         """Clean and validate a single line."""
         line = line.rstrip()
 
@@ -83,7 +83,7 @@ class CorpusBuilder:
 
     def build_chunks(
         self,
-        tokenizer: Optional[Callable[[str], list]] = None,
+        tokenizer: Callable[[str], list] | None = None,
     ) -> Iterator[CorpusChunk]:
         """Build training chunks from corpus."""
         # Simple word tokenizer if none provided
@@ -154,7 +154,7 @@ class CorpusBuilder:
 class DisassemblyParser(CorpusBuilder):
     """Specialized corpus builder for 65816 disassembly."""
 
-    def __init__(self, config: Optional[CorpusConfig] = None):
+    def __init__(self, config: CorpusConfig | None = None):
         if config is None:
             config = CorpusConfig(
                 file_patterns=["*.asm", "*.s", "*.inc", "*.65816"],
@@ -165,7 +165,7 @@ class DisassemblyParser(CorpusBuilder):
             )
         super().__init__(config)
 
-    def _clean_line(self, line: str) -> Optional[str]:
+    def _clean_line(self, line: str) -> str | None:
         """Clean assembly line with special handling."""
         line = super()._clean_line(line)
         if not line:
@@ -181,7 +181,7 @@ class DisassemblyParser(CorpusBuilder):
 class ConversationParser(CorpusBuilder):
     """Specialized corpus builder for conversation/notes data."""
 
-    def __init__(self, config: Optional[CorpusConfig] = None):
+    def __init__(self, config: CorpusConfig | None = None):
         if config is None:
             config = CorpusConfig(
                 file_patterns=["*.md", "*.txt", "*.json"],
@@ -194,7 +194,7 @@ class ConversationParser(CorpusBuilder):
             )
         super().__init__(config)
 
-    def _clean_line(self, line: str) -> Optional[str]:
+    def _clean_line(self, line: str) -> str | None:
         """Clean conversation line."""
         line = super()._clean_line(line)
         if not line:

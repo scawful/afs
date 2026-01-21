@@ -1,15 +1,15 @@
 """Format converters for training data."""
 
 from .base import BaseConverter
-from .mlx import MLXConverter, MLXCompletionConverter
 from .hf import (
     AlpacaConverter,
     ChatMLConverter,
     ShareGPTConverter,
     UnslothThinkingConverter,
 )
-from .llama_cpp import LlamaCppConverter, GGUFTrainConverter
-from .toolbench import load_toolbench_dataset, export_toolbench_to_jsonl
+from .llama_cpp import GGUFTrainConverter, LlamaCppConverter
+from .mlx import MLXCompletionConverter, MLXConverter
+from .toolbench import export_toolbench_to_jsonl, load_toolbench_dataset
 
 _CONVERTER_REGISTRY: dict[str, type[BaseConverter]] = {}
 
@@ -89,8 +89,8 @@ def get_converter(
     Returns:
         Configured converter instance
     """
-    from ..config import CotInclusionMode
     from ...plugins import load_enabled_plugins
+    from ..config import CotInclusionMode
 
     load_enabled_plugins()
 

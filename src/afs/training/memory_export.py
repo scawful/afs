@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
 
 from ..generators.base import TrainingSample
-from .scoring import build_scoring_config, QualityScorer
 from .redaction import redact_sample
+from .scoring import QualityScorer, build_scoring_config
 
 
 @dataclass
@@ -86,7 +86,7 @@ def export_memory_to_dataset(
         )
         scored = scorer.score_batch(samples, update_samples=True)
         filtered_samples: list[TrainingSample] = []
-        for sample, score in zip(samples, scored):
+        for sample, score in zip(samples, scored, strict=False):
             if score.overall >= min_quality_score:
                 filtered_samples.append(sample)
             else:

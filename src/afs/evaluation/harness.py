@@ -14,7 +14,7 @@ import math
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from afs.generators.base import TrainingSample
@@ -198,7 +198,7 @@ class EvaluationHarness:
 
     def __init__(
         self,
-        scorer: "QualityScorer | None" = None,
+        scorer: QualityScorer | None = None,
         validate_syntax: bool = True,
         extract_entities: bool = True,
     ):
@@ -214,7 +214,7 @@ class EvaluationHarness:
         self._extract_entities = extract_entities
 
     @property
-    def scorer(self) -> "QualityScorer":
+    def scorer(self) -> QualityScorer:
         """Lazy load scorer."""
         if self._scorer is None:
             from afs.training.scoring import QualityScorer, ScoringConfig
@@ -222,7 +222,7 @@ class EvaluationHarness:
             self._scorer = QualityScorer(config=ScoringConfig())
         return self._scorer
 
-    def evaluate(self, samples: list["TrainingSample"]) -> EvaluationResult:
+    def evaluate(self, samples: list[TrainingSample]) -> EvaluationResult:
         """Evaluate a set of samples.
 
         Args:
@@ -250,7 +250,7 @@ class EvaluationHarness:
         outputs: set[str] = set()
         domains: Counter[str] = Counter()
 
-        for sample, score in zip(samples, scores):
+        for sample, score in zip(samples, scores, strict=False):
             quality_scores.append(score.overall)
             electra_scores.append(score.electra_score)
             output_lengths.append(len(sample.output))
@@ -314,8 +314,8 @@ class EvaluationHarness:
 
     def compare(
         self,
-        baseline: list["TrainingSample"],
-        candidate: list["TrainingSample"],
+        baseline: list[TrainingSample],
+        candidate: list[TrainingSample],
     ) -> ComparisonResult:
         """Compare two sets of samples.
 
@@ -388,7 +388,7 @@ class EvaluationHarness:
 
 
 def evaluate_samples(
-    samples: list["TrainingSample"],
+    samples: list[TrainingSample],
     electra_path: Path | None = None,
 ) -> EvaluationResult:
     """Convenience function to evaluate samples.

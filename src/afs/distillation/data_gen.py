@@ -4,17 +4,16 @@ Generates high-quality training data from teacher ensemble with
 quality filtering and checkpointing.
 """
 
-import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass, field, asdict
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Callable, AsyncIterator
 
-from .teacher import TeacherEnsemble, TeacherResponse, ProviderConfig, Provider
 from ..history import log_event
+from .teacher import TeacherEnsemble, TeacherResponse
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,7 @@ class DistillationSample:
     id: str
     prompt: str
     response: str
-    system_prompt: Optional[str] = None
+    system_prompt: str | None = None
     provider: str = ""
     model: str = ""
     quality_score: float = 0.0
@@ -111,15 +110,15 @@ class DistillationDataGenerator:
 
     def __init__(
         self,
-        ensemble: Optional[TeacherEnsemble] = None,
-        config: Optional[DistillationConfig] = None,
-        quality_scorer: Optional[Callable[[str, str], float]] = None,
+        ensemble: TeacherEnsemble | None = None,
+        config: DistillationConfig | None = None,
+        quality_scorer: Callable[[str, str], float] | None = None,
     ):
         self.ensemble = ensemble or TeacherEnsemble.default_ensemble()
         self.config = config or DistillationConfig()
         self.quality_scorer = quality_scorer or self._default_quality_scorer
         self._samples: list[DistillationSample] = []
-        self._checkpoint_path: Optional[Path] = None
+        self._checkpoint_path: Path | None = None
 
     def _default_quality_scorer(self, prompt: str, response: str) -> float:
         """Default quality scoring based on response characteristics."""
@@ -220,8 +219,8 @@ class DistillationDataGenerator:
 
     async def generate_batch(
         self,
-        count: Optional[int] = None,
-        progress_callback: Optional[Callable[[GenerationProgress], None]] = None,
+        count: int | None = None,
+        progress_callback: Callable[[GenerationProgress], None] | None = None,
     ) -> list[DistillationSample]:
         """Generate a batch of distillation samples."""
         count = count or self.config.target_count
@@ -336,7 +335,7 @@ class DistillationDataGenerator:
     def export_training_data(
         self,
         output_path: Path,
-        format_type: Optional[str] = None,
+        format_type: str | None = None,
     ) -> int:
         """Export samples to training format."""
         format_type = format_type or self.config.format_type

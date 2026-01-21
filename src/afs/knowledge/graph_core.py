@@ -4,12 +4,13 @@ Provides abstract base classes for knowledge graphs that can be
 specialized for different domains (Zelda/ALTTP, Avatar/Personal).
 """
 
+import json
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Iterator, Callable, Any
-import json
 from pathlib import Path
+from typing import Any
 
 
 class NodeType(Enum):
@@ -34,7 +35,7 @@ class GraphNode:
     name: str
     node_type: str
     properties: dict = field(default_factory=dict)
-    embedding: Optional[list[float]] = None
+    embedding: list[float] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -120,15 +121,15 @@ class KnowledgeGraph(ABC):
         if node.id not in self._reverse_adjacency:
             self._reverse_adjacency[node.id] = []
 
-    def get_node(self, node_id: str) -> Optional[GraphNode]:
+    def get_node(self, node_id: str) -> GraphNode | None:
         """Get a node by ID."""
         return self._nodes.get(node_id)
 
     def find_nodes(
         self,
-        node_type: Optional[str] = None,
-        name_pattern: Optional[str] = None,
-        property_filter: Optional[dict] = None,
+        node_type: str | None = None,
+        name_pattern: str | None = None,
+        property_filter: dict | None = None,
     ) -> Iterator[GraphNode]:
         """Find nodes matching criteria."""
         for node in self._nodes.values():
@@ -159,9 +160,9 @@ class KnowledgeGraph(ABC):
 
     def get_edges(
         self,
-        source_id: Optional[str] = None,
-        target_id: Optional[str] = None,
-        edge_type: Optional[str] = None,
+        source_id: str | None = None,
+        target_id: str | None = None,
+        edge_type: str | None = None,
     ) -> Iterator[GraphEdge]:
         """Get edges matching criteria."""
         for edge in self._edges:
@@ -188,7 +189,7 @@ class KnowledgeGraph(ABC):
         self,
         root_ids: list[str],
         max_depth: int = 2,
-        edge_types: Optional[list[str]] = None,
+        edge_types: list[str] | None = None,
     ) -> "KnowledgeGraph":
         """Extract a subgraph starting from root nodes."""
         visited = set()

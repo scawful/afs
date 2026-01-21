@@ -5,14 +5,14 @@ from __future__ import annotations
 import pytest
 
 from afs.generators.asm_augment import (
-    AsmAugmentConfig,
-    AsmAugmentGenerator,
-    Phase2Augmenter,
-    Phase2AugmentConfig,
-    RegisterSwapAugmenter,
-    RegisterSwapConfig,
     AddressVariationAugmenter,
     AddressVariationConfig,
+    AsmAugmentConfig,
+    AsmAugmentGenerator,
+    Phase2AugmentConfig,
+    Phase2Augmenter,
+    RegisterSwapAugmenter,
+    RegisterSwapConfig,
     StyleVariationAugmenter,
     StyleVariationConfig,
     detect_category,

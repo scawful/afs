@@ -1,8 +1,8 @@
 """Chain of Thought generation for training data."""
 
-from .generator import CotGenerator, CotConfig
+from .client import GeminiClient, LLMClient
 from .formats import CotFormat, format_cot_sample
-from .client import LLMClient, GeminiClient
+from .generator import CotConfig, CotGenerator
 from .rate_limiter import RateLimiter
 
 __all__ = [

@@ -7,8 +7,8 @@ import json
 import sys
 from pathlib import Path
 
-from ._utils import load_manager, parse_mount_type, resolve_context_paths
 from ..context_fs import ContextFileSystem
+from ._utils import load_manager, parse_mount_type, resolve_context_paths
 
 
 def fs_read_command(args: argparse.Namespace) -> int:

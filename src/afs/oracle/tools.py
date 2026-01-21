@@ -3,12 +3,11 @@
 Provides knowledge lookup and verification tools for the Triforce experts.
 """
 
-import json
 import re
-import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 # Knowledge base paths
 KNOWLEDGE_BASE = Path.home() / ".context" / "knowledge"

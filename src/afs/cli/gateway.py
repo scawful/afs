@@ -214,8 +214,8 @@ def cmd_docker(args: argparse.Namespace) -> int:
 
 def cmd_vastai_up(args: argparse.Namespace) -> int:
     """Provision vast.ai instance."""
-    from pathlib import Path
     import subprocess
+    from pathlib import Path
 
     script = Path(__file__).parents[3] / "scripts" / "vastai_provision.py"
     return subprocess.run([
@@ -227,8 +227,8 @@ def cmd_vastai_up(args: argparse.Namespace) -> int:
 
 def cmd_vastai_down(args: argparse.Namespace) -> int:
     """Teardown vast.ai instance."""
-    from pathlib import Path
     import subprocess
+    from pathlib import Path
 
     script = Path(__file__).parents[3] / "scripts" / "vastai_provision.py"
     return subprocess.run([sys.executable, str(script), "down"]).returncode
@@ -236,8 +236,8 @@ def cmd_vastai_down(args: argparse.Namespace) -> int:
 
 def cmd_vastai_status(args: argparse.Namespace) -> int:
     """Show vast.ai status."""
-    from pathlib import Path
     import subprocess
+    from pathlib import Path
 
     script = Path(__file__).parents[3] / "scripts" / "vastai_provision.py"
     return subprocess.run([sys.executable, str(script), "status"]).returncode
@@ -245,8 +245,8 @@ def cmd_vastai_status(args: argparse.Namespace) -> int:
 
 def cmd_vastai_tunnel(args: argparse.Namespace) -> int:
     """Set up SSH tunnel."""
-    from pathlib import Path
     import subprocess
+    from pathlib import Path
 
     script = Path(__file__).parents[3] / "scripts" / "vastai_provision.py"
     return subprocess.run([

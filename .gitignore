@@ -24,3 +24,11 @@ VAST_INSTANCES.md
 /.venv/
 /venv/
 *.egg-info/
+.coverage
+htmlcov/
+
+# Project Specific
+.context/
+.quality-gates/
+llama.cpp/
+merge_temp.py

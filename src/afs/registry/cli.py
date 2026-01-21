@@ -12,13 +12,11 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
 
 import click
 
 from .database import ModelRegistry
 from .lineage import LineageTracker
-from .models import EvaluationScores, ModelVersion, TrainingMetadata
 
 
 @click.group()

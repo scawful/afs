@@ -8,7 +8,6 @@ Provides methods for merging outputs from multiple experts:
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional, Callable
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -43,7 +42,7 @@ class FusionConfig:
 class ExpertFusion:
     """Fuses outputs from multiple experts."""
 
-    def __init__(self, config: Optional[FusionConfig] = None):
+    def __init__(self, config: FusionConfig | None = None):
         self.config = config or FusionConfig()
 
     def fuse(self, outputs: list[ExpertOutput]) -> str:

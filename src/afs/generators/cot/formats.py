@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from enum import Enum
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,10 +18,10 @@ class CotFormat(str, Enum):
 
 
 def format_cot_sample(
-    sample: "TrainingSample",
+    sample: TrainingSample,
     thinking: str,
     format_type: CotFormat,
-) -> "TrainingSample":
+) -> TrainingSample:
     """Format a sample with CoT based on specified format.
 
     Args:
