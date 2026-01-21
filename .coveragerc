@@ -1,0 +1,54 @@
+[run]
+source = src/afs
+branch = True
+parallel = True
+omit =
+    */tests/*
+    */test_*.py
+    */__pycache__/*
+    */site-packages/*
+    */venv/*
+    */virtualenv/*
+
+[report]
+precision = 2
+show_missing = True
+skip_covered = False
+sort = Cover
+
+exclude_lines =
+    # Have to re-enable the standard pragma
+    pragma: no cover
+
+    # Don't complain about missing debug-only code
+    def __repr__
+    def __str__
+
+    # Don't complain if tests don't hit defensive assertion code
+    raise AssertionError
+    raise NotImplementedError
+
+    # Don't complain if non-runnable code isn't run
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    if typing.TYPE_CHECKING:
+
+    # Don't complain about abstract methods
+    @abstractmethod
+    @abc.abstractmethod
+
+    # Don't complain about protocols
+    @runtime_checkable
+    @typing.runtime_checkable
+
+[html]
+directory = htmlcov
+title = AFS Test Coverage Report
+
+[xml]
+output = coverage.xml
+
+[paths]
+source =
+    src/
+    */site-packages/
