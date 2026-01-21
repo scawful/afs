@@ -37,6 +37,11 @@ class PipelineConfig:
     # Output
     output_dir: Path = field(default_factory=lambda: Path("./pipeline_output"))
 
+    # Rehearsal buffer (for preventing catastrophic forgetting)
+    rehearsal_buffer_path: Path | None = None
+    rehearsal_ratio: float = 0.3  # 30% rehearsal samples
+    rehearsal_shuffle: bool = True
+
     # Tokenizer
     tokenizer_path: Path | None = None
     expand_vocab: bool = True
@@ -86,6 +91,7 @@ class PipelineResult:
     filtered_count: int = 0
     augmented_count: int = 0
     dedupe_removed: int = 0
+    rehearsal_count: int = 0  # Samples from rehearsal buffer
 
     # Quality stats
     mean_quality_score: float = 0.0
@@ -115,6 +121,7 @@ class PipelineResult:
             "filtered_count": self.filtered_count,
             "augmented_count": self.augmented_count,
             "dedupe_removed": self.dedupe_removed,
+            "rehearsal_count": self.rehearsal_count,
             "mean_quality_score": self.mean_quality_score,
             "min_quality_score": self.min_quality_score,
             "max_quality_score": self.max_quality_score,
@@ -162,7 +169,7 @@ class DataPipeline:
         self._log("=" * 60)
 
         # Stage 1: Load raw data
-        self._log("\n[1/9] Loading raw data...")
+        self._log("\n[1/10] Loading raw data...")
         samples = self._load_samples()
         result.input_count = len(samples)
         self._log(f"  Loaded {len(samples)} samples from {len(self.config.input_paths)} files")
@@ -171,81 +178,91 @@ class DataPipeline:
             result.errors.append("No samples loaded")
             return result
 
+        # Stage 1.5: Merge with rehearsal buffer
+        if self.config.rehearsal_buffer_path:
+            self._log("\n[1.5/10] Merging with rehearsal buffer...")
+            samples, rehearsal_added = self._merge_rehearsal(samples)
+            result.rehearsal_count = rehearsal_added
+            self._log(f"  Added {rehearsal_added} samples from rehearsal buffer")
+            self._log(f"  Total: {len(samples)} samples")
+        else:
+            self._log("\n[1.5/10] Skipping rehearsal buffer (not configured)")
+
         # Stage 2: Expand tokenizer vocabulary
         if self.config.expand_vocab:
-            self._log("\n[2/9] Expanding tokenizer vocabulary...")
+            self._log("\n[2/10] Expanding tokenizer vocabulary...")
             self._expand_tokenizer(samples)
         else:
-            self._log("\n[2/9] Skipping vocabulary expansion")
+            self._log("\n[2/10] Skipping vocabulary expansion")
 
         # Stage 3: Extract entities
         if self.config.extract_entities:
-            self._log("\n[3/9] Extracting entities...")
+            self._log("\n[3/10] Extracting entities...")
             entity_stats = self._extract_entities(samples)
             result.total_entities = entity_stats["total"]
             result.known_entities = entity_stats["known"]
             result.entity_coverage = entity_stats["coverage"]
             self._log(f"  Found {result.total_entities} entities, {result.known_entities} known ({100*result.entity_coverage:.1f}%)")
         else:
-            self._log("\n[3/9] Skipping entity extraction")
+            self._log("\n[3/10] Skipping entity extraction")
 
         # Stage 4: Score quality
         if self.config.score_quality:
-            self._log("\n[4/9] Scoring quality...")
+            self._log("\n[4/10] Scoring quality...")
             quality_stats = self._score_quality(samples)
             result.mean_quality_score = quality_stats["mean"]
             result.min_quality_score = quality_stats["min"]
             result.max_quality_score = quality_stats["max"]
             self._log(f"  Mean score: {result.mean_quality_score:.3f} (range: {result.min_quality_score:.3f} - {result.max_quality_score:.3f})")
         else:
-            self._log("\n[4/9] Skipping quality scoring")
+            self._log("\n[4/10] Skipping quality scoring")
 
         # Stage 5: Filter low-quality
         if self.config.score_quality and self.config.min_quality_score > 0:
-            self._log("\n[5/9] Filtering low-quality samples...")
+            self._log("\n[5/10] Filtering low-quality samples...")
             before = len(samples)
             samples = [s for s in samples if s.quality_score >= self.config.min_quality_score]
             result.filtered_count = before - len(samples)
             self._log(f"  Filtered {result.filtered_count} samples below {self.config.min_quality_score}")
             self._log(f"  Remaining: {len(samples)} samples")
         else:
-            self._log("\n[5/9] Skipping quality filtering")
+            self._log("\n[5/10] Skipping quality filtering")
 
         # Stage 6: Apply augmentation
         if self.config.apply_phase1_augment or self.config.apply_phase2_augment:
-            self._log("\n[6/9] Applying augmentation...")
+            self._log("\n[6/10] Applying augmentation...")
             before = len(samples)
             samples = self._augment_samples(samples)
             result.augmented_count = len(samples) - before
             self._log(f"  Generated {result.augmented_count} augmented samples")
             self._log(f"  Total: {len(samples)} samples")
         else:
-            self._log("\n[6/9] Skipping augmentation")
+            self._log("\n[6/10] Skipping augmentation")
 
         # Stage 7: Deduplicate
         if self.config.deduplicate:
-            self._log("\n[7/9] Deduplicating...")
+            self._log("\n[7/10] Deduplicating...")
             before = len(samples)
             samples = self._deduplicate(samples)
             result.dedupe_removed = before - len(samples)
             self._log(f"  Removed {result.dedupe_removed} duplicates")
             self._log(f"  Remaining: {len(samples)} samples")
         else:
-            self._log("\n[7/9] Skipping deduplication")
+            self._log("\n[7/10] Skipping deduplication")
 
         # Stage 8: Split into train/val/test
         if self.config.split_data:
-            self._log("\n[8/9] Splitting data...")
+            self._log("\n[8/10] Splitting data...")
             splits = self._split_data(samples)
             self._log(f"  Train: {len(splits['train'])} samples")
             self._log(f"  Val: {len(splits['val'])} samples")
             self._log(f"  Test: {len(splits['test'])} samples")
         else:
-            self._log("\n[8/9] Skipping data split")
+            self._log("\n[8/10] Skipping data split")
             splits = {"all": samples}
 
         # Stage 9: Export
-        self._log("\n[9/9] Exporting...")
+        self._log("\n[9/10] Exporting...")
         result.output_paths = self._export(splits)
         for name, path in result.output_paths.items():
             self._log(f"  {name}: {path}")
@@ -299,6 +316,37 @@ class DataPipeline:
                             self._log(f"  Warning: Invalid JSON in {path}: {e}")
 
         return samples
+
+    def _merge_rehearsal(self, new_samples: list) -> tuple[list, int]:
+        """Merge new samples with rehearsal buffer.
+
+        Args:
+            new_samples: New training samples
+
+        Returns:
+            Tuple of (merged_samples, rehearsal_count)
+        """
+        from .rehearsal import load_rehearsal_buffer
+
+        buffer_path = Path(self.config.rehearsal_buffer_path).expanduser().resolve()
+
+        if not buffer_path.exists():
+            self._log(f"  Warning: Rehearsal buffer not found at {buffer_path}")
+            return new_samples, 0
+
+        # Load buffer
+        buffer = load_rehearsal_buffer(buffer_path)
+        self._log(f"  Loaded {len(buffer.samples)} samples from rehearsal buffer")
+
+        # Merge
+        merged = buffer.merge_with_new_data(
+            new_samples,
+            rehearsal_ratio=self.config.rehearsal_ratio,
+            shuffle=self.config.rehearsal_shuffle,
+        )
+
+        rehearsal_count = len(merged) - len(new_samples)
+        return merged, rehearsal_count
 
     def _expand_tokenizer(self, samples: list) -> None:
         """Expand tokenizer vocabulary from samples."""

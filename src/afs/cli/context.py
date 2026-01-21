@@ -334,7 +334,12 @@ def graph_export_command(args: argparse.Namespace) -> int:
         print("(no contexts)")
         return 0
 
-    graph = build_graph(projects, config=config)
+    graph = build_graph(
+        search_paths=search_paths,
+        max_depth=args.max_depth,
+        ignore_names=ignore_names,
+        config=config,
+    )
 
     output_path = (
         Path(args.output).expanduser().resolve()

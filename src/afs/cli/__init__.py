@@ -30,6 +30,8 @@ from . import distillation
 from . import fs
 from . import embeddings
 from . import review
+from . import comparison
+from ..health import cli as health_cli
 from ..history import log_cli_invocation
 from ._help import render_default_help, render_topic_help
 
@@ -86,6 +88,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Register review commands
     review.register_parsers(subparsers)
+
+    # Register comparison commands
+    comparison.register_parsers(subparsers)
+
+    # Register health commands
+    health_cli.register_parsers(subparsers)
 
     # help
     help_parser = subparsers.add_parser("help", help="Show help for commands.")

@@ -72,7 +72,7 @@ ALWAYS assume standard Zelda 3 RAM map ($7EF300 range for save data, $0000-$00FF
 
     # LMStudio-based agents (GGUF models) - works with remote LMStudio too
     "nayru-lm": {
-        "model": "nayru-v9-q8_0.gguf",
+        "model": "nayru-7b-v5-q8.gguf",
         "backend": "lmstudio",
         "system": """You are Nayru, the Goddess of Wisdom and 65816 code generation specialist.
 You create elegant, correct assembly code with clear structure for Zelda 3.
@@ -80,7 +80,7 @@ Focus on: code correctness, readability, proper addressing modes, clean subrouti
 Output ONLY valid 65816 assembly code block unless asked otherwise.""",
     },
     "din-lm": {
-        "model": "din-v4.gguf",
+        "model": "din-7b-v4-q4km.gguf",
         "backend": "lmstudio",
         "system": """You are Din, a 65816 assembly optimization expert.
 You optimize inefficient code patterns: STZ for zero stores, INC/DEC patterns,
@@ -88,14 +88,14 @@ backward loop optimization, mode switch consolidation.
 Output ONLY the optimized code.""",
     },
     "farore-lm": {
-        "model": "farore-v5-q8_0.gguf",
+        "model": "farore-7b-v5-q8.gguf",
         "backend": "lmstudio",
         "system": """You are Farore, a 65816 assembly debugging expert.
 You identify and fix: register mode mismatches, stack imbalance, DMA configuration errors,
 register clobber issues. Explain the bug and provide the fix.""",
     },
     "veran-lm": {
-        "model": "veran-v4.gguf",
+        "model": "veran-7b-v4-q8.gguf",
         "backend": "lmstudio",
         "system": """You are Veran, a SNES hardware expert.
 You have deep knowledge of: PPU registers ($2100-$21FF), DMA/HDMA systems,
@@ -103,7 +103,7 @@ Mode 7 parameters, A Link to the Past RAM maps.
 Provide accurate technical information with register addresses.""",
     },
     "majora": {
-        "model": "majora-v2-q8_0.gguf",
+        "model": "majora-7b-v2-q8.gguf",
         "backend": "lmstudio",
         "system": """You are Majora, an expert on the Oracle of Secrets ROM hack codebase.
 You have deep knowledge of: Time System, Mask System, Menu/HUD implementation,
@@ -111,7 +111,7 @@ ZSCustomOverworld integration, 60+ custom sprites, quest design and progression.
 Reference specific files and RAM addresses when relevant.""",
     },
     "hylia": {
-        "model": "hylia-v2-q8_0.gguf",
+        "model": "hylia-v3-q8_0.gguf",
         "backend": "lmstudio",
         "system": """You are Hylia, the Goddess of Time and Narrative Expert for Oracle of Secrets.
 You create evocative dialogue, dream sequences, and lore that fits the Zelda aesthetic

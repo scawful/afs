@@ -486,6 +486,33 @@ def training_codex_history_import_command(args: argparse.Namespace) -> int:
 
 
 # =============================================================================
+# ToolBench Export
+# =============================================================================
+
+
+def training_toolbench_export_command(args: argparse.Namespace) -> int:
+    """Export ToolBench dataset to TrainingSample JSONL."""
+    from ..training.converters import export_toolbench_to_jsonl
+
+    dataset_dir = Path(args.dataset_dir).expanduser().resolve()
+    if not dataset_dir.exists():
+        print(f"ToolBench dataset directory not found: {dataset_dir}")
+        return 1
+
+    output_path = Path(args.output).expanduser().resolve()
+
+    count = export_toolbench_to_jsonl(
+        dataset_dir=dataset_dir,
+        output_path=output_path,
+        split=args.split,
+        max_samples=args.limit,
+    )
+
+    print(f"Exported {count} samples to {output_path}")
+    return 0
+
+
+# =============================================================================
 # Rebalance
 # =============================================================================
 
@@ -1228,6 +1255,34 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Disable secret redaction.",
     )
     train_codex_history.set_defaults(func=training_codex_history_import_command)
+
+    # training toolbench-export
+    train_toolbench = training_sub.add_parser(
+        "toolbench-export",
+        help="Export ToolBench dataset to TrainingSample JSONL.",
+    )
+    train_toolbench.add_argument(
+        "--dataset-dir",
+        required=True,
+        help="ToolBench dataset directory (containing data/ subdirectory).",
+    )
+    train_toolbench.add_argument(
+        "--output",
+        required=True,
+        help="Output JSONL path.",
+    )
+    train_toolbench.add_argument(
+        "--split",
+        choices=["train", "validation"],
+        default="train",
+        help="Dataset split to export (default: train).",
+    )
+    train_toolbench.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of samples to export (default: all).",
+    )
+    train_toolbench.set_defaults(func=training_toolbench_export_command)
 
     # training rebalance
     train_rebalance = training_sub.add_parser(

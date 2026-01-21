@@ -112,9 +112,14 @@ class OrchestratorResult:
 class TriforceOrchestrator:
     """Orchestrates ROM hacking tasks across Triforce expert models."""
 
+    OPTIMIZATION_KEYWORDS = [
+        "optimize", "optimization", "faster", "smaller", "speed", "size",
+        "cycle", "cycles", "byte", "bytes",
+    ]
+
     # Keyword mappings for task classification
     EXPERT_KEYWORDS = {
-        Expert.DIN: ["optimize", "faster", "smaller", "cycle", "byte", "reduce", "improve"],
+        Expert.DIN: OPTIMIZATION_KEYWORDS,
         Expert.FARORE: ["bug", "crash", "BRK", "debug", "fix", "wrong", "error", "corrupt"],
         Expert.VERAN: ["DMA", "HDMA", "register", "PPU", "VRAM", "OAM", "$21", "$42", "$43"],
         Expert.ONOX: ["table", "struct", "data", "format", "layout", "bitfield", "palette"],
@@ -237,6 +242,8 @@ class TriforceOrchestrator:
 
         # Determine task type
         task_type = self._classify_task_type(task_lower)
+        if task_type != TaskType.OPTIMIZATION and primary_expert == Expert.DIN:
+            primary_expert = Expert.NAYRU
 
         # Get pipeline for task type
         pipeline = self.TASK_PIPELINES.get(task_type, [primary_expert])
@@ -269,7 +276,7 @@ class TriforceOrchestrator:
             return TaskType.ITEM
         if any(kw in task for kw in ["menu", "hud", "ui", "interface"]):
             return TaskType.MENU
-        if any(kw in task for kw in ["optimize", "faster", "smaller"]):
+        if any(kw in task for kw in self.OPTIMIZATION_KEYWORDS):
             return TaskType.OPTIMIZATION
         if any(kw in task for kw in ["bug", "crash", "debug", "fix"]):
             return TaskType.DEBUGGING

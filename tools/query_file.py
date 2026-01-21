@@ -22,7 +22,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Answer a question about a file.")
     parser.add_argument("path", help="Path to the file to query")
     parser.add_argument("query", help="The question to ask about the file")
-    parser.add_argument("--model", default="gemini-2.5-flash", help="Model to use")
+    parser.add_argument("--model", default="gemini-3-flash-preview", help="Model to use")
     
     args = parser.parse_args()
     

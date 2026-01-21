@@ -100,6 +100,12 @@ class EncoderDataProcessor:
         self._embeddings_cache[text] = embedding
         return embedding
 
+    def _get_field(self, sample: Any, field: str, default: Any = "") -> Any:
+        """Get field value from dict or object."""
+        if isinstance(sample, dict):
+            return sample.get(field, default)
+        return getattr(sample, field, default)
+
     def _get_encoder_embedding(self, text: str) -> np.ndarray:
         """Get embedding from encoder model."""
         import torch
@@ -164,8 +170,8 @@ class EncoderDataProcessor:
         Returns:
             Analysis dict with quality metrics
         """
-        instruction = sample.get("instruction", "")
-        output = sample.get("output", "")
+        instruction = self._get_field(sample, "instruction", "")
+        output = self._get_field(sample, "output", "")
 
         # Tokenize output (assembly code) with ASM tokenizer
         output_tokens = self.tokenizer.tokenize(output)
@@ -264,7 +270,7 @@ class EncoderDataProcessor:
         # Get embeddings
         embeddings = []
         for sample in samples:
-            text = sample.get(field, "")
+            text = self._get_field(sample, field, "")
             embeddings.append(self.get_embedding(text))
 
         # Find duplicates
@@ -320,11 +326,11 @@ class EncoderDataProcessor:
                 to_remove.update(group_list[1:])
             elif keep == "longest":
                 # Keep longest output
-                lengths = [(i, len(samples[i].get("output", ""))) for i in group_list]
+                lengths = [(i, len(self._get_field(samples[i], "output", ""))) for i in group_list]
                 lengths.sort(key=lambda x: -x[1])
                 to_remove.update(i for i, _ in lengths[1:])
             elif keep == "shortest":
-                lengths = [(i, len(samples[i].get("output", ""))) for i in group_list]
+                lengths = [(i, len(self._get_field(samples[i], "output", ""))) for i in group_list]
                 lengths.sort(key=lambda x: x[1])
                 to_remove.update(i for i, _ in lengths[1:])
 
@@ -363,7 +369,7 @@ class EncoderDataProcessor:
         # Get embeddings
         embeddings = []
         for sample in samples:
-            text = sample.get(field, "")
+            text = self._get_field(sample, field, "")
             embeddings.append(self.get_embedding(text))
 
         X = np.array(embeddings)

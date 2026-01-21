@@ -10,7 +10,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Any
 
 from ..config import load_config_model
 from ..schema import AFSConfig, ServiceConfig
@@ -104,7 +104,6 @@ class ServiceManager:
             enabled=True,
             last_started=last_started,
         )
-
     def _check_docker_service(self, container_name: str) -> ServiceState:
         """Check if a docker container is running."""
         try:
@@ -591,3 +590,13 @@ def _merge_definition(
         keep_alive=base.keep_alive,
         run_at_load=override.auto_start,
     )
+
+
+class LMStudioManager:
+    """Stub for LMStudio integration (patched in tests)."""
+
+    def load_model(self, model_name: str) -> bool:
+        raise NotImplementedError
+
+    def health_check(self) -> dict[str, Any]:
+        raise NotImplementedError

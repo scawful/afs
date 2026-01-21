@@ -33,3 +33,10 @@ __all__ = [
     "DirectoryConfig",
     "PolicyType",
 ]
+
+# Registry and model management (optional import)
+try:
+    from . import registry
+    __all__.append("registry")
+except ImportError:
+    pass

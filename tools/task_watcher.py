@@ -47,9 +47,9 @@ def get_active_downloads():
         pass
 
     # Check for active downloads by looking at recently modified large files
-    gguf_dir = Path.home() / "src/lab/afs/models/gguf"
+    gguf_dir = Path.home() / "models/gguf"
     if gguf_dir.exists():
-        for f in gguf_dir.glob("*.gguf"):
+        for f in gguf_dir.rglob("*.gguf"):
             try:
                 stat = f.stat()
                 # If file was modified in last 60 seconds and is growing

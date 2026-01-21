@@ -9,6 +9,7 @@ from .hf import (
     UnslothThinkingConverter,
 )
 from .llama_cpp import LlamaCppConverter, GGUFTrainConverter
+from .toolbench import load_toolbench_dataset, export_toolbench_to_jsonl
 
 _CONVERTER_REGISTRY: dict[str, type[BaseConverter]] = {}
 
@@ -26,6 +27,9 @@ __all__ = [
     # llama.cpp
     "LlamaCppConverter",
     "GGUFTrainConverter",
+    # ToolBench
+    "load_toolbench_dataset",
+    "export_toolbench_to_jsonl",
     # Registry helpers
     "available_converters",
     "register_converter",

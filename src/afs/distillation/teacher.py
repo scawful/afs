@@ -13,8 +13,8 @@ generating high-quality training data.
 ### Google Gemini (use google-genai package, not deprecated google-generativeai)
 - gemini-3-flash-preview: Latest Gemini 3 Flash (fast, frontier-class)
 - gemini-3-pro-preview: Latest Gemini 3 Pro (most capable)
-- gemini-2.5-flash: Stable Gemini 2.5 Flash
-- gemini-2.5-pro: Stable Gemini 2.5 Pro
+- gemini-2.5-flash: Legacy Gemini 2.5 Flash (avoid for new work)
+- gemini-2.5-pro: Legacy Gemini 2.5 Pro (avoid for new work)
 
 ### Anthropic
 - claude-opus-4-5-20251101: Claude Opus 4.5 (most capable)
@@ -217,8 +217,8 @@ class GoogleTeacher(TeacherModel):
     Available models (as of Jan 2026):
     - gemini-3-flash-preview: Latest Gemini 3 Flash (fast, capable)
     - gemini-3-pro-preview: Latest Gemini 3 Pro (most capable)
-    - gemini-2.5-flash: Stable Gemini 2.5 Flash
-    - gemini-2.5-pro: Stable Gemini 2.5 Pro
+    - gemini-2.5-flash: Legacy Gemini 2.5 Flash (avoid for new work)
+    - gemini-2.5-pro: Legacy Gemini 2.5 Pro (avoid for new work)
     """
 
     def __init__(self, config: Optional[ProviderConfig] = None):

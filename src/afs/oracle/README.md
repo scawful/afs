@@ -26,6 +26,8 @@ Routes development tasks to specialized fine-tuned models:
 | **Twinrova** | State/Sprites | State machines, sprite AI |
 | **Agahnim** | Build/Validation | Namespace, syntax checks |
 
+**Note:** Din is routed only for explicit optimization requests. Tool calling is not enabled for Din; treat outputs as suggestions and review before applying.
+
 ```python
 from afs.oracle import TriforceOrchestrator, Expert
 
