@@ -13,7 +13,7 @@ Configuring LMStudio on Windows as a network inference server accessible from Ma
 | Router v2 | router-v2-q8_0.gguf | 3.3GB | Mac + Windows |
 
 **Windows (medical-mechanica):** `C:\Users\starw\.lmstudio\models\`
-**Mac:** `~/src/lab/afs/models/gguf/`
+**Mac:** `~/models/gguf/`
 
 ## Prerequisites
 

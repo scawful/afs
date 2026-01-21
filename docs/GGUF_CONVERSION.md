@@ -17,7 +17,7 @@ cd ~/src/lab/afs/scripts
 
 # Merge and convert Agahnim v2
 python3 merge_and_convert.py \
-  --adapter ~/src/lab/afs/models/agahnim-v2-lora/final \
+  --adapter ~/models/adapters/afs/agahnim-v2-lora/final \
   --base-model Qwen/Qwen2.5-Coder-7B-Instruct \
   --output agahnim-7b-v2 \
   --quant q8_0
@@ -31,7 +31,7 @@ Better for 7B models - uses GPU instance:
 
 ```bash
 # Upload LoRA adapter
-scp -P 28668 -r ~/src/lab/afs/models/nayru-v9-lora/final root@ssh9.vast.ai:/workspace/nayru-v9-lora/
+scp -P 28668 -r ~/models/adapters/afs/nayru-v9-lora/final root@ssh9.vast.ai:/workspace/nayru-v9-lora/
 ```
 
 ### Step 2: Run Remote Merge
@@ -100,7 +100,7 @@ cd llama.cpp && make -j llama-quantize && cd ..
 
 **Option A: Download to Mac**
 ```bash
-scp -P 28668 root@ssh9.vast.ai:/workspace/nayru-v9-Q4_K_M.gguf ~/src/lab/afs/models/gguf/
+scp -P 28668 root@ssh9.vast.ai:/workspace/nayru-v9-Q4_K_M.gguf ~/models/gguf/
 ```
 
 **Option B: Download directly to Windows (Recommended)**
@@ -129,9 +129,9 @@ See [Windows SSH Setup](#windows-ssh-setup) below for first-time configuration.
 
 ## LMStudio Deployment
 
-1. Copy GGUF to LMStudio models folder:
+1. Copy GGUF to your local GGUF store (LM Studio can load from anywhere):
    ```bash
-   cp nayru-v9-Q4_K_M.gguf ~/Library/Application\ Support/LMStudio/models/
+   cp nayru-v9-Q4_K_M.gguf ~/models/gguf/
    ```
 
 2. Open LMStudio and load the model
@@ -149,8 +149,8 @@ MODELS="agahnim-v2 hylia-v2 nayru-v9 router-v2"
 for model in $MODELS; do
   echo "Converting $model..."
   python3 merge_and_convert.py \
-    --adapter ~/src/lab/afs/models/${model}-lora/final \
-    --output ~/src/lab/afs/models/gguf/${model} \
+  --adapter ~/models/adapters/afs/${model}-lora/final \
+  --output ~/models/gguf/${model} \
     --quant q4_k_m
 done
 ```

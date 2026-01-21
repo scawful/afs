@@ -15,10 +15,10 @@ You've built a **Mixture of Experts** system for Oracle of Secrets development w
 
 | Component | Location | Status |
 |-----------|----------|--------|
-| Mac GGUFs | `~/src/lab/afs/models/gguf/` | Ready |
+| Mac GGUFs | `~/models/gguf/` | Ready |
 | Windows GGUFs | `C:\Users\starw\.lmstudio\models\` | Transferring |
 | Orchestrator | `~/src/lab/afs/tools/orchestrator.py` | Ready |
-| LoRA Adapters | `~/src/lab/afs/models/adapters/` | Backup only |
+| LoRA Adapters | `~/models/adapters/afs/` | Backup only |
 
 ### Model Catalog
 
@@ -193,7 +193,7 @@ You've built a **Mixture of Experts** system for Oracle of Secrets development w
 
 ### LMStudio Model Paths
 
-- **Mac**: `~/.lmstudio/models/` or load from anywhere
+- **Mac**: `~/models/gguf/` (or `~/.lmstudio/models/` via symlink)
 - **Windows**: `C:\Users\starw\.lmstudio\models\`
 
 ---
