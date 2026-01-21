@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AFS Training Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Header -->
+        <header class="dashboard-header">
+            <div class="header-content">
+                <h1>AFS Training System Monitor</h1>
+                <div class="header-controls">
+                    <button id="toggleTheme" class="theme-toggle" title="Toggle dark/light mode">
+                        <svg class="icon" viewBox="0 0 24 24">
+                            <path d="M12 18C8.68 18 6 15.32 6 12s2.68-6 6-6 6 2.68 6 6-2.68 6-6 6zm0-10c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zM11 1h2v3h-2V1zm0 19h2v3h-2v-3zM3.51 4.46l1.41 1.41L2.12 7.17l-1.41-1.41 2.8-2.8zm16.98 16.98l1.41 1.41-2.8 2.8-1.41-1.41 2.8-2.8zM1 11v2h3v-2H1zm19 0v2h3v-2h-3z"/>
+                        </svg>
+                    </button>
+                    <button id="refreshBtn" class="refresh-btn" title="Manual refresh">
+                        <svg class="icon" viewBox="0 0 24 24">
+                            <path d="M1 4v6h6M23 20v-6h-6M20.54 9.46C19.5 8.41 18.04 7.76 16.4 7.76c-3.04 0-5.56 2.36-5.85 5.36h-2.1c.35-4.26 3.99-7.56 7.95-7.56 2.34 0 4.44.99 5.95 2.58l2.09-2.09V4h6v6l-4.5-4.54zM3.46 14.54C4.5 15.59 5.96 16.24 7.6 16.24c3.04 0 5.56-2.36 5.85-5.36h2.1c-.35 4.26-3.99 7.56-7.95 7.56-2.34 0-4.44-.99-5.95-2.58L2.56 18v2.44h-6v-6l4.5 4.54z"/>
+                        </svg>
+                    </button>
+                    <div class="status-indicator">
+                        <span class="status-dot"></span>
+                        <span id="lastUpdate">Initializing...</span>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Navigation Tabs -->
+        <nav class="dashboard-nav">
+            <button class="nav-tab active" data-tab="overview">Overview</button>
+            <button class="nav-tab" data-tab="models">Models</button>
+            <button class="nav-tab" data-tab="costs">Costs</button>
+            <button class="nav-tab" data-tab="metrics">Metrics</button>
+            <button class="nav-tab" data-tab="registry">Registry</button>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="dashboard-content">
+
+            <!-- Overview Tab -->
+            <section id="overview" class="tab-content active">
+                <div class="overview-grid">
+                    <!-- Key Metrics Cards -->
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-label">Total Cost</div>
+                            <div class="stat-value" id="totalCost">$0.00</div>
+                            <div class="stat-unit">Session Budget</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Completed Models</div>
+                            <div class="stat-value" id="completedModels">0</div>
+                            <div class="stat-unit">/ 5 Total</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">In Progress</div>
+                            <div class="stat-value" id="inProgressModels">0</div>
+                            <div class="stat-unit">Training</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Session Time</div>
+                            <div class="stat-value" id="sessionTime">--:--:--</div>
+                            <div class="stat-unit">Elapsed</div>
+                        </div>
+                    </div>
+
+                    <!-- Models Summary Table -->
+                    <div class="section-card">
+                        <h2>Training Status</h2>
+                        <div class="table-container">
+                            <table class="status-table">
+                                <thead>
+                                    <tr>
+                                        <th>Model</th>
+                                        <th>Status</th>
+                                        <th>Progress</th>
+                                        <th>GPU/Hour</th>
+                                        <th>Total Cost</th>
+                                        <th>Samples</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="modelsTableBody">
+                                    <tr class="loading">
+                                        <td colspan="6">Loading...</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Models Tab -->
+            <section id="models" class="tab-content">
+                <div class="models-grid" id="modelsGrid">
+                    <div class="loading-message">Loading models...</div>
+                </div>
+            </section>
+
+            <!-- Costs Tab -->
+            <section id="costs" class="tab-content">
+                <div class="costs-section">
+                    <div class="section-card">
+                        <h2>Cost Breakdown</h2>
+                        <div class="chart-container">
+                            <canvas id="costChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="section-card">
+                        <h2>Cost Details</h2>
+                        <div class="table-container">
+                            <table class="cost-table">
+                                <thead>
+                                    <tr>
+                                        <th>Model</th>
+                                        <th>GPU Hours</th>
+                                        <th>Rate/Hour</th>
+                                        <th>Total Cost</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="costTableBody">
+                                    <tr class="loading">
+                                        <td colspan="4">Loading...</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Metrics Tab -->
+            <section id="metrics" class="tab-content">
+                <div class="metrics-grid">
+                    <div class="section-card">
+                        <h2>GPU Utilization (24h)</h2>
+                        <div class="chart-container">
+                            <canvas id="gpuChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="section-card">
+                        <h2>Training Loss</h2>
+                        <div class="chart-container">
+                            <canvas id="lossChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="section-card">
+                        <h2>Throughput (24h)</h2>
+                        <div class="chart-container">
+                            <canvas id="throughputChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="section-card">
+                        <h2>Memory Usage</h2>
+                        <div class="memory-gauge">
+                            <div class="gauge-container">
+                                <svg viewBox="0 0 200 100">
+                                    <defs>
+                                        <linearGradient id="gaugeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                                            <stop offset="0%" style="stop-color:#4CAF50;stop-opacity:1" />
+                                            <stop offset="50%" style="stop-color:#FFC107;stop-opacity:1" />
+                                            <stop offset="100%" style="stop-color:#F44336;stop-opacity:1" />
+                                        </linearGradient>
+                                    </defs>
+                                    <path d="M 20,80 A 60,60 0 0,1 180,80" stroke="url(#gaugeGradient)" stroke-width="20" fill="none" stroke-linecap="round"/>
+                                    <text x="100" y="90" text-anchor="middle" font-size="24" font-weight="bold" id="memoryValue">24/32GB</text>
+                                </svg>
+                            </div>
+                            <div class="gauge-info">
+                                <p>Current: <strong id="memoryUsed">24</strong> GB</p>
+                                <p>Total: <strong>32</strong> GB</p>
+                                <p>Usage: <strong id="memoryPercent">75%</strong></p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Registry Tab -->
+            <section id="registry" class="tab-content">
+                <div class="registry-section">
+                    <div class="section-card">
+                        <h2>Model Registry</h2>
+                        <div class="registry-grid" id="registryGrid">
+                            <div class="loading-message">Loading registry...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+        </main>
+
+        <!-- Footer -->
+        <footer class="dashboard-footer">
+            <div class="footer-content">
+                <div class="export-controls">
+                    <button id="exportCsv" class="export-btn">Export CSV</button>
+                    <button id="exportJson" class="export-btn">Export JSON</button>
+                </div>
+                <div class="footer-info">
+                    <p>Auto-refresh every 30 seconds • Project: AFS Training System</p>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Loading Modal -->
+    <div id="loadingModal" class="modal">
+        <div class="modal-content">
+            <h2>Loading Dashboard</h2>
+            <div class="spinner"></div>
+            <p id="loadingMessage">Fetching data from server...</p>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

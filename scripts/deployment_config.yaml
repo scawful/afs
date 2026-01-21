@@ -1,0 +1,249 @@
+# Deployment Configuration for AFS Models
+# This file controls the entire deployment pipeline from vast.ai to LMStudio
+
+# Vast.ai Configuration
+vast:
+  # API key is read from VAST_API_KEY environment variable
+  ssh_key: "~/.ssh/id_rsa"
+
+  # Models to download from vast.ai after training
+  models:
+    majora:
+      instance_id: null  # Will be set during training
+      output_path: "/workspace/output/majora_v1/adapter_model.safetensors"
+      base_model: "Qwen/Qwen2.5-7B-Instruct"
+      description: "Oracle of Secrets quest expert"
+
+    nayru:
+      instance_id: null
+      output_path: "/workspace/output/nayru_asm/adapter_model.safetensors"
+      base_model: "Qwen/Qwen2.5-7B-Instruct"
+      description: "65816 assembly expert"
+
+    veran:
+      instance_id: null
+      output_path: "/workspace/output/veran_v5/adapter_model.safetensors"
+      base_model: "Qwen/Qwen2.5-7B-Instruct"
+      description: "Logic and state machine expert"
+
+    agahnim:
+      instance_id: null
+      output_path: "/workspace/output/agahnim/adapter_model.safetensors"
+      base_model: "Qwen/Qwen2.5-7B-Instruct"
+      description: "General purpose model"
+
+    hylia:
+      instance_id: null
+      output_path: "/workspace/output/hylia/adapter_model.safetensors"
+      base_model: "Qwen/Qwen2.5-7B-Instruct"
+      description: "Retrieval and documentation expert"
+
+# Merge Configuration
+merge:
+  # Use unsloth for faster merging
+  use_unsloth: true
+
+  # Save merged model before quantization
+  save_merged_hf: true
+  merged_dir: "models/merged_hf"
+
+  # Batch size for merge operations
+  batch_size: 1
+
+# Quantization Configuration
+quantization:
+  # Default quantization levels to create
+  formats:
+    - q4_k_m   # Recommended for most use cases (4.4 bits)
+    - q5_k_m   # Higher quality (5.3 bits)
+    - q8_0     # Highest quality (8 bits)
+
+  # Primary format for deployment
+  primary_format: "q4_k_m"
+
+  # llama.cpp build settings
+  llama_cpp_flags:
+    cuda: true      # Enable CUDA support
+    metal: false    # Disable Metal on macOS (use faster with CPU fallback)
+    avx2: true      # Enable AVX2 vectorization
+
+# Deployment Configuration
+deployment:
+  # LMStudio configuration
+  lmstudio:
+    enabled: true
+    home: "~/.lmstudio"
+    models_dir: "~/.lmstudio/models"
+
+    # Port assignments for each model
+    ports:
+      majora: 5000
+      nayru: 5001
+      veran: 5002
+      agahnim: 5003
+      hylia: 5004
+
+  # Alternative: ollama deployment
+  ollama:
+    enabled: false
+    api_endpoint: "http://localhost:11434"
+    models_dir: "~/.ollama/models"
+
+  # Backup directory (before deployment)
+  backup_dir: "models/backups"
+  keep_backups: 3  # Keep last N versions
+
+  # Model metadata for deployment
+  models:
+    majora:
+      port: 5000
+      context_size: 4096
+      temperature: 0.7  # Creative responses
+      system_prompt: "You are an expert in Oracle of Secrets ROM hacking and game design. Provide creative and strategic advice."
+
+    nayru:
+      port: 5001
+      context_size: 8192
+      temperature: 0.1  # Precise technical responses
+      system_prompt: "You are a 65816 assembly language expert. Provide precise, technical responses with code examples."
+
+    veran:
+      port: 5002
+      context_size: 4096
+      temperature: 0.5  # Balanced
+      system_prompt: "You are an expert in system design, state machines, and architecture. Provide logical and structured responses."
+
+    agahnim:
+      port: 5003
+      context_size: 4096
+      temperature: 0.6  # General purpose
+      system_prompt: "You are a helpful general-purpose AI assistant. Provide accurate and clear answers."
+
+    hylia:
+      port: 5004
+      context_size: 2048
+      temperature: 0.3  # Factual retrieval
+      system_prompt: "You are a documentation and retrieval expert. Provide accurate information from knowledge bases."
+
+# Health Check Configuration
+health_check:
+  # Timeout for each model in seconds
+  timeout: 30
+
+  # Number of retry attempts
+  max_retries: 3
+
+  # Delay between retries (seconds)
+  retry_delay: 5
+
+  # Test prompts for each model
+  test_prompts:
+    majora: "What are some important Oracle of Secrets dungeon layouts?"
+    nayru: "Explain the LDA #$FF instruction in 65816 assembly."
+    veran: "Design a state machine for a multi-room dungeon system."
+    agahnim: "Write a Python function to merge two sorted lists."
+    hylia: "What is the memory map for SNES games?"
+
+  # Expected response characteristics
+  min_response_length: 50  # Minimum characters in response
+  max_response_time: 30    # Maximum seconds per response
+
+# Notification Configuration (Optional)
+notifications:
+  enabled: false
+
+  slack:
+    enabled: false
+    webhook_url: null  # Set via SLACK_WEBHOOK_URL env var
+    channel: "#afs-training"
+    mention_on_failure: true
+    ping_user: null  # Slack user ID to mention on critical failures
+
+  discord:
+    enabled: false
+    webhook_url: null  # Set via DISCORD_WEBHOOK_URL env var
+
+  email:
+    enabled: false
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+    from_email: null  # Set via EMAIL_FROM env var
+    to_email: null    # Set via EMAIL_TO env var
+
+# Logging Configuration
+logging:
+  # Log directory
+  log_dir: ".logs"
+
+  # Log level
+  level: "INFO"
+
+  # Keep logs for N days
+  retention_days: 30
+
+  # Log file names
+  files:
+    download: "download.log"
+    merge: "merge.log"
+    quantize: "quantize.log"
+    deploy: "deploy.log"
+    health_check: "health_check.log"
+    pipeline: "pipeline.log"
+
+# Pipeline Configuration
+pipeline:
+  # Stages to execute
+  stages:
+    - download
+    - merge
+    - quantize
+    - deploy
+    - health_check
+    - evaluate
+
+  # Continue on error in specific stages
+  continue_on_error:
+    download: false
+    merge: false
+    quantize: true
+    deploy: false
+    health_check: false
+    evaluate: true
+
+  # Cleanup on completion
+  cleanup:
+    remove_intermediate_files: true
+    remove_merged_hf: true  # After quantization
+    remove_f16_gguf: true   # After quantization
+
+# Evaluation Configuration
+evaluation:
+  enabled: true
+
+  # Run comparison benchmarks after deployment
+  run_benchmarks: true
+
+  # Test dataset
+  test_set: "data/eval_samples.jsonl"
+
+  # Metrics to collect
+  metrics:
+    - latency
+    - throughput
+    - quality_score
+    - memory_usage
+
+# Performance Tuning
+performance:
+  # Parallel operations
+  parallel_downloads: 2
+  parallel_quantize: 1
+
+  # Memory management
+  max_memory_gb: 32
+  use_disk_cache: true
+  cache_dir: ".cache"
+
+  # GPU optimization
+  gpu_memory_fraction: 0.9
+  mixed_precision: true
