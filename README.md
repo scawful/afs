@@ -1,20 +1,44 @@
-# AFS (Agentic File System)
+# Agentic File System (AFS)
 
-Research-only. Not a product.
+**Everything is Context.**
 
-Scope: core AFS primitives + internal workflow tooling.
+AFS is an experimental orchestration layer for managing multi-agent swarms and context loops directly within the filesystem. It treats documentation, tools, and memory as mountable context nodes, allowing AI agents to "live" and operate within the repository.
 
-**Provenance:** avoid employer/internal sources; skip unclear origins.
+## Core Concepts
+
+- **Context Mounting:** Dynamically load relevant documentation, code, and memories into the agent's working context.
+- **Agent Swarms:** Orchestrate multiple specialized agents (Planner, Coder, Critic) to solve complex tasks.
+- **File-Based Memory:** Store long-term memories and project knowledge in a structured, human-readable file system.
+- **Tool Integration:** Expose command-line tools and scripts as callable functions for agents.
+
+## Architecture
+
+AFS is built on a modular architecture:
+
+- **Core:** The central engine that manages context, agents, and tool execution.
+- **Services:** Pluggable modules for specific functionalities (e.g., LLM providers, vector databases).
+- **Tools:** Scripts and executables that agents can invoke to perform actions.
+- **Context:** The structured file system where agents operate and store information.
+
+## Getting Started
+
+1.  **Installation:**
+    ```bash
+    git clone https://github.com/scawful/afs.git
+    cd afs
+    pip install -r requirements.txt
+    ```
+
+2.  **Configuration:**
+    Configure your LLM providers and other settings in `config/`.
+
+3.  **Running Agents:**
+    Use the CLI tools to interact with agents and manage context.
 
 ## Documentation
-- **CLI Reference:** `docs/CLI_REFERENCE.md` (Quickstart, Commands, Installation)
-- **Architecture:** `docs/ARCHITECTURE.md`
-- **Glossary:** `docs/GLOSSARY.md`
-- **Training:** `docs/TRAINING_INFRASTRUCTURE.md`
-- **LM Studio:** `LMSTUDIO_SETUP.md`
-- **Registry:** `~/src/lab/afs-scawful/config/chat_registry.toml`
 
-## Key Concepts
-- **"Context as Files":** Agents read/write to `~/.context`.
-- **Workspace Integration:** `afs workspace sync` maps `src` to AFS.
-- **Tooling Strategy:** See `docs/TOOLING_STRATEGY.md`.
+See the `docs/` directory for detailed guides and architectural overviews.
+
+## License
+
+MIT

@@ -32,3 +32,5 @@ htmlcov/
 .quality-gates/
 llama.cpp/
 merge_temp.py
+curl_tests/
+LMSTUDIO_SETUP.md
