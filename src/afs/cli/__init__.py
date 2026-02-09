@@ -19,6 +19,7 @@ from ..history import log_cli_invocation
 from . import (
     active_learning,
     benchmark,
+    claude,
     comparison,
     context,
     core,
@@ -90,6 +91,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Register review commands
     review.register_parsers(subparsers)
+
+    # Register Claude log analysis commands
+    claude.register_parsers(subparsers)
 
     # Register comparison commands
     comparison.register_parsers(subparsers)
