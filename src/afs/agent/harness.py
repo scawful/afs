@@ -81,10 +81,10 @@ class AgentHarness:
 
     Example:
         ```python
-        harness = AgentHarness("nayru-v5:latest", tools=TRIFORCE_TOOLS)
+        harness = AgentHarness("ollama:llama3.2", tools=AFS_TOOLS)
 
         async with harness:
-            result = await harness.run("Write a DMA transfer routine")
+            result = await harness.run("Summarize the current workspace context")
             print(result.response)
         ```
     """
@@ -181,13 +181,14 @@ class AgentHarness:
                     new_messages.append(messages[0])
 
                 # Keep the last N messages
-                                # We subtract 2 to leave room for system prompt + warning
-                                retain_count = self.config.max_history_messages - 2
-                                if retain_count < 1:
-                                    retain_count = 1
-                
-                                new_messages.append({                    "role": "system",
-                    "content": "Context truncated due to length limits. Please read 'scratchpad/state.md' or query files to restore your understanding of the task state."
+                # We subtract 2 to leave room for system prompt + warning
+                retain_count = self.config.max_history_messages - 2
+                if retain_count < 1:
+                    retain_count = 1
+
+                new_messages.append({
+                    "role": "system",
+                    "content": "Context truncated due to length limits. Please read 'scratchpad/state.md' or query files to restore your understanding of the task state.",
                 })
                 new_messages.extend(messages[-retain_count:])
 
@@ -321,7 +322,7 @@ async def run_agent(
     """Convenience function to run a single agent query.
 
     Args:
-        model: Model identifier (e.g., "nayru-v5:latest", "gemini-3-flash-preview")
+        model: Model identifier (e.g., "ollama:llama3.2", "gemini-3-flash-preview")
         prompt: User's request
         tools: Tools available (default: AFS_TOOLS)
         context: Additional context
@@ -351,8 +352,8 @@ async def main():
     parser.add_argument("prompt", help="Prompt for the agent")
     parser.add_argument(
         "--model",
-        default="nayru-v5:latest",
-        help="Model to use (default: nayru-v5:latest)",
+        default="ollama:llama3.2",
+        help="Model to use (default: ollama:llama3.2)",
     )
     parser.add_argument(
         "--tools",

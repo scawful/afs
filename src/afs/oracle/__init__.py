@@ -1,43 +1,10 @@
-"""Oracle of Secrets integration module for AFS.
+"""Compatibility shim for Oracle domain modules now owned by afs-scawful."""
 
-Provides specialized tools and orchestration for ROM hacking tasks,
-including emulator-based testing via yaze-mcp integration.
-"""
+from __future__ import annotations
 
-from .embeddings import (
-    EmbeddingChunk,
-    OracleEmbeddingGenerator,
-    OracleEmbeddingStats,
-)
-from .orchestrator import Expert, TaskType, TriforceOrchestrator
-from .testing import (
-    AgenticTestLoop,
-    OracleTodo,
-    PatchTestResult,
-    TestStatus,
-    YazeMCPClient,
-    load_oracle_todos,
-)
-from .tools import ORACLE_TOOLS, OracleTools, execute_tool
-
-__all__ = [
-    # Tools
-    "OracleTools",
-    "ORACLE_TOOLS",
-    "execute_tool",
-    # Orchestration
-    "TriforceOrchestrator",
-    "Expert",
-    "TaskType",
-    # Testing
-    "AgenticTestLoop",
-    "OracleTodo",
-    "PatchTestResult",
-    "TestStatus",
-    "YazeMCPClient",
-    "load_oracle_todos",
-    # Embeddings
-    "OracleEmbeddingGenerator",
-    "EmbeddingChunk",
-    "OracleEmbeddingStats",
-]
+try:
+    from afs_scawful.oracle import *  # type: ignore[F403]
+except Exception as exc:  # pragma: no cover - compatibility path
+    raise RuntimeError(
+        "Oracle domain modules moved to the afs-scawful extension."
+    ) from exc

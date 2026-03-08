@@ -318,7 +318,3 @@ def sample_by_uncertainty(
     sampler = UncertaintySampler()
     return sampler.sample(samples, n, scorer)
 
-
-    """
-    return [s for s in samples if s.metadata.get("stage") == stage]
-

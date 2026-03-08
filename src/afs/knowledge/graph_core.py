@@ -1,8 +1,4 @@
-"""Domain-agnostic knowledge graph framework.
-
-Provides abstract base classes for knowledge graphs that can be
-specialized for different domains (Zelda/ALTTP, Avatar/Personal).
-"""
+"""Domain-agnostic knowledge graph framework."""
 
 import json
 from abc import ABC, abstractmethod

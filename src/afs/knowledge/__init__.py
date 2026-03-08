@@ -1,44 +1,66 @@
-"""Knowledge base for ALTTP and SNES assembly."""
+"""Knowledge graph primitives plus optional extension-owned domain knowledge."""
 
-from .alttp_addresses import (
-    ALTTP_ADDRESSES,
-    INVENTORY_ADDRESSES,
-    LINK_STATE_ADDRESSES,
-    SPRITE_TABLES,
-    WRAM_ADDRESSES,
-    AddressCategory,
-    AddressInfo,
-    format_address_reference,
-    get_address_info,
-    get_addresses_by_category,
-    lookup_by_address,
+from .graph_core import (
+    EdgeType,
+    GraphConstraint,
+    GraphEdge,
+    GraphNode,
+    KnowledgeGraph,
+    NodeType,
 )
-from .entity_extractor import (
-    EntityExtractor,
-    ExtractedEntity,
-    ExtractionResult,
-    extract_entities,
-    extract_with_stats,
-)
+from .adapters.personal_adapter import PersonalKnowledgeGraph
 
 __all__ = [
-    # Address data
-    "ALTTP_ADDRESSES",
-    "SPRITE_TABLES",
-    "LINK_STATE_ADDRESSES",
-    "INVENTORY_ADDRESSES",
-    "WRAM_ADDRESSES",
-    "AddressCategory",
-    "AddressInfo",
-    # Address utilities
-    "get_address_info",
-    "get_addresses_by_category",
-    "format_address_reference",
-    "lookup_by_address",
-    # Entity extraction
-    "EntityExtractor",
-    "ExtractedEntity",
-    "ExtractionResult",
-    "extract_entities",
-    "extract_with_stats",
+    "NodeType",
+    "EdgeType",
+    "GraphNode",
+    "GraphEdge",
+    "GraphConstraint",
+    "KnowledgeGraph",
+    "PersonalKnowledgeGraph",
 ]
+
+try:  # pragma: no cover - compatibility path
+    from afs_scawful.knowledge.alttp_addresses import (
+        ALTTP_ADDRESSES,
+        INVENTORY_ADDRESSES,
+        LINK_STATE_ADDRESSES,
+        SPRITE_TABLES,
+        WRAM_ADDRESSES,
+        AddressCategory,
+        AddressInfo,
+        format_address_reference,
+        get_address_info,
+        get_addresses_by_category,
+        lookup_by_address,
+    )
+    from afs_scawful.knowledge.entity_extractor import (
+        EntityExtractor,
+        ExtractedEntity,
+        ExtractionResult,
+        extract_entities,
+        extract_with_stats,
+    )
+
+    __all__.extend(
+        [
+            "ALTTP_ADDRESSES",
+            "SPRITE_TABLES",
+            "LINK_STATE_ADDRESSES",
+            "INVENTORY_ADDRESSES",
+            "WRAM_ADDRESSES",
+            "AddressCategory",
+            "AddressInfo",
+            "get_address_info",
+            "get_addresses_by_category",
+            "format_address_reference",
+            "lookup_by_address",
+            "EntityExtractor",
+            "ExtractedEntity",
+            "ExtractionResult",
+            "extract_entities",
+            "extract_with_stats",
+        ]
+    )
+except Exception:
+    pass

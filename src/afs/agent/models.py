@@ -1,17 +1,18 @@
 """Model abstraction layer for unified access to local and cloud models.
 
 Supports:
-    - Ollama (local models including Triforce experts)
+    - Ollama (local models)
     - LMStudio (local GGUF models via OpenAI-compatible API)
     - Google Gemini (cloud)
     - Anthropic Claude (cloud, optional)
-    - OpenAI (cloud, optional)
+    - OpenAI-compatible APIs (cloud or local gateways)
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -28,6 +29,8 @@ class ModelProvider(Enum):
     GEMINI = "gemini"
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
+    OPENROUTER = "openrouter"
+    LITELLM = "litellm"
 
 
 @dataclass
@@ -36,13 +39,13 @@ class ModelConfig:
 
     Examples:
         # Local Ollama model
-        ModelConfig(provider=ModelProvider.OLLAMA, model_id="nayru-v5:latest")
+        ModelConfig(provider=ModelProvider.OLLAMA, model_id="llama3.2")
 
         # Gemini
         ModelConfig(provider=ModelProvider.GEMINI, model_id="gemini-3-flash-preview")
 
         # From string shorthand
-        ModelConfig.from_string("ollama:nayru-v5:latest")
+        ModelConfig.from_string("ollama:llama3.2")
         ModelConfig.from_string("gemini-3-flash-preview")  # Defaults to gemini provider
     """
 
@@ -56,7 +59,7 @@ class ModelConfig:
 
     @classmethod
     def from_string(cls, model_str: str) -> ModelConfig:
-        """Parse model string like 'ollama:nayru-v5:latest' or 'gemini-3-flash-preview'."""
+        """Parse model string like 'ollama:llama3.2' or 'gemini-3-flash-preview'."""
         if ":" in model_str:
             parts = model_str.split(":", 1)
             provider_str = parts[0].lower()
@@ -72,10 +75,14 @@ class ModelConfig:
             # Default inference based on model name
             if model_str.startswith("gemini"):
                 provider = ModelProvider.GEMINI
+            elif model_str.startswith("openrouter/") or model_str.startswith("openrouter-"):
+                provider = ModelProvider.OPENROUTER
             elif model_str.startswith("claude"):
                 provider = ModelProvider.ANTHROPIC
             elif model_str.startswith("gpt"):
                 provider = ModelProvider.OPENAI
+            elif model_str.startswith("litellm/"):
+                provider = ModelProvider.LITELLM
             elif model_str.startswith("gguf/") or model_str.endswith(".gguf"):
                 # GGUF models are typically served by LMStudio
                 provider = ModelProvider.LMSTUDIO
@@ -87,87 +94,59 @@ class ModelConfig:
 
         return cls(provider=provider, model_id=model_id)
 
-    # Preset configurations for Triforce experts
+    # Compatibility presets now owned by afs-scawful
     @classmethod
     def din(cls) -> ModelConfig:
-        """Din - Optimization expert."""
-        return cls(
-            provider=ModelProvider.OLLAMA,
-            model_id="din-v3-fewshot:latest",
-            temperature=0.3,
-            system_prompt="You are Din, a 65816 assembly optimization expert. Output only optimized code.",
-        )
+        """Compatibility preset for afs-scawful."""
+        return _load_scawful_preset("din")
 
     @classmethod
     def nayru(cls) -> ModelConfig:
-        """Nayru - Generation expert."""
-        return cls(
-            provider=ModelProvider.OLLAMA,
-            model_id="nayru-v5:latest",
-            temperature=0.5,
-            system_prompt="You are Nayru, a 65816 assembly code generation expert. Write complete, working code.",
-        )
+        """Compatibility preset for afs-scawful."""
+        return _load_scawful_preset("nayru")
 
     @classmethod
     def farore(cls) -> ModelConfig:
-        """Farore - Debugging expert."""
-        return cls(
-            provider=ModelProvider.OLLAMA,
-            model_id="farore-v1:latest",
-            temperature=0.3,
-            system_prompt="You are Farore, a 65816 assembly debugging expert. Find and fix bugs.",
-        )
+        """Compatibility preset for afs-scawful."""
+        return _load_scawful_preset("farore")
 
     @classmethod
     def veran(cls) -> ModelConfig:
-        """Veran - Hardware knowledge expert."""
-        return cls(
-            provider=ModelProvider.OLLAMA,
-            model_id="veran-v1:latest",
-            temperature=0.2,
-            system_prompt="You are Veran, a SNES hardware expert. Provide accurate technical information.",
-        )
+        """Compatibility preset for afs-scawful."""
+        return _load_scawful_preset("veran")
 
-    # LMStudio-based Triforce experts (GGUF models)
+    # LMStudio compatibility presets now owned by afs-scawful
     @classmethod
     def din_lmstudio(cls) -> ModelConfig:
-        """Din - Optimization expert (LMStudio/GGUF)."""
-        return cls(
-            provider=ModelProvider.LMSTUDIO,
-            model_id="gguf/ollama/din-7b-v4-q4km.gguf",
-            temperature=0.3,
-            system_prompt="You are Din, a 65816 assembly optimization expert. Output only optimized code.",
-        )
+        """Compatibility preset for afs-scawful."""
+        return _load_scawful_preset("din_lmstudio")
 
     @classmethod
     def farore_lmstudio(cls) -> ModelConfig:
-        """Farore - Debugging expert (LMStudio/GGUF)."""
-        return cls(
-            provider=ModelProvider.LMSTUDIO,
-            model_id="gguf/ollama/farore-7b-v5-q8.gguf",
-            temperature=0.3,
-            system_prompt="You are Farore, a 65816 assembly debugging expert. Find and fix bugs.",
-        )
+        """Compatibility preset for afs-scawful."""
+        return _load_scawful_preset("farore_lmstudio")
 
     @classmethod
     def veran_lmstudio(cls) -> ModelConfig:
-        """Veran - Hardware knowledge expert (LMStudio/GGUF)."""
-        return cls(
-            provider=ModelProvider.LMSTUDIO,
-            model_id="gguf/ollama/veran-7b-v4-q8.gguf",
-            temperature=0.2,
-            system_prompt="You are Veran, a SNES hardware expert. Provide accurate technical information.",
-        )
+        """Compatibility preset for afs-scawful."""
+        return _load_scawful_preset("veran_lmstudio")
 
     @classmethod
     def majora_lmstudio(cls) -> ModelConfig:
-        """Majora - Oracle of Secrets codebase expert (LMStudio/GGUF)."""
-        return cls(
-            provider=ModelProvider.LMSTUDIO,
-            model_id="gguf/ollama/majora-7b-v2-q8.gguf",
-            temperature=0.4,
-            system_prompt="You are Majora, an expert on the Oracle of Secrets ROM hack codebase. You have deep knowledge of its Time System, Mask System, Menu, and custom sprites.",
-        )
+        """Compatibility preset for afs-scawful."""
+        return _load_scawful_preset("majora_lmstudio")
+
+
+def _load_scawful_preset(name: str) -> ModelConfig:
+    """Load an extension-owned preset without baking it into core AFS."""
+    try:
+        from afs_scawful.agent_model_presets import build_preset
+    except Exception as exc:  # pragma: no cover - compatibility path
+        raise RuntimeError(
+            "Domain-specific model presets moved to the afs-scawful extension."
+        ) from exc
+
+    return build_preset(name)
 
 
 @dataclass
@@ -517,6 +496,109 @@ class LMStudioBackend(ModelBackend):
             self._client = None
 
 
+class OpenAIBackend(ModelBackend):
+    """OpenAI-compatible backend (OpenAI, OpenRouter, LiteLLM, gateway)."""
+
+    def __init__(
+        self,
+        config: ModelConfig,
+        base_url: str,
+        api_key: str | None = None,
+        require_key: bool = True,
+    ):
+        super().__init__(config)
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key or ""
+        self.require_key = require_key
+        self._client = None
+
+    async def _ensure_client(self):
+        if self._client is None:
+            import httpx
+
+            self._client = httpx.AsyncClient(timeout=120.0)
+
+    def _chat_url(self) -> str:
+        if self.base_url.endswith("/v1") or self.base_url.endswith("/api/v1"):
+            return f"{self.base_url}/chat/completions"
+        return f"{self.base_url}/v1/chat/completions"
+
+    async def generate(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> GenerateResult:
+        await self._ensure_client()
+
+        if self.require_key and not self.api_key:
+            raise RuntimeError("Missing API key for OpenAI-compatible backend.")
+
+        if self.config.system_prompt and (
+            not messages or messages[0]["role"] != "system"
+        ):
+            messages = [{"role": "system", "content": self.config.system_prompt}] + messages
+
+        payload = {
+            "model": self.config.model_id,
+            "messages": messages,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+        }
+        if tools:
+            payload["tools"] = tools
+
+        headers = {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        response = await self._client.post(
+            self._chat_url(),
+            json=payload,
+            headers=headers,
+        )
+
+        data = response.json()
+        if "error" in data:
+            raise RuntimeError(data["error"])
+
+        response.raise_for_status()
+
+        choice = data["choices"][0]
+        message = choice["message"]
+        content = message.get("content", "")
+
+        tool_calls = []
+        if "tool_calls" in message:
+            for tc in message["tool_calls"]:
+                func = tc.get("function", {})
+                args = func.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {}
+                tool_calls.append(
+                    ToolCall(
+                        name=func.get("name", ""),
+                        arguments=args,
+                        id=tc.get("id", ""),
+                    )
+                )
+
+        return GenerateResult(
+            content=content,
+            tool_calls=tool_calls,
+            finish_reason=choice.get("finish_reason", "stop"),
+            usage=data.get("usage", {}),
+            raw_response=data,
+        )
+
+    async def close(self) -> None:
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+
+
 class GeminiBackend(ModelBackend):
     """Google Gemini model backend."""
 
@@ -529,7 +611,11 @@ class GeminiBackend(ModelBackend):
         if self._client is None:
             from google import genai
 
-            self._client = genai.Client()
+            api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+            if api_key:
+                self._client = genai.Client(api_key=api_key)
+            else:
+                self._client = genai.Client()
 
     async def generate(
         self,
@@ -644,8 +730,8 @@ def create_backend(config: ModelConfig | str) -> ModelBackend:
     """Create the appropriate backend for a model config.
 
     Args:
-        config: ModelConfig or string shorthand like "ollama:nayru-v5:latest"
-                or "lmstudio:gguf/ollama/majora-7b-v2-q8.gguf"
+        config: ModelConfig or string shorthand like "ollama:llama3.2"
+                or "lmstudio:gguf/qwen2.5-coder-7b-instruct.gguf"
 
     Returns:
         Appropriate ModelBackend instance
@@ -660,8 +746,34 @@ def create_backend(config: ModelConfig | str) -> ModelBackend:
     elif config.provider == ModelProvider.GEMINI:
         return GeminiBackend(config)
     elif config.provider == ModelProvider.ANTHROPIC:
-        raise NotImplementedError("Anthropic backend not yet implemented")
+        base_url = (
+            os.getenv("AFS_ANTHROPIC_BASE_URL")
+            or os.getenv("LITELLM_BASE_URL")
+            or os.getenv("OPENROUTER_BASE_URL")
+            or "http://localhost:4000/v1"
+        )
+        api_key = (
+            os.getenv("LITELLM_MASTER_KEY")
+            or os.getenv("LITELLM_API_KEY")
+            or os.getenv("OPENROUTER_API_KEY")
+            or os.getenv("ANTHROPIC_API_KEY")
+        )
+        return OpenAIBackend(config, base_url=base_url, api_key=api_key, require_key=True)
     elif config.provider == ModelProvider.OPENAI:
-        raise NotImplementedError("OpenAI backend not yet implemented")
+        base_url = (
+            os.getenv("OPENAI_BASE_URL")
+            or os.getenv("OPENAI_API_BASE_URL")
+            or "https://api.openai.com/v1"
+        )
+        api_key = os.getenv("OPENAI_API_KEY")
+        return OpenAIBackend(config, base_url=base_url, api_key=api_key, require_key=True)
+    elif config.provider == ModelProvider.OPENROUTER:
+        base_url = os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1"
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        return OpenAIBackend(config, base_url=base_url, api_key=api_key, require_key=True)
+    elif config.provider == ModelProvider.LITELLM:
+        base_url = os.getenv("LITELLM_BASE_URL") or "http://localhost:4000/v1"
+        api_key = os.getenv("LITELLM_MASTER_KEY") or os.getenv("LITELLM_API_KEY")
+        return OpenAIBackend(config, base_url=base_url, api_key=api_key, require_key=False)
     else:
         raise ValueError(f"Unknown provider: {config.provider}")

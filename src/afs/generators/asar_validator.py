@@ -128,8 +128,22 @@ class AsarValidatorConfig:
     keep_temp_files: bool = False
 
 
-# Path to ALTTP stubs file
-ALTTP_STUBS_PATH = Path(__file__).parent.parent / "knowledge" / "alttp_stubs.asm"
+def _resolve_alttp_stubs_path() -> Path:
+    core_path = Path(__file__).parent.parent / "knowledge" / "alttp_stubs.asm"
+    try:
+        import afs_scawful
+
+        extension_path = (
+            Path(afs_scawful.__file__).resolve().parent / "knowledge" / "alttp_stubs.asm"
+        )
+        if extension_path.exists():
+            return extension_path
+    except Exception:
+        pass
+    return core_path
+
+
+ALTTP_STUBS_PATH = _resolve_alttp_stubs_path()
 
 
 def get_alttp_header() -> str:

@@ -27,7 +27,9 @@ class HookConfig:
 
     output_dir: Path = field(default_factory=lambda: DEFAULT_OUTPUT_DIR)
     min_quality: float = 0.6
-    domains: list[str] = field(default_factory=lambda: ["asm65816", "snes", "alttp"])
+    domains: list[str] = field(
+        default_factory=lambda: ["general", "software", "documentation"]
+    )
     include_tool_context: bool = True
     max_samples_per_file: int = 1000
 
@@ -66,11 +68,11 @@ class TrainingExportHook:
     Example:
         ```python
         hook = TrainingExportHook(HookConfig(min_quality=0.7))
-        harness = AgentHarness("nayru-v5:latest", tools=TRIFORCE_TOOLS)
+        harness = AgentHarness("ollama:llama3.2", tools=AFS_TOOLS)
         harness.add_hook(hook)
 
         async with harness:
-            result = await harness.run("Write DMA code")
+            result = await harness.run("Summarize the current repository state")
             # High-quality interactions auto-exported
         ```
     """
@@ -190,30 +192,21 @@ class TrainingExportHook:
         """Detect the domain of a sample based on content."""
         combined = (prompt + response).lower()
 
-        # Check for 65816/assembly indicators
-        asm_keywords = [
-            "lda", "sta", "jsr", "jsl", "rts", "rtl",
-            "rep #$", "sep #$", "65816", "asar", "snes",
-            "dma", "vram", "oam", "spc700",
+        documentation_keywords = [
+            "readme", "documentation", "docs/", "markdown", ".md",
+            "org file", "guide", "runbook", "playbook", "spec",
         ]
-        if any(kw in combined for kw in asm_keywords):
-            return "asm65816"
+        if any(kw in combined for kw in documentation_keywords):
+            return "documentation"
 
-        # Check for ALTTP-specific terms
-        alttp_keywords = [
-            "alttp", "zelda", "link", "dungeon", "overworld",
-            "sprite", "tile", "palette", "room", "entrance",
+        software_keywords = [
+            "python", "javascript", "typescript", "module", "function",
+            "class", "api", "cli", "test", "pytest", "traceback",
+            "stack trace", "refactor", "bug", "exception", "json",
+            "yaml", "toml", "shell", "bash", "sql",
         ]
-        if any(kw in combined for kw in alttp_keywords):
-            return "alttp"
-
-        # Check for general SNES
-        snes_keywords = [
-            "snes", "super nintendo", "mode 7", "hdma",
-            "bsnes", "snes9x", "emulator",
-        ]
-        if any(kw in combined for kw in snes_keywords):
-            return "snes"
+        if any(kw in combined for kw in software_keywords):
+            return "software"
 
         return "general"
 
@@ -267,17 +260,17 @@ class SimpleQualityScorer:
         if "```" in sample.output_text:
             score += 0.15
 
-        # Assembly-specific indicators
-        asm_patterns = [
-            "LDA", "STA", "JSR", "JMP", "BNE", "BEQ",
-            "REP #$", "SEP #$", "org $", "lorom",
+        # Common code/documentation indicators
+        code_patterns = [
+            "def ", "class ", "import ", "function ", "SELECT ",
+            "curl ", "pytest ", "```python", "```json", "```bash",
         ]
-        for pattern in asm_patterns:
+        for pattern in code_patterns:
             if pattern in sample.output_text:
                 score += 0.03
 
         # Domain relevance bonus
-        if sample.domain in ["asm65816", "alttp", "snes"]:
+        if sample.domain in ["software", "documentation"]:
             score += 0.1
 
         # Tool context bonus
@@ -297,7 +290,7 @@ def create_training_hook(
     Args:
         output_dir: Where to write training pools
         min_quality: Minimum quality threshold (0-1)
-        domains: Domains to export (default: asm65816, snes, alttp)
+        domains: Domains to export (default: general, software, documentation)
 
     Returns:
         Configured TrainingExportHook
@@ -305,6 +298,6 @@ def create_training_hook(
     config = HookConfig(
         output_dir=Path(output_dir) if output_dir else DEFAULT_OUTPUT_DIR,
         min_quality=min_quality,
-        domains=domains or ["asm65816", "snes", "alttp"],
+        domains=domains or ["general", "software", "documentation"],
     )
     return TrainingExportHook(config)
