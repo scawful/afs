@@ -9,6 +9,7 @@ from pathlib import Path
 
 from afs.logging_config import get_logger
 
+from .afs_status import collect_afs_health, render_afs_health
 from .daemon import run_daemon_cli
 from .enhanced_checks import EnhancedHealthChecker, HealthCheckLevel
 
@@ -18,6 +19,8 @@ logger = get_logger(__name__)
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register health check commands."""
     health_parser = subparsers.add_parser("health", help="System health checks and monitoring")
+    health_parser.add_argument("--config", help="Config path for AFS health summary.")
+    health_parser.add_argument("--json", action="store_true", help="Output summary as JSON.")
     health_subparsers = health_parser.add_subparsers(dest="health_command")
 
     # health check
@@ -125,8 +128,22 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     history_parser.set_defaults(func=handle_history)
 
-    # Set default if no subcommand
-    health_parser.set_defaults(func=lambda args: health_parser.print_help())
+    # Default: focused AFS health summary.
+    health_parser.set_defaults(
+        func=handle_afs_summary,
+        _allow_missing_subcommand=True,
+    )
+
+
+def handle_afs_summary(args: argparse.Namespace) -> int:
+    """Handle default `afs health` summary."""
+    config_path = Path(args.config).expanduser().resolve() if args.config else None
+    snapshot = collect_afs_health(config_path=config_path)
+    if args.json:
+        print(json.dumps(snapshot, indent=2))
+        return 0
+    print(render_afs_health(snapshot))
+    return 0
 
 
 def handle_check(args: argparse.Namespace) -> None:

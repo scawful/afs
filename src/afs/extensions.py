@@ -27,6 +27,8 @@ class ExtensionManifest:
     cli_modules: list[str] = field(default_factory=list)
     policies: list[str] = field(default_factory=list)
     hooks: dict[str, list[str]] = field(default_factory=dict)
+    mcp_tools_module: str = ""
+    mcp_tools_factory: str = "register_mcp_tools"
 
 
 def _as_path_list(items: Any, root: Path) -> list[Path]:
@@ -197,6 +199,21 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
             if isinstance(event, str):
                 hooks[event] = _as_str_list(commands)
 
+    mcp_tools_module = ""
+    mcp_tools_factory = "register_mcp_tools"
+    mcp_tools_raw = raw.get("mcp_tools")
+    if isinstance(mcp_tools_raw, dict):
+        module_value = mcp_tools_raw.get("module")
+        if isinstance(module_value, str):
+            mcp_tools_module = module_value.strip()
+        factory_value = mcp_tools_raw.get("factory")
+        if isinstance(factory_value, str) and factory_value.strip():
+            mcp_tools_factory = factory_value.strip()
+    else:
+        module_value = raw.get("mcp_tools_module")
+        if isinstance(module_value, str):
+            mcp_tools_module = module_value.strip()
+
     return ExtensionManifest(
         name=name.strip(),
         root=root,
@@ -208,6 +225,8 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
         cli_modules=_as_str_list(raw.get("cli_modules")),
         policies=_as_str_list(raw.get("policies")),
         hooks=hooks,
+        mcp_tools_module=mcp_tools_module,
+        mcp_tools_factory=mcp_tools_factory,
     )
 
 

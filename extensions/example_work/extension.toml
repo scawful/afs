@@ -12,3 +12,7 @@ policies = []
 before_context_read = []
 after_context_write = []
 before_agent_dispatch = []
+
+[mcp_tools]
+module = ""
+factory = "register_mcp_tools"

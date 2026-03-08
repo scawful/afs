@@ -94,6 +94,11 @@ def default_directory_configs() -> list[DirectoryConfig]:
             policy=PolicyType.WRITABLE,
             role=MountType.ITEMS,
         ),
+        DirectoryConfig(
+            name="monorepo",
+            policy=PolicyType.READ_ONLY,
+            role=MountType.MONOREPO,
+        ),
     ]
 
 

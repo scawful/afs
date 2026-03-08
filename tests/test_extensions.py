@@ -18,7 +18,11 @@ def test_discover_and_load_extension_manifest(tmp_path: Path) -> None:
         "description = \"work adapter\"\n"
         "knowledge_mounts = [\"knowledge\"]\n"
         "skill_roots = [\"skills\"]\n"
-        "model_registries = []\n",
+        "model_registries = []\n"
+        "\n"
+        "[mcp_tools]\n"
+        "module = \"afs_google_test.mcp\"\n"
+        "factory = \"register_mcp_tools\"\n",
         encoding="utf-8",
     )
 
@@ -32,3 +36,5 @@ def test_discover_and_load_extension_manifest(tmp_path: Path) -> None:
     assert manifest.description == "work adapter"
     assert (ext / "knowledge").resolve() in manifest.knowledge_mounts
     assert (ext / "skills").resolve() in manifest.skill_roots
+    assert manifest.mcp_tools_module == "afs_google_test.mcp"
+    assert manifest.mcp_tools_factory == "register_mcp_tools"

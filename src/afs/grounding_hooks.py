@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .history import log_event
 from .profiles import merge_extension_hooks, resolve_active_profile
 from .schema import AFSConfig
 
@@ -37,30 +38,58 @@ def run_grounding_hooks(
 ) -> None:
     """Run built-in and script hooks for the provided event."""
     profile = resolve_active_profile(config, profile_name=profile_name)
-
-    _enforce_profile_policies(event, payload, profile.policies)
-
     commands = merge_extension_hooks(config, profile, event)
-    if not commands:
-        return
+    context_root = _resolve_context_path(payload)
+    status = "ok"
+    error_message: str | None = None
 
-    for command in commands:
-        try:
-            result = _run_hook_command(command, event, payload)
-        except FileNotFoundError as exc:
+    try:
+        _enforce_profile_policies(event, payload, profile.policies)
+        if not commands:
+            return
+
+        for command in commands:
+            try:
+                result = _run_hook_command(command, event, payload)
+            except FileNotFoundError as exc:
+                if event in _PRE_HOOK_EVENTS:
+                    status = "blocked"
+                    error_message = str(exc)
+                    raise PermissionError(str(exc)) from exc
+                logger.warning("Hook command missing for event %s: %s", event, exc)
+                continue
+
+            if result.returncode == 0:
+                continue
+
+            stderr = (result.stderr or "").strip()
+            message = stderr or f"hook command failed with exit {result.returncode}"
             if event in _PRE_HOOK_EVENTS:
-                raise PermissionError(str(exc)) from exc
-            logger.warning("Hook command missing for event %s: %s", event, exc)
-            continue
-
-        if result.returncode == 0:
-            continue
-
-        stderr = (result.stderr or "").strip()
-        message = stderr or f"hook command failed with exit {result.returncode}"
-        if event in _PRE_HOOK_EVENTS:
-            raise PermissionError(message)
-        logger.warning("Hook command failed for event %s: %s", event, message)
+                status = "blocked"
+                error_message = message
+                raise PermissionError(message)
+            logger.warning("Hook command failed for event %s: %s", event, message)
+    except PermissionError:
+        status = "blocked"
+        raise
+    except Exception as exc:
+        status = "error"
+        error_message = str(exc)
+        raise
+    finally:
+        if context_root is not None:
+            log_event(
+                "hook",
+                "afs.grounding_hooks",
+                op=event,
+                metadata={
+                    "profile": profile.name,
+                    "commands": list(commands),
+                    "status": status,
+                    "error": error_message,
+                },
+                context_root=context_root,
+            )
 
 
 def _enforce_profile_policies(event: str, payload: dict[str, Any], policies: list[str]) -> None:
@@ -107,6 +136,16 @@ def _run_hook_command(command: str, event: str, payload: dict[str, Any]) -> _Com
         env=env,
         check=False,
     )
+
+
+def _resolve_context_path(payload: dict[str, Any]) -> Path | None:
+    raw = payload.get("context_path")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return Path(raw).expanduser().resolve()
+    except Exception:
+        return None
 
 
 def extract_path_tokens(text: str) -> list[str]:

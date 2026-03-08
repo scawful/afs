@@ -28,6 +28,10 @@ policies = ["no_zelda"]
 
 [hooks]
 before_context_read = ["scripts/hooks/before_context_read.sh"]
+
+[mcp_tools]
+module = "afs_google.mcp_tools"
+factory = "register_mcp_tools"
 ```
 
 ## Config + Env
@@ -44,6 +48,21 @@ extension_dirs = ["./extensions"]
 - Environment overrides:
 - `AFS_EXTENSION_DIRS` (`:` separated)
 - `AFS_ENABLED_EXTENSIONS` (comma/space separated)
+
+## MCP Tool Extension Point
+
+If an extension needs custom MCP tools, implement a Python module and declare it in
+`[mcp_tools]`.
+
+Factory contract:
+
+- callable name defaults to `register_mcp_tools`
+- return value is `list[dict]`
+- each dict requires:
+  - `name`
+  - `description`
+  - `inputSchema` (or `input_schema`)
+  - `handler` callable (`handler(arguments)` or `handler(arguments, manager)`)
 
 ## Notes
 

@@ -40,6 +40,8 @@ before_agent_dispatch = []
 ```bash
 afs context profile-show --profile work
 afs context profile-apply --profile work
+afs profile current
+afs profile switch work
 ```
 
 `context init` and `context ensure` auto-apply the active profile when `profiles.auto_apply = true`.
@@ -68,3 +70,11 @@ afs skills match "debug gemini-cli mcp setup" --profile work
 
 The built-in `no_zelda` policy blocks Zelda-related terms in profile-scoped hooks (`before_context_read`, `before_agent_dispatch`).
 Use this for work profiles to prevent accidental cross-domain leakage.
+
+## Monorepo Bridge
+
+AFS now provisions a `monorepo/` mount role and expects workspace-switch automation to
+write `monorepo/active_workspace.toml`. Use the template hook in
+`extensions/afs_google/hooks/context-sync-active-workspace.sh`.
+
+`afs health` reports when that bridge file is stale (older than one hour).

@@ -33,6 +33,9 @@ Inspect and apply profiles:
 ```bash
 afs context profile-show --profile work
 afs context profile-apply --profile work
+afs profile current
+afs profile switch work
+afs health
 ```
 
 Run the MCP server for Gemini/other MCP clients:

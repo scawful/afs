@@ -23,6 +23,7 @@ AFS_DIRS = [
     "hivemind",
     "global",
     "items",
+    "monorepo",
 ]
 
 

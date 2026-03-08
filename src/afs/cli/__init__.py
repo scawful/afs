@@ -34,6 +34,7 @@ from . import (
     generators,
     mcp,
     pipeline,
+    profile,
     review,
     skills,
     tokenizer,
@@ -94,6 +95,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Register MCP server commands
     mcp.register_parsers(subparsers)
+
+    # Register profile switching commands
+    profile.register_parsers(subparsers)
 
     # Register review commands
     review.register_parsers(subparsers)
@@ -172,6 +176,8 @@ def _get_command_parser(
 def _requires_subcommand(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> bool:
+    if getattr(args, "_allow_missing_subcommand", False):
+        return False
     command = getattr(args, "command", None)
     if not command:
         return False

@@ -20,6 +20,7 @@ class MountType(str, Enum):
     HIVEMIND = "hivemind"
     GLOBAL = "global"
     ITEMS = "items"
+    MONOREPO = "monorepo"
 
 
 @dataclass(frozen=True)

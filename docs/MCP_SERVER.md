@@ -39,6 +39,14 @@ In Antigravity, open `MCP Servers -> Manage MCP Servers -> View raw config`, the
 - `context.discover`
 - `context.mount`
 
+Extensions can register additional tools via `extension.toml`:
+
+```toml
+[mcp_tools]
+module = "afs_google.mcp_tools"
+factory = "register_mcp_tools"
+```
+
 Path operations are scoped to:
 
 - `~/.context`
