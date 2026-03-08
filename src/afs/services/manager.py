@@ -432,7 +432,7 @@ class ServiceManager:
             "openwebui": ServiceDefinition(
                 name="openwebui",
                 label="Open WebUI",
-                description="Web chat interface for testing Zelda models",
+                description="Web chat interface for local model testing",
                 command=[str(chat_service), "start", "simple"],
                 working_directory=afs_root,
                 environment={},
@@ -443,7 +443,7 @@ class ServiceManager:
             "gateway": ServiceDefinition(
                 name="gateway",
                 label="AFS Gateway",
-                description="OpenAI-compatible API for MoE routing",
+                description="OpenAI-compatible API gateway",
                 command=[python, "-m", "uvicorn", "afs.gateway.server:app", "--host", "0.0.0.0", "--port", "8000"],
                 working_directory=repo_root,
                 environment=environment,

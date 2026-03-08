@@ -1,11 +1,8 @@
 """AFS command-line interface package.
 
-This package provides a modular CLI structure for AFS commands.
-Commands are organized into logical groups:
-- core: init, plugins, status, services, agents, orchestrator, studio
-- context: context management, graph, workspace
-- training: training data, discriminator, tokenizer, encoder
-- pipeline: pipeline, evaluation, scoring, entity, active learning, generator
+Core `afs` exposes filesystem/context/runtime primitives.
+Legacy model-training, benchmark, and gateway surfaces are extension-owned and
+should be reintroduced by extension manifests such as `afs-scawful`.
 """
 
 from __future__ import annotations
@@ -14,33 +11,37 @@ import argparse
 import importlib
 import sys
 from collections.abc import Iterable
+from contextlib import contextmanager
+from pathlib import Path
 
 from ..health import cli as health_cli
 from ..history import log_cli_invocation
 from . import (
-    active_learning,
-    benchmark,
     claude,
-    comparison,
     context,
     core,
-    distillation,
     embeddings,
-    encoder,
-    entity,
     fs,
-    gateway,
-    generator,
-    generators,
     mcp,
-    pipeline,
     profile,
     review,
     skills,
-    tokenizer,
-    training,
 )
 from ._help import render_default_help, render_topic_help
+
+
+@contextmanager
+def _extension_import_path(extension_root: Path) -> Iterable[None]:
+    candidates = [
+        str(extension_root),
+        str(extension_root.parent),
+    ]
+    original = list(sys.path)
+    sys.path = [entry for entry in candidates if Path(entry).exists()] + original
+    try:
+        yield
+    finally:
+        sys.path = original
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,39 +54,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Register context commands (context, graph, workspace)
     context.register_parsers(subparsers)
-
-    # Register training commands (training, discriminator)
-    training.register_parsers(subparsers)
-
-    # Register generator commands (generators - data augmentation)
-    generators.register_parsers(subparsers)
-
-    # Register tokenizer commands
-    tokenizer.register_parsers(subparsers)
-
-    # Register encoder commands
-    encoder.register_parsers(subparsers)
-
-    # Register entity commands
-    entity.register_parsers(subparsers)
-
-    # Register pipeline commands (scoring, pipeline, evaluation)
-    pipeline.register_parsers(subparsers)
-
-    # Register active learning commands
-    active_learning.register_parsers(subparsers)
-
-    # Register generator commands (model-based generation)
-    generator.register_parsers(subparsers)
-
-    # Register gateway commands (API server, backends, vast.ai)
-    gateway.register_parsers(subparsers)
-
-    # Register benchmark commands
-    benchmark.register_parsers(subparsers)
-
-    # Register distillation commands
-    distillation.register_parsers(subparsers)
 
     # Register filesystem commands
     fs.register_parsers(subparsers)
@@ -107,9 +75,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Register Claude log analysis commands
     claude.register_parsers(subparsers)
-
-    # Register comparison commands
-    comparison.register_parsers(subparsers)
 
     # Register health commands
     health_cli.register_parsers(subparsers)
@@ -143,7 +108,8 @@ def build_parser() -> argparse.ArgumentParser:
         for extension in extensions.values():
             for module_name in extension.cli_modules:
                 try:
-                    module = importlib.import_module(module_name)
+                    with _extension_import_path(extension.root):
+                        module = importlib.import_module(module_name)
                 except Exception:
                     continue
                 register = getattr(module, "register_parsers", None)

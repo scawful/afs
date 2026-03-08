@@ -22,22 +22,12 @@ _TOP_LEVEL_ORDER = [
     "services",
     "agents",
     "orchestrator",
-    "gateway",
-    "vastai",
     "embeddings",
-    "training",
-    "discriminator",
-    "tokenizer",
-    "encoder",
-    "entity",
-    "generators",
-    "generator",
-    "active-learning",
-    "scoring",
-    "pipeline",
-    "evaluation",
-    "benchmark",
-    "distill",
+    "mcp",
+    "profile",
+    "skills",
+    "claude",
+    "health",
     "studio",
     "review",
     "help",
@@ -54,22 +44,12 @@ _TOP_LEVEL_COLORS = {
     "services": "1;34",
     "agents": "1;34",
     "orchestrator": "1;34",
-    "gateway": "1;33",
-    "vastai": "1;33",
     "embeddings": "1;35",
-    "training": "1;35",
-    "discriminator": "1;35",
-    "tokenizer": "1;35",
-    "encoder": "1;35",
-    "entity": "1;35",
-    "generators": "1;35",
-    "generator": "1;35",
-    "active-learning": "1;35",
-    "scoring": "1;35",
-    "pipeline": "1;35",
-    "evaluation": "1;35",
-    "benchmark": "1;35",
-    "distill": "1;35",
+    "mcp": "1;35",
+    "profile": "1;35",
+    "skills": "1;35",
+    "claude": "1;35",
+    "health": "1;35",
     "studio": "1;36",
     "review": "1;36",
     "help": "1;36",
@@ -94,7 +74,7 @@ def render_default_help(parser: argparse.ArgumentParser, config: AFSConfig | Non
     lines.append(_section("AFS CLI"))
     lines.append(f"Usage: {_cmd('afs')} <command> [options]")
     lines.append(
-        _dim("Context roots, filesystem mounts, workspaces, services, training, gateway.")
+        _dim("Context roots, filesystem mounts, workspaces, profiles, hooks, and agent operations.")
     )
     lines.append("")
 
@@ -104,9 +84,19 @@ def render_default_help(parser: argparse.ArgumentParser, config: AFSConfig | Non
             [
                 f"{_tag('fs', '32')} context roots, mounts, workspaces, graph",
                 f"{_tag('ops', '34')} init/status/plugins/services/agents/orchestrator",
-                f"{_tag('train', '35')} training/pipeline/evaluation/generators",
-                f"{_tag('gateway', '33')} gateway/vastai backends",
+                f"{_tag('agent', '35')} embeddings/mcp/profile/skills/health/claude",
                 f"{_tag('studio', '36')} studio build/install/path/alias",
+            ]
+        )
+    )
+    lines.append("")
+
+    lines.append(_section("Extensions"))
+    lines.extend(
+        _format_list(
+            [
+                "Legacy model-training, benchmark, and gateway commands are extension-owned.",
+                "Enable an extension such as afs-scawful to restore personal/domain command groups.",
             ]
         )
     )
@@ -168,7 +158,8 @@ def render_default_help(parser: argparse.ArgumentParser, config: AFSConfig | Non
                 ),
                 _cmd(f"afs context discover --path {_format_path(workspace_root)}"),
                 _cmd(f"afs context ensure-all --path {_format_path(workspace_root)}"),
-                _cmd(f"afs fs list memory --path {_format_path(workspace_root)}"),
+                _cmd("afs profile current"),
+                _cmd("afs health"),
                 _cmd(f"afs workspace sync --root {_format_path(workspace_root)}"),
             ]
         )
