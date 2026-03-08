@@ -16,6 +16,21 @@ afs mcp serve
 gemini mcp add afs python -m afs.mcp_server
 ```
 
+## Antigravity Custom Config
+
+In Antigravity, open `MCP Servers -> Manage MCP Servers -> View raw config`, then add:
+
+```json
+{
+  "mcpServers": {
+    "afs": {
+      "command": "python",
+      "args": ["-m", "afs.mcp_server"]
+    }
+  }
+}
+```
+
 ## Tools
 
 - `fs.read`
