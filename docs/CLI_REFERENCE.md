@@ -1,101 +1,75 @@
 # AFS CLI Reference
 
-*Moved from README.md*
-
 ## Quickstart
-- `afs` (shows defaults + command tree)
+
+- `afs`
 - `afs help context`
 - `afs init --context-root ~/.context --workspace-name src`
 - `afs status`
-- `afs workspace sync --root ~/src`
 - `afs context init --path ~/src`
-- `afs context validate --path ~/src`
 - `afs context discover --path ~/src`
 - `afs context ensure-all --path ~/src`
 - `afs graph export --path ~/src`
-- `afs services list`
-- `afs orchestrator list`
 
-## Installation
-Recommended:
+## Profiles
+
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e .
-afs status
+afs profile current
+afs profile list
+afs profile switch work
 ```
 
-Helper script: `scripts/afs-venv`
+## Context
 
-## Shell & Agent Access
-- Source `scripts/afs-shell-init.sh` in bash/zsh.
-- Use `scripts/afs` in non-interactive agents.
-- Use `scripts/afs-warm` for periodic context warming.
-- See `docs/AGENT_SURFACES.md` for CLI and MCP surfaces.
-
-## Plugins
-- Set `AFS_PLUGIN_DIRS` (colon-separated on macOS/Linux) to add local plugin folders.
-- Set `AFS_ENABLED_PLUGINS` (comma or space separated) to load specific plugins.
-- Defaults to `~/.config/afs/plugins` and `~/.afs/plugins` if present.
-
-## JSON Output (Agent-Friendly)
 ```bash
-afs status --json
-afs context discover --path ~/src --json
-afs context report --path ~/src --json
-afs fs list memory --path ~/src --json
-afs embeddings search --project afs --query "context root" --json
+afs context init
+afs context ensure
+afs context list
+afs context validate
+afs context mount knowledge ~/src/docs --alias docs
+afs context unmount knowledge docs
 ```
 
-## Dataset Exports
-**Memory/History:**
+## Workspace
+
 ```bash
-afs training memory-export --output ~/src/training/datasets/memory_export.jsonl
-afs training history-export --output ~/src/training/datasets/history_export.jsonl
+afs workspace list
+afs workspace add ~/src/project-a --description "project-a"
+afs workspace remove ~/src/project-a
+afs workspace sync --root ~/src
 ```
 
-**Chat Logs:**
+## Plugins and Extensions
+
 ```bash
-afs training antigravity-export --output ~/src/training/datasets/antigravity_export.jsonl
-afs training gemini-export --output ~/src/training/datasets/gemini_export.jsonl
-afs training claude-export --output ~/src/training/datasets/claude_export.jsonl
-afs training codex-export --output ~/src/training/datasets/codex_export.jsonl
+afs plugins --details
+afs plugins --json
 ```
 
-**Rebalance:**
+## Skills
+
 ```bash
-afs training rebalance --input ... --output ...
+afs skills list --profile work
+afs skills match "mcp context mount" --profile work
 ```
-
-## Background Services
-```bash
-afs services start memory-export
-afs services stop memory-export
-afs services start context-warm
-```
-
-## Agents
-- `afs agents list`
-- `afs agents run context-audit -- --path ~/src ...`
-- `afs agents run scribe-draft -- --prompt "..."`
-
-## Agentic Filesystem
-- `afs fs read scratchpad state.md --path ~/src`
-- `afs fs write scratchpad notes.md --path ~/src --content "..."`
-- `afs fs list knowledge --path ~/src --glob "*.md"`
 
 ## Embeddings
-- `afs embeddings index --project afs --source ~/src/lab/afs/docs --provider none`
-- `afs embeddings search --project afs --query "context root"`
 
-## Studio
-- `afs-studio` (builds if needed)
-- `afs studio install --prefix ~/.local`
-- `afs studio alias`
+```bash
+afs embeddings index --knowledge-dir ~/.context/knowledge/work
+afs embeddings search "workspace policy" --knowledge-dir ~/.context/knowledge/work
+```
 
-## Domain Capabilities (ALTTP/65816)
-- `afs.tokenizer` - Custom 65816 assembly tokenizer
-```python
-from afs.tokenizer import ASMTokenizer
-print(ASMTokenizer().tokenize("LDA $7F00,X"))
+## MCP
+
+```bash
+afs mcp serve
+```
+
+## Health
+
+```bash
+afs health
+afs health --json
+afs health check --level standard
 ```

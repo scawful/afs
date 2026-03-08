@@ -1,5 +1,5 @@
-site_name: AFS Training System Documentation
-site_url: https://afs-training.local
+site_name: AFS Core Documentation
+site_url: https://afs.local
 repo_url: https://github.com/scawful/afs
 edit_uri: edit/main/docs/
 
@@ -7,13 +7,8 @@ theme:
   name: material
   palette:
     - scheme: default
-      primary: indigo
-      accent: blue
-  font:
-    text: Roboto
-    code: Roboto Mono
-  logo: https://afs-training.local/logo.png
-  favicon: https://afs-training.local/favicon.png
+      primary: blue grey
+      accent: teal
   features:
     - navigation.tabs
     - navigation.sections
@@ -24,21 +19,13 @@ theme:
 
 plugins:
   - search
-  - mermaid2
 
 markdown_extensions:
   - admonition
   - pymdownx.details
-  - pymdownx.superfences:
-      custom_fences:
-        - name: mermaid
-          class: mermaid
-          format: !!python/name:pymdownx.superfences.fence_code_format ''
-  - pymdownx.tabbed:
-      alternate_style: true
+  - pymdownx.superfences
   - pymdownx.highlight
   - pymdownx.inlinehilite
-  - pymdownx.snippets
   - pymdownx.tasklist
   - tables
   - toc:
@@ -47,23 +34,19 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Guides:
-    - Quick Start: index.md#quick-start
-    - Training: training.md
-    - Evaluation: evaluation.md
-    - Deployment: deployment.md
+    - Architecture: ARCHITECTURE.md
+    - Profiles and Hooks: PROFILES.md
+    - Extensions: PLUGINS.md
+    - MCP Server: MCP_SERVER.md
+    - Memory System: MEMORY_SYSTEM.md
+    - Workspace Integration: WORKSPACE_INTEGRATION.md
+  - Operations:
+    - Health Quick Start: HEALTH_QUICK_START.md
   - Reference:
+    - CLI Reference: CLI_REFERENCE.md
     - API: api.md
-    - Architecture: architecture.md
-  - Development:
-    - Contributing: development.md
-    - Testing: development.md#testing
-    - Code Standards: development.md#code-standards
+  - Migration:
+    - AFS Scawful Migration: SCAWFUL_MIGRATION.md
 
 extra:
-  version: "1.0"
-  social:
-    - icon: fontawesome/brands/github
-      link: https://github.com/scawful/afs
-
-extra_css:
-  - stylesheets/extra.css
+  version: "core"
