@@ -22,6 +22,26 @@ Use SSH host aliases rather than hardcoded IPs.
 - Use mount points (`~/Mounts/...`) to browse remote filesystems.
 - For Windows, prefer `/mnt/d/src` when working in WSL.
 - Keep `.context/` local to each machine.
+- For Gemini CLI workspaces under `/google`, add `/google` to
+  `general.workspace_directories` and `general.mcp_allowed_roots` so MCP path
+  validation matches your real work root.
+
+Example:
+
+```toml
+[general]
+mcp_allowed_roots = ["/google"]
+
+[[general.workspace_directories]]
+path = "/google"
+description = "Mercurial cloud workspaces"
+```
+
+Temporary shell override:
+
+```bash
+export AFS_MCP_ALLOWED_ROOTS=/google
+```
 
 ## Tooling
 

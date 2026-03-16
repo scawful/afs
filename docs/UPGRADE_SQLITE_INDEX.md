@@ -29,7 +29,7 @@ Writes/Mounts ──> Filesystem (.context/)  ← source of truth
                    SQLite Index (context_index.sqlite3)
                               │
                               ▼
-                   MCP tools: context.query, context.index.rebuild
+            MCP tools: context.query, context.index.rebuild, context.diff, context.status
 ```
 
 If the index fails or is deleted, all primary AFS operations continue to work.
@@ -98,6 +98,26 @@ context around the match.
 
 The same query path now powers the Gemini-facing `afs.query.search` MCP prompt,
 including automatic refresh when the index is stale.
+
+### `context.diff`
+
+Show added, modified, and deleted files relative to the current index.
+
+| Parameter      | Type     | Default | Description                         |
+|----------------|----------|---------|-------------------------------------|
+| `context_path` | string   | cwd     | Path to `.context/` directory       |
+| `mount_types`  | string[] | all     | Filter to specific mount types      |
+
+### `context.status`
+
+Return mount counts, active profile, and index health for a context.
+
+| Parameter      | Type   | Default | Description                   |
+|----------------|--------|---------|-------------------------------|
+| `context_path` | string | cwd     | Path to `.context/` directory |
+
+This is useful for Gemini-style agents that need a quick “context health”
+snapshot before deciding whether to query or rebuild.
 
 ## Upgrading from a previous AFS version
 

@@ -53,6 +53,8 @@ In Antigravity, open `MCP Servers -> Manage MCP Servers -> View raw config`, the
 - `context.unmount`
 - `context.index.rebuild`
 - `context.query`
+- `context.diff`
+- `context.status`
 
 `context.query` uses a SQLite index with FTS ranking when available, and falls
 back to `LIKE` matching if FTS is unavailable on the host SQLite build.
@@ -99,12 +101,47 @@ Path operations are scoped to:
 
 - `~/.context`
 - configured `general.context_root`
+- configured `general.agent_workspaces_dir`
+- configured `general.workspace_directories`
+- configured `general.mcp_allowed_roots`
+- `AFS_MCP_ALLOWED_ROOTS` (path-separated env override)
 - local project `.context` under the current working directory
 
 `context.init` follows the same rule:
 
 - repo-local initialization is allowed when `project_path` is under the current working directory
+- initialization is also allowed when `project_path` is under a configured workspace root
 - centralized initialization is allowed when `context_root` is explicitly set under an allowed root
+
+Recommended Gemini work configuration for Mercurial cloud workspaces:
+
+```toml
+[general]
+mcp_allowed_roots = ["/google"]
+
+[[general.workspace_directories]]
+path = "/google"
+description = "Mercurial cloud workspaces"
+```
+
+Temporary shell override:
+
+```bash
+export AFS_MCP_ALLOWED_ROOTS=/google
+```
+
+`context.diff` reports added, modified, and deleted files relative to the last
+index build. `context.status` reports mount counts, index health, and the active
+profile for the target context.
+
+Gemini background brief surfaces:
+
+```bash
+~/src/lab/afs/scripts/afs agents run gemini-workspace-brief --stdout
+~/src/lab/afs/scripts/afs services start gemini-workspace-brief
+```
+
+The brief agent requires `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
 
 ## Example Call Shape
 

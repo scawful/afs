@@ -16,6 +16,7 @@ Also supported once installed into the active environment:
 - `./scripts/afs help context`
 - `./scripts/afs init --context-root ~/.context --workspace-name src`
 - `./scripts/afs status`
+- `./scripts/afs status --json`
 - `./scripts/afs context init --path ~/src`
 - `./scripts/afs context discover --path ~/src`
 - `./scripts/afs context ensure-all --path ~/src`
@@ -74,6 +75,25 @@ Also supported once installed into the active environment:
 
 ```bash
 ./scripts/afs mcp serve
+```
+
+Useful Gemini-oriented MCP operations:
+
+- `context.query` for indexed path/content search
+- `context.diff` for “what changed since the last index build”
+- `context.status` for mount counts, profile, and index health
+
+Gemini work-root override:
+
+```bash
+export AFS_MCP_ALLOWED_ROOTS=/google
+```
+
+Gemini brief agent:
+
+```bash
+./scripts/afs agents run gemini-workspace-brief --stdout
+./scripts/afs services start gemini-workspace-brief
 ```
 
 ## Health

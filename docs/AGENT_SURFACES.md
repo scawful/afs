@@ -104,22 +104,57 @@ Built-in tools:
 - `context.unmount`
 - `context.index.rebuild`
 - `context.query`
+- `context.diff`
+- `context.status`
 
 Paths are scoped to:
 
 - `~/.context`
 - configured `general.context_root`
+- configured `general.agent_workspaces_dir`
+- configured `general.workspace_directories`
+- configured `general.mcp_allowed_roots`
+- `AFS_MCP_ALLOWED_ROOTS`
 - local project `.context`
 
 `context.init` is intended for Gemini-style project bootstrap:
 
 - local project init when the target project is under the current working directory
+- init under configured workspace roots such as `/google`
 - explicit `context_root` under an allowed root for centralized/shared contexts
 
 Gemini-friendly prompts/resources are also exposed over MCP:
 
 - prompts: `afs.context.overview`, `afs.query.search`, `afs.scratchpad.review`
 - resources: `afs://contexts`, `afs://context/<path>/metadata`, `.../mounts`, `.../index`
+
+Gemini work setup example:
+
+```toml
+[general]
+mcp_allowed_roots = ["/google"]
+
+[[general.workspace_directories]]
+path = "/google"
+description = "Mercurial cloud workspaces"
+```
+
+Session-only override:
+
+```bash
+export AFS_MCP_ALLOWED_ROOTS=/google
+```
+
+Gemini background agent surfaces:
+
+```bash
+~/src/lab/afs/scripts/afs agents run gemini-workspace-brief --stdout
+~/src/lab/afs/scripts/afs services start gemini-workspace-brief
+```
+
+The brief agent writes JSON and Markdown summaries under
+`.context/scratchpad/afs_agents/` and requires `GEMINI_API_KEY` or
+`GOOGLE_API_KEY`.
 
 ## Gemini / Antigravity Registration
 
