@@ -56,6 +56,7 @@ def test_collect_afs_health_snapshot(tmp_path: Path, monkeypatch) -> None:
     assert snapshot["context"]["path"] == str(context_root.resolve())
     assert "mcp" in snapshot
     assert "extensions" in snapshot
+    assert "maintenance" in snapshot
     assert snapshot["context"]["mount_health"]["healthy"] is True
     assert "registered_clients" in snapshot["mcp"]
     assert "registered_with_claude" in snapshot["mcp"]

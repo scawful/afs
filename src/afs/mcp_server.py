@@ -792,6 +792,26 @@ def _tool_context_status(arguments: dict[str, Any], manager: AFSManager) -> dict
     }
 
 
+def _tool_context_repair(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    """Repair provenance, broken mounts, and stale indexes for a context."""
+    context_path = _resolve_context_path(arguments, manager)
+    dry_run = bool(arguments.get("dry_run", False))
+    reapply_profile = bool(arguments.get("reapply_profile", True))
+    remap_missing_sources = bool(arguments.get("remap_missing_sources", True))
+    rebuild_index = bool(arguments.get("rebuild_index", False))
+    profile_name = arguments.get("profile_name")
+    if profile_name is not None and not isinstance(profile_name, str):
+        raise ValueError("profile_name must be a string")
+    return manager.repair_context(
+        context_path=context_path,
+        profile_name=profile_name,
+        dry_run=dry_run,
+        reapply_profile=reapply_profile,
+        remap_missing_sources=remap_missing_sources,
+        rebuild_index=rebuild_index,
+    )
+
+
 def _builtin_tool_definitions() -> list[MCPToolDefinition]:
     return [
         MCPToolDefinition(
@@ -1010,6 +1030,23 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_context_status,
+        ),
+        MCPToolDefinition(
+            name="context.repair",
+            description="Repair mount provenance, broken mounts, and stale indexes for a context.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "profile_name": {"type": "string"},
+                    "dry_run": {"type": "boolean", "default": False},
+                    "reapply_profile": {"type": "boolean", "default": True},
+                    "remap_missing_sources": {"type": "boolean", "default": True},
+                    "rebuild_index": {"type": "boolean", "default": False},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_context_repair,
         ),
     ]
 

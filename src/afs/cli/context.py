@@ -10,12 +10,15 @@ from ._utils import load_manager, parse_mount_type, resolve_context_paths
 
 
 def _mount_to_dict(mount) -> dict:
-    return {
+    payload = {
         "name": mount.name,
         "source": str(mount.source),
         "mount_type": mount.mount_type.value,
         "is_symlink": mount.is_symlink,
     }
+    if mount.provenance is not None:
+        payload["provenance"] = mount.provenance.to_dict()
+    return payload
 
 
 def _context_to_dict(context) -> dict:
@@ -138,6 +141,49 @@ def context_unmount_command(args: argparse.Namespace) -> int:
         print(f"mount not found: {args.alias}")
         return 1
     print(f"unmounted {args.alias} from {mount_type.value}")
+    return 0
+
+
+def context_repair_command(args: argparse.Namespace) -> int:
+    """Repair context mounts, provenance, and optionally the index."""
+    config_path = Path(args.config) if args.config else None
+    manager = load_manager(config_path)
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+        args, manager
+    )
+    payload = manager.repair_context(
+        context_path=context_path,
+        profile_name=args.profile,
+        dry_run=args.dry_run,
+        reapply_profile=not args.no_profile_reapply,
+        remap_missing_sources=not args.no_remap,
+        rebuild_index=args.rebuild_index,
+    )
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print(f"context_path: {payload['context_path']}")
+    print(f"dry_run: {str(payload['dry_run']).lower()}")
+    print(f"changed: {str(payload['changed']).lower()}")
+    actions = payload["actions"] or ["(none)"]
+    print("actions:")
+    for action in actions:
+        print(f"- {action}")
+    applied = payload["applied_actions"] or ["(none)"]
+    print("applied:")
+    for action in applied:
+        print(f"- {action}")
+    remapped = payload["remapped_mounts"]
+    if remapped:
+        print("remapped_mounts:")
+        for entry in remapped:
+            print(
+                f"- {entry['mount_type']}/{entry['alias']}: "
+                f"{entry['previous_source']} -> {entry['new_source']}"
+            )
+    print(f"healthy_before: {str(payload['health_before']['healthy']).lower()}")
+    print(f"healthy_after: {str(payload['health_after']['healthy']).lower()}")
     return 0
 
 
@@ -618,6 +664,28 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     add_context_args(ctx_validate)
     ctx_validate.add_argument("--json", action="store_true", help="Output JSON.")
     ctx_validate.set_defaults(func=context_validate_command)
+
+    # context repair
+    ctx_repair = context_sub.add_parser("repair", help="Repair context mounts and provenance.")
+    add_context_args(ctx_repair)
+    ctx_repair.add_argument("--dry-run", action="store_true", help="Show planned repairs only.")
+    ctx_repair.add_argument(
+        "--no-profile-reapply",
+        action="store_true",
+        help="Skip reapplying profile-managed mounts.",
+    )
+    ctx_repair.add_argument(
+        "--no-remap",
+        action="store_true",
+        help="Skip conservative workspace remapping for missing sources.",
+    )
+    ctx_repair.add_argument(
+        "--rebuild-index",
+        action="store_true",
+        help="Rebuild the context index if it is stale or empty.",
+    )
+    ctx_repair.add_argument("--json", action="store_true", help="Output JSON.")
+    ctx_repair.set_defaults(func=context_repair_command)
 
     # context discover
     ctx_discover = context_sub.add_parser("discover", help="Discover contexts.")

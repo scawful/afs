@@ -57,7 +57,7 @@ def test_audit_contexts_repairs_profile_mounts(tmp_path: Path, monkeypatch) -> N
 
     assert metrics["contexts_audited"] == 1
     assert metrics["profile_repairs"] == 1
-    assert audits[0]["profile_repair"]["profile"] == "work"
+    assert audits[0]["repair"]["profile_reapply"]["profile"] == "work"
     assert audits[0]["mount_health"]["healthy"] is True
 
 
@@ -83,3 +83,51 @@ def test_audit_contexts_rebuilds_stale_indexes(tmp_path: Path, monkeypatch) -> N
     assert metrics["indexes_rebuilt"] == 1
     assert audits[0]["index"]["has_entries"] is True
     assert audits[0]["index"]["stale"] is False
+
+
+def test_resolve_audit_context_paths_filters_and_limits(tmp_path: Path) -> None:
+    config = _build_config(tmp_path)
+    selected = agent._resolve_audit_context_paths(
+        config,
+        [
+            {"path": str(tmp_path / "alpha" / ".context")},
+            {"path": str(tmp_path / "beta" / ".context")},
+            {"path": str(tmp_path / "gamma" / ".context")},
+        ],
+        filters=["beta"],
+        max_contexts=1,
+    )
+
+    assert selected == []
+
+    for name in ("alpha", "beta", "gamma"):
+        (tmp_path / name / ".context").mkdir(parents=True, exist_ok=True)
+
+    selected = agent._resolve_audit_context_paths(
+        config,
+        [
+            {"path": str(tmp_path / "alpha" / ".context")},
+            {"path": str(tmp_path / "beta" / ".context")},
+            {"path": str(tmp_path / "gamma" / ".context")},
+        ],
+        filters=["beta", "gamma"],
+        max_contexts=1,
+    )
+
+    assert len(selected) == 1
+    assert "beta" in str(selected[0])
+
+
+def test_context_watch_roots_include_context_and_mount_sources(tmp_path: Path) -> None:
+    config = _build_config(tmp_path)
+    (tmp_path / "knowledge-src").mkdir()
+    manager = AFSManager(config=config)
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    context = manager.ensure(path=project_path, context_root=config.general.context_root, profile="work")
+
+    watch_roots = agent._context_watch_roots(config, [context.path])
+
+    roots = watch_roots[context.path]
+    assert context.path in roots
+    assert any(root.name == "knowledge-src" for root in roots)

@@ -415,6 +415,7 @@ def status_command(args: argparse.Namespace) -> int:
     """Show AFS status."""
     from ..config import load_config_model
     from ..core import find_root, resolve_context_root
+    from ..health.afs_status import _maintenance_health
     from ..manager import AFSManager
     from ..models import MountType
 
@@ -425,6 +426,7 @@ def status_command(args: argparse.Namespace) -> int:
     manager = AFSManager(config=config)
 
     mount_health = manager.context_health(context_root)
+    maintenance = _maintenance_health(config, context_root)
 
     missing = list(mount_health["missing_dirs"])
 
@@ -471,6 +473,7 @@ def status_command(args: argparse.Namespace) -> int:
             "total_files": total_files,
             "mount_health": mount_health,
             "index": index_stats,
+            "maintenance": maintenance,
         }
         print(json.dumps(payload, indent=2))
         return 0
@@ -520,6 +523,24 @@ def status_command(args: argparse.Namespace) -> int:
         print("  index: enabled but not yet built")
     else:
         print("  index: disabled")
+
+    warm = maintenance["reports"]["context_warm"]
+    watch = maintenance["reports"]["context_watch"]
+    print()
+    print(
+        "  maintenance: "
+        f"context_warm={warm['status'] or 'unknown'} "
+        f"context_watch={watch['status'] or 'unknown'} "
+        f"degraded_contexts={maintenance['degraded_contexts']} "
+        f"remapped_mounts={maintenance['remapped_mounts']}"
+    )
+    brief = maintenance["reports"]["gemini_workspace_brief"]
+    if brief["available"]:
+        print(
+            "  gemini_brief: "
+            f"{brief['status'] or 'unknown'} "
+            f"age={brief['age_seconds'] if brief['age_seconds'] is not None else 'n/a'}s"
+        )
 
     return 0
 

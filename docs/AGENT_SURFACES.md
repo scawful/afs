@@ -106,6 +106,7 @@ Built-in tools:
 - `context.query`
 - `context.diff`
 - `context.status`
+- `context.repair`
 
 Paths are scoped to:
 
@@ -163,6 +164,7 @@ be listed with `afs agents list`.
 ```bash
 ~/src/lab/afs/scripts/afs agents run context-warm --stdout
 ~/src/lab/afs/scripts/afs services start context-warm
+~/src/lab/afs/scripts/afs services start context-watch
 ```
 
 Each run now audits discovered contexts for:
@@ -170,11 +172,25 @@ Each run now audits discovered contexts for:
 - broken symlink mounts
 - duplicate aliases that point at the same source
 - missing or mismatched profile-managed mounts
+- untracked or stale mount provenance
 - empty or stale SQLite indexes
 
-The built-in `context-warm` service rebuilds stale indexes automatically. Set
-`AFS_CONTEXT_WARM_REPAIR_PROFILE_MOUNTS=1` if you also want it to reapply
-profile-managed mounts when they drift.
+The built-in `context-warm` service now runs with `--repair-mounts
+--rebuild-stale-indexes` by default, so it can seed provenance, remap missing
+sources conservatively, and reapply profile-managed mounts when the configured
+source still exists.
+
+`context-watch` is the event-driven companion surface. It uses `context-warm
+--watch` to watch the context root and mounted source paths, then reruns repair
+and index maintenance only for affected contexts. If the optional `watchfiles`
+package is unavailable, it degrades to polling.
+
+Direct repair surface:
+
+```bash
+~/src/lab/afs/scripts/afs context repair --dry-run
+~/src/lab/afs/scripts/afs context repair --rebuild-index
+```
 
 ## Gemini / Claude / Codex Registration
 
@@ -223,4 +239,5 @@ environment where `afs` is installed and run `python3 -m afs.mcp_server`.
 
 `afs health` checks Gemini, Claude, and Codex registration files, recognizes
 wrapper-style `afs mcp serve` processes, and surfaces context mount drift such
-as broken symlinks and missing profile-managed mounts.
+as broken symlinks, missing profile-managed mounts, provenance drift, and
+maintenance service/report state.

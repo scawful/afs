@@ -48,6 +48,7 @@ def test_tools_list_returns_afs_tools(tmp_path: Path) -> None:
         "context.query",
         "context.diff",
         "context.status",
+        "context.repair",
     }.issubset(names)
 
 
@@ -521,6 +522,69 @@ def test_context_status_and_diff_tools(tmp_path: Path, monkeypatch) -> None:
     assert any(entry["relative_path"] == "extra.md" for entry in diff_structured["added"])
     assert any(entry["relative_path"] == "daily.md" for entry in diff_structured["deleted"])
     assert diff_structured["total_changes"] >= 2
+
+
+def test_context_repair_tool_remaps_missing_mount(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "google"
+    workspace_root.mkdir()
+    context_root = tmp_path / "context"
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(
+                context_root=context_root,
+                agent_workspaces_dir=context_root / "workspaces",
+                workspace_directories=[WorkspaceDirectory(path=workspace_root)],
+            )
+        )
+    )
+    context_root.mkdir(parents=True, exist_ok=True)
+    for mount_type in MountType:
+        (context_root / mount_type.value).mkdir(exist_ok=True)
+
+    legacy_docs = tmp_path / "legacy-docs"
+    legacy_docs.mkdir()
+    target = context_root / "knowledge" / "docs"
+    target.symlink_to(legacy_docs, target_is_directory=True)
+    metadata = {
+        "created_at": "2026-01-01T00:00:00",
+        "description": "repair target",
+        "directories": {mount.value: mount.value for mount in MountType},
+        "mount_provenance": {
+            "knowledge": {
+                "docs": {
+                    "alias": "docs",
+                    "mount_type": "knowledge",
+                    "source": str(legacy_docs),
+                    "managed_by": "manual",
+                }
+            }
+        },
+    }
+    (context_root / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    new_docs = workspace_root / legacy_docs.name
+    new_docs.mkdir()
+    (new_docs / "README.md").write_text("remapped", encoding="utf-8")
+    legacy_docs.rmdir()
+
+    repair_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 66,
+            "method": "tools/call",
+            "params": {
+                "name": "context.repair",
+                "arguments": {
+                    "context_path": str(context_root),
+                    "reapply_profile": False,
+                },
+            },
+        },
+        manager,
+    )
+    assert repair_response is not None
+    structured = repair_response["result"]["structuredContent"]
+    assert len(structured["remapped_mounts"]) == 1
+    assert structured["health_after"]["healthy"] is True
 
 
 def test_context_query_respects_auto_index_config_default(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,7 @@ from ..monorepo_bridge import (
 )
 from ..plugins import discover_extension_manifests, load_enabled_extensions
 from ..profiles import merge_extension_hooks, resolve_active_profile
+from ..services.manager import ServiceManager
 from .mcp_registration import SUPPORTED_MCP_CLIENTS, find_afs_mcp_registrations
 
 EMBEDDINGS_STALE_SECONDS = 24 * 3600
@@ -75,6 +77,7 @@ def collect_afs_health(config_path: Path | None = None) -> dict[str, Any]:
     extensions = _extension_health(config, profile, mcp_status)
     hooks = _hook_health(config, profile, context_root)
     mcp = _mcp_health(mcp_status)
+    maintenance = _maintenance_health(config, context_root)
 
     return {
         "profile": {
@@ -102,6 +105,7 @@ def collect_afs_health(config_path: Path | None = None) -> dict[str, Any]:
         "extensions": extensions,
         "hooks": hooks,
         "mcp": mcp,
+        "maintenance": maintenance,
     }
 
 
@@ -114,6 +118,7 @@ def render_afs_health(snapshot: dict[str, Any]) -> str:
     extensions = snapshot["extensions"]
     hooks = snapshot["hooks"]
     mcp = snapshot["mcp"]
+    maintenance = snapshot["maintenance"]
 
     lines = []
     lines.append("AFS Health")
@@ -190,6 +195,28 @@ def render_afs_health(snapshot: dict[str, Any]) -> str:
         f"registered_clients={','.join(mcp['registered_client_names']) or 'none'} "
         f"tools={len(mcp['tools'])}"
     )
+    warm = maintenance["reports"]["context_warm"]
+    watch = maintenance["reports"]["context_watch"]
+    lines.append(
+        "maintenance: "
+        f"context_warm={warm['status'] or 'unknown'} "
+        f"context_watch={watch['status'] or 'unknown'} "
+        f"age={_format_age(warm['age_seconds'])} "
+        f"degraded_contexts={maintenance['degraded_contexts']} "
+        f"remapped_mounts={maintenance['remapped_mounts']}"
+    )
+    brief = maintenance["reports"]["gemini_workspace_brief"]
+    if brief["available"]:
+        lines.append(
+            "gemini_workspace_brief: "
+            f"status={brief['status'] or 'unknown'} "
+            f"age={_format_age(brief['age_seconds'])}"
+        )
+    service_states = ", ".join(
+        f"{name}={state}"
+        for name, state in sorted(maintenance["services"].items())
+    )
+    lines.append(f"maintenance_services: {service_states or 'none'}")
     for client in SUPPORTED_MCP_CLIENTS:
         hits = mcp["config_hits"].get(client, [])
         if hits:
@@ -324,6 +351,49 @@ def _mcp_health(mcp_status: dict[str, Any]) -> dict[str, Any]:
         "load_errors": mcp_status.get("load_errors", {}),
     }
 
+def _maintenance_health(config, context_root: Path) -> dict[str, Any]:
+    agent_output_dir = context_root / "scratchpad" / "afs_agents"
+    reports = {
+        "context_warm": _load_agent_report(agent_output_dir / "context_warm.json"),
+        "context_watch": _load_agent_report(agent_output_dir / "context_watch.json"),
+        "gemini_workspace_brief": _load_agent_report(
+            agent_output_dir / "gemini_workspace_brief.json"
+        ),
+    }
+    degraded_contexts = 0
+    remapped_mounts = 0
+    warm_payload = reports["context_warm"]["payload"] if reports["context_warm"]["available"] else {}
+    if isinstance(warm_payload, dict):
+        audits = warm_payload.get("context_health", [])
+        if isinstance(audits, list):
+            degraded_contexts = sum(
+                1
+                for audit in audits
+                if isinstance(audit, dict)
+                and isinstance(audit.get("mount_health"), dict)
+                and not audit["mount_health"].get("healthy", False)
+            )
+            remapped_mounts = sum(
+                len(audit.get("repair", {}).get("remapped_mounts", []))
+                for audit in audits
+                if isinstance(audit, dict)
+            )
+
+    service_manager = ServiceManager(config=config)
+    services: dict[str, str] = {}
+    for name in ("context-warm", "context-watch", "gemini-workspace-brief"):
+        definition = service_manager.get_definition(name)
+        if definition is None:
+            continue
+        services[name] = service_manager.status(name).state.value
+
+    return {
+        "reports": reports,
+        "services": services,
+        "degraded_contexts": degraded_contexts,
+        "remapped_mounts": remapped_mounts,
+    }
+
 
 def _detect_mcp_running() -> tuple[bool, list[str]]:
     matches: list[str] = []
@@ -386,6 +456,41 @@ def _file_age_seconds(path: Path, *, now: datetime | None = None) -> float | Non
     current = now or datetime.now(timezone.utc)
     modified = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
     return max((current - modified).total_seconds(), 0.0)
+
+
+def _load_agent_report(path: Path) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "available": path.exists(),
+        "path": str(path),
+        "status": None,
+        "started_at": None,
+        "finished_at": None,
+        "age_seconds": _file_age_seconds(path) if path.exists() else None,
+        "metrics": {},
+        "notes": [],
+        "payload": {},
+    }
+    if not path.exists():
+        return payload
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload["status"] = "invalid"
+        return payload
+
+    if not isinstance(raw, dict):
+        payload["status"] = "invalid"
+        return payload
+    payload["status"] = raw.get("status") if isinstance(raw.get("status"), str) else None
+    payload["started_at"] = raw.get("started_at") if isinstance(raw.get("started_at"), str) else None
+    payload["finished_at"] = raw.get("finished_at") if isinstance(raw.get("finished_at"), str) else None
+    if isinstance(raw.get("metrics"), dict):
+        payload["metrics"] = raw["metrics"]
+    if isinstance(raw.get("notes"), list):
+        payload["notes"] = [note for note in raw["notes"] if isinstance(note, str)]
+    if isinstance(raw.get("payload"), dict):
+        payload["payload"] = raw["payload"]
+    return payload
 
 
 def _format_age(age_seconds: float | None) -> str:

@@ -37,6 +37,7 @@ Also supported once installed into the active environment:
 ./scripts/afs context ensure
 ./scripts/afs context list
 ./scripts/afs context validate
+./scripts/afs context repair --dry-run
 ./scripts/afs context mount knowledge ~/src/docs --alias docs
 ./scripts/afs context unmount knowledge docs
 ```
@@ -82,6 +83,7 @@ Useful Gemini-oriented MCP operations:
 - `context.query` for indexed path/content search
 - `context.diff` for “what changed since the last index build”
 - `context.status` for mount counts, mount health, profile, and index health
+- `context.repair` for provenance seeding, conservative source remapping, and stale index repair
 
 Gemini work-root override:
 
@@ -99,10 +101,19 @@ Gemini brief agent:
 ```
 
 `context-warm` now audits each discovered context for broken symlink mounts,
-duplicate mount targets, missing profile-managed mounts, and stale SQLite
-indexes. The built-in service runs with `--rebuild-stale-indexes` by default.
-Set `AFS_CONTEXT_WARM_REPAIR_PROFILE_MOUNTS=1` to let the service reapply
-managed profile mounts automatically when they drift.
+duplicate mount targets, missing profile-managed mounts, untracked/stale mount
+provenance, and stale SQLite indexes. The built-in service now runs with
+`--repair-mounts --rebuild-stale-indexes` by default.
+
+For continuous maintenance, start the watcher:
+
+```bash
+./scripts/afs services start context-watch
+```
+
+`context-watch` uses `context-warm --watch` and reacts to changes under the
+context root and mounted source paths. If the optional `watchfiles` package is
+not installed, it falls back to polling.
 
 Codex MCP config:
 
@@ -122,5 +133,14 @@ args = ["mcp", "serve"]
 
 `afs health` reports AFS MCP registration for Gemini, Claude, and Codex, and it
 detects both `python -m afs.mcp_server` and `afs mcp serve` processes. It also
-reports broken mounts, duplicate mount targets, and missing profile-managed
-mounts so you can see context drift without opening the directory manually.
+reports broken mounts, duplicate mount targets, provenance drift, repair/remap
+activity, and maintenance service state so you can see context drift without
+opening the directory manually.
+
+Repair a context directly when you want an explicit fix instead of waiting for a
+background service:
+
+```bash
+./scripts/afs context repair --dry-run
+./scripts/afs context repair --rebuild-index
+```

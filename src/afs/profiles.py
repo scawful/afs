@@ -258,6 +258,8 @@ def _mount_profile_paths(
                 mount_type,
                 alias=spec.alias,
                 context_path=context_path,
+                managed_by="profile",
+                profile_name=spec.profile_name,
             )
             mounted += 1
         except FileExistsError:

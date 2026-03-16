@@ -402,6 +402,11 @@ class ServiceManager:
         memory_interval = memory_cfg.interval_seconds if memory_cfg.interval_seconds > 0 else 3600
         context_warm_report = agent_output_dir / "context_warm.json"
         context_warm_interval = _resolve_interval_env("AFS_CONTEXT_WARM_INTERVAL", default=3600)
+        context_watch_report = agent_output_dir / "context_watch.json"
+        context_watch_poll_seconds = _resolve_interval_env(
+            "AFS_CONTEXT_WATCH_POLL_SECONDS",
+            default=30,
+        )
         gemini_brief_report = agent_output_dir / "gemini_workspace_brief.json"
         gemini_brief_markdown = agent_output_dir / "gemini_workspace_brief.md"
         gemini_brief_interval = _resolve_interval_env(
@@ -435,10 +440,25 @@ class ServiceManager:
             str(context_warm_report),
             "--interval",
             str(context_warm_interval),
+            "--repair-mounts",
             "--rebuild-stale-indexes",
         ]
         if _resolve_bool_env("AFS_CONTEXT_WARM_REPAIR_PROFILE_MOUNTS"):
             context_warm_command.append("--repair-profile-mounts")
+        context_watch_command = [
+            python,
+            "-m",
+            "afs.agents.context_warm",
+            "--output",
+            str(context_watch_report),
+            "--watch",
+            "--watch-poll-seconds",
+            str(context_watch_poll_seconds),
+            "--repair-mounts",
+            "--rebuild-stale-indexes",
+            "--skip-workspace-sync",
+            "--skip-embeddings",
+        ]
         gemini_workspace_brief_command = [
             python,
             "-m",
@@ -558,6 +578,17 @@ class ServiceManager:
                 label="AFS Context Warm",
                 description="Sync workspace paths, discover contexts, and refresh embeddings on an interval",
                 command=context_warm_command,
+                working_directory=working_root,
+                environment=environment,
+                service_type=ServiceType.DAEMON,
+                keep_alive=True,
+                run_at_load=False,
+            ),
+            "context-watch": ServiceDefinition(
+                name="context-watch",
+                label="AFS Context Watch",
+                description="Watch context and mounted-source paths and repair/reindex on change",
+                command=context_watch_command,
                 working_directory=working_root,
                 environment=environment,
                 service_type=ServiceType.DAEMON,

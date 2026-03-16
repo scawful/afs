@@ -43,6 +43,12 @@ Temporary shell override:
 export AFS_MCP_ALLOWED_ROOTS=/google
 ```
 
+When a workspace path under `/google` moves, `afs context repair` and the
+background `context-warm` / `context-watch` services will try a conservative
+remap against registered workspace roots before leaving the mount broken. This
+works best when the real workspace roots are listed in
+`general.workspace_directories`, not just broad allowed roots.
+
 ## Tooling
 
 - Use `ws` for workspace navigation (`ws list`, `ws go`, `ws status`).

@@ -8,6 +8,7 @@ def test_service_manager_lists_builtins() -> None:
     manager = ServiceManager(config=AFSConfig(), platform_name="linux")
     names = [definition.name for definition in manager.list_definitions()]
     assert "orchestrator" in names
+    assert "context-watch" in names
     assert "gemini-workspace-brief" in names
 
 
@@ -22,7 +23,16 @@ def test_context_warm_service_rebuilds_stale_indexes() -> None:
     manager = ServiceManager(config=AFSConfig(), platform_name="linux")
     definition = manager.get_definition("context-warm")
     assert definition is not None
+    assert "--repair-mounts" in definition.command
     assert "--rebuild-stale-indexes" in definition.command
+
+
+def test_context_watch_service_uses_watch_mode() -> None:
+    manager = ServiceManager(config=AFSConfig(), platform_name="linux")
+    definition = manager.get_definition("context-watch")
+    assert definition is not None
+    assert "--watch" in definition.command
+    assert "--skip-embeddings" in definition.command
 
 
 def test_service_config_can_disable_service() -> None:

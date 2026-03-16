@@ -9,6 +9,11 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from watchfiles import watch as _watch_paths
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    _watch_paths = None
+
 from ..cli._utils import write_config
 from ..context_index import ContextSQLiteIndex
 from ..core import resolve_context_root
@@ -70,9 +75,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reapply managed profile mounts for contexts with broken or missing managed mounts.",
     )
     parser.add_argument(
+        "--repair-mounts",
+        action="store_true",
+        help="Run full context repair: seed provenance, remap missing sources, and reapply profiles.",
+    )
+    parser.add_argument(
         "--rebuild-stale-indexes",
         action="store_true",
         help="Rebuild empty or stale SQLite indexes for audited contexts.",
+    )
+    parser.add_argument(
+        "--context-filter",
+        action="append",
+        help="Only audit contexts whose path contains this substring (repeatable).",
+    )
+    parser.add_argument(
+        "--max-contexts",
+        type=int,
+        default=0,
+        help="Maximum number of contexts to audit (0 = no limit).",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Watch context and mounted-source paths for changes and rerun audits on demand.",
+    )
+    parser.add_argument(
+        "--watch-poll-seconds",
+        type=int,
+        default=30,
+        help="Polling fallback or watcher timeout in seconds (default: 30).",
+    )
+    parser.add_argument(
+        "--debounce-seconds",
+        type=float,
+        default=2.0,
+        help="Watcher debounce window in seconds (default: 2.0).",
     )
     parser.add_argument("--dry-run", action="store_true", help="Do not write config updates.")
     parser.add_argument(
@@ -270,6 +308,9 @@ def _load_embedding_projects(path: Path) -> list[EmbeddingProject]:
 def _resolve_audit_context_paths(
     config,
     discovered_contexts: list[dict[str, object]] | None,
+    *,
+    filters: list[str] | None = None,
+    max_contexts: int = 0,
 ) -> list[Path]:
     paths: list[Path] = []
     seen: set[str] = set()
@@ -285,18 +326,37 @@ def _resolve_audit_context_paths(
         paths.append(candidate)
 
     if paths:
-        return paths
+        return _filter_context_paths(paths, filters=filters, max_contexts=max_contexts)
 
     candidate = resolve_context_root(config, None)
     if candidate.exists():
-        return [candidate]
+        return _filter_context_paths([candidate], filters=filters, max_contexts=max_contexts)
     return []
+
+
+def _filter_context_paths(
+    context_paths: list[Path],
+    *,
+    filters: list[str] | None = None,
+    max_contexts: int = 0,
+) -> list[Path]:
+    selected = sorted({path.expanduser().resolve() for path in context_paths}, key=str)
+    if filters:
+        needles = [item.strip().lower() for item in filters if isinstance(item, str) and item.strip()]
+        if needles:
+            selected = [
+                path for path in selected if any(needle in str(path).lower() for needle in needles)
+            ]
+    if max_contexts > 0:
+        selected = selected[:max_contexts]
+    return selected
 
 
 def _audit_contexts(
     config,
     context_paths: list[Path],
     *,
+    repair_mounts: bool = False,
     repair_profile_mounts: bool = False,
     rebuild_stale_indexes: bool = False,
 ) -> tuple[list[dict[str, object]], dict[str, int], list[str]]:
@@ -308,6 +368,8 @@ def _audit_contexts(
         "contexts_with_mount_issues": 0,
         "contexts_with_broken_mounts": 0,
         "contexts_with_stale_indexes": 0,
+        "contexts_repaired": 0,
+        "mounts_remapped": 0,
         "profile_repairs": 0,
         "indexes_rebuilt": 0,
     }
@@ -320,19 +382,30 @@ def _audit_contexts(
             "mount_health": health,
         }
 
-        if repair_profile_mounts and (
+        if (repair_mounts or repair_profile_mounts) and (
             health["broken_mounts"]
             or health["profile"]["missing_mounts"]
+            or health["profile"]["missing_sources"]
             or health["profile"]["mismatched_mounts"]
+            or health["provenance"]["untracked_mounts"]
+            or health["provenance"]["stale_records"]
         ):
-            result = manager.apply_profile(context_path)
-            metrics["profile_repairs"] += 1
-            health = manager.context_health(context_path)
-            audit["profile_repair"] = {
-                "profile": result.profile_name,
-                "mounted": result.mounted,
-                "missing": result.skipped_missing,
-            }
+            repair = manager.repair_context(
+                context_path,
+                dry_run=False,
+                reapply_profile=repair_mounts or repair_profile_mounts,
+                remap_missing_sources=repair_mounts or repair_profile_mounts,
+                rebuild_index=rebuild_stale_indexes,
+            )
+            if repair["changed"]:
+                metrics["contexts_repaired"] += 1
+            metrics["mounts_remapped"] += len(repair["remapped_mounts"])
+            if repair["profile_reapply"] is not None:
+                metrics["profile_repairs"] += 1
+            if repair["index_rebuild"] is not None:
+                metrics["indexes_rebuilt"] += 1
+            health = repair["health_after"]
+            audit["repair"] = repair
             audit["mount_health"] = health
 
         issue_count = (
@@ -361,7 +434,7 @@ def _audit_contexts(
                     "total_entries": index.total_entries,
                 }
             )
-            if rebuild_stale_indexes and stale:
+            if rebuild_stale_indexes and stale and "repair" not in audit:
                 index_info["rebuild"] = manager.rebuild_context_index(context_path)
                 metrics["indexes_rebuilt"] += 1
                 refreshed = ContextSQLiteIndex(manager, context_path)
@@ -386,9 +459,214 @@ def _audit_contexts(
     return audits, metrics, notes
 
 
+def _run_cycle(
+    args: argparse.Namespace,
+    config,
+    *,
+    context_paths_override: list[Path] | None = None,
+) -> AgentResult:
+    started_at = now_iso()
+    start = time.monotonic()
+    notes: list[str] = []
+    metrics: dict[str, int | float] = {}
+    payload: dict[str, object] = {}
+
+    if not args.skip_workspace_sync:
+        count, sync_notes = _sync_workspace(args, config)
+        metrics["workspace_entries"] = count
+        notes.extend(sync_notes)
+
+    if not args.skip_discover:
+        contexts, stats, discover_notes = _discover_contexts(args, config)
+        payload["contexts"] = contexts
+        payload["context_stats"] = stats
+        metrics["contexts"] = stats.get("total_projects", 0)
+        metrics["invalid_contexts"] = stats.get("invalid_projects", 0)
+        notes.extend(discover_notes)
+
+    if not args.skip_embeddings:
+        embedding_results, embed_notes = _refresh_embeddings(args, config)
+        payload["embedding_results"] = embedding_results
+        metrics["embedding_projects"] = len(embedding_results)
+        notes.extend(embed_notes)
+
+    if not args.skip_context_audit:
+        if context_paths_override is not None:
+            context_paths = _filter_context_paths(
+                context_paths_override,
+                filters=args.context_filter,
+                max_contexts=args.max_contexts,
+            )
+        else:
+            context_paths = _resolve_audit_context_paths(
+                config,
+                payload.get("contexts") if isinstance(payload.get("contexts"), list) else None,
+                filters=args.context_filter,
+                max_contexts=args.max_contexts,
+            )
+        audits, audit_metrics, audit_notes = _audit_contexts(
+            config,
+            context_paths,
+            repair_mounts=args.repair_mounts,
+            repair_profile_mounts=args.repair_profile_mounts,
+            rebuild_stale_indexes=args.rebuild_stale_indexes,
+        )
+        payload["context_health"] = audits
+        payload["context_selection"] = {
+            "filters": list(args.context_filter or []),
+            "max_contexts": args.max_contexts,
+            "selected_contexts": [str(path) for path in context_paths],
+        }
+        metrics.update(audit_metrics)
+        notes.extend(audit_notes)
+
+    return AgentResult(
+        name=AGENT_NAME,
+        status="ok" if not notes else "warn",
+        started_at=started_at,
+        finished_at=now_iso(),
+        duration_seconds=time.monotonic() - start,
+        metrics=metrics,
+        notes=notes[:5],
+        payload=payload,
+    )
+
+
+def _selected_context_paths_from_result(result: AgentResult) -> list[Path]:
+    payload = result.payload.get("context_selection")
+    if not isinstance(payload, dict):
+        return []
+    selected = payload.get("selected_contexts")
+    if not isinstance(selected, list):
+        return []
+    paths: list[Path] = []
+    for item in selected:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        paths.append(Path(item).expanduser().resolve())
+    return paths
+
+
+def _context_watch_roots(config, context_paths: list[Path]) -> dict[Path, list[Path]]:
+    manager = AFSManager(config=config)
+    watch_roots: dict[Path, list[Path]] = {}
+    for context_path in context_paths:
+        roots: list[Path] = []
+        seen: set[Path] = set()
+
+        def _add(
+            path: Path | None,
+            *,
+            _roots: list[Path] = roots,
+            _seen: set[Path] = seen,
+        ) -> None:
+            if path is None:
+                return
+            candidate = path.expanduser().resolve(strict=False)
+            if candidate in _seen:
+                return
+            if not candidate.exists():
+                return
+            _seen.add(candidate)
+            _roots.append(candidate)
+
+        _add(context_path)
+        try:
+            context = manager.list_context(context_path=context_path)
+        except Exception:
+            watch_roots[context_path] = roots
+            continue
+        for mount_list in context.mounts.values():
+            for mount in mount_list:
+                if not mount.is_symlink:
+                    continue
+                source_root = mount.source if mount.source.exists() else mount.source.parent
+                _add(source_root)
+        watch_roots[context_path] = roots
+    return watch_roots
+
+
+def _affected_contexts(
+    watch_roots: dict[Path, list[Path]],
+    changed_paths: list[Path],
+) -> list[Path]:
+    affected: list[Path] = []
+    for context_path, roots in watch_roots.items():
+        if any(
+            changed == root or changed.is_relative_to(root)
+            for root in roots
+            for changed in changed_paths
+        ):
+            affected.append(context_path)
+    return affected
+
+
+def _emit_agent_result(args: argparse.Namespace, result: AgentResult) -> None:
+    output_path = Path(args.output).expanduser().resolve() if args.output else None
+    emit_result(
+        result,
+        output_path=output_path,
+        force_stdout=args.stdout,
+        pretty=args.pretty,
+    )
+
+
+def _run_watch_loop(args: argparse.Namespace, config) -> int:
+    runs = 0
+    result = _run_cycle(args, config)
+    if _watch_paths is None:
+        result.notes.append("watchfiles not installed; falling back to polling")
+        result.status = "warn"
+    _emit_agent_result(args, result)
+    runs += 1
+
+    while True:
+        if args.max_runs and runs >= args.max_runs:
+            return 0
+
+        selected_contexts = _selected_context_paths_from_result(result)
+        if not selected_contexts:
+            time.sleep(max(args.watch_poll_seconds, 1))
+            result = _run_cycle(args, config)
+            _emit_agent_result(args, result)
+            runs += 1
+            continue
+
+        watch_roots = _context_watch_roots(config, selected_contexts)
+        changed_contexts: list[Path]
+        if _watch_paths is None:
+            time.sleep(max(args.watch_poll_seconds, 1))
+            changed_contexts = selected_contexts
+        else:
+            watcher = _watch_paths(
+                *[str(path) for roots in watch_roots.values() for path in roots],
+                debounce=max(int(args.debounce_seconds * 1000), 100),
+                yield_on_timeout=True,
+                rust_timeout=max(int(args.watch_poll_seconds * 1000), 1000),
+            )
+            changes = next(watcher)
+            changed_paths = [
+                Path(raw_path).expanduser().resolve(strict=False)
+                for _change, raw_path in changes
+            ]
+            if not changed_paths:
+                continue
+            changed_contexts = _affected_contexts(watch_roots, changed_paths)
+            if not changed_contexts:
+                continue
+
+        result = _run_cycle(args, config, context_paths_override=changed_contexts)
+        _emit_agent_result(args, result)
+        runs += 1
+
+
 def run(args: argparse.Namespace) -> int:
     configure_logging(args.quiet)
     config = load_agent_config(args.config)
+
+    if args.watch:
+        return _run_watch_loop(args, config)
+
     runs = 0
 
     if args.interval > 0 and args.sleep_first:
@@ -396,64 +674,8 @@ def run(args: argparse.Namespace) -> int:
 
     while True:
         runs += 1
-        started_at = now_iso()
-        start = time.monotonic()
-        notes: list[str] = []
-        metrics: dict[str, int | float] = {}
-        payload: dict[str, object] = {}
-
-        if not args.skip_workspace_sync:
-            count, sync_notes = _sync_workspace(args, config)
-            metrics["workspace_entries"] = count
-            notes.extend(sync_notes)
-
-        if not args.skip_discover:
-            contexts, stats, discover_notes = _discover_contexts(args, config)
-            payload["contexts"] = contexts
-            payload["context_stats"] = stats
-            metrics["contexts"] = stats.get("total_projects", 0)
-            metrics["invalid_contexts"] = stats.get("invalid_projects", 0)
-            notes.extend(discover_notes)
-
-        if not args.skip_embeddings:
-            embedding_results, embed_notes = _refresh_embeddings(args, config)
-            payload["embedding_results"] = embedding_results
-            metrics["embedding_projects"] = len(embedding_results)
-            notes.extend(embed_notes)
-
-        if not args.skip_context_audit:
-            context_paths = _resolve_audit_context_paths(
-                config,
-                payload.get("contexts") if isinstance(payload.get("contexts"), list) else None,
-            )
-            audits, audit_metrics, audit_notes = _audit_contexts(
-                config,
-                context_paths,
-                repair_profile_mounts=args.repair_profile_mounts,
-                rebuild_stale_indexes=args.rebuild_stale_indexes,
-            )
-            payload["context_health"] = audits
-            metrics.update(audit_metrics)
-            notes.extend(audit_notes)
-
-        result = AgentResult(
-            name=AGENT_NAME,
-            status="ok" if not notes else "warn",
-            started_at=started_at,
-            finished_at=now_iso(),
-            duration_seconds=time.monotonic() - start,
-            metrics=metrics,
-            notes=notes[:5],
-            payload=payload,
-        )
-
-        output_path = Path(args.output).expanduser().resolve() if args.output else None
-        emit_result(
-            result,
-            output_path=output_path,
-            force_stdout=args.stdout,
-            pretty=args.pretty,
-        )
+        result = _run_cycle(args, config)
+        _emit_agent_result(args, result)
 
         if args.interval <= 0:
             break

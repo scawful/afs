@@ -84,6 +84,7 @@ In Antigravity, open `MCP Servers -> Manage MCP Servers -> View raw config`, the
 - `context.query`
 - `context.diff`
 - `context.status`
+- `context.repair`
 
 `context.query` uses a SQLite index with FTS ranking when available, and falls
 back to `LIKE` matching if FTS is unavailable on the host SQLite build.
@@ -160,8 +161,11 @@ export AFS_MCP_ALLOWED_ROOTS=/google
 ```
 
 `context.diff` reports added, modified, and deleted files relative to the last
-index build. `context.status` reports mount counts, mount health, index health,
-the active profile, and suggested repair actions for the target context.
+index build. `context.status` reports mount counts, mount health, provenance
+health, index health, the active profile, and suggested repair actions for the
+target context. `context.repair` seeds missing provenance records, prunes stale
+provenance, remaps missing mount sources conservatively across configured
+workspace roots such as `/google`, and optionally rebuilds the index.
 
 Gemini background brief surfaces:
 
@@ -169,20 +173,27 @@ Gemini background brief surfaces:
 ~/src/lab/afs/scripts/afs agents run gemini-workspace-brief --stdout
 ~/src/lab/afs/scripts/afs services start gemini-workspace-brief
 ~/src/lab/afs/scripts/afs services start context-warm
+~/src/lab/afs/scripts/afs services start context-watch
 ```
 
 The brief agent requires `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
 
 `context-warm` now audits discovered contexts for broken symlink mounts,
-duplicate mount targets, missing profile-managed mounts, and stale indexes. The
-built-in service runs with `--rebuild-stale-indexes` by default. Set
-`AFS_CONTEXT_WARM_REPAIR_PROFILE_MOUNTS=1` to let it reapply profile-managed
-mounts automatically.
+duplicate mount targets, missing profile-managed mounts, untracked/stale mount
+provenance, and stale indexes. The built-in service runs with
+`--repair-mounts --rebuild-stale-indexes` by default.
+
+`context-watch` is the on-change companion surface. It runs `context-warm
+--watch`, monitors the context root and mounted source paths, and only reruns
+repair/index work for the affected contexts. If `watchfiles` is not installed,
+it falls back to polling.
 
 `afs health` now reports AFS MCP registration across Gemini, Claude, and Codex
 config surfaces, and it recognizes both `python -m afs.mcp_server` and
 wrapper-style `afs mcp serve` processes. It also surfaces context mount drift so
-agents can distinguish path access problems from index staleness quickly.
+agents can distinguish path access problems from index staleness quickly, and it
+includes maintenance report/service state for `context-warm`, `context-watch`,
+and `gemini-workspace-brief`.
 
 ## Example Call Shape
 

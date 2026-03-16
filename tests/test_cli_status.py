@@ -79,3 +79,4 @@ def test_status_command_json_reports_index_and_mount_counts(
     assert payload["index"]["available"] is True
     assert payload["index"]["has_entries"] is True
     assert payload["index"]["total_entries"] >= 1
+    assert "maintenance" in payload

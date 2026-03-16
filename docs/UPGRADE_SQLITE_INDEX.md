@@ -29,7 +29,7 @@ Writes/Mounts ──> Filesystem (.context/)  ← source of truth
                    SQLite Index (context_index.sqlite3)
                               │
                               ▼
-            MCP tools: context.query, context.index.rebuild, context.diff, context.status
+            MCP tools: context.query, context.index.rebuild, context.diff, context.status, context.repair
 ```
 
 If the index fails or is deleted, all primary AFS operations continue to work.
@@ -118,6 +118,22 @@ Return mount counts, active profile, and index health for a context.
 
 This is useful for Gemini-style agents that need a quick “context health”
 snapshot before deciding whether to query or rebuild.
+
+### `context.repair`
+
+Repair a context by seeding missing provenance records, pruning stale
+provenance, conservatively remapping missing mount sources across configured
+workspace roots, reapplying profile-managed mounts when possible, and
+optionally rebuilding the index.
+
+| Parameter               | Type    | Default | Description                              |
+|-------------------------|---------|---------|------------------------------------------|
+| `context_path`          | string  | cwd     | Path to `.context/` directory            |
+| `profile_name`          | string  | active  | Profile override                         |
+| `dry_run`               | boolean | false   | Report planned repairs only              |
+| `reapply_profile`       | boolean | true    | Reapply profile-managed mounts           |
+| `remap_missing_sources` | boolean | true    | Try conservative workspace remapping     |
+| `rebuild_index`         | boolean | false   | Rebuild SQLite index if stale or empty   |
 
 ## Upgrading from a previous AFS version
 
