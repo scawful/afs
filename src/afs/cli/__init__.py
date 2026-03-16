@@ -14,9 +14,12 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
 
+from ..config import load_config_model
 from ..health import cli as health_cli
 from ..history import log_cli_invocation
+from ..profiles import resolve_active_profile
 from . import (
+    bundle,
     context,
     core,
     embeddings,
@@ -35,6 +38,62 @@ def _extension_import_path(extension_root: Path) -> Iterable[None]:
         str(extension_root),
         str(extension_root.parent),
     ]
+    original = list(sys.path)
+    sys.path = [entry for entry in candidates if Path(entry).exists()] + original
+    try:
+        yield
+    finally:
+        sys.path = original
+
+
+def _path_within_roots(path: Path, roots: Iterable[Path]) -> bool:
+    resolved = path.expanduser().resolve()
+    for root in roots:
+        candidate = root.expanduser().resolve()
+        if resolved == candidate or resolved.is_relative_to(candidate):
+            return True
+    return False
+
+
+def _purge_import_cache(module_name: str, search_roots: Iterable[Path]) -> None:
+    roots = list(search_roots)
+    related_names = {
+        ".".join(parts)
+        for parts in (
+            module_name.split(".")[:index]
+            for index in range(1, len(module_name.split(".")) + 1)
+        )
+    }
+    prefixes = tuple(f"{name}." for name in related_names)
+    for loaded_name, loaded_module in list(sys.modules.items()):
+        if loaded_name not in related_names and not loaded_name.startswith(prefixes):
+            continue
+        module_file = getattr(loaded_module, "__file__", None)
+        if isinstance(module_file, str) and _path_within_roots(Path(module_file), roots):
+            continue
+        sys.modules.pop(loaded_name, None)
+
+
+def _register_cli_module(
+    subparsers: argparse._SubParsersAction,
+    module_name: str,
+    *,
+    search_roots: Iterable[Path] = (),
+) -> None:
+    roots = [root for root in search_roots if root.exists()]
+    with _extension_import_path(roots[0]) if len(roots) == 1 else _multi_extension_import_path(roots):
+        _purge_import_cache(module_name, roots)
+        module = importlib.import_module(module_name)
+    register = getattr(module, "register_parsers", None)
+    if callable(register):
+        register(subparsers)
+
+
+@contextmanager
+def _multi_extension_import_path(search_roots: Iterable[Path]) -> Iterable[None]:
+    candidates: list[str] = []
+    for root in search_roots:
+        candidates.extend([str(root), str(root.parent)])
     original = list(sys.path)
     sys.path = [entry for entry in candidates if Path(entry).exists()] + original
     try:
@@ -72,6 +131,9 @@ def build_parser() -> argparse.ArgumentParser:
     # Register skill metadata commands
     skills.register_parsers(subparsers)
 
+    # Register bundle commands
+    bundle.register_parsers(subparsers)
+
     # Register health commands
     health_cli.register_parsers(subparsers)
 
@@ -96,21 +158,27 @@ def build_parser() -> argparse.ArgumentParser:
             load_enabled_plugins,
         )
 
-        plugins = load_enabled_plugins()
+        config = load_config_model(merge_user=True)
+        plugins = load_enabled_plugins(config=config)
         call_plugin_hook("register_cli", subparsers, plugins=plugins.values())
         call_plugin_hook("register_parsers", subparsers, plugins=plugins.values())
 
-        extensions = load_enabled_extensions()
+        extensions = load_enabled_extensions(config=config)
+        resolved_profile = resolve_active_profile(config)
+        extension_roots: dict[str, list[Path]] = {}
         for extension in extensions.values():
             for module_name in extension.cli_modules:
-                try:
-                    with _extension_import_path(extension.root):
-                        module = importlib.import_module(module_name)
-                except Exception:
-                    continue
-                register = getattr(module, "register_parsers", None)
-                if callable(register):
-                    register(subparsers)
+                extension_roots.setdefault(module_name, []).append(extension.root)
+
+        for module_name in resolved_profile.cli_modules:
+            try:
+                _register_cli_module(
+                    subparsers,
+                    module_name,
+                    search_roots=extension_roots.get(module_name, []),
+                )
+            except Exception:
+                continue
     except Exception:
         pass
 

@@ -11,6 +11,8 @@ from afs.schema import (
     ContextIndexConfig,
     ExtensionsConfig,
     GeneralConfig,
+    ProfileConfig,
+    ProfilesConfig,
     WorkspaceDirectory,
 )
 
@@ -1717,3 +1719,168 @@ def test_extension_mcp_server_conflicts_do_not_override_core_surface(
         "Prompt 'afs.context.overview' already registered by core" in message
         for message in errors.values()
     )
+
+
+def test_profile_mcp_tools_modules_are_loaded_into_registry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module_path = tmp_path / "profile_mcp.py"
+    module_path.write_text(
+        "def register_mcp_server(_manager):\n"
+        "    def echo(arguments):\n"
+        "        return {'echo': arguments.get('value', '')}\n"
+        "\n"
+        "    def status(_manager):\n"
+        "        return {'text': '{\"status\": \"profile\"}'}\n"
+        "\n"
+        "    def review(arguments):\n"
+        "        return f\"Profile review: {arguments.get('value', '')}\"\n"
+        "\n"
+        "    return {\n"
+        "        'tools': [\n"
+        "            {\n"
+        "                'name': 'profile.echo',\n"
+        "                'description': 'Echo from profile module',\n"
+        "                'inputSchema': {\n"
+        "                    'type': 'object',\n"
+        "                    'properties': {'value': {'type': 'string'}},\n"
+        "                    'additionalProperties': False,\n"
+        "                },\n"
+        "                'handler': echo,\n"
+        "            }\n"
+        "        ],\n"
+        "        'resources': [\n"
+        "            {\n"
+        "                'uri': 'afs://profile/status',\n"
+        "                'name': 'Profile status',\n"
+        "                'description': 'Status from profile MCP module',\n"
+        "                'mimeType': 'application/json',\n"
+        "                'handler': status,\n"
+        "            }\n"
+        "        ],\n"
+        "        'prompts': [\n"
+        "            {\n"
+        "                'name': 'profile.review',\n"
+        "                'description': 'Review from profile MCP module',\n"
+        "                'arguments': [{'name': 'value', 'required': False}],\n"
+        "                'handler': review,\n"
+        "            }\n"
+        "        ],\n"
+        "    }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    context_root = tmp_path / "context"
+    context_root.mkdir(parents=True)
+    (context_root / "scratchpad").mkdir()
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(
+                context_root=context_root,
+                agent_workspaces_dir=context_root / "workspaces",
+            ),
+            profiles=ProfilesConfig(
+                active_profile="work",
+                profiles={
+                    "work": ProfileConfig(mcp_tools=["profile_mcp"]),
+                },
+            ),
+        )
+    )
+
+    registry = build_mcp_registry(manager)
+    assert "profile.echo" in registry.tools
+    assert "afs://profile/status" in registry.resources
+    assert "profile.review" in registry.prompts
+
+    tool_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 60,
+            "method": "tools/call",
+            "params": {
+                "name": "profile.echo",
+                "arguments": {"value": "ok"},
+            },
+        },
+        manager,
+        registry=registry,
+    )
+    assert tool_response is not None
+    assert tool_response["result"]["structuredContent"]["echo"] == "ok"
+
+    resource_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 61,
+            "method": "resources/read",
+            "params": {"uri": "afs://profile/status"},
+        },
+        manager,
+        registry=registry,
+    )
+    assert resource_response is not None
+    assert json.loads(resource_response["result"]["contents"][0]["text"]) == {
+        "status": "profile"
+    }
+
+    prompt_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 62,
+            "method": "prompts/get",
+            "params": {
+                "name": "profile.review",
+                "arguments": {"value": "ready"},
+            },
+        },
+        manager,
+        registry=registry,
+    )
+    assert prompt_response is not None
+    assert prompt_response["result"]["messages"][0]["content"]["text"] == "Profile review: ready"
+
+
+def test_tools_list_includes_agent_tools(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    response = _handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, manager)
+    assert response is not None
+    tools = response["result"]["tools"]
+    names = {tool["name"] for tool in tools}
+    assert "agent.spawn" in names
+    assert "agent.ps" in names
+    assert "agent.stop" in names
+
+
+def test_agent_ps_returns_empty_list(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "agent.ps", "arguments": {}},
+        },
+        manager,
+    )
+    assert response is not None
+    content = response["result"]["structuredContent"]
+    assert content["agents"] == []
+
+
+def test_agent_stop_missing_agent(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "agent.stop", "arguments": {"name": "nonexistent"}},
+        },
+        manager,
+    )
+    assert response is not None
+    content = response["result"]["structuredContent"]
+    assert content["stopped"] is False

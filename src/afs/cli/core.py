@@ -263,6 +263,21 @@ def agents_list_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def agents_ps_command(args: argparse.Namespace) -> int:
+    """List running background agents."""
+    from ..agents.supervisor import AgentSupervisor
+
+    supervisor = AgentSupervisor()
+    agents = [agent for agent in supervisor.list_running() if agent.state == "running"]
+    if not agents:
+        print("no running agents")
+        return 0
+    for agent in agents:
+        pid = agent.pid or "-"
+        print(f"{agent.name}\t{agent.state}\tpid={pid}\t{agent.started_at}")
+    return 0
+
+
 def agents_run_command(args: argparse.Namespace) -> int:
     """Run a built-in agent."""
     from ..agents import get_agent
@@ -524,6 +539,17 @@ def status_command(args: argparse.Namespace) -> int:
     else:
         print("  index: disabled")
 
+    # Running agents
+    try:
+        from ..agents.supervisor import AgentSupervisor
+
+        supervisor = AgentSupervisor()
+        running_agents = [a for a in supervisor.list_running() if a.state == "running"]
+        if running_agents:
+            print(f"  agents: {len(running_agents)} running")
+    except Exception:
+        pass
+
     warm = maintenance["reports"]["context_warm"]
     watch = maintenance["reports"]["context_watch"]
     print()
@@ -608,6 +634,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 
     agents_list = agents_sub.add_parser("list", help="List available agents.")
     agents_list.set_defaults(func=agents_list_command)
+
+    agents_ps = agents_sub.add_parser("ps", help="List running background agents.")
+    agents_ps.set_defaults(func=agents_ps_command)
 
     agents_run = agents_sub.add_parser("run", help="Run a built-in agent.")
     agents_run.add_argument("name", help="Agent name.")

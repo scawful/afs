@@ -7,6 +7,7 @@ from afs.models import MountType
 from afs.profiles import resolve_active_profile
 from afs.schema import (
     AFSConfig,
+    AgentConfig,
     ExtensionsConfig,
     GeneralConfig,
     ProfileConfig,
@@ -127,3 +128,62 @@ def test_resolve_profile_does_not_auto_load_unrequested_extensions(tmp_path: Pat
 
     assert resolved.enabled_extensions == []
     assert resolved.knowledge_mounts == []
+
+
+def test_profile_merges_mcp_tools_through_inheritance() -> None:
+    profiles = ProfilesConfig(
+        active_profile="child",
+        profiles={
+            "base": ProfileConfig(
+                mcp_tools=["base.tools"],
+                cli_modules=["base.cli"],
+                agent_configs=[AgentConfig(name="base-agent", module="base.mod")],
+            ),
+            "child": ProfileConfig(
+                inherits=["base"],
+                mcp_tools=["child.tools"],
+                cli_modules=["child.cli"],
+                agent_configs=[AgentConfig(name="child-agent", module="child.mod")],
+            ),
+        },
+    )
+    config = AFSConfig(profiles=profiles)
+    resolved = resolve_active_profile(config)
+
+    assert "base.tools" in resolved.mcp_tools
+    assert "child.tools" in resolved.mcp_tools
+    assert "base.cli" in resolved.cli_modules
+    assert "child.cli" in resolved.cli_modules
+    assert len(resolved.agent_configs) == 2
+    agent_names = {a.name for a in resolved.agent_configs}
+    assert "base-agent" in agent_names
+    assert "child-agent" in agent_names
+
+
+def test_profile_agent_configs_child_wins() -> None:
+    profiles = ProfilesConfig(
+        active_profile="child",
+        profiles={
+            "base": ProfileConfig(
+                agent_configs=[AgentConfig(name="shared", module="base.mod", role="observer")],
+            ),
+            "child": ProfileConfig(
+                inherits=["base"],
+                agent_configs=[AgentConfig(name="shared", module="child.mod", role="worker")],
+            ),
+        },
+    )
+    config = AFSConfig(profiles=profiles)
+    resolved = resolve_active_profile(config)
+
+    assert len(resolved.agent_configs) == 1
+    assert resolved.agent_configs[0].module == "child.mod"
+    assert resolved.agent_configs[0].role == "worker"
+
+
+def test_resolved_profile_new_fields_default_empty() -> None:
+    config = AFSConfig()
+    resolved = resolve_active_profile(config)
+    assert resolved.mcp_tools == []
+    assert resolved.cli_modules == []
+    assert resolved.agent_configs == []

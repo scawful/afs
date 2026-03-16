@@ -26,6 +26,7 @@ from .discovery import discover_contexts
 from .manager import AFSManager
 from .models import MountType
 from .plugins import load_enabled_extensions
+from .profiles import resolve_active_profile
 from .schema import ContextIndexConfig
 
 SERVER_NAME = "afs"
@@ -999,6 +1000,61 @@ def _invoke_extension_callable(
     return handler(*positional_args, **keyword_args)
 
 
+def _tool_agent_spawn(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agents.supervisor import AgentSupervisor
+
+    name_value = arguments.get("name", "")
+    module_value = arguments.get("module", "")
+    args = arguments.get("args")
+    if not isinstance(name_value, str) or not name_value.strip():
+        raise ValueError("name is required")
+    if not isinstance(module_value, str) or not module_value.strip():
+        raise ValueError("module is required")
+    if args is None:
+        args = []
+    if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+        raise ValueError("args must be a list of strings")
+
+    name = name_value.strip()
+    module = module_value.strip()
+    supervisor = AgentSupervisor()
+    try:
+        agent = supervisor.spawn(name, module, args)
+        return {"name": agent.name, "pid": agent.pid, "state": agent.state}
+    except RuntimeError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+def _tool_agent_ps(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agents.supervisor import AgentSupervisor
+
+    supervisor = AgentSupervisor()
+    agents = [agent for agent in supervisor.list_running() if agent.state == "running"]
+    return {
+        "agents": [
+            {
+                "name": a.name,
+                "state": a.state,
+                "pid": a.pid,
+                "started_at": a.started_at,
+            }
+            for a in agents
+        ]
+    }
+
+
+def _tool_agent_stop(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agents.supervisor import AgentSupervisor
+
+    name_value = arguments.get("name", "")
+    if not isinstance(name_value, str) or not name_value.strip():
+        raise ValueError("name is required")
+    name = name_value.strip()
+    supervisor = AgentSupervisor()
+    stopped = supervisor.stop(name)
+    return {"name": name, "stopped": stopped}
+
+
 def _builtin_tool_definitions() -> list[MCPToolDefinition]:
     return [
         MCPToolDefinition(
@@ -1234,6 +1290,48 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_context_repair,
+        ),
+        MCPToolDefinition(
+            name="agent.spawn",
+            description="Spawn a background agent process.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Agent name."},
+                    "module": {"type": "string", "description": "Python module to run."},
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Extra CLI arguments.",
+                    },
+                },
+                "required": ["name", "module"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_spawn,
+        ),
+        MCPToolDefinition(
+            name="agent.ps",
+            description="List running background agents.",
+            input_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_ps,
+        ),
+        MCPToolDefinition(
+            name="agent.stop",
+            description="Stop a running background agent.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Agent name to stop."},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_stop,
         ),
     ]
 
@@ -1767,6 +1865,85 @@ def _load_extension_mcp_definitions(
     return merged, statuses
 
 
+def _load_profile_mcp_definitions(
+    manager: AFSManager,
+) -> tuple[MCPExtensionContribution, list[ExtensionMCPStatus]]:
+    merged = MCPExtensionContribution()
+    statuses: list[ExtensionMCPStatus] = []
+
+    resolved_profile = resolve_active_profile(manager.config)
+    if not resolved_profile.mcp_tools:
+        return merged, statuses
+
+    extensions = load_enabled_extensions(config=manager.config)
+    extension_modules = {
+        module_name
+        for manifest in extensions.values()
+        for module_name in (
+            manifest.mcp_tools_module.strip(),
+            manifest.mcp_server_module.strip(),
+        )
+        if module_name
+    }
+
+    for module_name in resolved_profile.mcp_tools:
+        normalized = module_name.strip()
+        if not normalized or normalized in extension_modules:
+            continue
+
+        status = ExtensionMCPStatus(
+            extension=f"profile:{resolved_profile.name}",
+            surface="profile_mcp",
+            module=normalized,
+            factory="auto",
+        )
+        statuses.append(status)
+
+        _purge_extension_module_cache(normalized, [])
+        try:
+            module = importlib.import_module(normalized)
+        except Exception as exc:
+            status.error = f"import failed: {exc}"
+            continue
+
+        factory_name = ""
+        factory = getattr(module, "register_mcp_server", None)
+        if callable(factory):
+            factory_name = "register_mcp_server"
+        else:
+            factory = getattr(module, "register_mcp_tools", None)
+            if callable(factory):
+                factory_name = "register_mcp_tools"
+        if not callable(factory):
+            status.error = "factory not callable: register_mcp_server/register_mcp_tools"
+            continue
+
+        status.factory = factory_name
+        try:
+            definitions = _invoke_extension_callable(
+                factory,
+                manager=manager,
+                fallback_roles=["manager"],
+            )
+            contribution = _normalize_extension_contribution(
+                f"profile:{resolved_profile.name}",
+                definitions,
+                source=f"profile:{resolved_profile.name}",
+            )
+        except Exception as exc:
+            status.error = str(exc)
+            continue
+
+        status.loaded_tools = [tool.name for tool in contribution.tools]
+        status.loaded_resources = [resource.uri for resource in contribution.resources]
+        status.loaded_prompts = [prompt.name for prompt in contribution.prompts]
+        merged.tools.extend(contribution.tools)
+        merged.resources.extend(contribution.resources)
+        merged.prompts.extend(contribution.prompts)
+
+    return merged, statuses
+
+
 def build_mcp_registry(manager: AFSManager) -> MCPToolRegistry:
     """Build MCP registry including extension tools, resources, and prompts."""
     registry = MCPToolRegistry()
@@ -1775,12 +1952,21 @@ def build_mcp_registry(manager: AFSManager) -> MCPToolRegistry:
         registry.add_tool(tool)
 
     extension_contribution, statuses = _load_extension_mcp_definitions(manager)
-    registry.extension_status = statuses
+    profile_contribution, profile_statuses = _load_profile_mcp_definitions(manager)
+    registry.extension_status = statuses + profile_statuses
     for status in statuses:
+        if status.error:
+            registry.load_errors[f"{status.extension}:{status.surface}"] = status.error
+    for status in profile_statuses:
         if status.error:
             registry.load_errors[f"{status.extension}:{status.surface}"] = status.error
 
     for tool in extension_contribution.tools:
+        try:
+            registry.add_tool(tool)
+        except ValueError as exc:
+            registry.load_errors[f"{tool.source}:{tool.name}"] = str(exc)
+    for tool in profile_contribution.tools:
         try:
             registry.add_tool(tool)
         except ValueError as exc:
@@ -1791,8 +1977,18 @@ def build_mcp_registry(manager: AFSManager) -> MCPToolRegistry:
             registry.add_resource(resource)
         except ValueError as exc:
             registry.load_errors[f"{resource.source}:{resource.uri}"] = str(exc)
+    for resource in profile_contribution.resources:
+        try:
+            registry.add_resource(resource)
+        except ValueError as exc:
+            registry.load_errors[f"{resource.source}:{resource.uri}"] = str(exc)
 
     for prompt in extension_contribution.prompts:
+        try:
+            registry.add_prompt(prompt)
+        except ValueError as exc:
+            registry.load_errors[f"{prompt.source}:{prompt.name}"] = str(exc)
+    for prompt in profile_contribution.prompts:
         try:
             registry.add_prompt(prompt)
         except ValueError as exc:
@@ -2193,10 +2389,48 @@ def _handle_request(
     if request_id is not None:
         return _error_response(request_id, -32601, f"Method not found: {method}")
     return None
-def serve(config_path: Path | None = None) -> int:
+def _setup_demo_context(manager: AFSManager) -> None:
+    """Configure demo-mode profile with bundled agents and MCP tools."""
+    from .agents.supervisor import AgentSupervisor
+    from .profiles import resolve_active_profile
+    from .schema import AgentConfig
+
+    config = manager.config
+    resolved = resolve_active_profile(config)
+    demo_agents = resolved.agent_configs or [
+        AgentConfig(
+            name="demo-watcher",
+            role="observer",
+            description="Demo context watcher agent",
+            auto_start=True,
+            module="afs.agents.context_warm",
+            triggers=["on_mount", "on_profile_switch"],
+        ),
+    ]
+
+    # Print demo banner
+    print(
+        f"[demo] profile={resolved.name} "
+        f"extensions={len(resolved.enabled_extensions)} "
+        f"mcp_tools={len(resolved.mcp_tools)} "
+        f"agent_configs={len(demo_agents)}",
+        file=sys.stderr,
+    )
+
+    # Auto-start demo agents
+    supervisor = AgentSupervisor()
+    started = supervisor.auto_start(demo_agents)
+    for agent in started:
+        print(f"[demo] auto-started agent: {agent.name} pid={agent.pid}", file=sys.stderr)
+
+
+def serve(config_path: Path | None = None, *, demo: bool = False) -> int:
     config = load_config_model(config_path=config_path, merge_user=True)
     manager = AFSManager(config=config)
     registry = build_mcp_registry(manager)
+
+    if demo:
+        _setup_demo_context(manager)
 
     while True:
         message = _read_message(sys.stdin.buffer)
@@ -2212,9 +2446,10 @@ def serve(config_path: Path | None = None) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="AFS MCP server")
     parser.add_argument("--config", help="Config path override.")
+    parser.add_argument("--demo", action="store_true", help="Run in demo mode with sample agents.")
     args = parser.parse_args(argv)
     config_path = Path(args.config).expanduser().resolve() if args.config else None
-    return serve(config_path=config_path)
+    return serve(config_path=config_path, demo=args.demo)
 
 
 if __name__ == "__main__":

@@ -72,3 +72,35 @@ def test_extension_cli_modules_can_restore_commands(
     commands = _command_choices(parser)
 
     assert "legacy-demo" in commands
+
+
+def test_profile_cli_modules_can_register_commands(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "profile_cli.py").write_text(
+        "def register_parsers(subparsers):\n"
+        "    parser = subparsers.add_parser('profile-demo', help='profile demo command')\n"
+        "    parser.set_defaults(func=lambda _args: 0)\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "afs.toml"
+    config_path.write_text(
+        "[extensions]\n"
+        "auto_discover = false\n\n"
+        "[profiles]\n"
+        "active_profile = \"work\"\n\n"
+        "[profiles.work]\n"
+        "cli_modules = [\"profile_cli\"]\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("AFS_CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("AFS_EXTENSION_DIRS", raising=False)
+    monkeypatch.delenv("AFS_ENABLED_EXTENSIONS", raising=False)
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    parser = build_parser()
+    commands = _command_choices(parser)
+
+    assert "profile-demo" in commands

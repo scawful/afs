@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from .extensions import load_extensions
 from .models import MountType
-from .schema import AFSConfig, ProfileConfig
+from .schema import AFSConfig, AgentConfig, ProfileConfig
 
 if TYPE_CHECKING:
     from .manager import AFSManager
@@ -30,6 +30,9 @@ class ResolvedProfile:
     enabled_extensions: list[str] = field(default_factory=list)
     policies: list[str] = field(default_factory=list)
     extension_hooks: dict[str, list[str]] = field(default_factory=dict)
+    mcp_tools: list[str] = field(default_factory=list)
+    cli_modules: list[str] = field(default_factory=list)
+    agent_configs: list[AgentConfig] = field(default_factory=list)
 
 
 @dataclass
@@ -92,6 +95,14 @@ def _merge_unique_str(*groups: list[str]) -> list[str]:
     return merged
 
 
+def _merge_unique_agents(*groups: list[AgentConfig]) -> list[AgentConfig]:
+    merged: dict[str, AgentConfig] = {}
+    for group in groups:
+        for agent in group:
+            merged[agent.name] = agent
+    return list(merged.values())
+
+
 def _resolve_profile_graph(name: str, profiles: dict[str, ProfileConfig]) -> ProfileConfig:
     visited: set[str] = set()
 
@@ -116,6 +127,9 @@ def _resolve_profile_graph(name: str, profiles: dict[str, ProfileConfig]) -> Pro
                     parent_config.enabled_extensions,
                 ),
                 policies=_merge_unique_str(merged.policies, parent_config.policies),
+                mcp_tools=_merge_unique_str(merged.mcp_tools, parent_config.mcp_tools),
+                cli_modules=_merge_unique_str(merged.cli_modules, parent_config.cli_modules),
+                agent_configs=_merge_unique_agents(merged.agent_configs, parent_config.agent_configs),
             )
 
         return ProfileConfig(
@@ -128,6 +142,9 @@ def _resolve_profile_graph(name: str, profiles: dict[str, ProfileConfig]) -> Pro
                 profile.enabled_extensions,
             ),
             policies=_merge_unique_str(merged.policies, profile.policies),
+            mcp_tools=_merge_unique_str(merged.mcp_tools, profile.mcp_tools),
+            cli_modules=_merge_unique_str(merged.cli_modules, profile.cli_modules),
+            agent_configs=_merge_unique_agents(merged.agent_configs, profile.agent_configs),
         )
 
     return _visit(name)
@@ -163,12 +180,17 @@ def resolve_active_profile(
     extension_registries: list[Path] = []
     extension_policies: list[str] = []
     extension_hooks: dict[str, list[str]] = {}
+    extension_cli_modules: list[str] = []
+    extension_mcp_tools: list[str] = []
 
     for manifest in extension_manifests.values():
         extension_knowledge.extend(manifest.knowledge_mounts)
         extension_skills.extend(manifest.skill_roots)
         extension_registries.extend(manifest.model_registries)
         extension_policies.extend(manifest.policies)
+        extension_cli_modules.extend(manifest.cli_modules)
+        if manifest.mcp_tools_module:
+            extension_mcp_tools.append(manifest.mcp_tools_module)
         for event, commands in manifest.hooks.items():
             extension_hooks.setdefault(event, [])
             extension_hooks[event].extend(commands)
@@ -200,6 +222,15 @@ def resolve_active_profile(
             event: _merge_unique_str(commands)
             for event, commands in extension_hooks.items()
         },
+        mcp_tools=_merge_unique_str(
+            resolved_profile.mcp_tools,
+            extension_mcp_tools,
+        ),
+        cli_modules=_merge_unique_str(
+            resolved_profile.cli_modules,
+            extension_cli_modules,
+        ),
+        agent_configs=resolved_profile.agent_configs,
     )
 
 

@@ -214,9 +214,18 @@ class ProfileConfig:
     model_registries: list[Path] = field(default_factory=list)
     enabled_extensions: list[str] = field(default_factory=list)
     policies: list[str] = field(default_factory=list)
+    mcp_tools: list[str] = field(default_factory=list)
+    cli_modules: list[str] = field(default_factory=list)
+    agent_configs: list[AgentConfig] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ProfileConfig:
+        agents_raw = data.get("agent_configs", [])
+        agent_configs = [
+            AgentConfig.from_dict(item)
+            for item in agents_raw
+            if isinstance(item, dict)
+        ]
         return cls(
             inherits=_as_str_list(data.get("inherits")),
             knowledge_mounts=_as_path_list(data.get("knowledge_mounts")),
@@ -224,6 +233,9 @@ class ProfileConfig:
             model_registries=_as_path_list(data.get("model_registries")),
             enabled_extensions=_as_str_list(data.get("enabled_extensions")),
             policies=_as_str_list(data.get("policies")),
+            mcp_tools=_as_str_list(data.get("mcp_tools")),
+            cli_modules=_as_str_list(data.get("cli_modules")),
+            agent_configs=agent_configs,
         )
 
 
@@ -296,6 +308,10 @@ class AgentConfig:
     description: str = ""
     tags: list[str] = field(default_factory=list)
     auto_start: bool = False
+    triggers: list[str] = field(default_factory=list)
+    schedule: str = ""
+    module: str = ""
+    watch_paths: list[Path] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AgentConfig:
@@ -311,6 +327,10 @@ class AgentConfig:
             description=str(data.get("description", "")).strip(),
             tags=tags,
             auto_start=bool(data.get("auto_start", False)),
+            triggers=_as_str_list(data.get("triggers")),
+            schedule=str(data.get("schedule", "")).strip(),
+            module=str(data.get("module", "")).strip(),
+            watch_paths=_as_path_list(data.get("watch_paths")),
         )
 
 
@@ -615,6 +635,50 @@ class AFSConfig:
             memory_export=memory_export,
             context_index=context_index,
         )
+
+
+@dataclass
+class BundleManifest:
+    name: str
+    version: str = "0.1.0"
+    description: str = ""
+    author: str = ""
+    profile: ProfileConfig = field(default_factory=ProfileConfig)
+    skills_dir: str = "skills"
+    knowledge_dir: str = "knowledge"
+    tools_dir: str = "tools"
+    agents_dir: str = "agents"
+    mcp_tools_dir: str = "mcp_tools"
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> BundleManifest:
+        profile_raw = data.get("profile", {})
+        profile = ProfileConfig.from_dict(profile_raw) if isinstance(profile_raw, dict) else ProfileConfig()
+        return cls(
+            name=str(data.get("name", "")).strip(),
+            version=str(data.get("version", "0.1.0")).strip(),
+            description=str(data.get("description", "")).strip(),
+            author=str(data.get("author", "")).strip(),
+            profile=profile,
+            skills_dir=str(data.get("skills_dir", "skills")).strip(),
+            knowledge_dir=str(data.get("knowledge_dir", "knowledge")).strip(),
+            tools_dir=str(data.get("tools_dir", "tools")).strip(),
+            agents_dir=str(data.get("agents_dir", "agents")).strip(),
+            mcp_tools_dir=str(data.get("mcp_tools_dir", "mcp_tools")).strip(),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "version": self.version,
+            "description": self.description,
+            "author": self.author,
+            "skills_dir": self.skills_dir,
+            "knowledge_dir": self.knowledge_dir,
+            "tools_dir": self.tools_dir,
+            "agents_dir": self.agents_dir,
+            "mcp_tools_dir": self.mcp_tools_dir,
+        }
 
 
 def _parse_directory_config(data: dict[str, Any]) -> list[DirectoryConfig]:
