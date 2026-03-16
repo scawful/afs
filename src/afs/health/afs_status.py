@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +23,7 @@ from ..monorepo_bridge import (
 )
 from ..plugins import discover_extension_manifests, load_enabled_extensions
 from ..profiles import merge_extension_hooks, resolve_active_profile
+from .mcp_registration import SUPPORTED_MCP_CLIENTS, find_afs_mcp_registrations
 
 EMBEDDINGS_STALE_SECONDS = 24 * 3600
 HOOK_EVENTS = (
@@ -143,13 +143,13 @@ def render_afs_health(snapshot: dict[str, Any]) -> str:
     lines.append(
         "mcp: "
         f"running={str(mcp['running']).lower()} "
-        f"registered_with_gemini={str(mcp['registered_with_gemini']).lower()} "
+        f"registered_clients={','.join(mcp['registered_client_names']) or 'none'} "
         f"tools={len(mcp['tools'])}"
     )
-    if mcp["gemini_config_hits"]:
-        lines.append(
-            "gemini_config_hits: " + ", ".join(mcp["gemini_config_hits"])
-        )
+    for client in SUPPORTED_MCP_CLIENTS:
+        hits = mcp["config_hits"].get(client, [])
+        if hits:
+            lines.append(f"{client}_config_hits: " + ", ".join(hits))
     return "\n".join(lines)
 
 
@@ -224,7 +224,7 @@ def _extension_health(
 
 def _hook_health(config, profile, context_root: Path) -> dict[str, Any]:
     history_root = context_root / "history"
-    last_run: dict[str, str | None] = {event: None for event in HOOK_EVENTS}
+    last_run: dict[str, str | None] = dict.fromkeys(HOOK_EVENTS, None)
     if history_root.exists():
         for event in iter_history_events(
             history_root,
@@ -255,12 +255,26 @@ def _hook_health(config, profile, context_root: Path) -> dict[str, Any]:
 
 def _mcp_health(mcp_status: dict[str, Any]) -> dict[str, Any]:
     running, running_details = _detect_mcp_running()
-    gemini_hits = _find_gemini_afs_registration()
+    registrations = find_afs_mcp_registrations()
+    registered_clients = {
+        client: bool(registrations.get(client))
+        for client in SUPPORTED_MCP_CLIENTS
+    }
+    registered_client_names = [
+        client for client, is_registered in registered_clients.items() if is_registered
+    ]
     return {
         "running": running,
         "running_details": running_details,
-        "registered_with_gemini": bool(gemini_hits),
-        "gemini_config_hits": gemini_hits,
+        "registered_clients": registered_clients,
+        "registered_client_names": registered_client_names,
+        "config_hits": registrations,
+        "registered_with_gemini": registered_clients.get("gemini", False),
+        "gemini_config_hits": registrations.get("gemini", []),
+        "registered_with_claude": registered_clients.get("claude", False),
+        "claude_config_hits": registrations.get("claude", []),
+        "registered_with_codex": registered_clients.get("codex", False),
+        "codex_config_hits": registrations.get("codex", []),
         "tools": mcp_status.get("tools", []),
         "extension_status": mcp_status.get("extension_status", []),
         "load_errors": mcp_status.get("load_errors", {}),
@@ -277,7 +291,7 @@ def _detect_mcp_running() -> tuple[bool, list[str]]:
                     joined = " ".join(cmdline)
                 except (psutil.NoSuchProcess, psutil.AccessDenied, PermissionError, OSError):
                     continue
-                if "afs.mcp_server" in joined:
+                if _looks_like_afs_mcp_command(joined):
                     matches.append(f"pid={proc.info.get('pid')}")
         except (psutil.AccessDenied, PermissionError, OSError):
             matches = []
@@ -286,7 +300,7 @@ def _detect_mcp_running() -> tuple[bool, list[str]]:
 
     try:
         result = subprocess.run(
-            ["pgrep", "-f", "afs\\.mcp_server"],
+            ["pgrep", "-af", "afs"],
             check=False,
             capture_output=True,
             text=True,
@@ -295,48 +309,29 @@ def _detect_mcp_running() -> tuple[bool, list[str]]:
         return False, matches
 
     if result.returncode == 0:
-        pids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        pids: list[str] = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            pid, _, command = line.partition(" ")
+            if pid and _looks_like_afs_mcp_command(command):
+                pids.append(pid)
         if pids:
             matches.extend([f"pid={pid}" for pid in pids])
             return True, matches
     return False, matches
 
 
-def _find_gemini_afs_registration() -> list[str]:
-    candidates = [
-        Path.home() / ".config" / "gemini",
-        Path.home() / ".gemini",
-    ]
-    hits: list[str] = []
-    for root in candidates:
-        if not root.exists():
-            continue
-        try:
-            files = list(root.rglob("*.json"))
-        except OSError:
-            continue
-        for path in files:
-            try:
-                if path.stat().st_size > 1_500_000:
-                    continue
-                data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if _has_afs_mcp_entry(data):
-                hits.append(str(path))
-    return sorted(set(hits))
-
-
-def _has_afs_mcp_entry(data: Any) -> bool:
-    if not isinstance(data, dict):
+def _looks_like_afs_mcp_command(command: str) -> bool:
+    normalized = command.strip()
+    if not normalized:
         return False
-    servers = data.get("mcpServers")
-    if not isinstance(servers, dict):
-        return False
-    if "afs" in servers:
+    if "afs.mcp_server" in normalized:
         return True
-    serialized = json.dumps(servers, ensure_ascii=True)
-    return "afs.mcp_server" in serialized
+    if " -m afs mcp serve" in f" {normalized}":
+        return True
+    return "afs mcp serve" in normalized
 
 
 def _file_age_seconds(path: Path, *, now: datetime | None = None) -> float | None:

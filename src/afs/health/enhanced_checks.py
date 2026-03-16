@@ -20,7 +20,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -30,6 +30,10 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - environment dependent
     psutil = None
 
+from afs.health.mcp_registration import (
+    discover_mcp_config_paths,
+    find_afs_mcp_registrations,
+)
 from afs.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -897,13 +901,15 @@ class EnhancedHealthChecker:
     def _check_mcp_servers(self) -> float:
         """Check MCP servers operational status."""
         try:
-            mcp_config_path = Path.home() / ".claude" / "settings.json"
-            if mcp_config_path.exists():
-                with open(mcp_config_path) as f:
-                    config = json.load(f)
-                    mcps = config.get("mcpServers", {})
-                    return min(1.0, len(mcps) / 5.0)  # Score based on # of MCPs
-            return 0.5  # Default if no config found
+            configs = discover_mcp_config_paths()
+            registrations = find_afs_mcp_registrations()
+            configured_clients = sum(1 for paths in configs.values() if paths)
+            registered_clients = sum(1 for paths in registrations.values() if paths)
+            if configured_clients == 0:
+                return 0.5
+            if registered_clients == 0:
+                return 0.25
+            return min(1.0, 0.5 + (0.5 * (registered_clients / configured_clients)))
         except Exception:
             return 0.0
 
@@ -1111,7 +1117,6 @@ class EnhancedHealthChecker:
     def _get_trend_summary(self) -> dict[str, list[float]]:
         """Get summary of trends for report."""
         summary = {}
-        cutoff_date = datetime.now() - timedelta(hours=24)
 
         for score in self.scores:
             key = f"{score.category}/{score.metric}"

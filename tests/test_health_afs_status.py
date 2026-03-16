@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from afs.health.afs_status import collect_afs_health
+from afs.health.afs_status import _looks_like_afs_mcp_command, collect_afs_health
 
 
 def test_collect_afs_health_snapshot(tmp_path: Path) -> None:
@@ -36,3 +36,13 @@ def test_collect_afs_health_snapshot(tmp_path: Path) -> None:
     assert snapshot["context"]["path"] == str(context_root.resolve())
     assert "mcp" in snapshot
     assert "extensions" in snapshot
+    assert "registered_clients" in snapshot["mcp"]
+    assert "registered_with_claude" in snapshot["mcp"]
+    assert "registered_with_codex" in snapshot["mcp"]
+
+
+def test_detect_mcp_running_matches_cli_variants() -> None:
+    assert _looks_like_afs_mcp_command("/usr/bin/python3 -m afs.mcp_server")
+    assert _looks_like_afs_mcp_command("/usr/bin/python3 -m afs mcp serve")
+    assert _looks_like_afs_mcp_command("/Users/scawful/src/lab/afs/scripts/afs mcp serve")
+    assert not _looks_like_afs_mcp_command("/usr/bin/python3 -m afs health")

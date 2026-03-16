@@ -23,6 +23,7 @@ class AgentSpec:
 
 
 CORE_AGENT_MODULES = (
+    "afs.agents.claude_orchestrator",
     "afs.agents.context_audit",
     "afs.agents.context_inventory",
     "afs.agents.context_warm",

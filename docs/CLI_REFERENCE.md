@@ -94,6 +94,15 @@ Gemini brief agent:
 ```bash
 ./scripts/afs agents run gemini-workspace-brief --stdout
 ./scripts/afs services start gemini-workspace-brief
+./scripts/afs agents run claude-orchestrator --prompt "Summarize this repo"
+```
+
+Codex MCP config:
+
+```toml
+[mcp_servers.afs]
+command = "/Users/scawful/src/lab/afs/scripts/afs"
+args = ["mcp", "serve"]
 ```
 
 ## Health
@@ -103,3 +112,6 @@ Gemini brief agent:
 ./scripts/afs health --json
 ./scripts/afs health check --level standard
 ```
+
+`afs health` reports AFS MCP registration for Gemini, Claude, and Codex, and it
+detects both `python -m afs.mcp_server` and `afs mcp serve` processes.

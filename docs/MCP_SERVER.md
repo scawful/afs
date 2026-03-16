@@ -25,6 +25,35 @@ gemini mcp add afs /Users/scawful/src/lab/afs/scripts/afs mcp serve
 If Gemini is running inside an environment where `afs` is already installed,
 `python3 -m afs.mcp_server` also works.
 
+## Codex Registration
+
+Codex uses `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.afs]
+command = "/Users/scawful/src/lab/afs/scripts/afs"
+args = ["mcp", "serve"]
+```
+
+Project-local overrides also work via `./.codex/config.toml`.
+
+## Claude Registration
+
+Claude-compatible MCP configs use the same `mcpServers` JSON shape. Depending on
+the client build, that is typically either `~/.claude/settings.json` or
+`~/Library/Application Support/Claude/claude_desktop_config.json`.
+
+```json
+{
+  "mcpServers": {
+    "afs": {
+      "command": "/Users/scawful/src/lab/afs/scripts/afs",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
 ## Antigravity Custom Config
 
 In Antigravity, open `MCP Servers -> Manage MCP Servers -> View raw config`, then add:
@@ -142,6 +171,10 @@ Gemini background brief surfaces:
 ```
 
 The brief agent requires `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
+
+`afs health` now reports AFS MCP registration across Gemini, Claude, and Codex
+config surfaces, and it recognizes both `python -m afs.mcp_server` and
+wrapper-style `afs mcp serve` processes.
 
 ## Example Call Shape
 

@@ -5,6 +5,11 @@ from pathlib import Path
 from afs.agents import get_agent, list_agents
 
 
+def test_core_agents_include_claude_orchestrator() -> None:
+    names = {spec.name for spec in list_agents()}
+    assert "claude-orchestrator" in names
+
+
 def test_extension_agent_modules_register_agents(
     monkeypatch,
     tmp_path: Path,

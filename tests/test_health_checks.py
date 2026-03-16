@@ -197,6 +197,30 @@ class TestEnhancedHealthChecker:
         score = checker._check_dependencies()
         assert 0.0 <= score <= 1.0
 
+    @patch("afs.health.enhanced_checks.find_afs_mcp_registrations")
+    @patch("afs.health.enhanced_checks.discover_mcp_config_paths")
+    def test_mcp_server_check_uses_supported_clients(
+        self,
+        mock_discover_mcp_config_paths,
+        mock_find_afs_mcp_registrations,
+        checker,
+    ):
+        """Test MCP config scoring across supported clients."""
+        mock_discover_mcp_config_paths.return_value = {
+            "gemini": [Path("/tmp/.gemini/mcp.json")],
+            "claude": [Path("/tmp/.claude/settings.json")],
+            "codex": [],
+        }
+        mock_find_afs_mcp_registrations.return_value = {
+            "gemini": ["/tmp/.gemini/mcp.json"],
+            "claude": [],
+            "codex": [],
+        }
+
+        score = checker._check_mcp_servers()
+
+        assert score == pytest.approx(0.75)
+
     def test_data_integrity_check(self, checker):
         """Test training data integrity check."""
         score = checker._check_data_integrity()

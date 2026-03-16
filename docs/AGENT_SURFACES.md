@@ -150,18 +150,41 @@ Gemini background agent surfaces:
 ```bash
 ~/src/lab/afs/scripts/afs agents run gemini-workspace-brief --stdout
 ~/src/lab/afs/scripts/afs services start gemini-workspace-brief
+~/src/lab/afs/scripts/afs agents run claude-orchestrator --prompt "Summarize this workspace"
 ```
 
 The brief agent writes JSON and Markdown summaries under
 `.context/scratchpad/afs_agents/` and requires `GEMINI_API_KEY` or
-`GOOGLE_API_KEY`.
+`GOOGLE_API_KEY`. `claude-orchestrator` is now a built-in agent surface and can
+be listed with `afs agents list`.
 
-## Gemini / Antigravity Registration
+## Gemini / Claude / Codex Registration
 
 Recommended command target:
 
 ```bash
 ~/src/lab/afs/scripts/afs mcp serve
+```
+
+Codex user config:
+
+```toml
+[mcp_servers.afs]
+command = "/Users/scawful/src/lab/afs/scripts/afs"
+args = ["mcp", "serve"]
+```
+
+Claude JSON config:
+
+```json
+{
+  "mcpServers": {
+    "afs": {
+      "command": "/Users/scawful/src/lab/afs/scripts/afs",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
 ```
 
 Antigravity raw config example:
@@ -179,3 +202,6 @@ Antigravity raw config example:
 
 If the client requires a Python module entrypoint instead, use a Python
 environment where `afs` is installed and run `python3 -m afs.mcp_server`.
+
+`afs health` checks Gemini, Claude, and Codex registration files and also
+recognizes wrapper-style `afs mcp serve` processes.
