@@ -119,13 +119,70 @@ max_file_size_bytes = 262144
 max_content_chars = 12000
 ```
 
-Extensions can register additional tools via `extension.toml`:
+Extensions can extend the MCP surface via `extension.toml`.
+
+Legacy tool-only registration still works:
 
 ```toml
 [mcp_tools]
 module = "afs_google.mcp_tools"
 factory = "register_mcp_tools"
 ```
+
+New server-surface registration can contribute tools, resources, and prompts
+from one factory:
+
+```toml
+[mcp_server]
+module = "afs_google.mcp_surface"
+factory = "register_mcp_server"
+```
+
+Example factory:
+
+```python
+def register_mcp_server(_manager):
+    def workspace_status(_manager):
+        return {"text": "{\"workspace\": \"ok\"}"}
+
+    def workspace_prompt(arguments):
+        return f"Review workspace: {arguments.get('query', '')}"
+
+    return {
+        "tools": [
+            {
+                "name": "workspace.echo",
+                "description": "Echo extension payload",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+                "handler": lambda arguments: {"echo": arguments.get("value", "")},
+            }
+        ],
+        "resources": [
+            {
+                "uri": "afs://workspace/status",
+                "name": "Workspace status",
+                "description": "Extension-owned workspace health",
+                "mimeType": "application/json",
+                "handler": workspace_status,
+            }
+        ],
+        "prompts": [
+            {
+                "name": "workspace.review",
+                "description": "Review extension workspace state",
+                "arguments": [{"name": "query", "required": False}],
+                "handler": workspace_prompt,
+            }
+        ],
+    }
+```
+
+Core tool names, core prompt names, and reserved `afs://contexts` /
+`afs://context/...` resources cannot be overridden by extensions.
 
 Path operations are scoped to:
 

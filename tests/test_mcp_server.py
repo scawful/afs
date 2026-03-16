@@ -1482,3 +1482,281 @@ def test_extension_mcp_tools_are_registered_and_callable(tmp_path: Path) -> None
     )
     assert call_response is not None
     assert call_response["result"]["structuredContent"]["echo"] == "ok"
+
+
+def test_extension_mcp_server_registers_tools_resources_and_prompts(
+    tmp_path: Path,
+) -> None:
+    ext_root = tmp_path / "extensions"
+    ext_dir = ext_root / "ext_workspace"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "extension.toml").write_text(
+        "name = \"ext_workspace\"\n"
+        "\n"
+        "[mcp_server]\n"
+        "module = \"ext_surface\"\n"
+        "factory = \"register_mcp_server\"\n",
+        encoding="utf-8",
+    )
+    (ext_dir / "ext_surface.py").write_text(
+        "def register_mcp_server(_manager):\n"
+        "    def echo(arguments):\n"
+        "        return {'echo': arguments.get('value', '')}\n"
+        "\n"
+        "    def status_resource(manager):\n"
+        "        return {'text': '{\"status\": \"ok\"}'}\n"
+        "\n"
+        "    def review_prompt(arguments):\n"
+        "        value = arguments.get('value', '')\n"
+        "        return f'Extension review: {value}'\n"
+        "\n"
+        "    return {\n"
+        "        'tools': [\n"
+        "            {\n"
+        "                'name': 'workspace.echo',\n"
+        "                'description': 'Echo test payload',\n"
+        "                'inputSchema': {\n"
+        "                    'type': 'object',\n"
+        "                    'properties': {'value': {'type': 'string'}},\n"
+        "                    'additionalProperties': False,\n"
+        "                },\n"
+        "                'handler': echo,\n"
+        "            }\n"
+        "        ],\n"
+        "        'resources': [\n"
+        "            {\n"
+        "                'uri': 'afs://ext/status',\n"
+        "                'name': 'Extension status',\n"
+        "                'description': 'Status resource from extension',\n"
+        "                'mimeType': 'application/json',\n"
+        "                'handler': status_resource,\n"
+        "            }\n"
+        "        ],\n"
+        "        'prompts': [\n"
+        "            {\n"
+        "                'name': 'ext.review',\n"
+        "                'description': 'Extension review prompt',\n"
+        "                'arguments': [\n"
+        "                    {\n"
+        "                        'name': 'value',\n"
+        "                        'description': 'Value to echo',\n"
+        "                        'required': False,\n"
+        "                    }\n"
+        "                ],\n"
+        "                'handler': review_prompt,\n"
+        "            }\n"
+        "        ],\n"
+        "    }\n",
+        encoding="utf-8",
+    )
+
+    context_root = tmp_path / "context"
+    context_root.mkdir(parents=True)
+    (context_root / "scratchpad").mkdir()
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(
+                context_root=context_root,
+                agent_workspaces_dir=context_root / "workspaces",
+            ),
+            extensions=ExtensionsConfig(
+                enabled_extensions=["ext_workspace"],
+                extension_dirs=[ext_root],
+            ),
+        )
+    )
+
+    registry = build_mcp_registry(manager)
+    assert "workspace.echo" in registry.tools
+    assert "afs://ext/status" in registry.resources
+    assert "ext.review" in registry.prompts
+
+    tool_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 31,
+            "method": "tools/call",
+            "params": {
+                "name": "workspace.echo",
+                "arguments": {"value": "ok"},
+            },
+        },
+        manager,
+        registry=registry,
+    )
+    assert tool_response is not None
+    assert tool_response["result"]["structuredContent"]["echo"] == "ok"
+
+    resources_response = _handle_request(
+        {"jsonrpc": "2.0", "id": 32, "method": "resources/list"},
+        manager,
+        registry=registry,
+    )
+    assert resources_response is not None
+    resource_uris = {item["uri"] for item in resources_response["result"]["resources"]}
+    assert "afs://ext/status" in resource_uris
+
+    resource_read_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 33,
+            "method": "resources/read",
+            "params": {"uri": "afs://ext/status"},
+        },
+        manager,
+        registry=registry,
+    )
+    assert resource_read_response is not None
+    contents = resource_read_response["result"]["contents"]
+    assert contents[0]["uri"] == "afs://ext/status"
+    assert json.loads(contents[0]["text"]) == {"status": "ok"}
+
+    prompts_response = _handle_request(
+        {"jsonrpc": "2.0", "id": 34, "method": "prompts/list"},
+        manager,
+        registry=registry,
+    )
+    assert prompts_response is not None
+    prompt_names = {item["name"] for item in prompts_response["result"]["prompts"]}
+    assert "ext.review" in prompt_names
+
+    prompt_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 35,
+            "method": "prompts/get",
+            "params": {
+                "name": "ext.review",
+                "arguments": {"value": "ready"},
+            },
+        },
+        manager,
+        registry=registry,
+    )
+    assert prompt_response is not None
+    messages = prompt_response["result"]["messages"]
+    assert messages[0]["content"]["text"] == "Extension review: ready"
+
+
+def test_extension_mcp_server_conflicts_do_not_override_core_surface(
+    tmp_path: Path,
+) -> None:
+    ext_root = tmp_path / "extensions"
+    ext_dir = ext_root / "ext_workspace"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "extension.toml").write_text(
+        "name = \"ext_workspace\"\n"
+        "\n"
+        "[mcp_server]\n"
+        "module = \"ext_surface\"\n"
+        "factory = \"register_mcp_server\"\n",
+        encoding="utf-8",
+    )
+    (ext_dir / "ext_surface.py").write_text(
+        "def register_mcp_server(_manager):\n"
+        "    def duplicate_tool(arguments):\n"
+        "        return {'duplicate': True}\n"
+        "\n"
+        "    def duplicate_resource(manager):\n"
+        "        return {'text': 'duplicate'}\n"
+        "\n"
+        "    def duplicate_prompt(arguments):\n"
+        "        return 'duplicate'\n"
+        "\n"
+        "    return {\n"
+        "        'tools': [\n"
+        "            {\n"
+        "                'name': 'fs.read',\n"
+        "                'description': 'duplicate tool',\n"
+        "                'handler': duplicate_tool,\n"
+        "            }\n"
+        "        ],\n"
+        "        'resources': [\n"
+        "            {\n"
+        "                'uri': 'afs://contexts',\n"
+        "                'name': 'duplicate resource',\n"
+        "                'description': 'duplicate resource',\n"
+        "                'handler': duplicate_resource,\n"
+        "            }\n"
+        "        ],\n"
+        "        'prompts': [\n"
+        "            {\n"
+        "                'name': 'afs.context.overview',\n"
+        "                'description': 'duplicate prompt',\n"
+        "                'handler': duplicate_prompt,\n"
+        "            }\n"
+        "        ],\n"
+        "    }\n",
+        encoding="utf-8",
+    )
+
+    context_root = tmp_path / "context"
+    context_root.mkdir(parents=True)
+    (context_root / "scratchpad").mkdir()
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(
+                context_root=context_root,
+                agent_workspaces_dir=context_root / "workspaces",
+            ),
+            extensions=ExtensionsConfig(
+                enabled_extensions=["ext_workspace"],
+                extension_dirs=[ext_root],
+            ),
+        )
+    )
+
+    registry = build_mcp_registry(manager)
+    errors = registry.load_errors
+    assert any("Tool 'fs.read' already registered by core" in message for message in errors.values())
+    assert any(
+        "Resource 'afs://contexts' already registered by core" in message
+        for message in errors.values()
+    )
+    assert any(
+        "Prompt 'afs.context.overview' already registered by core" in message
+        for message in errors.values()
+    )
+
+
+def test_tools_list_includes_agent_tools(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    response = _handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, manager)
+    assert response is not None
+    tools = response["result"]["tools"]
+    names = {tool["name"] for tool in tools}
+    assert "agent.spawn" in names
+    assert "agent.ps" in names
+    assert "agent.stop" in names
+
+
+def test_agent_ps_returns_empty_list(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "agent.ps", "arguments": {}},
+        },
+        manager,
+    )
+    assert response is not None
+    content = response["result"]["structuredContent"]
+    assert content["agents"] == []
+
+
+def test_agent_stop_missing_agent(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "agent.stop", "arguments": {"name": "nonexistent"}},
+        },
+        manager,
+    )
+    assert response is not None
+    content = response["result"]["structuredContent"]
+    assert content["stopped"] is False

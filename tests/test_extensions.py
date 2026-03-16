@@ -23,7 +23,11 @@ def test_discover_and_load_extension_manifest(tmp_path: Path) -> None:
         "\n"
         "[mcp_tools]\n"
         "module = \"afs_google_test.mcp\"\n"
-        "factory = \"register_mcp_tools\"\n",
+        "factory = \"register_mcp_tools\"\n"
+        "\n"
+        "[mcp_server]\n"
+        "module = \"afs_google_test.server\"\n"
+        "factory = \"register_mcp_server\"\n",
         encoding="utf-8",
     )
 
@@ -40,3 +44,5 @@ def test_discover_and_load_extension_manifest(tmp_path: Path) -> None:
     assert manifest.agent_modules == ["afs_google_test.agents"]
     assert manifest.mcp_tools_module == "afs_google_test.mcp"
     assert manifest.mcp_tools_factory == "register_mcp_tools"
+    assert manifest.mcp_server_module == "afs_google_test.server"
+    assert manifest.mcp_server_factory == "register_mcp_server"

@@ -30,6 +30,8 @@ class ExtensionManifest:
     hooks: dict[str, list[str]] = field(default_factory=dict)
     mcp_tools_module: str = ""
     mcp_tools_factory: str = "register_mcp_tools"
+    mcp_server_module: str = ""
+    mcp_server_factory: str = "register_mcp_server"
 
 
 def _as_path_list(items: Any, root: Path) -> list[Path]:
@@ -215,6 +217,21 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
         if isinstance(module_value, str):
             mcp_tools_module = module_value.strip()
 
+    mcp_server_module = ""
+    mcp_server_factory = "register_mcp_server"
+    mcp_server_raw = raw.get("mcp_server")
+    if isinstance(mcp_server_raw, dict):
+        module_value = mcp_server_raw.get("module")
+        if isinstance(module_value, str):
+            mcp_server_module = module_value.strip()
+        factory_value = mcp_server_raw.get("factory")
+        if isinstance(factory_value, str) and factory_value.strip():
+            mcp_server_factory = factory_value.strip()
+    else:
+        module_value = raw.get("mcp_server_module")
+        if isinstance(module_value, str):
+            mcp_server_module = module_value.strip()
+
     return ExtensionManifest(
         name=name.strip(),
         root=root,
@@ -229,6 +246,8 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
         hooks=hooks,
         mcp_tools_module=mcp_tools_module,
         mcp_tools_factory=mcp_tools_factory,
+        mcp_server_module=mcp_server_module,
+        mcp_server_factory=mcp_server_factory,
     )
 
 

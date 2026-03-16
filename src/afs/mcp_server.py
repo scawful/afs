@@ -31,8 +31,17 @@ from .schema import ContextIndexConfig
 SERVER_NAME = "afs"
 SERVER_VERSION = "0.1.0"
 PROTOCOL_VERSION = "2024-11-05"
+_CORE_RESOURCE_URIS = {"afs://contexts"}
+_CORE_RESOURCE_PREFIXES = ("afs://context/",)
+_CORE_PROMPT_NAMES = {
+    "afs.context.overview",
+    "afs.query.search",
+    "afs.scratchpad.review",
+}
 
 ToolHandler = Callable[[dict[str, Any], AFSManager], dict[str, Any]]
+ResourceHandler = Callable[..., dict[str, Any]]
+PromptHandler = Callable[..., list[dict[str, Any]]]
 
 
 @dataclass(frozen=True)
@@ -51,20 +60,67 @@ class MCPToolDefinition:
         }
 
 
+@dataclass(frozen=True)
+class MCPResourceDefinition:
+    uri: str
+    name: str
+    description: str
+    mime_type: str
+    handler: ResourceHandler
+    source: str = "core"
+
+    def to_spec(self) -> dict[str, Any]:
+        return {
+            "uri": self.uri,
+            "name": self.name,
+            "description": self.description,
+            "mimeType": self.mime_type,
+        }
+
+
+@dataclass(frozen=True)
+class MCPPromptDefinition:
+    name: str
+    description: str
+    arguments: list[dict[str, Any]]
+    handler: PromptHandler
+    source: str = "core"
+
+    def to_spec(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "arguments": list(self.arguments),
+        }
+
+
+@dataclass(frozen=True)
+class MCPExtensionContribution:
+    tools: list[MCPToolDefinition] = field(default_factory=list)
+    resources: list[MCPResourceDefinition] = field(default_factory=list)
+    prompts: list[MCPPromptDefinition] = field(default_factory=list)
+
+
 @dataclass
 class ExtensionMCPStatus:
     extension: str
+    surface: str
     module: str
     factory: str
     loaded_tools: list[str] = field(default_factory=list)
+    loaded_resources: list[str] = field(default_factory=list)
+    loaded_prompts: list[str] = field(default_factory=list)
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "extension": self.extension,
+            "surface": self.surface,
             "module": self.module,
             "factory": self.factory,
             "loaded_tools": list(self.loaded_tools),
+            "loaded_resources": list(self.loaded_resources),
+            "loaded_prompts": list(self.loaded_prompts),
             "error": self.error,
         }
 
@@ -72,6 +128,8 @@ class ExtensionMCPStatus:
 @dataclass
 class MCPToolRegistry:
     tools: dict[str, MCPToolDefinition] = field(default_factory=dict)
+    resources: dict[str, MCPResourceDefinition] = field(default_factory=dict)
+    prompts: dict[str, MCPPromptDefinition] = field(default_factory=dict)
     extension_status: list[ExtensionMCPStatus] = field(default_factory=list)
     load_errors: dict[str, str] = field(default_factory=dict)
 
@@ -84,8 +142,44 @@ class MCPToolRegistry:
             )
         self.tools[tool.name] = tool
 
+    def add_resource(self, resource: MCPResourceDefinition) -> None:
+        if resource.uri in _CORE_RESOURCE_URIS or any(
+            resource.uri.startswith(prefix) for prefix in _CORE_RESOURCE_PREFIXES
+        ):
+            raise ValueError(
+                f"Resource '{resource.uri}' already registered by core; "
+                f"cannot override from {resource.source}"
+            )
+        if resource.uri in self.resources:
+            existing = self.resources[resource.uri]
+            raise ValueError(
+                f"Resource '{resource.uri}' already registered by {existing.source}; "
+                f"cannot override from {resource.source}"
+            )
+        self.resources[resource.uri] = resource
+
+    def add_prompt(self, prompt: MCPPromptDefinition) -> None:
+        if prompt.name in _CORE_PROMPT_NAMES:
+            raise ValueError(
+                f"Prompt '{prompt.name}' already registered by core; "
+                f"cannot override from {prompt.source}"
+            )
+        if prompt.name in self.prompts:
+            existing = self.prompts[prompt.name]
+            raise ValueError(
+                f"Prompt '{prompt.name}' already registered by {existing.source}; "
+                f"cannot override from {prompt.source}"
+            )
+        self.prompts[prompt.name] = prompt
+
     def specs(self) -> list[dict[str, Any]]:
         return [self.tools[name].to_spec() for name in sorted(self.tools)]
+
+    def resource_specs(self) -> list[dict[str, Any]]:
+        return [self.resources[uri].to_spec() for uri in sorted(self.resources)]
+
+    def prompt_specs(self) -> list[dict[str, Any]]:
+        return [self.prompts[name].to_spec() for name in sorted(self.prompts)]
 
     def call(
         self,
@@ -97,6 +191,23 @@ class MCPToolRegistry:
         if not tool:
             raise ValueError(f"Unknown tool: {name}")
         return tool.handler(arguments, manager)
+
+    def read_resource(self, uri: str, manager: AFSManager) -> dict[str, Any]:
+        resource = self.resources.get(uri)
+        if not resource:
+            raise ValueError(f"Unknown resource URI: {uri}")
+        return resource.handler(uri, manager)
+
+    def get_prompt(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        manager: AFSManager,
+    ) -> list[dict[str, Any]]:
+        prompt = self.prompts.get(name)
+        if not prompt:
+            raise ValueError(f"Unknown prompt: {name}")
+        return prompt.handler(arguments, manager)
 
 
 def _read_message(stream) -> dict[str, Any] | None:
@@ -812,6 +923,82 @@ def _tool_context_repair(arguments: dict[str, Any], manager: AFSManager) -> dict
     )
 
 
+_PARAMETER_ROLE_ALIASES: dict[str, set[str]] = {
+    "arguments": {"arguments", "args", "input", "params", "payload"},
+    "manager": {"manager", "afs_manager", "context_manager", "mgr"},
+    "uri": {"uri", "resource_uri", "resource", "path"},
+}
+
+
+def _parameter_role(name: str) -> str | None:
+    normalized = name.strip().lstrip("_").lower()
+    for role, aliases in _PARAMETER_ROLE_ALIASES.items():
+        if normalized in aliases:
+            return role
+    return None
+
+
+def _invoke_extension_callable(
+    handler: Callable[..., Any],
+    *,
+    manager: AFSManager,
+    fallback_roles: list[str],
+    arguments: dict[str, Any] | None = None,
+    uri: str | None = None,
+) -> Any:
+    named_values = {
+        "arguments": arguments,
+        "manager": manager,
+        "uri": uri,
+    }
+    signature = inspect.signature(handler)
+    params = list(signature.parameters.values())
+    if not params:
+        return handler()
+
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params):
+        kwargs = {
+            role: value
+            for role, value in named_values.items()
+            if value is not None
+        }
+        return handler(**kwargs)
+
+    fallback = [
+        role for role in fallback_roles if named_values.get(role) is not None
+    ]
+    fallback_index = 0
+    positional_args: list[Any] = []
+    keyword_args: dict[str, Any] = {}
+
+    for param in params:
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            while fallback_index < len(fallback):
+                positional_args.append(named_values[fallback[fallback_index]])
+                fallback_index += 1
+            continue
+
+        role = _parameter_role(param.name)
+        value = named_values.get(role) if role else None
+        if value is None:
+            while fallback_index < len(fallback):
+                next_role = fallback[fallback_index]
+                fallback_index += 1
+                candidate = named_values.get(next_role)
+                if candidate is not None:
+                    value = candidate
+                    break
+        if value is None and param.default is not inspect.Parameter.empty:
+            continue
+
+        if param.kind == inspect.Parameter.KEYWORD_ONLY:
+            keyword_args[param.name] = value
+        else:
+            positional_args.append(value)
+
+    return handler(*positional_args, **keyword_args)
+
+
 def _builtin_tool_definitions() -> list[MCPToolDefinition]:
     return [
         MCPToolDefinition(
@@ -1065,22 +1252,31 @@ def _prepend_paths(paths: Iterable[Path]):
         sys.path = original
 
 
-def _invoke_factory(factory: Callable[..., Any], manager: AFSManager) -> Any:
-    signature = inspect.signature(factory)
-    params = list(signature.parameters.values())
-    if not params:
-        return factory()
-    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params):
-        return factory(manager=manager)
-    first = params[0]
-    if first.kind in (
-        inspect.Parameter.POSITIONAL_ONLY,
-        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-    ):
-        return factory(manager)
-    if first.kind == inspect.Parameter.KEYWORD_ONLY and first.name == "manager":
-        return factory(manager=manager)
-    return factory()
+def _path_within_roots(path: Path, roots: Iterable[Path]) -> bool:
+    resolved = path.expanduser().resolve()
+    for root in roots:
+        candidate = root.expanduser().resolve()
+        if resolved == candidate or resolved.is_relative_to(candidate):
+            return True
+    return False
+
+
+def _purge_extension_module_cache(module_name: str, search_roots: list[Path]) -> None:
+    related_names = {
+        ".".join(parts)
+        for parts in (
+            module_name.split(".")[:index]
+            for index in range(1, len(module_name.split(".")) + 1)
+        )
+    }
+    prefixes = tuple(f"{name}." for name in related_names)
+    for loaded_name, loaded_module in list(sys.modules.items()):
+        if loaded_name not in related_names and not loaded_name.startswith(prefixes):
+            continue
+        module_file = getattr(loaded_module, "__file__", None)
+        if isinstance(module_file, str) and _path_within_roots(Path(module_file), search_roots):
+            continue
+        sys.modules.pop(loaded_name, None)
 
 
 def _invoke_tool_handler(
@@ -1088,24 +1284,51 @@ def _invoke_tool_handler(
     arguments: dict[str, Any],
     manager: AFSManager,
 ) -> dict[str, Any]:
-    signature = inspect.signature(handler)
-    params = list(signature.parameters.values())
-    if not params:
-        return handler()
-    if len(params) == 1:
-        return handler(arguments)
-    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params):
-        return handler(arguments=arguments, manager=manager)
-    return handler(arguments, manager)
+    return _invoke_extension_callable(
+        handler,
+        manager=manager,
+        arguments=arguments,
+        fallback_roles=["arguments", "manager"],
+    )
+
+
+def _invoke_resource_handler(
+    handler: Callable[..., dict[str, Any]],
+    uri: str,
+    manager: AFSManager,
+) -> dict[str, Any]:
+    return _invoke_extension_callable(
+        handler,
+        manager=manager,
+        uri=uri,
+        fallback_roles=["uri", "manager"],
+    )
+
+
+def _invoke_prompt_handler(
+    handler: Callable[..., list[dict[str, Any]]],
+    arguments: dict[str, Any],
+    manager: AFSManager,
+) -> list[dict[str, Any]]:
+    return _invoke_extension_callable(
+        handler,
+        manager=manager,
+        arguments=arguments,
+        fallback_roles=["arguments", "manager"],
+    )
 
 
 def _normalize_extension_tools(
     extension_name: str,
     definitions: Any,
+    *,
+    source: str,
 ) -> list[MCPToolDefinition]:
     if definitions is None:
         return []
-    if isinstance(definitions, dict):
+    if isinstance(definitions, MCPToolDefinition):
+        payloads = [definitions]
+    elif isinstance(definitions, dict):
         payloads = [definitions]
     elif isinstance(definitions, (list, tuple)):
         payloads = list(definitions)
@@ -1116,6 +1339,27 @@ def _normalize_extension_tools(
 
     tools: list[MCPToolDefinition] = []
     for payload in payloads:
+        if isinstance(payload, MCPToolDefinition):
+            handler = payload.handler
+
+            def _wrapped(
+                arguments: dict[str, Any],
+                manager: AFSManager,
+                _handler=handler,
+            ) -> dict[str, Any]:
+                return _invoke_tool_handler(_handler, arguments, manager)
+
+            tools.append(
+                MCPToolDefinition(
+                    name=payload.name.strip(),
+                    description=payload.description.strip(),
+                    input_schema=payload.input_schema,
+                    handler=_wrapped,
+                    source=source,
+                )
+            )
+            continue
+
         if not isinstance(payload, dict):
             raise TypeError(
                 f"Extension {extension_name} returned non-dict MCP tool payload"
@@ -1153,76 +1397,406 @@ def _normalize_extension_tools(
                 description=description.strip(),
                 input_schema=input_schema,
                 handler=_wrapped,
-                source=f"extension:{extension_name}",
+                source=source,
             )
         )
     return tools
 
 
-def _load_extension_tool_definitions(
+def _normalize_extension_resources(
+    extension_name: str,
+    definitions: Any,
+    *,
+    source: str,
+) -> list[MCPResourceDefinition]:
+    if definitions is None:
+        return []
+    if isinstance(definitions, MCPResourceDefinition):
+        payloads = [definitions]
+    elif isinstance(definitions, dict):
+        payloads = [definitions]
+    elif isinstance(definitions, (list, tuple)):
+        payloads = list(definitions)
+    else:
+        raise TypeError(
+            f"Extension {extension_name} must return list[dict] from mcp resource factory"
+        )
+
+    resources: list[MCPResourceDefinition] = []
+    for payload in payloads:
+        if isinstance(payload, MCPResourceDefinition):
+            handler = payload.handler
+            mime_type = payload.mime_type
+            uri = payload.uri.strip()
+
+            def _wrapped(
+                resource_uri: str,
+                manager: AFSManager,
+                _handler=handler,
+                _mime_type=mime_type,
+                _uri=uri,
+            ) -> dict[str, Any]:
+                result = _invoke_resource_handler(_handler, resource_uri, manager)
+                return _coerce_resource_result(result, uri=_uri, mime_type=_mime_type)
+
+            resources.append(
+                MCPResourceDefinition(
+                    uri=uri,
+                    name=payload.name.strip(),
+                    description=payload.description.strip(),
+                    mime_type=mime_type,
+                    handler=_wrapped,
+                    source=source,
+                )
+            )
+            continue
+
+        if not isinstance(payload, dict):
+            raise TypeError(
+                f"Extension {extension_name} returned non-dict MCP resource payload"
+            )
+
+        uri = payload.get("uri")
+        name = payload.get("name")
+        description = payload.get("description")
+        mime_type = payload.get("mimeType", payload.get("mime_type"))
+        handler = payload.get("handler", payload.get("reader"))
+
+        if not isinstance(uri, str) or not uri.strip():
+            raise ValueError(f"Extension {extension_name} returned resource without valid uri")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(
+                f"Extension {extension_name} returned resource '{uri}' without valid name"
+            )
+        if not isinstance(description, str):
+            description = ""
+        if not isinstance(mime_type, str) or not mime_type.strip():
+            mime_type = "application/json"
+        if not callable(handler):
+            raise ValueError(
+                f"Extension {extension_name} resource '{uri}' missing callable handler"
+            )
+
+        def _wrapped(
+            resource_uri: str,
+            manager: AFSManager,
+            _handler=handler,
+            _mime_type=mime_type,
+            _uri=uri.strip(),
+        ) -> dict[str, Any]:
+            result = _invoke_resource_handler(_handler, resource_uri, manager)
+            return _coerce_resource_result(result, uri=_uri, mime_type=_mime_type)
+
+        resources.append(
+            MCPResourceDefinition(
+                uri=uri.strip(),
+                name=name.strip(),
+                description=description.strip(),
+                mime_type=mime_type.strip(),
+                handler=_wrapped,
+                source=source,
+            )
+        )
+    return resources
+
+
+def _normalize_prompt_arguments(arguments: Any) -> list[dict[str, Any]]:
+    if not isinstance(arguments, list):
+        return []
+    return [dict(item) for item in arguments if isinstance(item, dict)]
+
+
+def _coerce_resource_result(
+    result: Any,
+    *,
+    uri: str,
+    mime_type: str,
+) -> dict[str, Any]:
+    if isinstance(result, dict):
+        payload = dict(result)
+        payload.setdefault("uri", uri)
+        payload.setdefault("mimeType", mime_type)
+        if "text" not in payload:
+            payload["text"] = json.dumps(payload.get("data", payload), ensure_ascii=True)
+        return payload
+    if isinstance(result, str):
+        return {"uri": uri, "mimeType": mime_type, "text": result}
+    return {
+        "uri": uri,
+        "mimeType": mime_type,
+        "text": json.dumps(result, ensure_ascii=True),
+    }
+
+
+def _coerce_prompt_result(result: Any) -> list[dict[str, Any]]:
+    if isinstance(result, str):
+        return [{"role": "user", "content": {"type": "text", "text": result}}]
+    if isinstance(result, dict):
+        return [dict(result)]
+    if isinstance(result, (list, tuple)):
+        messages = [dict(item) for item in result if isinstance(item, dict)]
+        if messages:
+            return messages
+    raise TypeError("prompt handler must return string, dict, or list[dict]")
+
+
+def _normalize_extension_prompts(
+    extension_name: str,
+    definitions: Any,
+    *,
+    source: str,
+) -> list[MCPPromptDefinition]:
+    if definitions is None:
+        return []
+    if isinstance(definitions, MCPPromptDefinition):
+        payloads = [definitions]
+    elif isinstance(definitions, dict):
+        payloads = [definitions]
+    elif isinstance(definitions, (list, tuple)):
+        payloads = list(definitions)
+    else:
+        raise TypeError(
+            f"Extension {extension_name} must return list[dict] from mcp prompt factory"
+        )
+
+    prompts: list[MCPPromptDefinition] = []
+    for payload in payloads:
+        if isinstance(payload, MCPPromptDefinition):
+            handler = payload.handler
+
+            def _wrapped(
+                arguments: dict[str, Any],
+                manager: AFSManager,
+                _handler=handler,
+            ) -> list[dict[str, Any]]:
+                result = _invoke_prompt_handler(_handler, arguments, manager)
+                return _coerce_prompt_result(result)
+
+            prompts.append(
+                MCPPromptDefinition(
+                    name=payload.name.strip(),
+                    description=payload.description.strip(),
+                    arguments=list(payload.arguments),
+                    handler=_wrapped,
+                    source=source,
+                )
+            )
+            continue
+
+        if not isinstance(payload, dict):
+            raise TypeError(
+                f"Extension {extension_name} returned non-dict MCP prompt payload"
+            )
+
+        name = payload.get("name")
+        description = payload.get("description")
+        arguments = payload.get("arguments")
+        handler = payload.get("handler", payload.get("get_messages"))
+
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"Extension {extension_name} returned prompt without valid name")
+        if not isinstance(description, str):
+            description = ""
+        if not callable(handler):
+            raise ValueError(
+                f"Extension {extension_name} prompt '{name}' missing callable handler"
+            )
+
+        def _wrapped(
+            prompt_arguments: dict[str, Any],
+            manager: AFSManager,
+            _handler=handler,
+        ) -> list[dict[str, Any]]:
+            result = _invoke_prompt_handler(_handler, prompt_arguments, manager)
+            return _coerce_prompt_result(result)
+
+        prompts.append(
+            MCPPromptDefinition(
+                name=name.strip(),
+                description=description.strip(),
+                arguments=_normalize_prompt_arguments(arguments),
+                handler=_wrapped,
+                source=source,
+            )
+        )
+    return prompts
+
+
+def _normalize_extension_contribution(
+    extension_name: str,
+    definitions: Any,
+    *,
+    source: str,
+) -> MCPExtensionContribution:
+    if definitions is None:
+        return MCPExtensionContribution()
+
+    if isinstance(definitions, MCPExtensionContribution):
+        return MCPExtensionContribution(
+            tools=_normalize_extension_tools(
+                extension_name,
+                definitions.tools,
+                source=source,
+            ),
+            resources=_normalize_extension_resources(
+                extension_name,
+                definitions.resources,
+                source=source,
+            ),
+            prompts=_normalize_extension_prompts(
+                extension_name,
+                definitions.prompts,
+                source=source,
+            ),
+        )
+
+    if isinstance(definitions, dict) and any(
+        key in definitions for key in ("tools", "resources", "prompts")
+    ):
+        return MCPExtensionContribution(
+            tools=_normalize_extension_tools(
+                extension_name,
+                definitions.get("tools"),
+                source=source,
+            ),
+            resources=_normalize_extension_resources(
+                extension_name,
+                definitions.get("resources"),
+                source=source,
+            ),
+            prompts=_normalize_extension_prompts(
+                extension_name,
+                definitions.get("prompts"),
+                source=source,
+            ),
+        )
+
+    return MCPExtensionContribution(
+        tools=_normalize_extension_tools(extension_name, definitions, source=source)
+    )
+
+
+def _load_extension_surface(
     manager: AFSManager,
-) -> tuple[list[MCPToolDefinition], list[ExtensionMCPStatus]]:
-    loaded_tools: list[MCPToolDefinition] = []
+    *,
+    extension_name: str,
+    extension_root: Path,
+    surface: str,
+    module_name: str,
+    factory_name: str,
+) -> tuple[MCPExtensionContribution, ExtensionMCPStatus]:
+    source = f"extension:{extension_name}"
+    search_roots = [extension_root, extension_root.parent]
+    status = ExtensionMCPStatus(
+        extension=extension_name,
+        surface=surface,
+        module=module_name,
+        factory=factory_name,
+    )
+
+    with _prepend_paths(search_roots):
+        _purge_extension_module_cache(module_name, search_roots)
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as exc:
+            status.error = f"import failed: {exc}"
+            return MCPExtensionContribution(), status
+
+        factory = getattr(module, factory_name, None)
+        if not callable(factory):
+            status.error = f"factory not callable: {factory_name}"
+            return MCPExtensionContribution(), status
+
+        try:
+            definitions = _invoke_extension_callable(
+                factory,
+                manager=manager,
+                fallback_roles=["manager"],
+            )
+            contribution = _normalize_extension_contribution(
+                extension_name,
+                definitions,
+                source=source,
+            )
+        except Exception as exc:
+            status.error = str(exc)
+            return MCPExtensionContribution(), status
+
+    status.loaded_tools = [tool.name for tool in contribution.tools]
+    status.loaded_resources = [resource.uri for resource in contribution.resources]
+    status.loaded_prompts = [prompt.name for prompt in contribution.prompts]
+    return contribution, status
+
+
+def _load_extension_mcp_definitions(
+    manager: AFSManager,
+) -> tuple[MCPExtensionContribution, list[ExtensionMCPStatus]]:
+    merged = MCPExtensionContribution()
     statuses: list[ExtensionMCPStatus] = []
 
     extensions = load_enabled_extensions(config=manager.config)
     for extension_name, manifest in sorted(extensions.items()):
-        module_name = manifest.mcp_tools_module.strip()
-        factory_name = manifest.mcp_tools_factory.strip() or "register_mcp_tools"
-        if not module_name:
-            continue
-
-        status = ExtensionMCPStatus(
-            extension=extension_name,
-            module=module_name,
-            factory=factory_name,
-        )
-        statuses.append(status)
-
-        with _prepend_paths([manifest.root, manifest.root.parent]):
-            try:
-                module = importlib.import_module(module_name)
-            except Exception as exc:
-                status.error = f"import failed: {exc}"
+        surfaces = [
+            (
+                "mcp_tools",
+                manifest.mcp_tools_module.strip(),
+                manifest.mcp_tools_factory.strip() or "register_mcp_tools",
+            ),
+            (
+                "mcp_server",
+                manifest.mcp_server_module.strip(),
+                manifest.mcp_server_factory.strip() or "register_mcp_server",
+            ),
+        ]
+        for surface, module_name, factory_name in surfaces:
+            if not module_name:
                 continue
+            contribution, status = _load_extension_surface(
+                manager,
+                extension_name=extension_name,
+                extension_root=manifest.root,
+                surface=surface,
+                module_name=module_name,
+                factory_name=factory_name,
+            )
+            statuses.append(status)
+            merged.tools.extend(contribution.tools)
+            merged.resources.extend(contribution.resources)
+            merged.prompts.extend(contribution.prompts)
 
-            factory = getattr(module, factory_name, None)
-            if not callable(factory):
-                status.error = f"factory not callable: {factory_name}"
-                continue
-
-            try:
-                definitions = _invoke_factory(factory, manager)
-                extension_tools = _normalize_extension_tools(extension_name, definitions)
-            except Exception as exc:
-                status.error = str(exc)
-                continue
-
-            for tool in extension_tools:
-                loaded_tools.append(tool)
-                status.loaded_tools.append(tool.name)
-
-    return loaded_tools, statuses
+    return merged, statuses
 
 
 def build_mcp_registry(manager: AFSManager) -> MCPToolRegistry:
-    """Build MCP tool registry including extension tools."""
+    """Build MCP registry including extension tools, resources, and prompts."""
     registry = MCPToolRegistry()
 
     for tool in _builtin_tool_definitions():
         registry.add_tool(tool)
 
-    extension_tools, statuses = _load_extension_tool_definitions(manager)
+    extension_contribution, statuses = _load_extension_mcp_definitions(manager)
     registry.extension_status = statuses
     for status in statuses:
         if status.error:
-            registry.load_errors[status.extension] = status.error
+            registry.load_errors[f"{status.extension}:{status.surface}"] = status.error
 
-    for tool in extension_tools:
+    for tool in extension_contribution.tools:
         try:
             registry.add_tool(tool)
         except ValueError as exc:
-            registry.load_errors[tool.source] = str(exc)
+            registry.load_errors[f"{tool.source}:{tool.name}"] = str(exc)
+
+    for resource in extension_contribution.resources:
+        try:
+            registry.add_resource(resource)
+        except ValueError as exc:
+            registry.load_errors[f"{resource.source}:{resource.uri}"] = str(exc)
+
+    for prompt in extension_contribution.prompts:
+        try:
+            registry.add_prompt(prompt)
+        except ValueError as exc:
+            registry.load_errors[f"{prompt.source}:{prompt.name}"] = str(exc)
 
     return registry
 
@@ -1240,12 +1814,17 @@ def get_mcp_status(config_path: Path | None = None) -> dict[str, Any]:
     registry = build_mcp_registry(manager)
     return {
         "tools": sorted(registry.tools.keys()),
+        "resources": sorted(registry.resources.keys()),
+        "prompts": sorted(registry.prompts.keys()),
         "extension_status": [status.to_dict() for status in registry.extension_status],
         "load_errors": dict(registry.load_errors),
     }
 
 
-def _list_resources(manager: AFSManager) -> list[dict[str, Any]]:
+def _list_resources(
+    manager: AFSManager,
+    registry: MCPToolRegistry | None = None,
+) -> list[dict[str, Any]]:
     """Return MCP resource descriptors for discovered contexts."""
     resources: list[dict[str, Any]] = [
         {
@@ -1275,10 +1854,16 @@ def _list_resources(manager: AFSManager) -> list[dict[str, Any]]:
             "description": f"Index summary for {ctx.project_name}",
             "mimeType": "application/json",
         })
+    if registry is not None:
+        resources.extend(registry.resource_specs())
     return resources
 
 
-def _read_resource(uri: str, manager: AFSManager) -> dict[str, Any]:
+def _read_resource(
+    uri: str,
+    manager: AFSManager,
+    registry: MCPToolRegistry | None = None,
+) -> dict[str, Any]:
     """Read a single MCP resource by URI."""
     if uri == "afs://contexts":
         data = [
@@ -1291,6 +1876,9 @@ def _read_resource(uri: str, manager: AFSManager) -> dict[str, Any]:
             for ctx in _discover_allowed_contexts(manager)
         ]
         return {"uri": uri, "mimeType": "application/json", "text": json.dumps(data)}
+
+    if registry is not None and uri in registry.resources:
+        return registry.read_resource(uri, manager)
 
     prefix = "afs://context/"
     if not uri.startswith(prefix):
@@ -1335,9 +1923,9 @@ def _read_resource(uri: str, manager: AFSManager) -> dict[str, Any]:
     raise ValueError(f"Unknown resource URI: {uri}")
 
 
-def _list_prompts() -> list[dict[str, Any]]:
+def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any]]:
     """Return MCP prompt descriptors."""
-    return [
+    prompts = [
         {
             "name": "afs.context.overview",
             "description": "Describe the AFS context structure and available mounts",
@@ -1392,12 +1980,16 @@ def _list_prompts() -> list[dict[str, Any]]:
             ],
         },
     ]
+    if registry is not None:
+        prompts.extend(registry.prompt_specs())
+    return prompts
 
 
 def _get_prompt(
     name: str,
     arguments: dict[str, Any],
     manager: AFSManager,
+    registry: MCPToolRegistry | None = None,
 ) -> list[dict[str, Any]]:
     """Build MCP prompt messages for a named prompt."""
     if name == "afs.context.overview":
@@ -1497,6 +2089,9 @@ def _get_prompt(
 
         return [{"role": "user", "content": {"type": "text", "text": "\n".join(lines)}}]
 
+    if registry is not None and name in registry.prompts:
+        return registry.get_prompt(name, arguments, manager)
+
     raise ValueError(f"Unknown prompt: {name}")
 
 
@@ -1553,7 +2148,7 @@ def _handle_request(
 
     if method == "resources/list":
         return _success_response(
-            request_id, {"resources": _list_resources(manager)}
+            request_id, {"resources": _list_resources(manager, registry=active_registry)}
         )
 
     if method == "resources/read":
@@ -1564,14 +2159,14 @@ def _handle_request(
         if not isinstance(uri, str):
             return _error_response(request_id, -32602, "uri must be a string")
         try:
-            content = _read_resource(uri, manager)
+            content = _read_resource(uri, manager, registry=active_registry)
         except Exception as exc:
             return _error_response(request_id, -32000, str(exc))
         return _success_response(request_id, {"contents": [content]})
 
     if method == "prompts/list":
         return _success_response(
-            request_id, {"prompts": _list_prompts()}
+            request_id, {"prompts": _list_prompts(active_registry)}
         )
 
     if method == "prompts/get":
@@ -1585,7 +2180,12 @@ def _handle_request(
         if not isinstance(prompt_args, dict):
             return _error_response(request_id, -32602, "arguments must be an object")
         try:
-            messages = _get_prompt(prompt_name, prompt_args, manager)
+            messages = _get_prompt(
+                prompt_name,
+                prompt_args,
+                manager,
+                registry=active_registry,
+            )
         except Exception as exc:
             return _error_response(request_id, -32000, str(exc))
         return _success_response(request_id, {"messages": messages})

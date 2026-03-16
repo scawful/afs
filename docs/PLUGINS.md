@@ -59,6 +59,7 @@ Manifest fields:
 - `policies`
 - `[hooks]`
 - `[mcp_tools]`
+- `[mcp_server]`
 
 `agent_modules` let an extension register extra `afs agents run ...` entries without
 putting personal or domain-specific agent code into core `afs`.
@@ -70,3 +71,26 @@ putting personal or domain-specific agent code into core `afs`.
 module = "my_extension.mcp_tools"
 factory = "register_mcp_tools"
 ```
+
+`[mcp_server]` is the broader surface. It can register tools, resources, and
+prompts from one extension module:
+
+```toml
+[mcp_server]
+module = "my_extension.mcp_surface"
+factory = "register_mcp_server"
+```
+
+Expected factory shape:
+
+```python
+def register_mcp_server(_manager):
+    return {
+        "tools": [...],
+        "resources": [...],
+        "prompts": [...],
+    }
+```
+
+Legacy `[mcp_tools]` remains supported for tool-only extensions. Core MCP
+resource URIs and prompt names are reserved and cannot be overridden.

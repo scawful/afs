@@ -129,6 +129,11 @@ Gemini-friendly prompts/resources are also exposed over MCP:
 - prompts: `afs.context.overview`, `afs.query.search`, `afs.scratchpad.review`
 - resources: `afs://contexts`, `afs://context/<path>/metadata`, `.../mounts`, `.../index`
 
+Extensions can add their own MCP tools, prompts, and resources with
+`[mcp_server]` in `extension.toml`. Legacy tool-only factories under
+`[mcp_tools]` still work. Core `afs://contexts`, `afs://context/...`, and the
+built-in `afs.*` prompts remain reserved.
+
 Gemini work setup example:
 
 ```toml
