@@ -38,6 +38,12 @@ def _expand_config_paths(config_data: dict[str, Any]) -> None:
             general["context_root"] = _expand_path(general["context_root"])
         if "agent_workspaces_dir" in general:
             general["agent_workspaces_dir"] = _expand_path(general["agent_workspaces_dir"])
+        if "mcp_allowed_roots" in general and isinstance(general["mcp_allowed_roots"], list):
+            general["mcp_allowed_roots"] = [
+                _expand_path(path)
+                for path in general["mcp_allowed_roots"]
+                if isinstance(path, (str, Path))
+            ]
         if "python_executable" in general:
             python_exec = general["python_executable"]
             if isinstance(python_exec, str) and python_exec.startswith("~"):
@@ -144,6 +150,7 @@ def load_config(config_path: Path | None = None, merge_user: bool = True) -> dic
             explicit_raw = tomllib.load(f)
         config_data = _deep_merge(config_data, explicit_raw)
 
+    _merge_env_allowed_roots(config_data)
     _merge_workspace_registry(config_data)
     _expand_config_paths(config_data)
     return config_data
@@ -197,3 +204,29 @@ def _merge_workspace_registry(config_data: dict[str, Any]) -> None:
         seen.add(path)
 
     general["workspace_directories"] = merged
+
+
+def _merge_env_allowed_roots(config_data: dict[str, Any]) -> None:
+    raw = os.environ.get("AFS_MCP_ALLOWED_ROOTS", "").strip()
+    if not raw:
+        return
+
+    general = config_data.setdefault("general", {})
+    existing = general.get("mcp_allowed_roots")
+    if not isinstance(existing, list):
+        existing = []
+
+    merged = list(existing)
+    seen = {
+        str(item).strip()
+        for item in merged
+        if isinstance(item, (str, Path)) and str(item).strip()
+    }
+    for item in raw.split(os.pathsep):
+        value = item.strip()
+        if not value or value in seen:
+            continue
+        merged.append(value)
+        seen.add(value)
+
+    general["mcp_allowed_roots"] = merged

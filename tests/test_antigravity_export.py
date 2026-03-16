@@ -1,6 +1,11 @@
 import json
 
-from afs.training.antigravity_export import _extract_json_objects, _payload_to_sample
+import pytest
+
+try:
+    from afs.training.antigravity_export import _extract_json_objects, _payload_to_sample
+except RuntimeError:
+    pytest.skip("afs.training moved to afs-scawful", allow_module_level=True)
 
 
 def test_antigravity_payload_to_sample() -> None:

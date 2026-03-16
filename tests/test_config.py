@@ -95,3 +95,31 @@ def test_load_config_model_parses_context_index_settings(tmp_path) -> None:
     assert model.context_index.include_content is False
     assert model.context_index.max_file_size_bytes == 8192
     assert model.context_index.max_content_chars == 1024
+
+
+def test_load_config_model_parses_mcp_allowed_roots(tmp_path) -> None:
+    config_path = tmp_path / "mcp.toml"
+    allowed = tmp_path / "google"
+    config_path.write_text(
+        "[general]\n"
+        f"mcp_allowed_roots = [\"{allowed}\"]\n",
+        encoding="utf-8",
+    )
+
+    model = load_config_model(config_path=config_path, merge_user=False)
+    assert model.general.mcp_allowed_roots == [allowed.resolve()]
+
+
+def test_load_config_model_merges_env_mcp_allowed_roots(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "mcp_env.toml"
+    configured = tmp_path / "configured"
+    env_root = tmp_path / "google"
+    config_path.write_text(
+        "[general]\n"
+        f"mcp_allowed_roots = [\"{configured}\"]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AFS_MCP_ALLOWED_ROOTS", str(env_root))
+
+    model = load_config_model(config_path=config_path, merge_user=False)
+    assert model.general.mcp_allowed_roots == [configured.resolve(), env_root.resolve()]

@@ -408,6 +408,121 @@ class ContextSQLiteIndex:
                 return True
         return False
 
+    def summary(self) -> IndexSummary:
+        """Return a lightweight summary of the current index state."""
+        by_mount: dict[str, int] = {}
+        total = 0
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT mount_type, COUNT(1) AS cnt FROM file_index "
+                "WHERE context_path = ? GROUP BY mount_type",
+                (str(self._context_path),),
+            ).fetchall()
+            for row in rows:
+                by_mount[row["mount_type"]] = int(row["cnt"])
+                total += int(row["cnt"])
+        return IndexSummary(
+            context_path=str(self._context_path),
+            db_path=str(self.db_path),
+            indexed_at="",
+            rows_written=total,
+            rows_deleted=0,
+            by_mount_type=by_mount,
+            skipped_large_files=0,
+            skipped_binary_files=0,
+            errors=[],
+        )
+
+    @property
+    def total_entries(self) -> int:
+        """Return total indexed entries for this context path."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(1) AS cnt FROM file_index WHERE context_path = ?",
+                (str(self._context_path),),
+            ).fetchone()
+            return int(row["cnt"]) if row else 0
+
+    def diff(
+        self,
+        *,
+        mount_types: list[MountType] | None = None,
+    ) -> dict[str, Any]:
+        """Compare filesystem state against the index.
+
+        Returns lists of new, modified, and deleted paths per mount type.
+        """
+        selected_mounts = self._normalize_mount_types(mount_types)
+        added: list[dict[str, str]] = []
+        modified: list[dict[str, str]] = []
+        deleted: list[dict[str, str]] = []
+
+        for mount_type in selected_mounts:
+            try:
+                mount_root = self._manager.resolve_mount_root(
+                    self._context_path, mount_type
+                )
+            except Exception:
+                continue
+            if not mount_root.exists():
+                continue
+
+            # Build filesystem snapshot: relative_path -> (size, mtime)
+            fs_entries: dict[str, tuple[int, str]] = {}
+            for entry, relative_path in _iter_mount_entries(mount_root):
+                try:
+                    stat = entry.stat()
+                    mtime = _iso_utc(stat.st_mtime)
+                    fs_entries[relative_path] = (stat.st_size, mtime)
+                except OSError:
+                    continue
+
+            # Build index snapshot: relative_path -> (size, mtime)
+            db_entries: dict[str, tuple[int, str | None]] = {}
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT relative_path, size_bytes, modified_at "
+                    "FROM file_index WHERE context_path = ? AND mount_type = ?",
+                    (str(self._context_path), mount_type.value),
+                ).fetchall()
+                for row in rows:
+                    db_entries[row["relative_path"]] = (
+                        int(row["size_bytes"]),
+                        row["modified_at"],
+                    )
+
+            # Compare
+            for rel_path, (fs_size, fs_mtime) in fs_entries.items():
+                if rel_path not in db_entries:
+                    added.append({
+                        "mount_type": mount_type.value,
+                        "relative_path": rel_path,
+                        "size_bytes": fs_size,
+                    })
+                else:
+                    db_size, db_mtime = db_entries[rel_path]
+                    if fs_size != db_size or fs_mtime != db_mtime:
+                        modified.append({
+                            "mount_type": mount_type.value,
+                            "relative_path": rel_path,
+                            "size_bytes": fs_size,
+                        })
+
+            for rel_path in db_entries:
+                if rel_path not in fs_entries:
+                    deleted.append({
+                        "mount_type": mount_type.value,
+                        "relative_path": rel_path,
+                    })
+
+        return {
+            "context_path": str(self._context_path),
+            "added": added,
+            "modified": modified,
+            "deleted": deleted,
+            "total_changes": len(added) + len(modified) + len(deleted),
+        }
+
     def query(
         self,
         *,
@@ -894,6 +1009,18 @@ def _iter_mount_entries(mount_root: Path):
                 yield nested, f"{prefix}/{nested_relative}"
             else:
                 yield nested, nested.relative_to(mount_root).as_posix()
+
+
+def count_mount_files(mount_root: Path) -> int:
+    """Count file entries in a mount, following symlinked directories."""
+    total = 0
+    for entry, _relative_path in _iter_mount_entries(mount_root):
+        try:
+            if entry.is_file():
+                total += 1
+        except OSError:
+            continue
+    return total
 
 
 def _read_text_for_indexing(

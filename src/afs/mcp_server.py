@@ -6,6 +6,7 @@ import argparse
 import importlib
 import inspect
 import json
+import os
 import shutil
 import sys
 from collections.abc import Callable, Iterable
@@ -19,6 +20,7 @@ from .context_index import (
     DEFAULT_MAX_CONTENT_CHARS,
     DEFAULT_MAX_FILE_SIZE_BYTES,
     ContextSQLiteIndex,
+    count_mount_files,
 )
 from .discovery import discover_contexts
 from .manager import AFSManager
@@ -145,18 +147,32 @@ def _success_response(request_id: Any, result: dict[str, Any]) -> dict[str, Any]
 
 def _allowed_roots(manager: AFSManager) -> list[Path]:
     roots: list[Path] = []
+    seen: set[Path] = set()
 
-    home_context = (Path.home() / ".context").resolve()
-    roots.append(home_context)
+    def _add(root: Path | None) -> None:
+        if root is None:
+            return
+        resolved = root.expanduser().resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        roots.append(resolved)
 
-    config_root = manager.config.general.context_root.resolve()
-    if config_root not in roots:
-        roots.append(config_root)
-
-    local_context = (Path.cwd() / ".context").resolve()
-    if local_context.exists() and local_context not in roots:
-        roots.append(local_context)
-
+    _add(Path.home() / ".context")
+    _add(manager.config.general.context_root)
+    _add(manager.config.general.agent_workspaces_dir)
+    for workspace in manager.config.general.workspace_directories:
+        _add(workspace.path)
+    for root in manager.config.general.mcp_allowed_roots:
+        _add(root)
+    raw_env_roots = os.environ.get("AFS_MCP_ALLOWED_ROOTS", "").strip()
+    if raw_env_roots:
+        for item in raw_env_roots.split(os.pathsep):
+            if item.strip():
+                _add(Path(item.strip()))
+    local_context = Path.cwd() / ".context"
+    if local_context.exists():
+        _add(local_context)
     return roots
 
 
@@ -210,10 +226,13 @@ def _validate_context_init_scope(
     resolved_project = project_path.expanduser().resolve()
     if resolved_project == cwd or resolved_project.is_relative_to(cwd):
         return
+    for root in _allowed_roots(manager):
+        if resolved_project == root or resolved_project.is_relative_to(root):
+            return
 
     raise PermissionError(
         "context.init requires project_path under the current working directory "
-        "or an explicit context_root under an allowed root"
+        "or under an allowed workspace root, or an explicit context_root under an allowed root"
     )
 
 
@@ -711,6 +730,65 @@ def _tool_context_query(arguments: dict[str, Any], manager: AFSManager) -> dict[
     )
 
 
+def _tool_context_diff(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    """Show changes between filesystem and index."""
+    context_path = _resolve_context_path(arguments, manager)
+    mount_types = _parse_mount_types(arguments.get("mount_types"))
+    settings = _context_index_settings(manager)
+    if not settings.enabled:
+        return {"context_path": str(context_path), "error": "index disabled"}
+    index = ContextSQLiteIndex(manager, context_path)
+    if not index.has_entries(mount_types=mount_types):
+        return {
+            "context_path": str(context_path),
+            "error": "index empty — run context.index.rebuild first",
+        }
+    return index.diff(mount_types=mount_types)
+
+
+def _tool_context_status(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    """Return a summary of the context: mounts, index health, profile."""
+    context_path = _resolve_context_path(arguments, manager)
+    settings = _context_index_settings(manager)
+
+    # Mount counts
+    mount_counts: dict[str, int] = {}
+    total_files = 0
+    for mount_type in MountType:
+        mount_dir = context_path / mount_type.value
+        if not mount_dir.exists():
+            continue
+        count = count_mount_files(mount_dir)
+        if count > 0:
+            mount_counts[mount_type.value] = count
+            total_files += count
+
+    # Index stats
+    index_info: dict[str, Any] = {"enabled": settings.enabled}
+    if settings.enabled:
+        db_path = context_path / "global" / settings.db_filename
+        if db_path.exists():
+            try:
+                index = ContextSQLiteIndex(manager, context_path)
+                has = index.has_entries()
+                index_info["has_entries"] = has
+                index_info["total_entries"] = index.total_entries
+                index_info["stale"] = index.needs_refresh() if has else False
+                index_info["db_size_bytes"] = db_path.stat().st_size
+            except Exception:
+                index_info["error"] = "failed to read index"
+        else:
+            index_info["built"] = False
+
+    return {
+        "context_path": str(context_path),
+        "profile": manager.config.profiles.active_profile,
+        "mount_counts": mount_counts,
+        "total_files": total_files,
+        "index": index_info,
+    }
+
+
 def _builtin_tool_definitions() -> list[MCPToolDefinition]:
     return [
         MCPToolDefinition(
@@ -901,6 +979,34 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_context_query,
+        ),
+        MCPToolDefinition(
+            name="context.diff",
+            description="Show new, modified, and deleted files since last index build.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "mount_types": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": [mount.value for mount in MountType]},
+                    },
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_context_diff,
+        ),
+        MCPToolDefinition(
+            name="context.status",
+            description="Summary of context health: mount counts, index stats, active profile.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_context_status,
         ),
     ]
 
@@ -1110,8 +1216,6 @@ def _list_resources(manager: AFSManager) -> list[dict[str, Any]]:
         },
     ]
     for ctx in _discover_allowed_contexts(manager):
-        if not _is_allowed_path(ctx.path, manager):
-            continue
         ctx_uri = f"afs://context/{ctx.path}"
         resources.append({
             "uri": f"{ctx_uri}/metadata",
@@ -1449,8 +1553,6 @@ def _handle_request(
     if request_id is not None:
         return _error_response(request_id, -32601, f"Method not found: {method}")
     return None
-
-
 def serve(config_path: Path | None = None) -> int:
     config = load_config_model(config_path=config_path, merge_user=True)
     manager = AFSManager(config=config)
@@ -1463,6 +1565,7 @@ def serve(config_path: Path | None = None) -> int:
         response = _handle_request(message, manager, registry=registry)
         if response is not None:
             _write_message(sys.stdout.buffer, response)
+
     return 0
 
 

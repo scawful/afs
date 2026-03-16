@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import pytest
 
-from afs.generators.base import TrainingSample
-from afs.training.scoring import (
-    QualityScore,
-    QualityScorer,
-    ScoringConfig,
-    ScoringWeights,
-    analyze_scores,
-)
+try:
+    from afs.generators.base import TrainingSample
+    from afs.training.scoring import (
+        QualityScore,
+        QualityScorer,
+        ScoringConfig,
+        ScoringWeights,
+        analyze_scores,
+    )
+except RuntimeError:
+    pytest.skip("afs.training moved to afs-scawful", allow_module_level=True)
 
 
 class TestScoringWeights:

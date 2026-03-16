@@ -1,7 +1,12 @@
 import json
 
-from afs.history import iter_history_events
-from afs.training.codex_export import import_codex_logs_to_history
+import pytest
+
+try:
+    from afs.history import iter_history_events
+    from afs.training.codex_export import import_codex_logs_to_history
+except RuntimeError:
+    pytest.skip("afs.training moved to afs-scawful", allow_module_level=True)
 
 
 def test_codex_history_import(tmp_path) -> None:

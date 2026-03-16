@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from ._utils import (
     AFS_DIRS,
@@ -395,10 +396,27 @@ def studio_alias_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _count_mount_files(mount_dir: Path) -> int:
+    """Count files in a mount directory, including symlinked directories."""
+    from ..context_index import count_mount_files
+
+    return count_mount_files(mount_dir)
+
+
+def _human_size(size_bytes: int) -> str:
+    """Format bytes as a human-readable string."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(size_bytes) < 1024:
+            return f"{size_bytes:.1f} {unit}" if unit != "B" else f"{size_bytes} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f} TB"
+
+
 def status_command(args: argparse.Namespace) -> int:
     """Show AFS status."""
     from ..config import load_config_model
     from ..core import find_root, resolve_context_root
+    from ..models import MountType
 
     start_dir = Path(args.start_dir).expanduser().resolve() if args.start_dir else None
     root = find_root(start_dir)
@@ -410,22 +428,82 @@ def status_command(args: argparse.Namespace) -> int:
         if not (context_root / name).exists():
             missing.append(name)
 
+    # Gather mount counts
+    mount_counts: dict[str, int] = {}
+    total_files = 0
+    for mount_type in MountType:
+        mount_dir = context_root / mount_type.value
+        count = _count_mount_files(mount_dir)
+        if count > 0:
+            mount_counts[mount_type.value] = count
+            total_files += count
+
+    # Gather index stats
+    index_stats: dict[str, Any] = {"available": False}
+    db_path = context_root / "global" / config.context_index.db_filename
+    if config.context_index.enabled and db_path.exists():
+        try:
+            from ..context_index import ContextSQLiteIndex
+            from ..manager import AFSManager
+
+            manager = AFSManager(config=config)
+            index = ContextSQLiteIndex(manager, context_root)
+            has_entries = index.has_entries()
+            index_stats = {
+                "available": True,
+                "db_path": str(db_path),
+                "db_size": db_path.stat().st_size,
+                "has_entries": has_entries,
+                "stale": index.needs_refresh() if has_entries else False,
+            }
+            index_stats["total_entries"] = index.total_entries
+        except Exception:
+            pass
+
+    # Active profile
+    active_profile = config.profiles.active_profile
+
     if args.json:
-        payload = {
+        payload: dict[str, Any] = {
             "context_root": str(context_root),
             "linked_root": str(root) if root else None,
             "missing_dirs": missing,
             "valid": not missing,
+            "active_profile": active_profile,
+            "mount_counts": mount_counts,
+            "total_files": total_files,
+            "index": index_stats,
         }
         print(json.dumps(payload, indent=2))
         return 0
 
-    print(f"context_root: {context_root}")
-    print(f"linked_root: {root if root else '(none)'}")
-    if missing:
-        print("missing_dirs: " + ", ".join(missing))
+    # Pretty-print
+    print(f"  context_root: {context_root}")
+    print(f"  linked_root:  {root if root else '(none)'}")
+    print(f"  profile:      {active_profile}")
+    print(f"  valid:        {'yes' if not missing else 'no — missing: ' + ', '.join(missing)}")
+    print()
+
+    # Mount summary
+    if mount_counts:
+        print("  mounts:")
+        for mount_name, count in sorted(mount_counts.items()):
+            print(f"    {mount_name:12s}  {count:>5} files")
+        print(f"    {'total':12s}  {total_files:>5} files")
     else:
-        print("missing_dirs: (none)")
+        print("  mounts: (empty)")
+    print()
+
+    # Index summary
+    if index_stats.get("available"):
+        stale_label = "stale" if index_stats.get("stale") else "fresh"
+        db_size = _human_size(index_stats.get("db_size", 0))
+        entries = index_stats.get("total_entries", "?")
+        print(f"  index: {entries} entries, {db_size}, {stale_label}")
+    elif config.context_index.enabled:
+        print("  index: enabled but not yet built")
+    else:
+        print("  index: disabled")
 
     return 0
 

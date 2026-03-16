@@ -180,6 +180,12 @@ def write_config(path: Path, config: AFSConfig) -> None:
         f"agent_workspaces_dir = \"{general.agent_workspaces_dir}\"",
     ]
 
+    if general.mcp_allowed_roots:
+        lines.append(
+            "mcp_allowed_roots = "
+            + _toml_array([str(path) for path in general.mcp_allowed_roots])
+        )
+
     if general.workspace_directories:
         for ws in general.workspace_directories:
             lines.append("")

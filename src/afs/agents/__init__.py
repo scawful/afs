@@ -26,6 +26,7 @@ CORE_AGENT_MODULES = (
     "afs.agents.context_audit",
     "afs.agents.context_inventory",
     "afs.agents.context_warm",
+    "afs.agents.gemini_workspace_brief",
     "afs.agents.scribe_draft",
 )
 

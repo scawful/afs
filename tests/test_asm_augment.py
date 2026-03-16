@@ -4,22 +4,25 @@ from __future__ import annotations
 
 import pytest
 
-from afs.generators.asm_augment import (
-    AddressVariationAugmenter,
-    AddressVariationConfig,
-    AsmAugmentConfig,
-    AsmAugmentGenerator,
-    Phase2AugmentConfig,
-    Phase2Augmenter,
-    RegisterSwapAugmenter,
-    RegisterSwapConfig,
-    StyleVariationAugmenter,
-    StyleVariationConfig,
-    detect_category,
-    extract_action,
-    generate_paraphrases,
-)
-from afs.generators.base import TrainingSample
+try:
+    from afs.generators.asm_augment import (
+        AddressVariationAugmenter,
+        AddressVariationConfig,
+        AsmAugmentConfig,
+        AsmAugmentGenerator,
+        Phase2AugmentConfig,
+        Phase2Augmenter,
+        RegisterSwapAugmenter,
+        RegisterSwapConfig,
+        StyleVariationAugmenter,
+        StyleVariationConfig,
+        detect_category,
+        extract_action,
+        generate_paraphrases,
+    )
+    from afs.generators.base import TrainingSample
+except RuntimeError:
+    pytest.skip("afs.generators.asm_augment moved to afs-scawful", allow_module_level=True)
 
 
 class TestCategoryDetection:

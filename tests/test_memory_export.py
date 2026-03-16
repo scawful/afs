@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import json
 
-from afs.training.memory_export import export_memory_to_dataset
+import pytest
+
+try:
+    from afs.training.memory_export import export_memory_to_dataset
+except RuntimeError:
+    pytest.skip("afs.training moved to afs-scawful", allow_module_level=True)
 
 
 def test_memory_export_quality_filter(tmp_path) -> None:

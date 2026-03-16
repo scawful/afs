@@ -270,14 +270,17 @@ def _mcp_health(mcp_status: dict[str, Any]) -> dict[str, Any]:
 def _detect_mcp_running() -> tuple[bool, list[str]]:
     matches: list[str] = []
     if psutil is not None:
-        for proc in psutil.process_iter(["pid", "cmdline"]):
-            try:
-                cmdline = proc.info.get("cmdline") or []
-                joined = " ".join(cmdline)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-            if "afs.mcp_server" in joined:
-                matches.append(f"pid={proc.info.get('pid')}")
+        try:
+            for proc in psutil.process_iter(["pid", "cmdline"]):
+                try:
+                    cmdline = proc.info.get("cmdline") or []
+                    joined = " ".join(cmdline)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, PermissionError, OSError):
+                    continue
+                if "afs.mcp_server" in joined:
+                    matches.append(f"pid={proc.info.get('pid')}")
+        except (psutil.AccessDenied, PermissionError, OSError):
+            matches = []
         if matches:
             return True, matches
 

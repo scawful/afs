@@ -122,6 +122,7 @@ class GeneralConfig:
     )
     python_executable: Path | None = None
     workspace_directories: list[WorkspaceDirectory] = field(default_factory=list)
+    mcp_allowed_roots: list[Path] = field(default_factory=list)
     discovery_ignore: list[str] = field(default_factory=default_discovery_ignore)
 
     @classmethod
@@ -133,6 +134,11 @@ class GeneralConfig:
             WorkspaceDirectory.from_dict(item)
             for item in data.get("workspace_directories", [])
             if isinstance(item, dict)
+        ]
+        mcp_allowed_roots = [
+            _as_path(item)
+            for item in data.get("mcp_allowed_roots", [])
+            if isinstance(item, (str, Path))
         ]
         raw_ignore = data.get("discovery_ignore")
         if isinstance(raw_ignore, list):
@@ -150,6 +156,7 @@ class GeneralConfig:
             if python_executable
             else None,
             workspace_directories=workspace_directories,
+            mcp_allowed_roots=mcp_allowed_roots,
             discovery_ignore=discovery_ignore,
         )
 

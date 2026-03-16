@@ -11,6 +11,7 @@ Features:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -922,9 +923,8 @@ class EnhancedHealthChecker:
         """Check time to load model."""
         start = time.time()
         try:
-            # Simplified: just check if we can import torch/transformers
-            import torch  # noqa: F401
-
+            # Probe availability without importing torch, which can abort in sandboxed envs.
+            importlib.util.find_spec("torch")
             return (time.time() - start) * 1000
         except Exception:
             return self.config["model_load_timeout_s"] * 1000

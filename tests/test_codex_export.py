@@ -1,6 +1,11 @@
 import json
 
-from afs.training.codex_export import export_codex_logs_to_dataset
+import pytest
+
+try:
+    from afs.training.codex_export import export_codex_logs_to_dataset
+except RuntimeError:
+    pytest.skip("afs.training moved to afs-scawful", allow_module_level=True)
 
 
 def test_codex_export(tmp_path) -> None:

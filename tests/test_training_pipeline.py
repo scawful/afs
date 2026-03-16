@@ -7,9 +7,12 @@ import json
 
 import pytest
 
-from afs.generators.base import TrainingSample
-from afs.training.pipeline import DataPipeline, PipelineConfig
-from afs.training.rehearsal import RehearsalBuffer, RehearsalBufferConfig
+try:
+    from afs.generators.base import TrainingSample
+    from afs.training.pipeline import DataPipeline, PipelineConfig
+    from afs.training.rehearsal import RehearsalBuffer, RehearsalBufferConfig
+except RuntimeError:
+    pytest.skip("afs.training moved to afs-scawful", allow_module_level=True)
 
 
 class TestTrainingSample:

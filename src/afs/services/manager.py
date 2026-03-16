@@ -397,7 +397,11 @@ class ServiceManager:
         memory_interval = memory_cfg.interval_seconds if memory_cfg.interval_seconds > 0 else 3600
         context_warm_report = agent_output_dir / "context_warm.json"
         context_warm_interval = _resolve_interval_env("AFS_CONTEXT_WARM_INTERVAL", default=3600)
-        docker_dir = afs_root / "docker"
+        gemini_brief_report = agent_output_dir / "gemini_workspace_brief.json"
+        gemini_brief_markdown = agent_output_dir / "gemini_workspace_brief.md"
+        gemini_brief_interval = _resolve_interval_env(
+            "AFS_GEMINI_WORKSPACE_BRIEF_INTERVAL", default=1800
+        )
         chat_service = afs_root / "scripts" / "chat-service.sh"
 
         memory_command = [
@@ -426,6 +430,17 @@ class ServiceManager:
             str(context_warm_report),
             "--interval",
             str(context_warm_interval),
+        ]
+        gemini_workspace_brief_command = [
+            python,
+            "-m",
+            "afs.agents.gemini_workspace_brief",
+            "--output",
+            str(gemini_brief_report),
+            "--markdown-output",
+            str(gemini_brief_markdown),
+            "--interval",
+            str(gemini_brief_interval),
         ]
 
         return {
@@ -535,6 +550,17 @@ class ServiceManager:
                 label="AFS Context Warm",
                 description="Sync workspace paths, discover contexts, and refresh embeddings on an interval",
                 command=context_warm_command,
+                working_directory=working_root,
+                environment=environment,
+                service_type=ServiceType.DAEMON,
+                keep_alive=True,
+                run_at_load=False,
+            ),
+            "gemini-workspace-brief": ServiceDefinition(
+                name="gemini-workspace-brief",
+                label="Gemini Workspace Brief",
+                description="Use Gemini to write a periodic workspace/context brief into the AFS scratchpad",
+                command=gemini_workspace_brief_command,
                 working_directory=working_root,
                 environment=environment,
                 service_type=ServiceType.DAEMON,

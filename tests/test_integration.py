@@ -1,10 +1,10 @@
 """Comprehensive end-to-end integration tests for AFS system.
 
 Tests the full workflow of:
-1. Training pipeline → model registry → deployment → evaluation
-2. Cost tracking → budget alerts → optimization recommendations
-3. Usage logging → training data generation → continuous learning trigger
-4. Quality analysis → model comparison → deployment decision
+1. Training pipeline -> model registry -> deployment -> evaluation
+2. Cost tracking -> budget alerts -> optimization recommendations
+3. Usage logging -> training data generation -> continuous learning trigger
+4. Quality analysis -> model comparison -> deployment decision
 5. Notifications across all channels
 
 This ensures all AFS systems work together correctly from end-to-end.
@@ -18,33 +18,36 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from afs.continuous import (
-    ABTestConfig,
-    ABTestManager,
-    ContinuousLearningLoop,
-    DataGeneratorConfig,
-    LoopConfig,
-    TrainingDataGenerator,
-    TriggerConfig,
-    UsageLogger,
-)
-from afs.cost import (
-    CostAnalyzer,
-    CostOptimizer,
-    GPUPrice,
-    GPUPriceTracker,
-    TrainingMetrics,
-)
-from afs.generators.base import TrainingSample
-from afs.notifications import (
-    EventType,
-    NotificationLevel,
-    NotificationManager,
-)
-from afs.quality import QualityMetrics
-from afs.registry import EvaluationScores, ModelRegistry
-from afs.registry.models import VersionStatus
-from afs.training.pipeline import DataPipeline, PipelineConfig
+try:
+    from afs.continuous import (
+        ABTestConfig,
+        ABTestManager,
+        ContinuousLearningLoop,
+        DataGeneratorConfig,
+        LoopConfig,
+        TrainingDataGenerator,
+        TriggerConfig,
+        UsageLogger,
+    )
+    from afs.cost import (
+        CostAnalyzer,
+        CostOptimizer,
+        GPUPrice,
+        GPUPriceTracker,
+        TrainingMetrics,
+    )
+    from afs.generators.base import TrainingSample
+    from afs.notifications import (
+        EventType,
+        NotificationLevel,
+        NotificationManager,
+    )
+    from afs.quality import QualityMetrics
+    from afs.registry import EvaluationScores, ModelRegistry
+    from afs.registry.models import VersionStatus
+    from afs.training.pipeline import DataPipeline, PipelineConfig
+except RuntimeError:
+    pytest.skip("afs.training/afs.continuous moved to afs-scawful", allow_module_level=True)
 
 # ============================================================================
 # FIXTURES

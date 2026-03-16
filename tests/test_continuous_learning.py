@@ -4,19 +4,22 @@ from pathlib import Path
 
 import pytest
 
-from afs.continuous import (
-    ABTestManager,
-    ContinuousLearningLoop,
-    DataGeneratorConfig,
-    LoopConfig,
-    ModelStatus,
-    ModelVersion,
-    RetrainTrigger,
-    TrainingDataGenerator,
-    TriggerConfig,
-    TriggerType,
-    UsageLogger,
-)
+try:
+    from afs.continuous import (
+        ABTestManager,
+        ContinuousLearningLoop,
+        DataGeneratorConfig,
+        LoopConfig,
+        ModelStatus,
+        ModelVersion,
+        RetrainTrigger,
+        TrainingDataGenerator,
+        TriggerConfig,
+        TriggerType,
+        UsageLogger,
+    )
+except RuntimeError:
+    pytest.skip("afs.continuous moved to afs-scawful", allow_module_level=True)
 
 
 class TestUsageLogger:

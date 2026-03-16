@@ -5,7 +5,14 @@ from pathlib import Path
 
 from afs.manager import AFSManager
 from afs.mcp_server import _handle_request, build_mcp_registry
-from afs.schema import AFSConfig, ContextIndexConfig, ExtensionsConfig, GeneralConfig
+from afs.models import MountType
+from afs.schema import (
+    AFSConfig,
+    ContextIndexConfig,
+    ExtensionsConfig,
+    GeneralConfig,
+    WorkspaceDirectory,
+)
 
 
 def _make_manager(tmp_path: Path) -> AFSManager:
@@ -37,6 +44,8 @@ def test_tools_list_returns_afs_tools(tmp_path: Path) -> None:
         "context.unmount",
         "context.index.rebuild",
         "context.query",
+        "context.diff",
+        "context.status",
     }.issubset(names)
 
 
@@ -73,6 +82,102 @@ def test_fs_write_and_read_tool_calls(tmp_path: Path) -> None:
     )
     assert read_response is not None
     assert read_response["result"]["structuredContent"]["content"] == "hello"
+
+
+def test_fs_list_allows_configured_workspace_root(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "google"
+    workspace_root.mkdir()
+    project_dir = workspace_root / "repo"
+    project_dir.mkdir()
+    (project_dir / "README.md").write_text("workspace root access", encoding="utf-8")
+
+    context_root = tmp_path / "context"
+    context_root.mkdir(parents=True)
+    (context_root / "scratchpad").mkdir()
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(
+                context_root=context_root,
+                agent_workspaces_dir=context_root / "workspaces",
+                workspace_directories=[WorkspaceDirectory(path=workspace_root)],
+            )
+        )
+    )
+
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 60,
+            "method": "tools/call",
+            "params": {
+                "name": "fs.list",
+                "arguments": {"path": str(workspace_root), "max_depth": 2},
+            },
+        },
+        manager,
+    )
+    assert response is not None
+    entries = response["result"]["structuredContent"]["entries"]
+    assert any(entry["path"].endswith("README.md") for entry in entries)
+
+
+def test_fs_list_allows_configured_mcp_allowed_root(tmp_path: Path) -> None:
+    allowed_root = tmp_path / "google"
+    allowed_root.mkdir()
+    (allowed_root / "WORKSPACE").write_text("configured root", encoding="utf-8")
+
+    context_root = tmp_path / "context"
+    context_root.mkdir(parents=True)
+    (context_root / "scratchpad").mkdir()
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(
+                context_root=context_root,
+                agent_workspaces_dir=context_root / "workspaces",
+                mcp_allowed_roots=[allowed_root],
+            )
+        )
+    )
+
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 66,
+            "method": "tools/call",
+            "params": {
+                "name": "fs.list",
+                "arguments": {"path": str(allowed_root), "max_depth": 1},
+            },
+        },
+        manager,
+    )
+    assert response is not None
+    entries = response["result"]["structuredContent"]["entries"]
+    assert any(entry["path"].endswith("WORKSPACE") for entry in entries)
+
+
+def test_fs_list_allows_env_configured_mcp_root(tmp_path: Path, monkeypatch) -> None:
+    allowed_root = tmp_path / "google"
+    allowed_root.mkdir()
+    (allowed_root / "WORKSPACE").write_text("env root", encoding="utf-8")
+    manager = _make_manager(tmp_path)
+    monkeypatch.setenv("AFS_MCP_ALLOWED_ROOTS", str(allowed_root))
+
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 61,
+            "method": "tools/call",
+            "params": {
+                "name": "fs.list",
+                "arguments": {"path": str(allowed_root), "max_depth": 1},
+            },
+        },
+        manager,
+    )
+    assert response is not None
+    entries = response["result"]["structuredContent"]["entries"]
+    assert any(entry["path"].endswith("WORKSPACE") for entry in entries)
 
 
 def test_context_init_tool_creates_project_context(tmp_path: Path, monkeypatch) -> None:
@@ -146,6 +251,42 @@ def test_context_init_allows_explicit_allowed_context_root_outside_cwd(tmp_path:
     structured = init_response["result"]["structuredContent"]
     assert structured["context_path"] == str(context_root)
     assert context_root.exists()
+
+
+def test_context_init_allows_project_under_workspace_root_outside_cwd(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "google"
+    workspace_root.mkdir()
+    context_root = tmp_path / "context"
+    context_root.mkdir(parents=True)
+    (context_root / "scratchpad").mkdir()
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(
+                context_root=context_root,
+                agent_workspaces_dir=context_root / "workspaces",
+                workspace_directories=[WorkspaceDirectory(path=workspace_root)],
+            )
+        )
+    )
+    project_root = workspace_root / "workspace_project"
+    project_root.mkdir(parents=True)
+
+    init_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 62,
+            "method": "tools/call",
+            "params": {
+                "name": "context.init",
+                "arguments": {"project_path": str(project_root)},
+            },
+        },
+        manager,
+    )
+    assert init_response is not None
+    structured = init_response["result"]["structuredContent"]
+    assert structured["context_path"] == str(project_root / ".context")
+    assert (project_root / ".context").exists()
 
 
 def test_context_unmount_tool_removes_alias(tmp_path: Path) -> None:
@@ -291,6 +432,82 @@ def test_context_query_tool_auto_indexes(tmp_path: Path) -> None:
     assert structured["count"] >= 1
     assert any(entry["relative_path"] == "gemini_notes.md" for entry in structured["entries"])
     assert "index_rebuild" in structured
+
+
+def test_context_status_and_diff_tools(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    notes_dir = context_root / "scratchpad"
+    (context_root / "knowledge").mkdir(exist_ok=True)
+    note_path = notes_dir / "daily.md"
+    note_path.write_text("initial note", encoding="utf-8")
+    docs_root = tmp_path / "docs"
+    docs_root.mkdir()
+    (docs_root / "README.md").write_text("knowledge mount", encoding="utf-8")
+    manager.mount(docs_root, MountType.KNOWLEDGE, alias="docs", context_path=context_root)
+
+    rebuild_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 63,
+            "method": "tools/call",
+            "params": {
+                "name": "context.index.rebuild",
+                "arguments": {
+                    "context_path": str(context_root),
+                    "mount_types": ["scratchpad"],
+                },
+            },
+        },
+        manager,
+    )
+    assert rebuild_response is not None
+
+    status_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 64,
+            "method": "tools/call",
+            "params": {
+                "name": "context.status",
+                "arguments": {"context_path": str(context_root)},
+            },
+        },
+        manager,
+    )
+    assert status_response is not None
+    status_structured = status_response["result"]["structuredContent"]
+    assert status_structured["mount_counts"]["scratchpad"] >= 1
+    assert status_structured["mount_counts"]["knowledge"] == 1
+    assert status_structured["index"]["enabled"] is True
+    assert status_structured["index"]["has_entries"] is True
+    assert status_structured["index"]["total_entries"] >= 1
+
+    note_path.write_text("updated note", encoding="utf-8")
+    added_path = notes_dir / "extra.md"
+    added_path.write_text("extra", encoding="utf-8")
+    note_path.unlink()
+
+    diff_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 65,
+            "method": "tools/call",
+            "params": {
+                "name": "context.diff",
+                "arguments": {
+                    "context_path": str(context_root),
+                    "mount_types": ["scratchpad"],
+                },
+            },
+        },
+        manager,
+    )
+    assert diff_response is not None
+    diff_structured = diff_response["result"]["structuredContent"]
+    assert any(entry["relative_path"] == "extra.md" for entry in diff_structured["added"])
+    assert any(entry["relative_path"] == "daily.md" for entry in diff_structured["deleted"])
+    assert diff_structured["total_changes"] >= 2
 
 
 def test_context_query_respects_auto_index_config_default(tmp_path: Path) -> None:
