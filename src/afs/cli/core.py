@@ -5,12 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
 from ._utils import (
     build_config,
     ensure_context_root,
+    load_manager,
+    resolve_context_paths,
     resolve_studio_root,
     run_command,
     studio_binary_name,
@@ -19,6 +22,78 @@ from ._utils import (
     studio_build_dir,
     write_config,
 )
+
+
+def _hint(text: str) -> str:
+    """Format a contextual hint, dimmed when color is supported."""
+    if sys.stdout.isatty() and os.getenv("NO_COLOR") is None:
+        return f"  \033[2m{text}\033[0m"
+    return f"  {text}"
+
+
+def _load_service_manager(args: argparse.Namespace):
+    from ..config import load_config_model
+    from ..services import ServiceManager
+
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    config = (
+        load_config_model(config_path=config_path, merge_user=True)
+        if config_path is not None
+        else None
+    )
+    return ServiceManager(config=config, config_path=config_path)
+
+
+def _resolve_command_context(args: argparse.Namespace) -> Path:
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    if not hasattr(args, "path"):
+        args.path = None
+    if not hasattr(args, "context_root"):
+        args.context_root = None
+    if not hasattr(args, "context_dir"):
+        args.context_dir = None
+    manager = load_manager(config_path)
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+        args, manager
+    )
+    return context_path
+
+
+def _read_agent_events(
+    context_path: Path,
+    *,
+    agent_name: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    history_dir = context_path / "history"
+    prefix = f"agent.{agent_name}"
+    events: list[dict[str, Any]] = []
+    if not history_dir.exists():
+        return events
+    for log_file in sorted(history_dir.glob("events_*.jsonl"), reverse=True):
+        for line in reversed(log_file.read_text(encoding="utf-8").splitlines()):
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("source", "").startswith(prefix):
+                events.append(entry)
+                if len(events) >= limit:
+                    break
+        if len(events) >= limit:
+            break
+    events.reverse()
+    return events
 
 
 def init_command(args: argparse.Namespace) -> int:
@@ -59,6 +134,14 @@ def init_command(args: argparse.Namespace) -> int:
             config = build_config(context_root, workspace_path, args.workspace_name)
             write_config(config_path, config)
             print(f"Wrote config: {config_path}")
+
+    print(f"Context root: {context_root}")
+    print()
+    print(_hint("Next steps:"))
+    print(_hint("  afs status                      # verify context health"))
+    print(_hint("  afs context discover --path .    # index this project"))
+    print(_hint("  afs profile current              # check active profile"))
+    print(_hint("  afs skills list                  # see available skills"))
 
     return 0
 
@@ -158,9 +241,7 @@ def plugins_command(args: argparse.Namespace) -> int:
 
 def services_list_command(args: argparse.Namespace) -> int:
     """List service definitions."""
-    from ..services import ServiceManager
-
-    manager = ServiceManager()
+    manager = _load_service_manager(args)
     for definition in manager.list_definitions():
         print(f"{definition.name}\t{definition.label}")
     return 0
@@ -168,18 +249,14 @@ def services_list_command(args: argparse.Namespace) -> int:
 
 def services_render_command(args: argparse.Namespace) -> int:
     """Render service unit."""
-    from ..services import ServiceManager
-
-    manager = ServiceManager()
+    manager = _load_service_manager(args)
     print(manager.render_unit(args.name))
     return 0
 
 
 def services_start_command(args: argparse.Namespace) -> int:
     """Start a service."""
-    from ..services import ServiceManager
-
-    manager = ServiceManager()
+    manager = _load_service_manager(args)
     try:
         if manager.start(args.name, foreground=args.foreground):
             print(f"Started: {args.name}")
@@ -193,9 +270,7 @@ def services_start_command(args: argparse.Namespace) -> int:
 
 def services_stop_command(args: argparse.Namespace) -> int:
     """Stop a service."""
-    from ..services import ServiceManager
-
-    manager = ServiceManager()
+    manager = _load_service_manager(args)
     try:
         if manager.stop(args.name):
             print(f"Stopped: {args.name}")
@@ -209,9 +284,7 @@ def services_stop_command(args: argparse.Namespace) -> int:
 
 def services_status_command(args: argparse.Namespace) -> int:
     """Get service status."""
-    from ..services import ServiceManager
-
-    manager = ServiceManager()
+    manager = _load_service_manager(args)
 
     if args.name:
         status = manager.status(args.name)
@@ -237,9 +310,7 @@ def services_status_command(args: argparse.Namespace) -> int:
 
 def services_restart_command(args: argparse.Namespace) -> int:
     """Restart a service."""
-    from ..services import ServiceManager
-
-    manager = ServiceManager()
+    manager = _load_service_manager(args)
     try:
         if manager.restart(args.name):
             print(f"Restarted: {args.name}")
@@ -255,11 +326,17 @@ def agents_list_command(args: argparse.Namespace) -> int:
     """List available agents."""
     from ..agents import list_agents
 
-    for agent in list_agents():
+    agents = list_agents()
+    if not agents:
+        print("no agents registered")
+        print(_hint("agents are defined in config or extensions"))
+        return 0
+    for agent in agents:
         if agent.description:
             print(f"{agent.name}\t{agent.description}")
         else:
             print(agent.name)
+    print(_hint(f"{len(agents)} agents available  |  afs agents run <name>  |  afs agents ps"))
     return 0
 
 
@@ -267,12 +344,20 @@ def agents_ps_command(args: argparse.Namespace) -> int:
     """List running background agents."""
     from ..agents.supervisor import AgentSupervisor
 
-    supervisor = AgentSupervisor()
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
+    supervisor = AgentSupervisor(config=manager.config)
     agents = supervisor.list_agents()
     if not args.all:
         agents = [agent for agent in agents if agent.state == "running"]
     if not agents:
         print("no matching agents")
+        print(_hint("spawn agents with: afs agents run <name>"))
+        print(_hint("or via MCP: agent.spawn / agent.ps / agent.stop"))
         return 0
     if args.json:
         payload = [
@@ -301,6 +386,69 @@ def agents_ps_command(args: argparse.Namespace) -> int:
             extra.append(f"error={agent.last_error}")
         suffix = f"\t{' '.join(extra)}" if extra else ""
         print(f"{agent.name}\t{agent.state}\tpid={pid}\t{agent.started_at}{suffix}")
+    return 0
+
+
+def agents_watch_command(args: argparse.Namespace) -> int:
+    """Show recent progress events for an agent."""
+    agent_name = args.name
+    limit = args.limit
+    context_path = _resolve_command_context(args)
+    history_dir = context_path / "history"
+    if not history_dir.exists():
+        print("no history directory")
+        return 1
+    events = _read_agent_events(context_path, agent_name=agent_name, limit=limit)
+    if not events:
+        print(f"no events for {agent_name}")
+        return 0
+    for event in events:
+        ts = event.get("timestamp", "")[:19]
+        op = event.get("op", "")
+        detail = (event.get("metadata") or {}).get("detail", "")
+        print(f"{ts}  {op}  {detail}")
+    return 0
+
+
+def tasks_list_command(args: argparse.Namespace) -> int:
+    """List tasks from the items queue."""
+    from ..tasks import TaskQueue
+
+    context_path = _resolve_command_context(args)
+    queue = TaskQueue(context_path)
+    tasks = queue.list(status=args.status if hasattr(args, "status") else None)
+    if not tasks:
+        print("no tasks")
+        print(_hint("create tasks via MCP: task.create / task.list / task.claim"))
+        print(_hint("or shell: afs-task 'Fix lint errors'"))
+        return 0
+    if hasattr(args, "json") and args.json:
+        print(json.dumps([t.to_dict() for t in tasks], indent=2))
+        return 0
+    for task in tasks:
+        assigned = f" -> {task.assigned_to}" if task.assigned_to else ""
+        print(f"{task.id}\t[{task.status}]\tp{task.priority}\t{task.title}{assigned}")
+    return 0
+
+
+def hivemind_list_command(args: argparse.Namespace) -> int:
+    """List recent hivemind messages."""
+    from ..hivemind import HivemindBus
+
+    context_path = _resolve_command_context(args)
+    bus = HivemindBus(context_path)
+    messages = bus.read(limit=args.limit if hasattr(args, "limit") else 20)
+    if not messages:
+        print("no messages")
+        print(_hint("agents communicate via: hivemind.send / hivemind.read"))
+        print(_hint("or shell: afs-say my-agent finding key=value"))
+        return 0
+    for msg in messages:
+        to_part = f" -> {msg.to}" if msg.to else ""
+        print(f"{msg.timestamp[:19]}  [{msg.msg_type}]  {msg.from_agent}{to_part}")
+        if msg.payload:
+            for key, value in msg.payload.items():
+                print(f"  {key}: {value}")
     return 0
 
 
@@ -599,11 +747,34 @@ def status_command(args: argparse.Namespace) -> int:
             f"age={brief['age_seconds'] if brief['age_seconds'] is not None else 'n/a'}s"
         )
 
+    # Contextual hints based on state
+    hints: list[str] = []
+    if missing:
+        hints.append("afs init --link-context  # fix missing mount dirs")
+    if not mount_counts:
+        hints.append("afs context discover --path .  # index this project")
+    if not index_stats.get("available"):
+        hints.append("afs context ensure-all --path .  # build context index")
+    elif index_stats.get("stale"):
+        hints.append("afs context ensure-all --path .  # refresh stale index")
+    if counts.get("failed", 0) > 0:
+        hints.append("afs agents ps --all  # check failed agents")
+    if hints:
+        print()
+        for hint in hints:
+            print(_hint(hint))
+
     return 0
 
 
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register core command parsers."""
+    def add_context_args(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--config", help="Config path.")
+        parser.add_argument("--path", help="Project path.")
+        parser.add_argument("--context-root", help="Context root override.")
+        parser.add_argument("--context-dir", help="Context directory name.")
+
     # init
     init_parser = subparsers.add_parser("init", help="Initialize AFS context/root.")
     init_parser.add_argument("--context-root", help="Context root path.")
@@ -636,26 +807,32 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     services_sub = services_parser.add_subparsers(dest="services_command")
 
     services_list = services_sub.add_parser("list", help="List service definitions.")
+    services_list.add_argument("--config", help="Config path.")
     services_list.set_defaults(func=services_list_command)
 
     services_render = services_sub.add_parser("render", help="Render service unit.")
+    services_render.add_argument("--config", help="Config path.")
     services_render.add_argument("name", help="Service name.")
     services_render.set_defaults(func=services_render_command)
 
     services_start = services_sub.add_parser("start", help="Start a service.")
+    services_start.add_argument("--config", help="Config path.")
     services_start.add_argument("name", help="Service name.")
     services_start.add_argument("--foreground", "-f", action="store_true", help="Run in foreground.")
     services_start.set_defaults(func=services_start_command)
 
     services_stop = services_sub.add_parser("stop", help="Stop a service.")
+    services_stop.add_argument("--config", help="Config path.")
     services_stop.add_argument("name", help="Service name.")
     services_stop.set_defaults(func=services_stop_command)
 
     services_status = services_sub.add_parser("status", help="Get service status.")
+    services_status.add_argument("--config", help="Config path.")
     services_status.add_argument("name", nargs="?", help="Service name (optional, shows all if omitted).")
     services_status.set_defaults(func=services_status_command)
 
     services_restart = services_sub.add_parser("restart", help="Restart a service.")
+    services_restart.add_argument("--config", help="Config path.")
     services_restart.add_argument("name", help="Service name.")
     services_restart.set_defaults(func=services_restart_command)
 
@@ -667,9 +844,16 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     agents_list.set_defaults(func=agents_list_command)
 
     agents_ps = agents_sub.add_parser("ps", help="List background agent processes.")
+    agents_ps.add_argument("--config", help="Config path.")
     agents_ps.add_argument("--all", action="store_true", help="Include failed/stopped agent state.")
     agents_ps.add_argument("--json", action="store_true", help="Output JSON.")
     agents_ps.set_defaults(func=agents_ps_command)
+
+    agents_watch = agents_sub.add_parser("watch", help="Show recent progress events for an agent.")
+    add_context_args(agents_watch)
+    agents_watch.add_argument("name", help="Agent name.")
+    agents_watch.add_argument("--limit", type=int, default=20, help="Max events to show.")
+    agents_watch.set_defaults(func=agents_watch_command)
 
     agents_run = agents_sub.add_parser("run", help="Run a built-in agent.")
     agents_run.add_argument("name", help="Agent name.")
@@ -679,6 +863,23 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Arguments for the agent (prefix with -- to pass through).",
     )
     agents_run.set_defaults(func=agents_run_command)
+
+    # tasks
+    tasks_parser = subparsers.add_parser("tasks", help="Task queue operations.")
+    tasks_sub = tasks_parser.add_subparsers(dest="tasks_command")
+    tasks_ls = tasks_sub.add_parser("list", help="List tasks.")
+    add_context_args(tasks_ls)
+    tasks_ls.add_argument("--status", help="Filter by status.")
+    tasks_ls.add_argument("--json", action="store_true", help="Output JSON.")
+    tasks_ls.set_defaults(func=tasks_list_command)
+
+    # hivemind
+    hivemind_parser = subparsers.add_parser("hivemind", help="Inter-agent message bus.")
+    hivemind_sub = hivemind_parser.add_subparsers(dest="hivemind_command")
+    hivemind_ls = hivemind_sub.add_parser("list", help="List recent messages.")
+    add_context_args(hivemind_ls)
+    hivemind_ls.add_argument("--limit", type=int, default=20, help="Max messages.")
+    hivemind_ls.set_defaults(func=hivemind_list_command)
 
     # orchestrator
     orch_parser = subparsers.add_parser("orchestrator", help="Orchestrator helpers.")

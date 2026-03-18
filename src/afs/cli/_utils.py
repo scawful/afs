@@ -167,129 +167,117 @@ def ensure_context_root(root: Path) -> None:
 
 
 def write_config(path: Path, config: AFSConfig) -> None:
-    """Write configuration to TOML file."""
+    """Write configuration to TOML file, preserving unknown sections."""
+    import tomlkit
+
+    # Load existing document to preserve unknown sections/comments.
+    doc: tomlkit.TOMLDocument
+    if path.exists():
+        try:
+            doc = tomlkit.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            doc = tomlkit.document()
+    else:
+        doc = tomlkit.document()
+
+    # --- [general] ---
     general = config.general
-
-    def _toml_array(values: list[str]) -> str:
-        escaped = [value.replace("\\", "\\\\").replace('"', '\\"') for value in values]
-        return "[" + ", ".join(f'"{value}"' for value in escaped) + "]"
-
-    lines: list[str] = [
-        "[general]",
-        f"context_root = \"{general.context_root}\"",
-        f"agent_workspaces_dir = \"{general.agent_workspaces_dir}\"",
-    ]
-
+    gen_table = doc.get("general")
+    if not isinstance(gen_table, dict):
+        gen_table = tomlkit.table()
+        doc["general"] = gen_table
+    gen_table["context_root"] = str(general.context_root)
+    gen_table["agent_workspaces_dir"] = str(general.agent_workspaces_dir)
     if general.mcp_allowed_roots:
-        lines.append(
-            "mcp_allowed_roots = "
-            + _toml_array([str(path) for path in general.mcp_allowed_roots])
-        )
-
+        gen_table["mcp_allowed_roots"] = [str(p) for p in general.mcp_allowed_roots]
     if general.workspace_directories:
+        ws_aot = tomlkit.aot()
         for ws in general.workspace_directories:
-            lines.append("")
-            lines.append("[[general.workspace_directories]]")
-            lines.append(f"path = \"{ws.path}\"")
+            ws_item = tomlkit.table()
+            ws_item["path"] = str(ws.path)
             if ws.description:
-                lines.append(f"description = \"{ws.description}\"")
+                ws_item["description"] = ws.description
+            ws_aot.append(ws_item)
+        gen_table["workspace_directories"] = ws_aot
 
-    lines.append("")
-    lines.append("[plugins]")
-    lines.append(f"auto_discover = {str(config.plugins.auto_discover).lower()}")
-    lines.append(
-        "auto_discover_prefixes = "
-        + _toml_array(list(config.plugins.auto_discover_prefixes))
-    )
-    lines.append(
-        "enabled_plugins = " + _toml_array(list(config.plugins.enabled_plugins))
-    )
-    lines.append(
-        "plugin_dirs = " + _toml_array([str(path) for path in config.plugins.plugin_dirs])
-    )
+    # --- [plugins] ---
+    plugins_table = doc.get("plugins")
+    if not isinstance(plugins_table, dict):
+        plugins_table = tomlkit.table()
+        doc["plugins"] = plugins_table
+    plugins_table["auto_discover"] = config.plugins.auto_discover
+    plugins_table["auto_discover_prefixes"] = list(config.plugins.auto_discover_prefixes)
+    plugins_table["enabled_plugins"] = list(config.plugins.enabled_plugins)
+    plugins_table["plugin_dirs"] = [str(p) for p in config.plugins.plugin_dirs]
 
-    lines.append("")
-    lines.append("[extensions]")
-    lines.append(f"auto_discover = {str(config.extensions.auto_discover).lower()}")
-    lines.append(
-        "enabled_extensions = "
-        + _toml_array(list(config.extensions.enabled_extensions))
-    )
-    lines.append(
-        "extension_dirs = "
-        + _toml_array([str(path) for path in config.extensions.extension_dirs])
-    )
+    # --- [extensions] ---
+    ext_table = doc.get("extensions")
+    if not isinstance(ext_table, dict):
+        ext_table = tomlkit.table()
+        doc["extensions"] = ext_table
+    ext_table["auto_discover"] = config.extensions.auto_discover
+    ext_table["enabled_extensions"] = list(config.extensions.enabled_extensions)
+    ext_table["extension_dirs"] = [str(p) for p in config.extensions.extension_dirs]
 
-    lines.append("")
-    lines.append("[profiles]")
-    lines.append(f"active_profile = \"{config.profiles.active_profile}\"")
-    lines.append(f"auto_apply = {str(config.profiles.auto_apply).lower()}")
+    # --- [profiles] ---
+    prof_table = doc.get("profiles")
+    if not isinstance(prof_table, dict):
+        prof_table = tomlkit.table()
+        doc["profiles"] = prof_table
+    prof_table["active_profile"] = config.profiles.active_profile
+    prof_table["auto_apply"] = config.profiles.auto_apply
     for name, profile in config.profiles.profiles.items():
-        lines.append("")
-        lines.append(f"[profiles.{name}]")
-        lines.append("inherits = " + _toml_array(profile.inherits))
-        lines.append(
-            "knowledge_mounts = "
-            + _toml_array([str(path) for path in profile.knowledge_mounts])
-        )
-        lines.append(
-            "skill_roots = " + _toml_array([str(path) for path in profile.skill_roots])
-        )
-        lines.append(
-            "model_registries = "
-            + _toml_array([str(path) for path in profile.model_registries])
-        )
-        lines.append(
-            "enabled_extensions = "
-            + _toml_array(list(profile.enabled_extensions))
-        )
-        lines.append("policies = " + _toml_array(list(profile.policies)))
-        lines.append("mcp_tools = " + _toml_array(list(profile.mcp_tools)))
-        lines.append("cli_modules = " + _toml_array(list(profile.cli_modules)))
+        p_table = tomlkit.table()
+        p_table["inherits"] = list(profile.inherits)
+        p_table["knowledge_mounts"] = [str(p) for p in profile.knowledge_mounts]
+        p_table["skill_roots"] = [str(p) for p in profile.skill_roots]
+        p_table["model_registries"] = [str(p) for p in profile.model_registries]
+        p_table["enabled_extensions"] = list(profile.enabled_extensions)
+        p_table["policies"] = list(profile.policies)
+        p_table["mcp_tools"] = list(profile.mcp_tools)
+        p_table["cli_modules"] = list(profile.cli_modules)
+        if profile.agent_configs:
+            agents_aot = tomlkit.aot()
+            for agent in profile.agent_configs:
+                a_table = tomlkit.table()
+                a_table["name"] = agent.name
+                a_table["role"] = agent.role
+                a_table["backend"] = agent.backend
+                a_table["description"] = agent.description
+                a_table["tags"] = list(agent.tags)
+                a_table["auto_start"] = agent.auto_start
+                a_table["triggers"] = list(agent.triggers)
+                a_table["schedule"] = agent.schedule
+                a_table["module"] = agent.module
+                a_table["watch_paths"] = [str(p) for p in agent.watch_paths]
+                a_table["allowed_mounts"] = list(agent.allowed_mounts)
+                a_table["allowed_tools"] = list(agent.allowed_tools)
+                a_table["workspace_isolated"] = agent.workspace_isolated
+                agents_aot.append(a_table)
+            p_table["agent_configs"] = agents_aot
+        prof_table[name] = p_table
 
-        for agent in profile.agent_configs:
-            lines.append("")
-            lines.append(f"[[profiles.{name}.agent_configs]]")
-            lines.append(f"name = \"{agent.name}\"")
-            lines.append(f"role = \"{agent.role}\"")
-            lines.append(f"backend = \"{agent.backend}\"")
-            lines.append(f"description = \"{agent.description}\"")
-            lines.append("tags = " + _toml_array(list(agent.tags)))
-            lines.append(f"auto_start = {str(agent.auto_start).lower()}")
-            lines.append("triggers = " + _toml_array(list(agent.triggers)))
-            lines.append(f"schedule = \"{agent.schedule}\"")
-            lines.append(f"module = \"{agent.module}\"")
-            lines.append(
-                "watch_paths = "
-                + _toml_array([str(path) for path in agent.watch_paths])
-            )
+    # --- [hooks] ---
+    hooks_table = doc.get("hooks")
+    if not isinstance(hooks_table, dict):
+        hooks_table = tomlkit.table()
+        doc["hooks"] = hooks_table
+    hooks_table["before_context_read"] = list(config.hooks.before_context_read)
+    hooks_table["after_context_write"] = list(config.hooks.after_context_write)
+    hooks_table["before_agent_dispatch"] = list(config.hooks.before_agent_dispatch)
 
-    lines.append("")
-    lines.append("[hooks]")
-    lines.append(
-        "before_context_read = "
-        + _toml_array(list(config.hooks.before_context_read))
-    )
-    lines.append(
-        "after_context_write = "
-        + _toml_array(list(config.hooks.after_context_write))
-    )
-    lines.append(
-        "before_agent_dispatch = "
-        + _toml_array(list(config.hooks.before_agent_dispatch))
-    )
+    # --- [cognitive] ---
+    cog_table = doc.get("cognitive")
+    if not isinstance(cog_table, dict):
+        cog_table = tomlkit.table()
+        doc["cognitive"] = cog_table
+    cog_table["enabled"] = config.cognitive.enabled
+    cog_table["record_emotions"] = config.cognitive.record_emotions
+    cog_table["record_metacognition"] = config.cognitive.record_metacognition
+    cog_table["record_goals"] = config.cognitive.record_goals
+    cog_table["record_epistemic"] = config.cognitive.record_epistemic
 
-    lines.append("")
-    lines.append("[cognitive]")
-    lines.append(f"enabled = {str(config.cognitive.enabled).lower()}")
-    lines.append(f"record_emotions = {str(config.cognitive.record_emotions).lower()}")
-    lines.append(
-        f"record_metacognition = {str(config.cognitive.record_metacognition).lower()}"
-    )
-    lines.append(f"record_goals = {str(config.cognitive.record_goals).lower()}")
-    lines.append(f"record_epistemic = {str(config.cognitive.record_epistemic).lower()}")
-    lines.append("")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.write_text(tomlkit.dumps(doc), encoding="utf-8")
 
 
 def build_config(

@@ -124,3 +124,25 @@ def emit_result(
 
 def now_iso() -> str:
     return datetime.now().isoformat()
+
+
+def emit_progress(
+    agent_name: str,
+    event: str,
+    detail: str = "",
+    *,
+    context_root: Path | None = None,
+) -> str | None:
+    """Emit an agent progress event to the history log.
+
+    Returns the event ID if logged, otherwise None.
+    """
+    from ..history import log_event as _log_event
+
+    return _log_event(
+        "agent_progress",
+        f"agent.{agent_name}",
+        op=event,
+        context_root=context_root,
+        metadata={"detail": detail, "agent": agent_name},
+    )

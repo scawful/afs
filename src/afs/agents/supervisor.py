@@ -109,7 +109,7 @@ def _watch_signature(path: Path) -> tuple[bool, int, int, int]:
 class RunningAgent:
     name: str
     pid: int | None = None
-    state: str = "stopped"  # stopped, running, failed
+    state: str = "stopped"  # stopped, running, failed, awaiting_review
     started_at: str = ""
     module: str = ""
     args: list[str] = field(default_factory=list)
@@ -225,6 +225,72 @@ class AgentSupervisor:
             self._write_state(agent)
         return agent
 
+    def _build_agent_env(
+        self, name: str, agent_config: AgentConfig | None,
+    ) -> dict[str, str] | None:
+        """Build environment dict with sandbox vars if agent_config is set."""
+        if agent_config is None:
+            return None
+        if (
+            not agent_config.allowed_mounts
+            and not agent_config.allowed_tools
+            and not agent_config.workspace_isolated
+        ):
+            return None
+        env = dict(os.environ)
+        env["AFS_AGENT_NAME"] = name
+        if agent_config.allowed_mounts:
+            env["AFS_ALLOWED_MOUNTS"] = ",".join(agent_config.allowed_mounts)
+        if agent_config.allowed_tools:
+            env["AFS_ALLOWED_TOOLS"] = ",".join(agent_config.allowed_tools)
+        if agent_config.workspace_isolated:
+            env["AFS_WORKSPACE_ISOLATED"] = "1"
+            env["AFS_PREFER_REPO_CONFIG"] = "1"
+            env["AFS_PREFER_USER_CONFIG"] = "0"
+        return env
+
+    def _terminate_pid(self, pid: int, *, grace_seconds: float = 1.0) -> bool:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+
+        deadline = time.monotonic() + grace_seconds
+        while time.monotonic() < deadline:
+            if not self._pid_alive(pid):
+                return True
+            time.sleep(0.05)
+
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+
+        deadline = time.monotonic() + grace_seconds
+        while time.monotonic() < deadline:
+            if not self._pid_alive(pid):
+                return True
+            time.sleep(0.05)
+        return not self._pid_alive(pid)
+
+    def _quiesce_agent(self, agent: RunningAgent, *, reason: str) -> bool:
+        if agent.pid is None:
+            return True
+        if not self._pid_alive(agent.pid):
+            agent.pid = None
+            return True
+        if self._terminate_pid(agent.pid):
+            agent.pid = None
+            return True
+        agent.last_error = f"failed to stop pid {agent.pid} for {reason}"
+        agent.last_seen_at = now_iso()
+        self._write_state(agent)
+        return False
+
     def spawn(
         self,
         name: str,
@@ -232,6 +298,7 @@ class AgentSupervisor:
         args: list[str] | None = None,
         *,
         reason: str = "",
+        agent_config: AgentConfig | None = None,
     ) -> RunningAgent:
         existing = self.status(name)
         if existing and existing.state == "running":
@@ -240,12 +307,14 @@ class AgentSupervisor:
         cmd = [self._python_executable(), "-m", module] + (args or [])
         launch_count = (existing.launch_count if existing else 0) + 1
         started_at = _now_utc().isoformat()
+        agent_env = self._build_agent_env(name, agent_config)
         try:
             proc = subprocess.Popen(
                 cmd,
                 start_new_session=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=agent_env,
             )
         except Exception as exc:
             agent = RunningAgent(
@@ -281,11 +350,8 @@ class AgentSupervisor:
         if not agent:
             return False
 
-        if agent.pid and self._pid_alive(agent.pid):
-            try:
-                os.kill(agent.pid, signal.SIGTERM)
-            except (OSError, ProcessLookupError):
-                pass
+        if not self._quiesce_agent(agent, reason="stop"):
+            return False
 
         agent.state = "stopped"
         agent.pid = None
@@ -307,7 +373,7 @@ class AgentSupervisor:
         return agents
 
     def list_running(self) -> list[RunningAgent]:
-        return self.list_agents()
+        return [agent for agent in self.list_agents() if agent.state == "running"]
 
     def status(self, name: str) -> RunningAgent | None:
         agent = self._read_state(name)
@@ -315,17 +381,65 @@ class AgentSupervisor:
             return None
         return self._refresh_state(agent)
 
+    def set_awaiting_review(self, name: str) -> bool:
+        """Transition agent to awaiting_review state."""
+        agent = self._read_state(name)
+        if agent is None:
+            return False
+        if not self._quiesce_agent(agent, reason="review"):
+            return False
+        agent.state = "awaiting_review"
+        agent.last_event = "review_requested"
+        agent.last_seen_at = now_iso()
+        self._write_state(agent)
+        return True
+
+    def approve_review(self, name: str) -> bool:
+        """Approve review, transition agent back to stopped."""
+        agent = self._read_state(name)
+        if agent is None or agent.state != "awaiting_review":
+            return False
+        if not self._quiesce_agent(agent, reason="review approval"):
+            return False
+        agent.state = "stopped"
+        agent.pid = None
+        agent.stopped_at = now_iso()
+        agent.last_event = "review_approved"
+        agent.last_seen_at = agent.stopped_at
+        self._write_state(agent)
+        return True
+
+    def reject_review(self, name: str) -> bool:
+        """Reject review, transition agent to failed."""
+        agent = self._read_state(name)
+        if agent is None or agent.state != "awaiting_review":
+            return False
+        if not self._quiesce_agent(agent, reason="review rejection"):
+            return False
+        agent.state = "failed"
+        agent.pid = None
+        agent.last_error = "review_rejected"
+        agent.last_event = "review_rejected"
+        agent.last_seen_at = now_iso()
+        self._write_state(agent)
+        return True
+
     def auto_start(self, agent_configs: list[AgentConfig]) -> list[RunningAgent]:
         started: list[RunningAgent] = []
         for config in agent_configs:
             if not config.auto_start or not config.module:
                 continue
             existing = self.status(config.name)
-            if existing and (existing.state == "running" or existing.manually_stopped):
+            if existing and (existing.state in ("running", "awaiting_review") or existing.manually_stopped):
                 continue
             try:
                 started.append(
-                    self.spawn(config.name, config.module, reason="auto_start")
+                    self.spawn(
+                        config.name,
+                        config.module,
+                        reason="auto_start",
+                        agent_config=config,
+                    )
                 )
             except RuntimeError:
                 continue
@@ -385,7 +499,7 @@ class AgentSupervisor:
             if interval_seconds is None or not config.module:
                 continue
             existing = self.status(config.name)
-            if existing and (existing.state == "running" or existing.manually_stopped):
+            if existing and (existing.state in ("running", "awaiting_review") or existing.manually_stopped):
                 continue
             if existing is None:
                 due.append(config)
@@ -429,10 +543,17 @@ class AgentSupervisor:
             if not config.module:
                 continue
             existing = self.status(config.name)
-            if existing and (existing.state == "running" or existing.manually_stopped):
+            if existing and (existing.state in ("running", "awaiting_review") or existing.manually_stopped):
                 continue
             try:
-                started.append(self.spawn(config.name, config.module, reason=reason))
+                started.append(
+                    self.spawn(
+                        config.name,
+                        config.module,
+                        reason=reason,
+                        agent_config=config,
+                    )
+                )
             except RuntimeError:
                 continue
         return started

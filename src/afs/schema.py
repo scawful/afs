@@ -130,11 +130,12 @@ class GeneralConfig:
         context_root = data.get("context_root")
         agent_workspaces_dir = data.get("agent_workspaces_dir")
         python_executable = data.get("python_executable")
-        workspace_directories = [
-            WorkspaceDirectory.from_dict(item)
-            for item in data.get("workspace_directories", [])
-            if isinstance(item, dict)
-        ]
+        workspace_directories = []
+        for item in data.get("workspace_directories", []):
+            if isinstance(item, dict):
+                workspace_directories.append(WorkspaceDirectory.from_dict(item))
+            elif isinstance(item, str):
+                workspace_directories.append(WorkspaceDirectory(path=_as_path(item)))
         mcp_allowed_roots = [
             _as_path(item)
             for item in data.get("mcp_allowed_roots", [])
@@ -325,6 +326,9 @@ class AgentConfig:
     schedule: str = ""
     module: str = ""
     watch_paths: list[Path] = field(default_factory=list)
+    allowed_mounts: list[str] = field(default_factory=list)
+    allowed_tools: list[str] = field(default_factory=list)
+    workspace_isolated: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AgentConfig:
@@ -344,6 +348,9 @@ class AgentConfig:
             schedule=str(data.get("schedule", "")).strip(),
             module=str(data.get("module", "")).strip(),
             watch_paths=_as_path_list(data.get("watch_paths")),
+            allowed_mounts=_as_str_list(data.get("allowed_mounts")),
+            allowed_tools=_as_str_list(data.get("allowed_tools")),
+            workspace_isolated=bool(data.get("workspace_isolated", False)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -358,6 +365,9 @@ class AgentConfig:
             "schedule": self.schedule,
             "module": self.module,
             "watch_paths": [str(path) for path in self.watch_paths],
+            "allowed_mounts": list(self.allowed_mounts),
+            "allowed_tools": list(self.allowed_tools),
+            "workspace_isolated": self.workspace_isolated,
         }
 
 

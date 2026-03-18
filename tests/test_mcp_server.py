@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
+from afs.agents.supervisor import AgentSupervisor
 from afs.manager import AFSManager
 from afs.mcp_server import _handle_request, build_mcp_registry
 from afs.models import MountType
@@ -1884,3 +1886,139 @@ def test_agent_stop_missing_agent(tmp_path: Path) -> None:
     assert response is not None
     content = response["result"]["structuredContent"]
     assert content["stopped"] is False
+
+
+def test_hivemind_task_and_agent_logs_tools_use_context_path(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_path = manager.config.general.context_root
+    history_file = context_path / "history" / "events_20260317.jsonl"
+    history_file.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-03-17T12:00:00+00:00",
+                "source": "agent.worker-1",
+                "op": "progress",
+                "metadata": {"detail": "queued task"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    send_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "hivemind.send",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "from": "agent-a",
+                    "type": "status",
+                    "payload": {"state": "ok"},
+                },
+            },
+        },
+        manager,
+    )
+    assert send_response is not None
+    send_payload = send_response["result"]["structuredContent"]
+    assert send_payload["from"] == "agent-a"
+
+    read_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "hivemind.read",
+                "arguments": {"context_path": str(context_path)},
+            },
+        },
+        manager,
+    )
+    assert read_response is not None
+    assert len(read_response["result"]["structuredContent"]["messages"]) == 1
+
+    create_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "task.create",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "title": "Review runtime wiring",
+                    "created_by": "agent-a",
+                },
+            },
+        },
+        manager,
+    )
+    assert create_response is not None
+    task_payload = create_response["result"]["structuredContent"]
+    assert task_payload["title"] == "Review runtime wiring"
+
+    list_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "task.list",
+                "arguments": {"context_path": str(context_path)},
+            },
+        },
+        manager,
+    )
+    assert list_response is not None
+    assert len(list_response["result"]["structuredContent"]["tasks"]) == 1
+
+    logs_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.logs",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "name": "worker-1",
+                },
+            },
+        },
+        manager,
+    )
+    assert logs_response is not None
+    events = logs_response["result"]["structuredContent"]["events"]
+    assert len(events) == 1
+    assert events[0]["metadata"]["detail"] == "queued task"
+
+
+def test_review_tools_use_manager_config(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    supervisor = AgentSupervisor(config=manager.config)
+    mock_proc = type("MockProc", (), {"pid": 42424})()
+
+    with patch("afs.agents.supervisor.subprocess.Popen", return_value=mock_proc):
+        supervisor.spawn("review-agent", "some.module")
+    with (
+        patch("afs.agents.supervisor.os.kill"),
+        patch.object(supervisor, "_pid_alive", side_effect=[True, False]),
+    ):
+        assert supervisor.set_awaiting_review("review-agent") is True
+
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {"name": "review.list", "arguments": {}},
+        },
+        manager,
+    )
+    assert response is not None
+    agents = response["result"]["structuredContent"]["agents"]
+    assert [agent["name"] for agent in agents] == ["review-agent"]

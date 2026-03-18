@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .agent_scope import assert_mount_allowed, assert_tool_allowed
 from .config import load_config_model
 from .context_index import (
     DEFAULT_MAX_CONTENT_CHARS,
@@ -191,6 +192,7 @@ class MCPToolRegistry:
         tool = self.tools.get(name)
         if not tool:
             raise ValueError(f"Unknown tool: {name}")
+        assert_tool_allowed(name)
         return tool.handler(arguments, manager)
 
     def read_resource(self, uri: str, manager: AFSManager) -> dict[str, Any]:
@@ -1000,9 +1002,42 @@ def _invoke_extension_callable(
     return handler(*positional_args, **keyword_args)
 
 
-def _tool_agent_spawn(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+def _agent_supervisor(manager: AFSManager):
     from .agents.supervisor import AgentSupervisor
 
+    return AgentSupervisor(config=manager.config)
+
+
+def _read_agent_events(
+    context_path: Path,
+    *,
+    agent_name: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    assert_mount_allowed(MountType.HISTORY, operation="read")
+    history_dir = context_path / "history"
+    prefix = f"agent.{agent_name}"
+    events: list[dict[str, Any]] = []
+    if history_dir.exists():
+        for log_file in sorted(history_dir.glob("events_*.jsonl"), reverse=True):
+            for line in reversed(log_file.read_text(encoding="utf-8").splitlines()):
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("source", "").startswith(prefix):
+                    events.append(entry)
+                    if len(events) >= limit:
+                        break
+            if len(events) >= limit:
+                break
+    events.reverse()
+    return events
+
+
+def _tool_agent_spawn(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     name_value = arguments.get("name", "")
     module_value = arguments.get("module", "")
     args = arguments.get("args")
@@ -1017,7 +1052,7 @@ def _tool_agent_spawn(arguments: dict[str, Any], manager: AFSManager) -> dict[st
 
     name = name_value.strip()
     module = module_value.strip()
-    supervisor = AgentSupervisor()
+    supervisor = _agent_supervisor(manager)
     try:
         agent = supervisor.spawn(name, module, args)
         return {"name": agent.name, "pid": agent.pid, "state": agent.state}
@@ -1026,10 +1061,8 @@ def _tool_agent_spawn(arguments: dict[str, Any], manager: AFSManager) -> dict[st
 
 
 def _tool_agent_ps(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
-    from .agents.supervisor import AgentSupervisor
-
-    supervisor = AgentSupervisor()
-    agents = [agent for agent in supervisor.list_running() if agent.state == "running"]
+    supervisor = _agent_supervisor(manager)
+    agents = supervisor.list_running()
     return {
         "agents": [
             {
@@ -1044,15 +1077,148 @@ def _tool_agent_ps(arguments: dict[str, Any], manager: AFSManager) -> dict[str, 
 
 
 def _tool_agent_stop(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
-    from .agents.supervisor import AgentSupervisor
-
     name_value = arguments.get("name", "")
     if not isinstance(name_value, str) or not name_value.strip():
         raise ValueError("name is required")
     name = name_value.strip()
-    supervisor = AgentSupervisor()
+    supervisor = _agent_supervisor(manager)
     stopped = supervisor.stop(name)
     return {"name": name, "stopped": stopped}
+
+
+def _tool_hivemind_send(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .hivemind import HivemindBus
+
+    from_agent = arguments.get("from", "")
+    if not isinstance(from_agent, str) or not from_agent.strip():
+        raise ValueError("from is required")
+    msg_type = str(arguments.get("type", "status")).strip()
+    payload = arguments.get("payload") or {}
+    to = arguments.get("to")
+    if isinstance(to, str):
+        to = to.strip() or None
+
+    context_path = _resolve_context_path(arguments, manager)
+    bus = HivemindBus(context_path)
+    msg = bus.send(from_agent.strip(), msg_type, payload, to=to)
+    return msg.to_dict()
+
+
+def _tool_hivemind_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .hivemind import HivemindBus
+
+    agent_name = arguments.get("agent")
+    if isinstance(agent_name, str):
+        agent_name = agent_name.strip() or None
+    msg_type = arguments.get("type")
+    if isinstance(msg_type, str):
+        msg_type = msg_type.strip() or None
+    limit = _coerce_int(arguments.get("limit"), default=50, minimum=1, maximum=500)
+
+    context_path = _resolve_context_path(arguments, manager)
+    bus = HivemindBus(context_path)
+    messages = bus.read(agent_name=agent_name, msg_type=msg_type, limit=limit)
+    return {"messages": [m.to_dict() for m in messages]}
+
+
+def _tool_task_create(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .tasks import TaskQueue
+
+    title = arguments.get("title", "")
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("title is required")
+    context_path = _resolve_context_path(arguments, manager)
+    priority = _coerce_int(arguments.get("priority"), default=5, minimum=1, maximum=10)
+    queue = TaskQueue(context_path)
+    task = queue.create(
+        title.strip(),
+        created_by=str(arguments.get("created_by", "")).strip(),
+        priority=priority,
+        context=arguments.get("context") or {},
+    )
+    return task.to_dict()
+
+
+def _tool_task_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .tasks import TaskQueue
+
+    status = arguments.get("status")
+    if isinstance(status, str):
+        status = status.strip() or None
+    context_path = _resolve_context_path(arguments, manager)
+    queue = TaskQueue(context_path)
+    tasks = queue.list(status=status)
+    return {"tasks": [t.to_dict() for t in tasks]}
+
+
+def _tool_task_claim(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .tasks import TaskQueue
+
+    task_id = arguments.get("task_id", "")
+    agent_name = arguments.get("agent_name", "")
+    if not task_id or not agent_name:
+        raise ValueError("task_id and agent_name are required")
+    context_path = _resolve_context_path(arguments, manager)
+    queue = TaskQueue(context_path)
+    task = queue.claim(str(task_id).strip(), str(agent_name).strip())
+    return task.to_dict()
+
+
+def _tool_task_complete(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .tasks import TaskQueue
+
+    task_id = arguments.get("task_id", "")
+    if not task_id:
+        raise ValueError("task_id is required")
+    result = arguments.get("result")
+    context_path = _resolve_context_path(arguments, manager)
+    queue = TaskQueue(context_path)
+    task = queue.complete(str(task_id).strip(), result=result)
+    return task.to_dict()
+
+
+def _tool_agent_logs(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    agent_name = arguments.get("name", "")
+    if not isinstance(agent_name, str) or not agent_name.strip():
+        raise ValueError("name is required")
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=500)
+    context_path = _resolve_context_path(arguments, manager)
+    events = _read_agent_events(
+        context_path,
+        agent_name=agent_name.strip(),
+        limit=limit,
+    )
+    return {"events": events}
+
+
+def _tool_review_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    supervisor = _agent_supervisor(manager)
+    agents = supervisor.list_agents()
+    awaiting = [a for a in agents if a.state == "awaiting_review"]
+    return {
+        "agents": [
+            {"name": a.name, "state": a.state, "last_event": a.last_event}
+            for a in awaiting
+        ]
+    }
+
+
+def _tool_review_approve(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    name = arguments.get("name", "")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("name is required")
+    supervisor = _agent_supervisor(manager)
+    approved = supervisor.approve_review(name.strip())
+    return {"name": name.strip(), "approved": approved}
+
+
+def _tool_review_reject(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    name = arguments.get("name", "")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("name is required")
+    supervisor = _agent_supervisor(manager)
+    rejected = supervisor.reject_review(name.strip())
+    return {"name": name.strip(), "rejected": rejected}
 
 
 def _builtin_tool_definitions() -> list[MCPToolDefinition]:
@@ -1332,6 +1498,149 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_agent_stop,
+        ),
+        MCPToolDefinition(
+            name="agent.logs",
+            description="Read recent progress events for a background agent.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "name": {"type": "string", "description": "Agent name."},
+                    "limit": {"type": "integer", "description": "Max events to return.", "default": 20},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_logs,
+        ),
+        MCPToolDefinition(
+            name="hivemind.send",
+            description="Send a message to the hivemind inter-agent bus.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "from": {"type": "string", "description": "Sender agent name."},
+                    "type": {"type": "string", "description": "Message type: finding, request, or status."},
+                    "payload": {"type": "object", "description": "Message payload."},
+                    "to": {"type": "string", "description": "Optional recipient agent name."},
+                },
+                "required": ["from", "type"],
+                "additionalProperties": False,
+            },
+            handler=_tool_hivemind_send,
+        ),
+        MCPToolDefinition(
+            name="hivemind.read",
+            description="Read messages from the hivemind inter-agent bus.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "agent": {"type": "string", "description": "Filter by sender agent name."},
+                    "type": {"type": "string", "description": "Filter by message type."},
+                    "limit": {"type": "integer", "description": "Max messages to return.", "default": 50},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_hivemind_read,
+        ),
+        MCPToolDefinition(
+            name="task.create",
+            description="Create a task in the items queue.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "title": {"type": "string", "description": "Task title."},
+                    "created_by": {"type": "string", "description": "Creator agent name."},
+                    "priority": {"type": "integer", "description": "Priority (1=highest, 10=lowest).", "default": 5},
+                    "context": {"type": "object", "description": "Task context (files, issue, etc)."},
+                },
+                "required": ["title"],
+                "additionalProperties": False,
+            },
+            handler=_tool_task_create,
+        ),
+        MCPToolDefinition(
+            name="task.list",
+            description="List tasks from the items queue.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "status": {"type": "string", "description": "Filter by status: pending, claimed, in_progress, done, failed."},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_task_list,
+        ),
+        MCPToolDefinition(
+            name="task.claim",
+            description="Claim a pending task for an agent.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "task_id": {"type": "string", "description": "Task ID to claim."},
+                    "agent_name": {"type": "string", "description": "Agent claiming the task."},
+                },
+                "required": ["task_id", "agent_name"],
+                "additionalProperties": False,
+            },
+            handler=_tool_task_claim,
+        ),
+        MCPToolDefinition(
+            name="task.complete",
+            description="Mark a task as completed.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "task_id": {"type": "string", "description": "Task ID to complete."},
+                    "result": {"type": "object", "description": "Optional result data."},
+                },
+                "required": ["task_id"],
+                "additionalProperties": False,
+            },
+            handler=_tool_task_complete,
+        ),
+        MCPToolDefinition(
+            name="review.list",
+            description="List agents awaiting review.",
+            input_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            handler=_tool_review_list,
+        ),
+        MCPToolDefinition(
+            name="review.approve",
+            description="Approve an agent's review and transition it back to stopped.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Agent name to approve."},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+            handler=_tool_review_approve,
+        ),
+        MCPToolDefinition(
+            name="review.reject",
+            description="Reject an agent's review and mark it as failed.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Agent name to reject."},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+            handler=_tool_review_reject,
         ),
     ]
 

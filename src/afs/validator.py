@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .mapping import resolve_directory_map
-from .models import MountType, ProjectMetadata
+from .models import OPTIONAL_MOUNT_TYPES, MountType, ProjectMetadata
 from .schema import DirectoryConfig
 
 
@@ -33,7 +33,11 @@ class AFSValidator:
             afs_directories=self._afs_directories,
             metadata=metadata,
         )
-        required_dirs = [directory_map.get(mt, mt.value) for mt in MountType]
+        required_dirs = [
+            directory_map.get(mt, mt.value)
+            for mt in MountType
+            if mt not in OPTIONAL_MOUNT_TYPES
+        ]
         status: dict[str, Any] = {"valid": True, "missing": [], "errors": []}
 
         for directory in required_dirs:

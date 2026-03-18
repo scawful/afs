@@ -49,9 +49,16 @@ def _expand_config_paths(config_data: dict[str, Any]) -> None:
             if isinstance(python_exec, str) and python_exec.startswith("~"):
                 general["python_executable"] = _expand_path(python_exec)
         if "workspace_directories" in general:
+            expanded_ws = []
             for ws_dir in general["workspace_directories"]:
-                if "path" in ws_dir:
+                if isinstance(ws_dir, str):
+                    expanded_ws.append({"path": _expand_path(ws_dir)})
+                elif isinstance(ws_dir, dict) and "path" in ws_dir:
                     ws_dir["path"] = _expand_path(ws_dir["path"])
+                    expanded_ws.append(ws_dir)
+                else:
+                    expanded_ws.append(ws_dir)
+            general["workspace_directories"] = expanded_ws
 
     if "plugins" in config_data and "plugin_dirs" in config_data["plugins"]:
         config_data["plugins"]["plugin_dirs"] = [

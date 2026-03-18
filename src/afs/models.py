@@ -23,6 +23,10 @@ class MountType(str, Enum):
     MONOREPO = "monorepo"
 
 
+# Mount types that are not required for context validation.
+OPTIONAL_MOUNT_TYPES: frozenset[MountType] = frozenset({MountType.MONOREPO})
+
+
 @dataclass(frozen=True)
 class MountProvenance:
     """Persisted metadata describing why a mount exists."""
@@ -200,7 +204,9 @@ class ContextRoot:
 
     @property
     def is_valid(self) -> bool:
-        required = [mount_type.value for mount_type in MountType]
+        required = [
+            mt.value for mt in MountType if mt not in OPTIONAL_MOUNT_TYPES
+        ]
         directory_map = self.metadata.directories if self.metadata else {}
         return all(
             (self.path / directory_map.get(role, role)).exists() for role in required

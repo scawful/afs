@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from .agent_scope import assert_mount_allowed
 from .grounding_hooks import run_grounding_hooks
 from .history import log_event
 from .manager import AFSManager
@@ -93,6 +94,12 @@ class ContextFileSystem:
             return target_resolved, root_resolved
         raise ValueError("Path escapes mount root")
 
+    def _ensure_mount_access(self, mount_type: MountType, *, operation: str) -> None:
+        allowed, message = self._policy.validate_operation(mount_type, operation)
+        if not allowed:
+            raise PermissionError(message)
+        assert_mount_allowed(mount_type, operation=operation)
+
     def read_text(
         self,
         mount_type: MountType,
@@ -101,9 +108,7 @@ class ContextFileSystem:
         encoding: str = "utf-8",
         errors: str = "replace",
     ) -> str:
-        allowed, message = self._policy.validate_operation(mount_type, "read")
-        if not allowed:
-            raise PermissionError(message)
+        self._ensure_mount_access(mount_type, operation="read")
         self._warn_if_workspace_bridge_stale()
         run_grounding_hooks(
             event="before_context_read",
@@ -170,9 +175,7 @@ class ContextFileSystem:
         append: bool = False,
         mkdirs: bool = False,
     ) -> Path:
-        allowed, message = self._policy.validate_operation(mount_type, "write")
-        if not allowed:
-            raise PermissionError(message)
+        self._ensure_mount_access(mount_type, operation="write")
         target, root = self.resolve_path(mount_type, relative_path)
         if not root.exists():
             raise FileNotFoundError(f"Mount root not found: {root}")
@@ -236,6 +239,7 @@ class ContextFileSystem:
         mount_type: MountType,
         relative_path: str,
     ) -> ContextEntry:
+        self._ensure_mount_access(mount_type, operation="read")
         target, root = self.resolve_path(mount_type, relative_path)
         if not target.exists():
             raise FileNotFoundError(f"Path not found: {target}")
@@ -252,6 +256,7 @@ class ContextFileSystem:
         include_files: bool = True,
         include_dirs: bool = True,
     ) -> list[ContextEntry]:
+        self._ensure_mount_access(mount_type, operation="read")
         target, root = self.resolve_path(mount_type, relative_path)
         if not target.exists():
             raise FileNotFoundError(f"Path not found: {target}")
