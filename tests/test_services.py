@@ -1,7 +1,35 @@
 from __future__ import annotations
 
-from afs.schema import AFSConfig, ServiceConfig, ServicesConfig
+from pathlib import Path
+
+from afs.schema import (
+    AFSConfig,
+    DirectoryConfig,
+    GeneralConfig,
+    ServiceConfig,
+    ServicesConfig,
+    default_directory_configs,
+)
 from afs.services.manager import ServiceManager
+
+
+def _remap_directories(**overrides: str) -> list[DirectoryConfig]:
+    directories: list[DirectoryConfig] = []
+    for directory in default_directory_configs():
+        name = (
+            overrides.get(directory.role.value, directory.name)
+            if directory.role
+            else directory.name
+        )
+        directories.append(
+            DirectoryConfig(
+                name=name,
+                policy=directory.policy,
+                description=directory.description,
+                role=directory.role,
+            )
+        )
+    return directories
 
 
 def test_service_manager_lists_builtins() -> None:
@@ -91,3 +119,17 @@ def test_service_manager_preserves_repo_preference_flag(monkeypatch) -> None:
     assert definition is not None
     assert definition.environment["AFS_PREFER_REPO_CONFIG"] == "1"
     assert "AFS_PREFER_USER_CONFIG" not in definition.environment
+
+
+def test_service_manager_uses_remapped_scratchpad_for_reports(tmp_path: Path) -> None:
+    context_root = tmp_path / "context"
+    config = AFSConfig(
+        general=GeneralConfig(context_root=context_root),
+        directories=_remap_directories(scratchpad="notes"),
+    )
+
+    manager = ServiceManager(config=config, platform_name="linux")
+    definition = manager.get_definition("context-warm")
+
+    assert definition is not None
+    assert str(context_root / "notes" / "afs_agents" / "context_warm.json") in definition.command

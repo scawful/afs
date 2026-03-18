@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..config import load_config_model
+from ..context_paths import resolve_agent_output_root
 from ..profiles import resolve_active_profile
 from ..schema import AFSConfig, AgentConfig
 from .base import AgentResult, build_base_parser, configure_logging, emit_result, now_iso
@@ -162,9 +163,10 @@ class AgentSupervisor:
             return Path(env_value).expanduser().resolve()
         resolved_config = config or load_config_model(merge_user=True)
         return (
-            resolved_config.general.context_root
-            / "scratchpad"
-            / "afs_agents"
+            resolve_agent_output_root(
+                resolved_config.general.context_root,
+                config=resolved_config,
+            )
             / "supervisor"
         ).expanduser().resolve()
 

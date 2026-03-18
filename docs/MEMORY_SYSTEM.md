@@ -37,6 +37,9 @@ Each mount role has a dedicated directory with policy-aware access.
 ## Metadata
 
 `metadata.json` stores project-level metadata, including mount directory mapping.
+That mapping is authoritative for built-in subsystems too: task queues, hivemind
+messages, history logs, MCP prompts/tools, and background-agent reports resolve
+their mount roots by role, not by hardcoded directory name.
 
 ## Access Patterns
 

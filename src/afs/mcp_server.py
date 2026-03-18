@@ -23,6 +23,7 @@ from .context_index import (
     ContextSQLiteIndex,
     count_mount_files,
 )
+from .context_paths import resolve_mount_root
 from .discovery import discover_contexts
 from .manager import AFSManager
 from .models import MountType
@@ -1015,7 +1016,7 @@ def _read_agent_events(
     limit: int,
 ) -> list[dict[str, Any]]:
     assert_mount_allowed(MountType.HISTORY, operation="read")
-    history_dir = context_path / "history"
+    history_dir = resolve_mount_root(context_path, MountType.HISTORY)
     prefix = f"agent.{agent_name}"
     events: list[dict[str, Any]] = []
     if history_dir.exists():
@@ -2566,7 +2567,11 @@ def _get_prompt(
     if name == "afs.scratchpad.review":
         context_path = _resolve_prompt_context_path(arguments, manager)
 
-        scratchpad_dir = context_path / "scratchpad"
+        scratchpad_dir = resolve_mount_root(
+            context_path,
+            MountType.SCRATCHPAD,
+            config=manager.config,
+        )
         lines = [f"# Scratchpad Review: {context_path}", ""]
 
         state_file = scratchpad_dir / "state.md"

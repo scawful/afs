@@ -63,3 +63,25 @@ def test_log_cli_invocation_redacts(tmp_path, monkeypatch) -> None:
     event = json.loads(log_files[0].read_text(encoding="utf-8").splitlines()[-1])
     argv = event["metadata"]["argv"]
     assert argv == ["--token", "[redacted]", "--api-key=[redacted]"]
+
+
+def test_log_event_uses_remapped_history_dir(tmp_path, monkeypatch) -> None:
+    context_root = tmp_path / "context"
+    config_path = tmp_path / "afs.toml"
+    _write_config(config_path, context_root)
+    context_root.mkdir(parents=True)
+    (context_root / "metadata.json").write_text(
+        json.dumps({"directories": {"history": "ledger"}}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("AFS_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("AFS_CONTEXT_ROOT", str(context_root))
+    monkeypatch.delenv("AFS_HISTORY_DISABLED", raising=False)
+
+    event_id = log_event("model", "test", payload={"prompt": "hello"})
+    assert event_id
+
+    assert list((context_root / "history").glob("events_*.jsonl")) == []
+    log_files = list((context_root / "ledger").glob("events_*.jsonl"))
+    assert log_files

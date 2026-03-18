@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ..context_paths import resolve_mount_root
+from ..models import MountType
 from ._utils import (
     build_config,
     ensure_context_root,
@@ -73,7 +75,7 @@ def _read_agent_events(
     agent_name: str,
     limit: int,
 ) -> list[dict[str, Any]]:
-    history_dir = context_path / "history"
+    history_dir = resolve_mount_root(context_path, MountType.HISTORY)
     prefix = f"agent.{agent_name}"
     events: list[dict[str, Any]] = []
     if not history_dir.exists():
@@ -394,7 +396,7 @@ def agents_watch_command(args: argparse.Namespace) -> int:
     agent_name = args.name
     limit = args.limit
     context_path = _resolve_command_context(args)
-    history_dir = context_path / "history"
+    history_dir = resolve_mount_root(context_path, MountType.HISTORY)
     if not history_dir.exists():
         print("no history directory")
         return 1

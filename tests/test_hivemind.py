@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -94,3 +95,18 @@ def test_hivemind_respects_allowed_mounts(tmp_path: Path, monkeypatch) -> None:
 
     with pytest.raises(PermissionError, match="not allowed to access hivemind"):
         HivemindBus(ctx)
+
+
+def test_hivemind_uses_remapped_mount(tmp_path: Path) -> None:
+    ctx = tmp_path / ".context"
+    hive_root = ctx / "bus"
+    hive_root.mkdir(parents=True)
+    (ctx / "metadata.json").write_text(
+        json.dumps({"directories": {"hivemind": "bus"}}),
+        encoding="utf-8",
+    )
+
+    bus = HivemindBus(ctx)
+    msg = bus.send("agent-a", "status", {"state": "ok"})
+
+    assert (hive_root / "agent-a" / f"{msg.id}.json").exists()

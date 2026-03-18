@@ -14,10 +14,12 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
     psutil = None
 
 from ..config import load_config_model
+from ..context_paths import resolve_agent_output_root, resolve_mount_root
 from ..core import find_root, resolve_context_root
 from ..history import iter_history_events
 from ..manager import AFSManager
 from ..mcp_server import get_mcp_status
+from ..models import MountType
 from ..monorepo_bridge import (
     DEFAULT_ACTIVE_WORKSPACE_STALE_SECONDS,
     get_workspace_bridge_status,
@@ -304,7 +306,7 @@ def _extension_health(
 
 
 def _hook_health(config, profile, context_root: Path) -> dict[str, Any]:
-    history_root = context_root / "history"
+    history_root = resolve_mount_root(context_root, MountType.HISTORY, config=config)
     last_run: dict[str, str | None] = dict.fromkeys(HOOK_EVENTS, None)
     if history_root.exists():
         for event in iter_history_events(
@@ -362,7 +364,7 @@ def _mcp_health(mcp_status: dict[str, Any]) -> dict[str, Any]:
     }
 
 def _maintenance_health(config, context_root: Path) -> dict[str, Any]:
-    agent_output_dir = context_root / "scratchpad" / "afs_agents"
+    agent_output_dir = resolve_agent_output_root(context_root, config=config)
     reports = {
         "context_warm": _load_agent_report(agent_output_dir / "context_warm.json"),
         "context_watch": _load_agent_report(agent_output_dir / "context_watch.json"),

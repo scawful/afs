@@ -7,6 +7,8 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
+from ..context_paths import resolve_mount_root
+from ..models import MountType
 from ..training import export_memory_to_dataset
 from .base import (
     AgentResult,
@@ -79,7 +81,7 @@ def _run_export(args: argparse.Namespace, config) -> AgentResult:
     memory_root = (
         Path(args.memory_root).expanduser().resolve()
         if args.memory_root
-        else (Path(context_root) / "memory")
+        else resolve_mount_root(Path(context_root), MountType.MEMORY, config=config)
     )
     dataset_output = (
         Path(args.dataset_output).expanduser().resolve()

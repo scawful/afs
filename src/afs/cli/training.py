@@ -155,6 +155,8 @@ def training_registry_compare_command(args: argparse.Namespace) -> int:
 def training_memory_export_command(args: argparse.Namespace) -> int:
     """Export memory entries to TrainingSample JSONL."""
     from ..config import load_config_model
+    from ..context_paths import resolve_mount_root
+    from ..models import MountType
     from ..training import export_memory_to_dataset
 
     config = load_config_model(config_path=Path(args.config) if args.config else None)
@@ -167,7 +169,7 @@ def training_memory_export_command(args: argparse.Namespace) -> int:
     memory_root = (
         Path(args.memory_root).expanduser().resolve()
         if args.memory_root
-        else (Path(context_root) / "memory")
+        else resolve_mount_root(Path(context_root), MountType.MEMORY, config=config)
     )
     output_path = Path(args.output).expanduser().resolve()
 
@@ -206,13 +208,15 @@ def training_memory_export_command(args: argparse.Namespace) -> int:
 def training_history_export_command(args: argparse.Namespace) -> int:
     """Export history events to TrainingSample JSONL."""
     from ..config import load_config_model
+    from ..context_paths import resolve_mount_root
+    from ..models import MountType
     from ..training import export_history_to_dataset
 
     config = load_config_model(config_path=Path(args.config) if args.config else None)
     history_root = (
         Path(args.history_root).expanduser().resolve()
         if args.history_root
-        else (config.general.context_root / "history")
+        else resolve_mount_root(config.general.context_root, MountType.HISTORY, config=config)
     )
     output_path = Path(args.output).expanduser().resolve()
 
@@ -456,13 +460,15 @@ def training_codex_export_command(args: argparse.Namespace) -> int:
 def training_codex_history_import_command(args: argparse.Namespace) -> int:
     """Import Codex CLI logs into AFS history."""
     from ..config import load_config_model
+    from ..context_paths import resolve_mount_root
+    from ..models import MountType
     from ..training import import_codex_logs_to_history
 
     config = load_config_model(config_path=Path(args.config) if args.config else None)
     history_root = (
         Path(args.history_root).expanduser().resolve()
         if args.history_root
-        else (config.general.context_root / "history")
+        else resolve_mount_root(config.general.context_root, MountType.HISTORY, config=config)
     )
     roots = [Path(root).expanduser().resolve() for root in (args.root or [])]
     scan_roots = [Path(root).expanduser().resolve() for root in (args.scan_root or [])]

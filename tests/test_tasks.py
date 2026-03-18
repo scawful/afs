@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -91,3 +92,18 @@ def test_task_queue_respects_allowed_mounts(tmp_path: Path, monkeypatch) -> None
 
     with pytest.raises(PermissionError, match="not allowed to access items"):
         TaskQueue(ctx)
+
+
+def test_task_queue_uses_remapped_items_mount(tmp_path: Path) -> None:
+    ctx = tmp_path / ".context"
+    queue_root = ctx / "queue"
+    queue_root.mkdir(parents=True)
+    (ctx / "metadata.json").write_text(
+        json.dumps({"directories": {"items": "queue"}}),
+        encoding="utf-8",
+    )
+
+    queue = TaskQueue(ctx)
+    task = queue.create("Use remapped queue")
+
+    assert (queue_root / f"task-{task.id}.json").exists()

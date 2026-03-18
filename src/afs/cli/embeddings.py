@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from ..config import load_config_model
+from ..context_paths import resolve_mount_root
 from ..core import resolve_context_root
 from ..embeddings import (
     build_embedding_index,
@@ -15,6 +16,7 @@ from ..embeddings import (
     load_embedding_eval_cases,
     search_embedding_index,
 )
+from ..models import MountType
 
 
 def embeddings_index_command(args: argparse.Namespace) -> int:
@@ -170,7 +172,7 @@ def embeddings_eval_command(args: argparse.Namespace) -> int:
             label = f"{status}"
             if rank:
                 label += f"@{rank}"
-            print(f"{label}\t{case.get(query)}")
+            print(f"{label}\t{case.get('query')}")
     return 0
 
 
@@ -184,7 +186,7 @@ def _resolve_knowledge_root(args: argparse.Namespace, config) -> Path:
         context_root = Path(args.context_root).expanduser().resolve()
     else:
         context_root = resolve_context_root(config, None)
-    return context_root / "knowledge" / args.project
+    return resolve_mount_root(context_root, MountType.KNOWLEDGE, config=config) / args.project
 
 
 def _resolve_sources(args: argparse.Namespace, index_root: Path) -> list[Path]:

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_scope import assert_mount_allowed
+from .context_paths import resolve_mount_root
 from .models import MountType
 
 
@@ -49,7 +50,7 @@ class HivemindBus:
 
     def __init__(self, context_path: Path) -> None:
         assert_mount_allowed(MountType.HIVEMIND, operation="access")
-        self._root = context_path / "hivemind"
+        self._root = resolve_mount_root(context_path, MountType.HIVEMIND)
 
     def send(
         self,

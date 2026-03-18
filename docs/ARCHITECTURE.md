@@ -12,12 +12,15 @@ inspectable, and mountable working memory.
 - `AFSManager` manages `.context` roots and mount operations.
 - Mount roles are typed (`MountType`) and policy-governed.
 - Metadata defines directory role mapping and manual-protection behavior.
+- Runtime surfaces resolve mount roots by role, so remapped directories remain
+  valid across CLI, MCP, health, and background services.
 
 Primary modules:
 
 - `src/afs/manager.py`
 - `src/afs/models.py`
 - `src/afs/mapping.py`
+- `src/afs/context_paths.py`
 - `src/afs/context_fs.py`
 
 ### 2. Config Layer

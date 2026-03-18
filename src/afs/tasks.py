@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_scope import assert_mount_allowed
+from .context_paths import resolve_mount_root
 from .models import MountType
 
 VALID_STATUSES = ("pending", "claimed", "in_progress", "done", "failed")
@@ -60,7 +61,7 @@ class TaskQueue:
 
     def __init__(self, context_path: Path) -> None:
         assert_mount_allowed(MountType.ITEMS, operation="access")
-        self._root = context_path / "items"
+        self._root = resolve_mount_root(context_path, MountType.ITEMS)
 
     def _task_path(self, task_id: str) -> Path:
         return self._root / f"task-{task_id}.json"

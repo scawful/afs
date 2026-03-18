@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_config_model
+from ..context_paths import resolve_agent_output_root
 from ..schema import AFSConfig, ServiceConfig
 from .adapters.base import ServiceAdapter
 from .adapters.launchd import LaunchdAdapter
@@ -397,7 +398,7 @@ class ServiceManager:
         working_root = repo_root or afs_root
         environment = self._service_environment()
         context_root = self.config.general.context_root
-        agent_output_dir = context_root / "scratchpad" / "afs_agents"
+        agent_output_dir = resolve_agent_output_root(context_root, config=self.config)
         memory_cfg = self.config.memory_export
         memory_report = memory_cfg.report_output or (agent_output_dir / "memory_export.json")
         memory_dataset = memory_cfg.dataset_output

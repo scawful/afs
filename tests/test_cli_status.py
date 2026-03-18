@@ -4,14 +4,34 @@ import json
 from argparse import Namespace
 from pathlib import Path
 
+import afs.cli.core as cli_core_module
 import afs.config as config_module
 import afs.core as core_module
 from afs.cli._utils import AFS_DIRS
-from afs.cli.core import status_command
+from afs.cli.core import agents_watch_command, status_command
 from afs.context_index import ContextSQLiteIndex
 from afs.manager import AFSManager
 from afs.models import MountType
-from afs.schema import AFSConfig, GeneralConfig
+from afs.schema import AFSConfig, DirectoryConfig, GeneralConfig, default_directory_configs
+
+
+def _remap_directories(**overrides: str) -> list[DirectoryConfig]:
+    directories: list[DirectoryConfig] = []
+    for directory in default_directory_configs():
+        name = (
+            overrides.get(directory.role.value, directory.name)
+            if directory.role
+            else directory.name
+        )
+        directories.append(
+            DirectoryConfig(
+                name=name,
+                policy=directory.policy,
+                description=directory.description,
+                role=directory.role,
+            )
+        )
+    return directories
 
 
 def _build_context(tmp_path: Path) -> tuple[AFSConfig, Path]:
@@ -80,3 +100,49 @@ def test_status_command_json_reports_index_and_mount_counts(
     assert payload["index"]["has_entries"] is True
     assert payload["index"]["total_entries"] >= 1
     assert "maintenance" in payload
+
+
+def test_agents_watch_command_uses_remapped_history_dir(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    context_root = tmp_path / ".context"
+    config = AFSConfig(
+        general=GeneralConfig(
+            context_root=context_root,
+            agent_workspaces_dir=context_root / "workspaces",
+        ),
+        directories=_remap_directories(history="ledger"),
+    )
+    manager = AFSManager(config=config)
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path, context_root=context_root)
+    (context_root / "ledger" / "events_20260317.jsonl").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-03-17T12:00:00+00:00",
+                "source": "agent.worker-1",
+                "op": "progress",
+                "metadata": {"detail": "queued task"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli_core_module, "load_manager", lambda _config_path=None: manager)
+
+    exit_code = agents_watch_command(
+        Namespace(
+            name="worker-1",
+            limit=10,
+            config=None,
+            path=None,
+            context_root=context_root,
+            context_dir=None,
+        )
+    )
+
+    assert exit_code == 0
+    assert "queued task" in capsys.readouterr().out

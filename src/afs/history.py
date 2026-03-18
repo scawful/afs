@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_config_model
+from .context_paths import resolve_mount_root
 from .core import find_root, resolve_context_root
+from .models import MountType
 
 SENSITIVE_MARKERS = ("key", "token", "secret", "password")
 EVENT_FILE_PREFIX = "events"
@@ -99,7 +101,7 @@ def _resolve_context_root(start_dir: Path | None = None) -> Path | None:
 def _history_log_path(context_root: Path | None) -> Path | None:
     if context_root is None:
         return None
-    history_dir = context_root / "history"
+    history_dir = resolve_mount_root(context_root, MountType.HISTORY)
     history_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
     return history_dir / f"{EVENT_FILE_PREFIX}_{stamp}.jsonl"
@@ -234,8 +236,10 @@ def append_history_event(
             payload_sha256 = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
     context_value = context_root
-    if context_value is None and history_root.name == "history":
-        context_value = history_root.parent
+    if context_value is None:
+        candidate_context = history_root.parent
+        if history_root == resolve_mount_root(candidate_context, MountType.HISTORY, config=config):
+            context_value = candidate_context
 
     event = HistoryEvent(
         event_id=event_id,

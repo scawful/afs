@@ -11,11 +11,13 @@ from afs.models import MountType
 from afs.schema import (
     AFSConfig,
     ContextIndexConfig,
+    DirectoryConfig,
     ExtensionsConfig,
     GeneralConfig,
     ProfileConfig,
     ProfilesConfig,
     WorkspaceDirectory,
+    default_directory_configs,
 )
 
 
@@ -26,6 +28,43 @@ def _make_manager(tmp_path: Path) -> AFSManager:
         agent_workspaces_dir=context_root / "workspaces",
     )
     manager = AFSManager(config=AFSConfig(general=general))
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path, context_root=context_root)
+    return manager
+
+
+def _remap_directories(**overrides: str) -> list[DirectoryConfig]:
+    directories: list[DirectoryConfig] = []
+    for directory in default_directory_configs():
+        name = (
+            overrides.get(directory.role.value, directory.name)
+            if directory.role
+            else directory.name
+        )
+        directories.append(
+            DirectoryConfig(
+                name=name,
+                policy=directory.policy,
+                description=directory.description,
+                role=directory.role,
+            )
+        )
+    return directories
+
+
+def _make_remapped_manager(tmp_path: Path, **overrides: str) -> AFSManager:
+    context_root = tmp_path / "context"
+    general = GeneralConfig(
+        context_root=context_root,
+        agent_workspaces_dir=context_root / "workspaces",
+    )
+    manager = AFSManager(
+        config=AFSConfig(
+            general=general,
+            directories=_remap_directories(**overrides),
+        )
+    )
     project_path = tmp_path / "project"
     project_path.mkdir()
     manager.ensure(path=project_path, context_root=context_root)
@@ -1381,6 +1420,33 @@ def test_prompts_get_scratchpad_review(tmp_path: Path) -> None:
     assert "deferred task list" in text
 
 
+def test_prompts_get_scratchpad_review_uses_remapped_directory(tmp_path: Path) -> None:
+    manager = _make_remapped_manager(tmp_path, scratchpad="notes")
+    context_root = manager.config.general.context_root
+    (context_root / "notes" / "state.md").write_text(
+        "remapped state", encoding="utf-8"
+    )
+    (context_root / "notes" / "deferred.md").write_text(
+        "remapped deferred", encoding="utf-8"
+    )
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 129,
+            "method": "prompts/get",
+            "params": {
+                "name": "afs.scratchpad.review",
+                "arguments": {"context_path": str(context_root)},
+            },
+        },
+        manager,
+    )
+    assert response is not None
+    text = response["result"]["messages"][0]["content"]["text"]
+    assert "remapped state" in text
+    assert "remapped deferred" in text
+
+
 def test_prompts_get_unknown_prompt(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     response = _handle_request(
@@ -1889,9 +1955,14 @@ def test_agent_stop_missing_agent(tmp_path: Path) -> None:
 
 
 def test_hivemind_task_and_agent_logs_tools_use_context_path(tmp_path: Path) -> None:
-    manager = _make_manager(tmp_path)
+    manager = _make_remapped_manager(
+        tmp_path,
+        history="ledger",
+        hivemind="bus",
+        items="queue",
+    )
     context_path = manager.config.general.context_root
-    history_file = context_path / "history" / "events_20260317.jsonl"
+    history_file = context_path / "ledger" / "events_20260317.jsonl"
     history_file.write_text(
         json.dumps(
             {
@@ -1925,6 +1996,7 @@ def test_hivemind_task_and_agent_logs_tools_use_context_path(tmp_path: Path) -> 
     assert send_response is not None
     send_payload = send_response["result"]["structuredContent"]
     assert send_payload["from"] == "agent-a"
+    assert list((context_path / "bus").glob("agent-a/*.json"))
 
     read_response = _handle_request(
         {
@@ -1960,6 +2032,7 @@ def test_hivemind_task_and_agent_logs_tools_use_context_path(tmp_path: Path) -> 
     assert create_response is not None
     task_payload = create_response["result"]["structuredContent"]
     assert task_payload["title"] == "Review runtime wiring"
+    assert list((context_path / "queue").glob("task-*.json"))
 
     list_response = _handle_request(
         {

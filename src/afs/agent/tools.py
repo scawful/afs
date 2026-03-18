@@ -7,13 +7,15 @@ can be supplied by extensions.
 
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from ..context_paths import resolve_mount_root
+from ..models import MountType
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +145,7 @@ async def write_scratchpad_handler(args: dict[str, Any]) -> ToolResult:
     filename = Path(filename).name  # Strip any path components
 
     context_root = Path(args.get("context_root", DEFAULT_CONTEXT_ROOT))
-    scratchpad_dir = context_root / "scratchpad"
+    scratchpad_dir = resolve_mount_root(context_root, MountType.SCRATCHPAD)
     scratchpad_dir.mkdir(parents=True, exist_ok=True)
 
     full_path = scratchpad_dir / filename

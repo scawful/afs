@@ -16,10 +16,12 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
 
 from ..cli._utils import write_config
 from ..context_index import ContextSQLiteIndex
+from ..context_paths import resolve_mount_root
 from ..core import resolve_context_root
 from ..discovery import discover_contexts, get_project_stats
 from ..embeddings import build_embedding_index, create_ollama_embed_fn
 from ..manager import AFSManager
+from ..models import MountType
 from ..workspace_sync import load_workspace_entries, resolve_config_output, sync_workspace_config
 from .base import (
     AgentResult,
@@ -228,7 +230,7 @@ def _refresh_embeddings(args: argparse.Namespace, config) -> tuple[list[dict], l
             continue
 
         sources = [project.path, *project.knowledge_roots]
-        output_dir = context_root / "knowledge" / project.name
+        output_dir = resolve_mount_root(context_root, MountType.KNOWLEDGE, config=config) / project.name
         result = build_embedding_index(
             sources,
             output_dir,

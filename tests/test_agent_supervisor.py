@@ -7,7 +7,32 @@ from pathlib import Path
 from unittest.mock import patch
 
 from afs.agents.supervisor import AgentSupervisor
-from afs.schema import AFSConfig, AgentConfig, GeneralConfig
+from afs.schema import (
+    AFSConfig,
+    AgentConfig,
+    DirectoryConfig,
+    GeneralConfig,
+    default_directory_configs,
+)
+
+
+def _remap_directories(**overrides: str) -> list[DirectoryConfig]:
+    directories: list[DirectoryConfig] = []
+    for directory in default_directory_configs():
+        name = (
+            overrides.get(directory.role.value, directory.name)
+            if directory.role
+            else directory.name
+        )
+        directories.append(
+            DirectoryConfig(
+                name=name,
+                policy=directory.policy,
+                description=directory.description,
+                role=directory.role,
+            )
+        )
+    return directories
 
 
 def test_supervisor_list_empty(tmp_path: Path) -> None:
@@ -151,6 +176,17 @@ def test_supervisor_uses_context_scoped_state_dir(tmp_path: Path) -> None:
         config=AFSConfig(general=GeneralConfig(context_root=context_root))
     )
     assert supervisor._state_dir == context_root / "scratchpad" / "afs_agents" / "supervisor"
+
+
+def test_supervisor_uses_remapped_scratchpad_state_dir(tmp_path: Path) -> None:
+    context_root = tmp_path / "context"
+    supervisor = AgentSupervisor(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            directories=_remap_directories(scratchpad="notes"),
+        )
+    )
+    assert supervisor._state_dir == context_root / "notes" / "afs_agents" / "supervisor"
 
 
 def test_supervisor_due_schedules(tmp_path: Path) -> None:
