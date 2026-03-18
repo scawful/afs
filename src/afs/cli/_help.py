@@ -21,11 +21,14 @@ _TOP_LEVEL_ORDER = [
     "plugins",
     "services",
     "agents",
+    "tasks",
+    "hivemind",
     "orchestrator",
     "embeddings",
     "mcp",
     "profile",
     "skills",
+    "bundle",
     "claude",
     "health",
     "studio",
@@ -43,11 +46,14 @@ _TOP_LEVEL_COLORS = {
     "plugins": "1;34",
     "services": "1;34",
     "agents": "1;34",
+    "tasks": "1;34",
+    "hivemind": "1;34",
     "orchestrator": "1;34",
     "embeddings": "1;35",
     "mcp": "1;35",
     "profile": "1;35",
     "skills": "1;35",
+    "bundle": "1;35",
     "claude": "1;35",
     "health": "1;35",
     "studio": "1;36",
@@ -83,8 +89,8 @@ def render_default_help(parser: argparse.ArgumentParser, config: AFSConfig | Non
         _format_list(
             [
                 f"{_tag('fs', '32')} context roots, mounts, workspaces, graph",
-                f"{_tag('ops', '34')} init/status/plugins/services/agents/orchestrator",
-                f"{_tag('agent', '35')} embeddings/mcp/profile/skills/health",
+                f"{_tag('ops', '34')} init/status/plugins/services/agents/tasks/hivemind",
+                f"{_tag('agent', '35')} embeddings/mcp/profile/skills/bundle/health",
                 f"{_tag('studio', '36')} studio build/install/path/alias",
             ]
         )
@@ -190,6 +196,19 @@ def render_default_help(parser: argparse.ArgumentParser, config: AFSConfig | Non
                 f"{_cmd('afs help <command>')}            # or: {_cmd('afs <command> --help')}",
                 f"{_cmd('afs context discover --json')}   # agent-friendly output",
                 _cmd("afs status --json"),
+            ]
+        )
+    )
+    lines.append("")
+
+    lines.append(_section("Shell Integration"))
+    lines.extend(
+        _format_list(
+            [
+                f"{_cmd('source scripts/afs-shell-init.sh')}  # aliases, completions, helpers",
+                f"{_dim('a=afs  as=status  ap=agents-ps  tl=tasks  hm=hivemind  sk=skills')}",
+                f"{_dim('afs-here  afs-bootstrap  afs-find  afs-watch  afs-spawn  afs-task  afs-say')}",
+                f"{_dim('afs-check  # lint + tests helper')}",
             ]
         )
     )

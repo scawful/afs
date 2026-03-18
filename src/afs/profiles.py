@@ -278,8 +278,16 @@ def _mount_profile_paths(
         if mount.name.startswith(prefix):
             manager.unmount(mount.name, mount_type, context_path=context_path)
 
+    mount_dir = manager.resolve_mount_root(context_path.resolve(), mount_type).resolve()
+
     for spec in specs:
         if not spec.source_exists:
+            skipped.append(str(spec.source))
+            continue
+
+        # Guard against self-referential mounts (source inside the target mount dir).
+        resolved_source = spec.source.resolve()
+        if resolved_source == mount_dir or mount_dir in resolved_source.parents:
             skipped.append(str(spec.source))
             continue
 

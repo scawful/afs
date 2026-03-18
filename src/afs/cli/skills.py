@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 from pathlib import Path
 
 from ..config import load_config_model
@@ -11,15 +13,53 @@ from ..profiles import resolve_active_profile
 from ..skills import discover_skills, score_skill_relevance
 
 
+def _print_hint(text: str) -> None:
+    """Print a dimmed hint line."""
+    if sys.stdout.isatty() and os.getenv("NO_COLOR") is None:
+        print(f"  \033[2m{text}\033[0m")
+    else:
+        print(f"  {text}")
+
+
+def _merge_unique_paths(*groups: list[Path]) -> list[Path]:
+    merged: list[Path] = []
+    seen: set[str] = set()
+    for group in groups:
+        for path in group:
+            resolved = path.expanduser().resolve()
+            marker = str(resolved)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            merged.append(resolved)
+    return merged
+
+
+def _bundled_skill_roots() -> list[Path]:
+    candidates: list[Path] = []
+    afs_root = os.getenv("AFS_ROOT", "").strip()
+    if afs_root:
+        candidates.append(Path(afs_root).expanduser().resolve() / "skills")
+    candidates.append(Path(__file__).resolve().parents[3] / "skills")
+    return _merge_unique_paths(
+        [candidate for candidate in candidates if candidate.exists()]
+    )
+
+
+def _resolve_skill_roots(args: argparse.Namespace, profile_roots: list[Path]) -> list[Path]:
+    if args.root:
+        return _merge_unique_paths(
+            [Path(path).expanduser().resolve() for path in args.root]
+        )
+    return _merge_unique_paths(profile_roots, _bundled_skill_roots())
+
+
 def skills_list_command(args: argparse.Namespace) -> int:
     config_path = Path(args.config) if args.config else None
     config = load_config_model(config_path=config_path, merge_user=True)
     profile = resolve_active_profile(config, profile_name=args.profile)
 
-    if args.root:
-        roots = [Path(path).expanduser().resolve() for path in args.root]
-    else:
-        roots = list(profile.skill_roots)
+    roots = _resolve_skill_roots(args, list(profile.skill_roots))
 
     skills = discover_skills(roots, profile=profile.name)
     if args.json:
@@ -43,11 +83,14 @@ def skills_list_command(args: argparse.Namespace) -> int:
     print(f"profile: {profile.name}")
     if not skills:
         print("(no skills)")
+        _print_hint("add SKILL.md files to profile skill_roots, extensions, or AFS_ROOT/skills")
+        _print_hint("example: skills/<name>/SKILL.md with frontmatter (name, triggers, profiles)")
         return 0
     for skill in skills:
         triggers = ",".join(skill.triggers) if skill.triggers else "-"
         requires = ",".join(skill.requires) if skill.requires else "-"
         print(f"{skill.name}\t{skill.path}\ttriggers={triggers}\trequires={requires}")
+    _print_hint(f"{len(skills)} skills  |  afs skills match '<prompt>'  |  afs skills list --json")
     return 0
 
 
@@ -56,10 +99,7 @@ def skills_match_command(args: argparse.Namespace) -> int:
     config = load_config_model(config_path=config_path, merge_user=True)
     profile = resolve_active_profile(config, profile_name=args.profile)
 
-    if args.root:
-        roots = [Path(path).expanduser().resolve() for path in args.root]
-    else:
-        roots = list(profile.skill_roots)
+    roots = _resolve_skill_roots(args, list(profile.skill_roots))
 
     skills = discover_skills(roots, profile=profile.name)
     ranked = []

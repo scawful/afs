@@ -185,3 +185,53 @@ def test_inspect_missing_bundle(tmp_path: Path) -> None:
 
     with pytest.raises(FileNotFoundError):
         inspect_bundle(tmp_path / "nonexistent")
+
+
+def test_pack_bundle_dereferences_symlinked_mount_content(tmp_path: Path) -> None:
+    real_knowledge = tmp_path / "real-knowledge"
+    real_knowledge.mkdir()
+    (real_knowledge / "notes.md").write_text("# Notes", encoding="utf-8")
+
+    real_skills = tmp_path / "real-skills"
+    real_skills.mkdir()
+    (real_skills / "SKILL.md").write_text("---\nname: linked-skill\n---\n", encoding="utf-8")
+
+    knowledge_link = tmp_path / "knowledge-link"
+    knowledge_link.symlink_to(real_knowledge, target_is_directory=True)
+    skills_link = tmp_path / "skills-link"
+    skills_link.symlink_to(real_skills, target_is_directory=True)
+
+    config = AFSConfig(
+        general=GeneralConfig(
+            context_root=tmp_path / "context",
+            agent_workspaces_dir=tmp_path / "context" / "workspaces",
+        ),
+        extensions=ExtensionsConfig(
+            auto_discover=False,
+            extension_dirs=[tmp_path / "extensions"],
+        ),
+        profiles=ProfilesConfig(
+            active_profile="demo",
+            profiles={
+                "demo": ProfileConfig(
+                    knowledge_mounts=[knowledge_link],
+                    skill_roots=[skills_link],
+                )
+            },
+        ),
+    )
+
+    output = tmp_path / "output"
+    output.mkdir()
+
+    result = pack_bundle("demo", config=config, output_path=output)
+
+    bundled_knowledge = result.path / "knowledge" / knowledge_link.name
+    bundled_skills = result.path / "skills" / skills_link.name
+
+    assert bundled_knowledge.exists()
+    assert bundled_skills.exists()
+    assert not bundled_knowledge.is_symlink()
+    assert not bundled_skills.is_symlink()
+    assert (bundled_knowledge / "notes.md").read_text(encoding="utf-8") == "# Notes"
+    assert (bundled_skills / "SKILL.md").read_text(encoding="utf-8").startswith("---")

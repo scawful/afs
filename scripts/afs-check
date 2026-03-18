@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Quick validation: tests + lint for AFS.
+# Usage: afs-check [--lint-only | --test-only | --quick]
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AFS_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+VENV_DIR="${AFS_VENV:-${AFS_ROOT}/.venv}"
+
+if [ -x "${VENV_DIR}/bin/python" ]; then
+  PYTHON_BIN="${VENV_DIR}/bin/python"
+else
+  PYTHON_BIN="python3"
+fi
+
+resolve_ruff_bin() {
+  if [ -x "${VENV_DIR}/bin/ruff" ]; then
+    printf '%s\n' "${VENV_DIR}/bin/ruff"
+    return 0
+  fi
+  if command -v ruff >/dev/null 2>&1; then
+    command -v ruff
+    return 0
+  fi
+  return 1
+}
+
+DIM="\033[2m"
+BOLD="\033[1m"
+GREEN="\033[32m"
+RED="\033[31m"
+RESET="\033[0m"
+
+RUN_TESTS=true
+RUN_LINT=true
+QUICK=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --lint-only)  RUN_TESTS=false ;;
+    --test-only)  RUN_LINT=false ;;
+    --quick)      QUICK=true ;;
+    -h|--help)
+      echo "Usage: afs-check [--lint-only | --test-only | --quick]"
+      echo "  --lint-only   Run ruff only"
+      echo "  --test-only   Run pytest only"
+      echo "  --quick       Run tests with -x (stop on first failure)"
+      exit 0
+      ;;
+  esac
+done
+
+cd "$AFS_ROOT"
+STATUS=0
+
+if [ "$RUN_LINT" = true ]; then
+  echo -e "${BOLD}lint${RESET} ${DIM}ruff check src/${RESET}"
+  if RUFF_BIN="$(resolve_ruff_bin)"; then
+    if "$RUFF_BIN" check src/ 2>&1; then
+      echo -e "  ${GREEN}pass${RESET}"
+    else
+      echo -e "  ${RED}fail${RESET}"
+      STATUS=1
+    fi
+  else
+    echo -e "  ${RED}fail${RESET}"
+    echo "  ruff not found (looked in ${VENV_DIR}/bin/ruff and PATH)"
+    STATUS=1
+  fi
+  echo ""
+fi
+
+if [ "$RUN_TESTS" = true ]; then
+  PYTEST_ARGS=(-q --tb=short)
+  if [ "$QUICK" = true ]; then
+    PYTEST_ARGS+=(-x)
+  fi
+  echo -e "${BOLD}test${RESET} ${DIM}pytest ${PYTEST_ARGS[*]}${RESET}"
+  if "$PYTHON_BIN" -m pytest tests/ "${PYTEST_ARGS[@]}" 2>&1; then
+    echo -e "  ${GREEN}pass${RESET}"
+  else
+    echo -e "  ${RED}fail${RESET}"
+    STATUS=1
+  fi
+fi
+
+if [ "$STATUS" -eq 0 ]; then
+  echo -e "\n${GREEN}${BOLD}all checks passed${RESET}"
+else
+  echo -e "\n${RED}${BOLD}checks failed${RESET}"
+fi
+
+exit "$STATUS"

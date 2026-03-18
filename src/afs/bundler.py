@@ -398,14 +398,22 @@ def pack_bundle(
     knowledge_dir = bundle_dir / manifest.knowledge_dir
     knowledge_dir.mkdir(exist_ok=True)
     for mount in profile_snapshot.knowledge_mounts:
-        if mount.exists() and mount.is_dir():
-            shutil.copytree(mount, knowledge_dir / mount.name, dirs_exist_ok=True)
+        source = mount.resolve() if mount.is_symlink() else mount
+        if source.exists() and source.is_dir():
+            shutil.copytree(
+                source, knowledge_dir / mount.name,
+                symlinks=False, dirs_exist_ok=True,
+            )
 
     skills_dir = bundle_dir / manifest.skills_dir
     skills_dir.mkdir(exist_ok=True)
     for root in profile_snapshot.skill_roots:
-        if root.exists() and root.is_dir():
-            shutil.copytree(root, skills_dir / root.name, dirs_exist_ok=True)
+        source = root.resolve() if root.is_symlink() else root
+        if source.exists() and source.is_dir():
+            shutil.copytree(
+                source, skills_dir / root.name,
+                symlinks=False, dirs_exist_ok=True,
+            )
 
     (bundle_dir / manifest.agents_dir).mkdir(exist_ok=True)
     (bundle_dir / manifest.tools_dir).mkdir(exist_ok=True)
@@ -450,7 +458,7 @@ def install_bundle(
     for item in bundle_path.iterdir():
         destination = extension_path / item.name
         if item.is_dir():
-            shutil.copytree(item, destination, dirs_exist_ok=True)
+            shutil.copytree(item, destination, symlinks=False, dirs_exist_ok=True)
         else:
             shutil.copy2(item, destination)
 

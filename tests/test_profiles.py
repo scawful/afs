@@ -4,14 +4,16 @@ from pathlib import Path
 
 from afs.manager import AFSManager
 from afs.models import MountType
-from afs.profiles import resolve_active_profile
+from afs.profiles import apply_profile_mounts, resolve_active_profile
 from afs.schema import (
     AFSConfig,
     AgentConfig,
+    DirectoryConfig,
     ExtensionsConfig,
     GeneralConfig,
     ProfileConfig,
     ProfilesConfig,
+    default_directory_configs,
 )
 
 
@@ -187,3 +189,39 @@ def test_resolved_profile_new_fields_default_empty() -> None:
     assert resolved.mcp_tools == []
     assert resolved.cli_modules == []
     assert resolved.agent_configs == []
+
+
+def test_profile_mount_guard_uses_resolved_mount_directory_names(tmp_path: Path) -> None:
+    custom_dirs = [
+        DirectoryConfig(
+            name="docs" if directory.role == MountType.KNOWLEDGE else directory.name,
+            policy=directory.policy,
+            description=directory.description,
+            role=directory.role,
+        )
+        for directory in default_directory_configs()
+    ]
+
+    source = tmp_path / "context" / "docs" / "nested-source"
+    source.mkdir(parents=True)
+
+    config = AFSConfig(
+        general=GeneralConfig(context_root=tmp_path / "context"),
+        directories=custom_dirs,
+        profiles=ProfilesConfig(
+            active_profile="work",
+            profiles={
+                "work": ProfileConfig(knowledge_mounts=[source]),
+            },
+        ),
+    )
+    manager = AFSManager(config=config)
+    project = tmp_path / "project"
+    project.mkdir()
+    context_path = manager.ensure(path=project, context_root=tmp_path / "context").path
+
+    profile = resolve_active_profile(config, profile_name="work")
+    result = apply_profile_mounts(manager, context_path, profile)
+
+    assert result.mounted["knowledge"] == 0
+    assert str(source.resolve()) in result.skipped_missing
