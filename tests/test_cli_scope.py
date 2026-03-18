@@ -104,3 +104,27 @@ def test_profile_cli_modules_can_register_commands(
     commands = _command_choices(parser)
 
     assert "profile-demo" in commands
+
+
+def test_services_subcommands_accept_config_flag(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "afs.toml"
+    config_path.write_text("[extensions]\nauto_discover = false\n", encoding="utf-8")
+    monkeypatch.setenv("AFS_CONFIG_PATH", str(config_path))
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "services",
+            "render",
+            "--config",
+            str(config_path),
+            "context-warm",
+        ]
+    )
+
+    assert args.command == "services"
+    assert args.services_command == "render"
+    assert str(args.config) == str(config_path)

@@ -46,10 +46,12 @@ class ServiceManager:
         self,
         config: AFSConfig | None = None,
         *,
+        config_path: Path | None = None,
         service_root: Path | None = None,
         platform_name: str | None = None,
     ) -> None:
-        self.config = config or load_config_model()
+        self.config_path = config_path.expanduser().resolve() if config_path else None
+        self.config = config or load_config_model(config_path=self.config_path)
         self.service_root = service_root or Path.home() / ".config" / "afs" / "services"
         self.platform_name = platform_name or platform.system().lower()
         self._adapter = self._build_adapter(self.platform_name)
@@ -667,10 +669,17 @@ class ServiceManager:
             env["PYTHONPATH"] = (
                 f"{repo_src}{os.pathsep}{existing}" if existing else repo_src
             )
-        user_config = Path.home() / ".config" / "afs" / "config.toml"
-        if user_config.exists():
-            env["AFS_CONFIG_PATH"] = str(user_config)
-            env["AFS_PREFER_USER_CONFIG"] = "1"
+        config_path = self.config_path or (
+            Path(raw).expanduser().resolve()
+            if (raw := os.environ.get("AFS_CONFIG_PATH"))
+            else None
+        )
+        if config_path is not None:
+            env["AFS_CONFIG_PATH"] = str(config_path)
+        for name in ("AFS_PREFER_REPO_CONFIG", "AFS_PREFER_USER_CONFIG"):
+            value = os.environ.get(name)
+            if value:
+                env[name] = value
         return env
 
 

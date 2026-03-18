@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import signal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -56,8 +57,16 @@ def test_supervisor_spawn_and_stop(tmp_path: Path) -> None:
     with patch("subprocess.Popen", return_value=mock_proc):
         supervisor.spawn("stop-test", "some.module")
 
-    with patch("os.kill") as mock_kill:
-        mock_kill.side_effect = [None, None]  # pid_alive check + SIGTERM
+    def kill_side_effect(pid, sig):
+        if sig == 0 and kill_side_effect.alive:
+            return None  # pid_alive: process exists
+        if sig == signal.SIGTERM:
+            kill_side_effect.alive = False
+            return None  # SIGTERM sent
+        raise ProcessLookupError("no such process")
+
+    kill_side_effect.alive = True
+    with patch("os.kill", side_effect=kill_side_effect):
         stopped = supervisor.stop("stop-test")
 
     assert stopped is True
@@ -75,12 +84,17 @@ def test_supervisor_list_detects_dead_pid(tmp_path: Path) -> None:
     with patch("subprocess.Popen", return_value=mock_proc):
         supervisor.spawn("dead-agent", "some.module")
 
-    # Simulate dead PID
+    # Simulate dead PID — list_agents refreshes state, marking it failed
     with patch.object(supervisor, "_pid_alive", return_value=False):
-        agents = supervisor.list_running()
+        agents = supervisor.list_agents()
 
-    assert len(agents) == 1
-    assert agents[0].state == "failed"
+    failed = [a for a in agents if a.state == "failed"]
+    assert len(failed) == 1
+    assert failed[0].name == "dead-agent"
+    # list_running should be empty since dead agents aren't "running"
+    with patch.object(supervisor, "_pid_alive", return_value=False):
+        running = supervisor.list_running()
+    assert len(running) == 0
 
 
 def test_supervisor_auto_start(tmp_path: Path) -> None:

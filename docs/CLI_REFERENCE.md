@@ -140,6 +140,17 @@ The supervisor stores state under
 `.context/scratchpad/afs_agents/supervisor/` by default, so repo- or
 context-scoped configs do not get shadowed by a single global PID cache.
 
+If you want background services to stay pinned to a repo-local config and
+`.context`, start them with `--config`:
+
+```bash
+./scripts/afs services start --config /path/to/afs.toml context-warm
+./scripts/afs services start --config /path/to/afs.toml agent-supervisor
+```
+
+`afs services render|start|stop|status|restart` preserve that explicit
+`AFS_CONFIG_PATH` for the spawned service process.
+
 `context-watch` uses `context-warm --watch` and reacts to changes under the
 context root and mounted source paths. If the optional `watchfiles` package is
 not installed, it falls back to polling.

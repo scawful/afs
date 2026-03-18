@@ -65,3 +65,29 @@ def test_service_render_launchd_contains_label() -> None:
     manager = ServiceManager(config=AFSConfig(), platform_name="darwin")
     payload = manager.render_unit("orchestrator")
     assert "\"Label\"" in payload
+
+
+def test_service_manager_propagates_explicit_config_path(tmp_path) -> None:
+    config_path = tmp_path / "afs.toml"
+    config_path.write_text("[general]\ncontext_root = \"/tmp/context\"\n", encoding="utf-8")
+
+    manager = ServiceManager(
+        config=AFSConfig(),
+        config_path=config_path,
+        platform_name="linux",
+    )
+    definition = manager.get_definition("context-warm")
+
+    assert definition is not None
+    assert definition.environment["AFS_CONFIG_PATH"] == str(config_path.resolve())
+
+
+def test_service_manager_preserves_repo_preference_flag(monkeypatch) -> None:
+    monkeypatch.setenv("AFS_PREFER_REPO_CONFIG", "1")
+
+    manager = ServiceManager(config=AFSConfig(), platform_name="linux")
+    definition = manager.get_definition("context-warm")
+
+    assert definition is not None
+    assert definition.environment["AFS_PREFER_REPO_CONFIG"] == "1"
+    assert "AFS_PREFER_USER_CONFIG" not in definition.environment

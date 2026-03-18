@@ -270,6 +270,15 @@ agents. It reconciles `auto_start`, interval `schedule`, and `watch_paths`
 settings and keeps state under `.context/scratchpad/afs_agents/supervisor/` by
 default.
 
+If you want maintenance services to stay on a repo-local config instead of the
+user config, start them with `--config`. The service layer preserves that
+explicit `AFS_CONFIG_PATH` when spawning the background process:
+
+```bash
+~/src/lab/afs/scripts/afs services start --config /path/to/afs.toml context-warm
+~/src/lab/afs/scripts/afs services start --config /path/to/afs.toml agent-supervisor
+```
+
 `afs health` now reports AFS MCP registration across Gemini, Claude, and Codex
 config surfaces, and it recognizes both `python -m afs.mcp_server` and
 wrapper-style `afs mcp serve` processes. It also surfaces context mount drift so

@@ -192,6 +192,18 @@ source still exists.
 and index maintenance only for affected contexts. If the optional `watchfiles`
 package is unavailable, it degrades to polling.
 
+If you need service processes to use a repo-local or workspace-local config
+instead of `~/.config/afs/config.toml`, start them with an explicit config:
+
+```bash
+~/src/lab/afs/scripts/afs services start --config /path/to/afs.toml context-warm
+~/src/lab/afs/scripts/afs services start --config /path/to/afs.toml agent-supervisor
+```
+
+`afs services render|start|stop|status|restart` now preserve that explicit
+`AFS_CONFIG_PATH` for the spawned service process, so background maintenance can
+stay pinned to a repo-local `.context` such as `/Users/scawful/src/lab/.context`.
+
 `agent-supervisor` is the process reconciler for profile-defined background
 agents. It applies:
 
