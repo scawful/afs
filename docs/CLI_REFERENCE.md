@@ -193,6 +193,15 @@ If you want background services to stay pinned to a repo-local config and
 context root and mounted source paths. If the optional `watchfiles` package is
 not installed, it falls back to polling.
 
+If you need the built-in maintenance daemons scoped to a subset of contexts
+without overriding the full command, use `context_filters` in your service
+config:
+
+```toml
+[services.services.context-watch]
+context_filters = ["/Users/scawful/src/lab"]
+```
+
 Codex MCP config:
 
 ```toml

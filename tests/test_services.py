@@ -72,6 +72,25 @@ def test_context_watch_service_uses_watch_mode() -> None:
     assert "--skip-embeddings" in definition.command
 
 
+def test_context_watch_service_accepts_context_filters_from_config(tmp_path: Path) -> None:
+    services = ServicesConfig(
+        enabled=True,
+        services={
+            "context-watch": ServiceConfig(
+                name="context-watch",
+                context_filters=[tmp_path / "lab"],
+            ),
+        },
+    )
+    manager = ServiceManager(config=AFSConfig(services=services), platform_name="linux")
+    definition = manager.get_definition("context-watch")
+
+    assert definition is not None
+    assert definition.command.count("--context-filter") == 1
+    flag_index = definition.command.index("--context-filter")
+    assert definition.command[flag_index + 1] == str((tmp_path / "lab").resolve())
+
+
 def test_agent_supervisor_service_uses_agent_entrypoint() -> None:
     manager = ServiceManager(config=AFSConfig(), platform_name="linux")
     definition = manager.get_definition("agent-supervisor")

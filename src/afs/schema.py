@@ -401,6 +401,7 @@ class ServiceConfig:
     enabled: bool = True
     auto_start: bool = False
     command: list[str] = field(default_factory=list)
+    context_filters: list[Path] = field(default_factory=list)
     working_directory: Path | None = None
     environment: dict[str, str] = field(default_factory=dict)
 
@@ -416,12 +417,18 @@ class ServiceConfig:
             environment = {str(key): str(value) for key, value in env.items()}
         else:
             environment = {}
+        context_filters = data.get("context_filters", [])
+        if isinstance(context_filters, list):
+            parsed_context_filters = _as_path_list(context_filters)
+        else:
+            parsed_context_filters = []
         working_directory = data.get("working_directory")
         return cls(
             name=str(data.get("name", "")).strip(),
             enabled=bool(data.get("enabled", True)),
             auto_start=bool(data.get("auto_start", False)),
             command=command,
+            context_filters=parsed_context_filters,
             working_directory=_as_path(working_directory)
             if working_directory
             else None,

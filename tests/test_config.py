@@ -157,3 +157,19 @@ def test_load_config_model_parses_memory_consolidation_settings(tmp_path) -> Non
     assert model.memory_consolidation.max_events_per_entry == 7
     assert model.memory_consolidation.include_event_types == ["fs", "context"]
     assert model.memory_consolidation.write_markdown is False
+
+
+def test_load_config_model_parses_service_context_filters(tmp_path) -> None:
+    config_path = tmp_path / "services.toml"
+    config_path.write_text(
+        "[services]\n"
+        "enabled = true\n\n"
+        "[services.services.context-watch]\n"
+        f"context_filters = [\"{tmp_path / 'lab'}\"]\n",
+        encoding="utf-8",
+    )
+
+    model = load_config_model(config_path=config_path, merge_user=False)
+
+    service = model.services.services["context-watch"]
+    assert service.context_filters == [(tmp_path / "lab").resolve()]

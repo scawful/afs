@@ -206,6 +206,14 @@ instead of `~/.config/afs/config.toml`, start them with an explicit config:
 `AFS_CONFIG_PATH` for the spawned service process, so background maintenance can
 stay pinned to a repo-local `.context` such as `/Users/scawful/src/lab/.context`.
 
+For the built-in `context-warm` and `context-watch` services, you can scope the
+watched/audited contexts declaratively without replacing the whole command:
+
+```toml
+[services.services.context-watch]
+context_filters = ["/Users/scawful/src/lab"]
+```
+
 `agent-supervisor` is the process reconciler for profile-defined background
 agents. It applies:
 

@@ -729,6 +729,15 @@ def _merge_definition(
     base: ServiceDefinition, override: ServiceConfig
 ) -> ServiceDefinition:
     command = list(override.command) if override.command else list(base.command)
+    if override.context_filters and not override.command and base.name in {
+        "context-warm",
+        "context-watch",
+    }:
+        command = _replace_repeated_flag(
+            command,
+            "--context-filter",
+            [str(path) for path in override.context_filters],
+        )
     environment = dict(base.environment)
     environment.update(override.environment)
     return ServiceDefinition(
@@ -742,6 +751,25 @@ def _merge_definition(
         keep_alive=base.keep_alive,
         run_at_load=override.auto_start,
     )
+
+
+def _replace_repeated_flag(
+    command: list[str],
+    flag: str,
+    values: list[str],
+) -> list[str]:
+    updated: list[str] = []
+    index = 0
+    while index < len(command):
+        part = command[index]
+        if part == flag:
+            index += 2
+            continue
+        updated.append(part)
+        index += 1
+    for value in values:
+        updated.extend([flag, value])
+    return updated
 
 
 class LMStudioManager:
