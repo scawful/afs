@@ -43,6 +43,7 @@ It provides filesystem-native primitives for:
 - [VSCode Extension Review](VSCODE_EXTENSION_REVIEW.md)
 - [Memory and Context Layout](MEMORY_SYSTEM.md)
 - [CLI Reference](CLI_REFERENCE.md)
+- [Emacs Integration](EMACS_INTEGRATION.md)
 
 ## Agent Note
 

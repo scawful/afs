@@ -81,6 +81,7 @@ afs gws agenda
 Install the optional Gemini dependency: `pip install -e ".[gemini]"`
 
 See `docs/EMBEDDINGS.md` for the full embedding system reference.
+See `docs/EMACS_INTEGRATION.md` for the bundled Emacs/Spacemacs helper.
 
 Tune context index defaults in `afs.toml`:
 
