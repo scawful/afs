@@ -59,3 +59,68 @@ def test_briefing_registry_loader_accepts_list_payload(tmp_path: Path, monkeypat
             "status": "running",
         }
     ]
+
+
+def test_briefing_skips_gws_when_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(briefing, "PROJECTS", {})
+    monkeypatch.setattr(briefing, "_fetch_halext_tasks", lambda: [])
+    monkeypatch.setattr(briefing, "_latest_weekly_carryover", lambda: [])
+    monkeypatch.setattr(
+        briefing,
+        "_get_gws_client",
+        lambda: (_ for _ in ()).throw(AssertionError("gws client should not be used")),
+    )
+
+    payload = briefing._build_briefing(days=1, include_gws=False)
+
+    assert payload["gws_available"] is False
+    assert payload["calendar_agenda"] == []
+    assert payload["gmail_unread"] == []
+
+
+def test_briefing_reads_gws_when_authenticated(monkeypatch) -> None:
+    monkeypatch.setattr(briefing, "PROJECTS", {})
+    monkeypatch.setattr(briefing, "_fetch_halext_tasks", lambda: [])
+    monkeypatch.setattr(briefing, "_latest_weekly_carryover", lambda: [])
+
+    class _FakeGWSClient:
+        available = True
+        authenticated = True
+
+        def calendar_agenda(self) -> list[dict[str, str]]:
+            return [{"summary": "Sync", "start": {"dateTime": "2026-03-19T09:00:00"}}]
+
+        def gmail_unread(self) -> list[dict[str, str]]:
+            return [{"id": "abc123", "snippet": "Need a response"}]
+
+    monkeypatch.setattr(briefing, "_get_gws_client", lambda: _FakeGWSClient())
+
+    payload = briefing._build_briefing(days=1, include_gws=True)
+
+    assert payload["gws_available"] is True
+    assert payload["calendar_agenda"][0]["summary"] == "Sync"
+    assert payload["gmail_unread"][0]["snippet"] == "Need a response"
+
+
+def test_briefing_skips_gws_when_client_is_not_authenticated(monkeypatch) -> None:
+    monkeypatch.setattr(briefing, "PROJECTS", {})
+    monkeypatch.setattr(briefing, "_fetch_halext_tasks", lambda: [])
+    monkeypatch.setattr(briefing, "_latest_weekly_carryover", lambda: [])
+
+    class _FakeGWSClient:
+        available = True
+        authenticated = False
+
+        def calendar_agenda(self) -> list[dict[str, str]]:
+            raise AssertionError("calendar_agenda should not run without auth")
+
+        def gmail_unread(self) -> list[dict[str, str]]:
+            raise AssertionError("gmail_unread should not run without auth")
+
+    monkeypatch.setattr(briefing, "_get_gws_client", lambda: _FakeGWSClient())
+
+    payload = briefing._build_briefing(days=1, include_gws=True)
+
+    assert payload["gws_available"] is False
+    assert payload["calendar_agenda"] == []
+    assert payload["gmail_unread"] == []

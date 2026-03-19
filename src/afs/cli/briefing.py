@@ -4,6 +4,7 @@ Usage:
     afs briefing              # full morning briefing
     afs briefing --short      # compact one-screen summary
     afs briefing --json       # machine-readable for IDE integration
+    afs briefing --no-gws     # skip Google Workspace integration
 """
 
 from __future__ import annotations
@@ -11,11 +12,9 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Project registry — repos to track
@@ -127,6 +126,17 @@ def _latest_weekly_carryover() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Google Workspace CLI integration (optional — requires `gws` binary)
+# Uses afs.gws.GWSClient for all GWS operations.
+# ---------------------------------------------------------------------------
+
+def _get_gws_client():
+    """Lazy import to avoid circular deps."""
+    from ..gws import get_client
+    return get_client()
+
+
+# ---------------------------------------------------------------------------
 # Agent registry (Phase 2 — reads if file exists)
 # ---------------------------------------------------------------------------
 
@@ -146,7 +156,7 @@ def _read_agent_registry() -> list[dict[str, Any]]:
 # Briefing assembly
 # ---------------------------------------------------------------------------
 
-def _build_briefing(days: int = 7) -> dict[str, Any]:
+def _build_briefing(days: int = 7, include_gws: bool = True) -> dict[str, Any]:
     """Assemble the full briefing data structure."""
     now = datetime.now()
 
@@ -187,6 +197,17 @@ def _build_briefing(days: int = 7) -> dict[str, Any]:
     carry = _latest_weekly_carryover()
     agents = _read_agent_registry()
 
+    # Google Workspace (optional)
+    calendar_agenda: list[dict[str, Any]] = []
+    gmail_unread: list[dict[str, Any]] = []
+    gws_available = False
+    if include_gws:
+        gws = _get_gws_client()
+        if gws.available and gws.authenticated:
+            gws_available = True
+            calendar_agenda = gws.calendar_agenda()
+            gmail_unread = gws.gmail_unread()
+
     return {
         "date": now.strftime("%Y-%m-%d %A"),
         "cloud_next_days": days_to_next,
@@ -196,6 +217,9 @@ def _build_briefing(days: int = 7) -> dict[str, Any]:
         "open_tasks": tasks,
         "carry_over": carry,
         "active_agents": agents,
+        "gws_available": gws_available,
+        "calendar_agenda": calendar_agenda,
+        "gmail_unread": gmail_unread,
     }
 
 
@@ -216,7 +240,38 @@ def _render_text(briefing: dict[str, Any], short: bool = False) -> str:
     elif d == 0:
         lines.append("  Cloud Next 2026: TODAY")
     lines.append(f"  Total commits (7d): {briefing['total_commits_7d']}")
+    if briefing.get("gws_available"):
+        lines.append("  Google Workspace: connected")
     lines.append("")
+
+    # Calendar agenda
+    if briefing.get("calendar_agenda"):
+        lines.append("--- Today's Calendar ---")
+        for event in briefing["calendar_agenda"]:
+            summary = event.get("summary", event.get("title", "untitled"))
+            start = event.get("start", {})
+            time_str = start.get("dateTime", start.get("date", "")) if isinstance(start, dict) else str(start)
+            # Extract just the time portion if it's a datetime
+            if "T" in str(time_str):
+                try:
+                    t = datetime.fromisoformat(str(time_str).replace("Z", "+00:00"))
+                    time_str = t.strftime("%I:%M %p")
+                except ValueError:
+                    pass
+            lines.append(f"  {time_str:<10} {summary}")
+        lines.append("")
+
+    # Gmail unread
+    if briefing.get("gmail_unread") and not short:
+        lines.append(f"--- Gmail ({len(briefing['gmail_unread'])} unread in primary) ---")
+        for msg in briefing["gmail_unread"]:
+            thread_id = msg.get("threadId", msg.get("id", ""))[:8]
+            snippet = msg.get("snippet", "")[:60]
+            if snippet:
+                lines.append(f"  {thread_id}  {snippet}")
+            else:
+                lines.append(f"  {thread_id}")
+        lines.append("")
 
     # Velocity
     lines.append("--- Project Velocity (7d) ---")
@@ -283,6 +338,28 @@ def _render_org(briefing: dict[str, Any]) -> str:
     lines.append(f"Total commits (7d): {briefing['total_commits_7d']}")
     lines.append("")
 
+    if briefing.get("calendar_agenda"):
+        lines.append("* Today's Calendar")
+        for event in briefing["calendar_agenda"]:
+            summary = event.get("summary", event.get("title", "untitled"))
+            start = event.get("start", {})
+            time_str = start.get("dateTime", start.get("date", "")) if isinstance(start, dict) else str(start)
+            if "T" in str(time_str):
+                try:
+                    t = datetime.fromisoformat(str(time_str).replace("Z", "+00:00"))
+                    time_str = t.strftime("%I:%M %p")
+                except ValueError:
+                    pass
+            lines.append(f"- {time_str} — {summary}")
+        lines.append("")
+
+    if briefing.get("gmail_unread"):
+        lines.append(f"* Gmail ({len(briefing['gmail_unread'])} unread)")
+        for msg in briefing["gmail_unread"]:
+            snippet = msg.get("snippet", msg.get("id", ""))[:80]
+            lines.append(f"- {snippet}")
+        lines.append("")
+
     lines.append("* Project Velocity")
     for name, v in briefing["velocity"].items():
         if v["commits"] == 0:
@@ -319,7 +396,8 @@ def _render_org(briefing: dict[str, Any]) -> str:
 
 def _briefing_command(args: argparse.Namespace) -> int:
     days = getattr(args, "days", 7)
-    briefing = _build_briefing(days=days)
+    include_gws = not getattr(args, "no_gws", False)
+    briefing = _build_briefing(days=days, include_gws=include_gws)
 
     if getattr(args, "json", False):
         print(json.dumps(briefing, indent=2, default=str))
@@ -341,4 +419,5 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--json", "-j", action="store_true", help="JSON output for IDE integration.")
     parser.add_argument("--org", action="store_true", help="Org-mode output for Emacs.")
     parser.add_argument("--days", "-d", type=int, default=7, help="Lookback window in days (default: 7).")
+    parser.add_argument("--no-gws", action="store_true", help="Skip Google Workspace integration.")
     parser.set_defaults(func=_briefing_command)

@@ -56,6 +56,7 @@ afs gemini setup
 
 # Check readiness (API key, SDK, MCP, embeddings)
 afs gemini status
+afs gemini status --project afs --context-root ~/src/lab/.context
 
 # Index knowledge with Gemini embedding vectors
 afs embeddings index --knowledge-path ~/.context/knowledge --provider gemini --include "*.md"
@@ -66,7 +67,15 @@ afs embeddings search --knowledge-path ~/.context/knowledge --provider gemini "h
 # Generate context for a Gemini session
 afs gemini context "sprite development"                    # search mode
 afs gemini context "sprite development" --include-content  # with full content
+afs gemini context --project afs "sqlite index"            # search a specific project subtree
 afs gemini context                                         # full knowledge index
+
+# Skip Google Workspace lookups in the morning briefing
+afs briefing --no-gws
+
+# Optional Google Workspace helper commands
+afs gws status
+afs gws agenda
 ```
 
 Install the optional Gemini dependency: `pip install -e ".[gemini]"`

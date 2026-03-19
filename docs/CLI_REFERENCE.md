@@ -178,6 +178,8 @@ indexing, `RETRIEVAL_QUERY` for search queries (asymmetric retrieval). Override 
 ./scripts/afs gemini status
 ./scripts/afs gemini status --json
 ./scripts/afs gemini status --skip-ping               # skip live embedding test
+./scripts/afs gemini status --project afs             # inspect one project subtree
+./scripts/afs gemini status --context-root ~/src/lab/.context
 
 # Generate context from knowledge base
 ./scripts/afs gemini context                           # dump full INDEX.md
@@ -185,6 +187,8 @@ indexing, `RETRIEVAL_QUERY` for search queries (asymmetric retrieval). Override 
 ./scripts/afs gemini context "debugging" --top-k 3     # limit results
 ./scripts/afs gemini context "hooks" --include-content  # include full doc text
 ./scripts/afs gemini context "training" --json          # machine-readable output
+./scripts/afs gemini context --project afs "sqlite"     # search one project subtree
+./scripts/afs gemini context --knowledge-path ~/.context/knowledge/afs "hooks"
 ```
 
 `afs gemini setup` writes the AFS MCP server entry into `~/.gemini/settings.json`
@@ -194,7 +198,28 @@ so Gemini CLI can discover AFS tools automatically.
 embedding index, and live embedding ping.
 
 `afs gemini context` generates context from the knowledge base using semantic search
-(when embeddings are indexed) or dumps the full knowledge INDEX.md.
+(when embeddings are indexed) or dumps the full knowledge INDEX.md. When no
+`--project` or `--knowledge-path` is given, it searches across every indexed
+project subtree under the active context knowledge root.
+
+## Briefing
+
+```bash
+./scripts/afs briefing
+./scripts/afs briefing --short
+./scripts/afs briefing --json
+./scripts/afs briefing --org
+./scripts/afs briefing --no-gws                        # skip Google Workspace lookups
+```
+
+## GWS
+
+```bash
+./scripts/afs gws status                               # gws auth status
+./scripts/afs gws agenda                               # today's calendar agenda
+./scripts/afs gws unread                               # unread primary inbox
+./scripts/afs gws raw gmail +triage --output-format json
+```
 
 ## MCP
 

@@ -11,26 +11,33 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from ..config import load_config_model
+from ..context_paths import resolve_mount_root
+from ..core import resolve_context_root
+from ..embeddings import SearchResult, create_embed_fn, search_embedding_index
 from ..health.mcp_registration import find_afs_mcp_registrations
-from ..profiles import resolve_active_profile
+from ..models import MountType
 
 # --------------------------------------------------------------------------- #
 # settings.json management
 # --------------------------------------------------------------------------- #
 
-_GEMINI_SETTINGS_CANDIDATES = [
-    Path.home() / ".gemini" / "settings.json",
-    Path.home() / ".config" / "gemini" / "settings.json",
-]
+
+def _gemini_settings_candidates() -> list[Path]:
+    home = Path.home()
+    return [
+        home / ".gemini" / "settings.json",
+        home / ".config" / "gemini" / "settings.json",
+    ]
 
 
 def _find_gemini_settings() -> Path | None:
     """Return the first existing Gemini settings.json, or None."""
-    for candidate in _GEMINI_SETTINGS_CANDIDATES:
+    for candidate in _gemini_settings_candidates():
         if candidate.exists():
             return candidate
     return None
@@ -71,6 +78,7 @@ def _write_settings(path: Path, data: dict[str, Any]) -> None:
 # gemini setup
 # --------------------------------------------------------------------------- #
 
+
 def gemini_setup_command(args: argparse.Namespace) -> int:
     """Set up Gemini integration: settings.json + MCP registration."""
     settings_path = _find_gemini_settings() or _default_gemini_settings_path()
@@ -79,11 +87,9 @@ def gemini_setup_command(args: argparse.Namespace) -> int:
 
     data = _read_settings(settings_path) if settings_path.exists() else {}
 
-    # Ensure mcpServers section exists
     if "mcpServers" not in data:
         data["mcpServers"] = {}
 
-    # Register AFS MCP server
     mcp_entry = _build_afs_mcp_entry()
 
     if "afs" in data["mcpServers"]:
@@ -99,12 +105,16 @@ def gemini_setup_command(args: argparse.Namespace) -> int:
 
     _write_settings(settings_path, data)
 
-    # Check API key
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if api_key:
-        print(f"API key: set (via {'GEMINI_API_KEY' if os.getenv('GEMINI_API_KEY') else 'GOOGLE_API_KEY'})")
+        key_name = (
+            "GEMINI_API_KEY" if os.getenv("GEMINI_API_KEY") else "GOOGLE_API_KEY"
+        )
+        print(f"API key: set (via {key_name})")
     else:
-        print("API key: NOT SET — export GEMINI_API_KEY to enable embeddings and generation")
+        print(
+            "API key: NOT SET — export GEMINI_API_KEY to enable embeddings and generation"
+        )
 
     return 0
 
@@ -113,68 +123,65 @@ def gemini_setup_command(args: argparse.Namespace) -> int:
 # gemini status
 # --------------------------------------------------------------------------- #
 
+
 def gemini_status_command(args: argparse.Namespace) -> int:
     """Check Gemini integration status."""
     checks: list[tuple[str, bool, str]] = []
+    config = _load_cli_config(args)
 
-    # 1. API key
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     checks.append(("API key", bool(api_key), "GEMINI_API_KEY or GOOGLE_API_KEY"))
 
-    # 2. google-genai SDK
     try:
         from google import genai  # type: ignore[import-untyped]  # noqa: F401
+
         sdk_ok = True
     except ImportError:
         sdk_ok = False
     checks.append(("google-genai SDK", sdk_ok, "pip install google-genai"))
 
-    # 3. Settings.json
     settings_path = _find_gemini_settings()
-    checks.append(("settings.json", settings_path is not None, str(settings_path or "not found")))
+    checks.append(
+        ("settings.json", settings_path is not None, str(settings_path or "not found"))
+    )
 
-    # 4. MCP registration
     registrations = find_afs_mcp_registrations()
     gemini_registered = bool(registrations.get("gemini"))
-    checks.append((
-        "MCP registered",
-        gemini_registered,
-        ", ".join(registrations.get("gemini", [])) or "not registered",
-    ))
+    checks.append(
+        (
+            "MCP registered",
+            gemini_registered,
+            ", ".join(registrations.get("gemini", [])) or "not registered",
+        )
+    )
 
-    # 5. Embeddings index
-    config = load_config_model(merge_user=True)
-    profile = resolve_active_profile(config)
-    has_index = False
-    index_info = "no knowledge mounts"
-    for mount in profile.knowledge_mounts:
-        mount_path = Path(mount).expanduser()
-        idx = mount_path / "embedding_index.json"
-        if idx.exists():
-            try:
-                index_data = json.loads(idx.read_text(encoding="utf-8"))
-                count = len(index_data)
-                has_index = True
-                index_info = f"{count} docs at {mount_path}"
-            except (OSError, json.JSONDecodeError):
-                pass
+    indexed_roots = _indexed_knowledge_roots(_candidate_knowledge_roots(args, config))
+    has_index = bool(indexed_roots)
+    if indexed_roots:
+        total_docs = sum(_index_doc_count(root) for root in indexed_roots)
+        index_info = (
+            f"{len(indexed_roots)} index roots, {total_docs} docs "
+            f"under {indexed_roots[0]}"
+        )
+    else:
+        index_info = "no embedding index found"
     checks.append(("Embeddings indexed", has_index, index_info))
 
-    # 6. Test embedding (if API key and SDK available)
-    embed_ok = True  # treat skipped as OK
+    embed_ok = True
     embed_info = "skipped"
     if api_key and sdk_ok and not args.skip_ping:
         try:
             from ..embeddings import create_gemini_embed_fn
+
             fn = create_gemini_embed_fn()
             result = fn("test")
             embed_ok = True
             embed_info = f"{len(result)}-dim vectors"
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - live API path
+            embed_ok = False
             embed_info = f"failed: {exc}"
     checks.append(("Embedding ping", embed_ok, embed_info))
 
-    # Print results
     if args.json:
         payload = {
             "checks": [
@@ -199,65 +206,46 @@ def gemini_status_command(args: argparse.Namespace) -> int:
 # gemini context
 # --------------------------------------------------------------------------- #
 
+
 def gemini_context_command(args: argparse.Namespace) -> int:
     """Generate a context document from knowledge base for Gemini sessions."""
-    config = load_config_model(merge_user=True)
-    profile = resolve_active_profile(config)
-
-    if not profile.knowledge_mounts:
-        print("No knowledge mounts in active profile.")
-        return 1
-
-    # Find knowledge roots with embedding indexes, falling back to any accessible mount
-    indexed_roots: list[Path] = []
-    accessible_roots: list[Path] = []
-    for mount in profile.knowledge_mounts:
-        mount_path = Path(mount).expanduser()
-        if mount_path.exists():
-            accessible_roots.append(mount_path)
-            if (mount_path / "embedding_index.json").exists():
-                indexed_roots.append(mount_path)
+    config = _load_cli_config(args)
+    accessible_roots = _candidate_knowledge_roots(args, config)
+    indexed_roots = _indexed_knowledge_roots(accessible_roots)
 
     if not accessible_roots:
         print("No accessible knowledge mount found.")
         return 1
 
     if args.query:
-        # Semantic/keyword search mode — prefer indexed mounts
-        knowledge_root = indexed_roots[0] if indexed_roots else accessible_roots[0]
         if not indexed_roots:
             print("No embedding index found. Run: afs embeddings index first.")
             return 1
-        return _context_search(knowledge_root, args)
-    else:
-        # Full context mode — prefer mount with INDEX.md, then any with .md files
-        for root in accessible_roots:
-            if (root / "INDEX.md").exists():
-                return _context_full(root, args)
-        return _context_full(accessible_roots[-1], args)
+        return _context_search(indexed_roots, args)
+
+    for root in accessible_roots:
+        if (root / "INDEX.md").exists():
+            return _context_full(root)
+    return _context_full(accessible_roots[-1])
 
 
-def _context_search(knowledge_root: Path, args: argparse.Namespace) -> int:
-    """Generate context by searching the knowledge base."""
-    from ..embeddings import create_embed_fn, search_embedding_index
-
-    # Check if index exists
-    index_path = knowledge_root / "embedding_index.json"
-    if not index_path.exists():
-        print(f"No embedding index at {knowledge_root}. Run: afs embeddings index first.")
-        return 1
-
-    # Try to use Gemini embeddings for search, fall back to keyword
+def _context_search(knowledge_roots: Iterable[Path], args: argparse.Namespace) -> int:
+    """Generate context by searching one or more indexed knowledge roots."""
     embed_fn = None
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if api_key:
         try:
-            embed_fn = create_embed_fn("gemini", model="gemini-embedding-001", api_key=api_key)
+            embed_fn = create_embed_fn(
+                "gemini",
+                model="gemini-embedding-001",
+                api_key=api_key,
+                task_type="RETRIEVAL_QUERY",
+            )
         except (RuntimeError, ValueError):
             pass
 
-    results = search_embedding_index(
-        knowledge_root,
+    results = _search_across_knowledge_roots(
+        knowledge_roots,
         args.query,
         embed_fn=embed_fn,
         top_k=args.top_k,
@@ -269,10 +257,7 @@ def _context_search(knowledge_root: Path, args: argparse.Namespace) -> int:
         return 0
 
     if args.json:
-        payload = {
-            "query": args.query,
-            "documents": [],
-        }
+        payload = {"query": args.query, "documents": []}
         for result in results:
             doc: dict[str, Any] = {
                 "doc_id": result.doc_id,
@@ -289,10 +274,11 @@ def _context_search(knowledge_root: Path, args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
         return 0
 
-    # Markdown output for Gemini context injection
     print(f"# Context for: {args.query}\n")
     for result in results:
-        rel_path = result.doc_id.split("::")[-1] if "::" in result.doc_id else result.doc_id
+        rel_path = (
+            result.doc_id.split("::")[-1] if "::" in result.doc_id else result.doc_id
+        )
         print(f"## {rel_path} (score: {result.score:.3f})\n")
         if args.include_content:
             try:
@@ -307,15 +293,13 @@ def _context_search(knowledge_root: Path, args: argparse.Namespace) -> int:
     return 0
 
 
-def _context_full(knowledge_root: Path, args: argparse.Namespace) -> int:
+def _context_full(knowledge_root: Path) -> int:
     """Generate full context summary from knowledge INDEX.md."""
     index_md = knowledge_root / "INDEX.md"
     if index_md.exists():
-        content = index_md.read_text(encoding="utf-8")
-        print(content)
+        print(index_md.read_text(encoding="utf-8"))
         return 0
 
-    # Fallback: list all .md files
     md_files = sorted(knowledge_root.rglob("*.md"))
     if not md_files:
         print("No knowledge documents found.")
@@ -330,9 +314,108 @@ def _context_full(knowledge_root: Path, args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_cli_config(args: argparse.Namespace):
+    config_path = getattr(args, "config", None)
+    resolved_config_path = (
+        Path(config_path).expanduser().resolve() if config_path else None
+    )
+    return load_config_model(config_path=resolved_config_path, merge_user=True)
+
+
+def _candidate_knowledge_roots(args: argparse.Namespace, config) -> list[Path]:
+    if getattr(args, "knowledge_path", None):
+        base_root = Path(args.knowledge_path).expanduser().resolve()
+    else:
+        context_override = getattr(args, "context_root", None)
+        context_root = (
+            Path(context_override).expanduser().resolve()
+            if context_override
+            else resolve_context_root(config, None)
+        )
+        base_root = resolve_mount_root(context_root, MountType.KNOWLEDGE, config=config)
+        project = getattr(args, "project", None)
+        if project:
+            base_root = base_root / project
+    return _expand_knowledge_roots(base_root)
+
+
+def _expand_knowledge_roots(base_root: Path) -> list[Path]:
+    resolved_root = base_root.expanduser().resolve()
+    if not resolved_root.exists():
+        return []
+
+    roots = [resolved_root]
+    try:
+        for child in sorted(resolved_root.iterdir()):
+            if child.is_dir():
+                roots.append(child.resolve())
+    except OSError:
+        pass
+    return roots
+
+
+def _indexed_knowledge_roots(roots: Iterable[Path]) -> list[Path]:
+    indexed: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        marker = str(root)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        if (root / "embedding_index.json").exists():
+            indexed.append(root)
+    return indexed
+
+
+def _index_doc_count(index_root: Path) -> int:
+    try:
+        payload = json.loads(
+            (index_root / "embedding_index.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return 0
+    return len(payload) if isinstance(payload, list) else 0
+
+
+def _search_across_knowledge_roots(
+    knowledge_roots: Iterable[Path],
+    query: str,
+    *,
+    embed_fn,
+    top_k: int,
+    min_score: float,
+) -> list[SearchResult]:
+    merged: dict[tuple[str, str], SearchResult] = {}
+    for root in knowledge_roots:
+        try:
+            results = search_embedding_index(
+                root,
+                query,
+                embed_fn=embed_fn,
+                top_k=top_k,
+                min_score=min_score,
+            )
+        except (OSError, ValueError):
+            continue
+        for result in results:
+            key = (result.doc_id, result.source_path)
+            previous = merged.get(key)
+            if previous is None or result.score > previous.score:
+                merged[key] = result
+    return sorted(merged.values(), key=lambda item: item.score, reverse=True)[:top_k]
+
+
 # --------------------------------------------------------------------------- #
 # Parser registration
 # --------------------------------------------------------------------------- #
+
+
+def _add_knowledge_root_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", help="Config path.")
+    parser.add_argument("--context-root", help="Context root override.")
+    parser.add_argument("--knowledge-path", help="Knowledge root override.")
+    parser.add_argument("--project", help="Knowledge project under the context root.")
+
 
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register gemini command parsers."""
@@ -341,7 +424,6 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     gemini_sub = gemini_parser.add_subparsers(dest="gemini_command")
 
-    # afs gemini setup
     setup = gemini_sub.add_parser(
         "setup", help="Set up Gemini settings.json and MCP registration."
     )
@@ -350,41 +432,50 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Override settings.json path (default: ~/.gemini/settings.json).",
     )
     setup.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Overwrite existing AFS MCP entry.",
     )
     setup.set_defaults(func=gemini_setup_command)
 
-    # afs gemini status
     status = gemini_sub.add_parser(
         "status", help="Check Gemini integration health."
     )
+    _add_knowledge_root_args(status)
     status.add_argument("--json", action="store_true", help="JSON output.")
     status.add_argument(
-        "--skip-ping", action="store_true",
+        "--skip-ping",
+        action="store_true",
         help="Skip live embedding ping test.",
     )
     status.set_defaults(func=gemini_status_command)
 
-    # afs gemini context
     ctx = gemini_sub.add_parser(
         "context",
         help="Generate context from knowledge base for Gemini sessions.",
     )
+    _add_knowledge_root_args(ctx)
     ctx.add_argument(
-        "query", nargs="?", default=None,
+        "query",
+        nargs="?",
+        default=None,
         help="Search query to find relevant context (omit for full index).",
     )
     ctx.add_argument(
-        "--top-k", type=int, default=5,
+        "--top-k",
+        type=int,
+        default=5,
         help="Number of documents to include (default: 5).",
     )
     ctx.add_argument(
-        "--min-score", type=float, default=0.3,
+        "--min-score",
+        type=float,
+        default=0.3,
         help="Minimum relevance score (default: 0.3).",
     )
     ctx.add_argument(
-        "--include-content", action="store_true",
+        "--include-content",
+        action="store_true",
         help="Include full document content (not just preview).",
     )
     ctx.add_argument("--json", action="store_true", help="JSON output.")

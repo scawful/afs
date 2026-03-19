@@ -26,6 +26,7 @@ from . import (
     embeddings,
     fs,
     gemini,
+    gws_cli,
     mcp,
     profile,
     review,
@@ -132,6 +133,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Register briefing command
     briefing.register_parsers(subparsers)
+
+    # Register Google Workspace commands
+    gws_cli.register_parsers(subparsers)
 
     # Register review commands
     review.register_parsers(subparsers)
