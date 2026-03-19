@@ -152,6 +152,86 @@ def create_openai_embed_fn(
     return embed
 
 
+def create_gemini_embed_fn(
+    model: str = "gemini-embedding-001",
+    *,
+    api_key: str | None = None,
+    task_type: str = "RETRIEVAL_DOCUMENT",
+) -> Callable[[str], list[float]]:
+    """Create a Gemini embeddings backend.
+
+    Uses the ``google-genai`` SDK when available, falling back to a
+    plain HTTP request against the Gemini REST API otherwise.
+
+    Available models (as of 2026-03):
+      - gemini-embedding-001
+      - gemini-embedding-2-preview
+    """
+    resolved_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not resolved_key:
+        raise RuntimeError(
+            "Missing API key for Gemini embeddings. "
+            "Set GEMINI_API_KEY or pass --gemini-api-key."
+        )
+
+    # Normalize model name — SDK expects "models/" prefix
+    qualified_model = model if model.startswith("models/") else f"models/{model}"
+
+    # Try the official SDK first; fall back to raw HTTP.
+    try:
+        from google import genai  # type: ignore[import-untyped]
+
+        client = genai.Client(api_key=resolved_key)
+
+        def _embed_sdk(text: str) -> list[float]:
+            result = client.models.embed_content(
+                model=qualified_model,
+                contents=text,
+                config={"task_type": task_type},
+            )
+            values = result.embeddings[0].values
+            return [float(v) for v in values]
+
+        return _embed_sdk
+    except ImportError:
+        pass
+
+    # Fallback: plain HTTP via httpx or requests.
+    try:
+        import httpx as _http_mod
+    except ImportError:
+        try:
+            import requests as _http_mod  # type: ignore[no-redef]
+        except ImportError as exc:
+            raise RuntimeError(
+                "Neither google-genai nor httpx/requests installed for Gemini embeddings"
+            ) from exc
+
+    # Strip "models/" prefix for the URL path since it's already in the endpoint
+    url_model = model.removeprefix("models/")
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/{url_model}:embedContent"
+        f"?key={resolved_key}"
+    )
+
+    def _embed_http(text: str) -> list[float]:
+        body = {
+            "model": qualified_model,
+            "content": {"parts": [{"text": text}]},
+            "taskType": task_type,
+        }
+        if hasattr(_http_mod, "post"):
+            resp = _http_mod.post(url, json=body, timeout=30.0)  # type: ignore[union-attr]
+        else:
+            resp = _http_mod.post(url, json=body, timeout=30)  # type: ignore[union-attr]
+        resp.raise_for_status()
+        data = resp.json()
+        values = data.get("embedding", {}).get("values", [])
+        return [float(v) for v in values]
+
+    return _embed_http
+
+
 def create_hf_embed_fn(
     model: str,
     *,
@@ -696,5 +776,13 @@ register_embedding_backend(
         base_url=base_url,
         api_key=api_key,
         timeout=timeout,
+    ),
+)
+register_embedding_backend(
+    "gemini",
+    lambda model="gemini-embedding-001", api_key=None, task_type="RETRIEVAL_DOCUMENT", **_: create_gemini_embed_fn(
+        model=model,
+        api_key=api_key,
+        task_type=task_type,
     ),
 )

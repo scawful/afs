@@ -26,6 +26,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+embeddings = [
+    "httpx>=0.24.0",
+]
+gemini = [
+    "google-genai>=1.0.0",
+]
 training = [
     "datasets>=2.14.0",
     "transformers>=4.35.0",

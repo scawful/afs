@@ -201,11 +201,22 @@ def _resolve_sources(args: argparse.Namespace, index_root: Path) -> list[Path]:
     return sources
 
 
+_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
+    "ollama": "nomic-embed-text",
+    "hf": "nomic-embed-text",
+    "openai": "text-embedding-3-small",
+    "gemini": "gemini-embedding-001",
+}
+
+
 def _resolve_embed_fn(args: argparse.Namespace):
     if args.provider == "none":
         return None
 
-    kwargs: dict[str, object] = {"model": args.model}
+    model = args.model
+    if model == "nomic-embed-text" and args.provider in _PROVIDER_DEFAULT_MODELS:
+        model = _PROVIDER_DEFAULT_MODELS[args.provider]
+    kwargs: dict[str, object] = {"model": model}
 
     if args.provider == "ollama":
         kwargs["host"] = args.host
@@ -217,6 +228,9 @@ def _resolve_embed_fn(args: argparse.Namespace):
     elif args.provider == "openai":
         kwargs["base_url"] = args.openai_base_url
         kwargs["api_key"] = args.openai_api_key
+    elif args.provider == "gemini":
+        kwargs["api_key"] = args.gemini_api_key
+        kwargs["task_type"] = args.gemini_task_type
 
     try:
         return create_embed_fn(args.provider, **kwargs)
@@ -235,7 +249,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     def add_provider_args(parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
             "--provider",
-            choices=["none", "ollama", "hf", "openai"],
+            choices=["none", "ollama", "hf", "openai", "gemini"],
             default="none",
             help="Embedding provider.",
         )
@@ -275,6 +289,14 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
             help="OpenAI-compatible embeddings base URL.",
         )
         parser.add_argument("--openai-api-key", help="OpenAI-compatible API key override.")
+        parser.add_argument(
+            "--gemini-api-key", help="Gemini API key override (or set GEMINI_API_KEY)."
+        )
+        parser.add_argument(
+            "--gemini-task-type",
+            default="RETRIEVAL_DOCUMENT",
+            help="Gemini embedding task type (RETRIEVAL_DOCUMENT, RETRIEVAL_QUERY, etc.).",
+        )
 
     emb_index = emb_sub.add_parser("index", help="Build embedding index.")
     emb_index.add_argument("--config", help="Config path.")
