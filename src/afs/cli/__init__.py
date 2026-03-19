@@ -25,6 +25,7 @@ from . import (
     core,
     embeddings,
     fs,
+    gemini,
     mcp,
     profile,
     review,
@@ -119,6 +120,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Register embedding commands
     embeddings.register_parsers(subparsers)
+
+    # Register Gemini integration commands
+    gemini.register_parsers(subparsers)
 
     # Register MCP server commands
     mcp.register_parsers(subparsers)

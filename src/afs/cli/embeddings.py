@@ -84,7 +84,7 @@ def embeddings_search_command(args: argparse.Namespace) -> int:
         print(str(exc))
         return 1
 
-    embed_fn = _resolve_embed_fn(args)
+    embed_fn = _resolve_embed_fn(args, mode="query")
     if embed_fn is None and args.provider != "none":
         return 1
 
@@ -132,7 +132,7 @@ def embeddings_eval_command(args: argparse.Namespace) -> int:
         print(f"No eval cases loaded from {query_path}")
         return 1
 
-    embed_fn = _resolve_embed_fn(args)
+    embed_fn = _resolve_embed_fn(args, mode="query")
     if embed_fn is None and args.provider != "none":
         return 1
 
@@ -209,7 +209,15 @@ _PROVIDER_DEFAULT_MODELS: dict[str, str] = {
 }
 
 
-def _resolve_embed_fn(args: argparse.Namespace):
+def _resolve_embed_fn(args: argparse.Namespace, *, mode: str = "index"):
+    """Resolve embedding function from CLI args.
+
+    Args:
+        args: Parsed CLI arguments.
+        mode: "index" for document indexing, "query" for search queries.
+              For Gemini, this switches between RETRIEVAL_DOCUMENT and
+              RETRIEVAL_QUERY task types (asymmetric retrieval).
+    """
     if args.provider == "none":
         return None
 
@@ -230,7 +238,12 @@ def _resolve_embed_fn(args: argparse.Namespace):
         kwargs["api_key"] = args.openai_api_key
     elif args.provider == "gemini":
         kwargs["api_key"] = args.gemini_api_key
-        kwargs["task_type"] = args.gemini_task_type
+        # Use asymmetric retrieval: RETRIEVAL_DOCUMENT for indexing,
+        # RETRIEVAL_QUERY for search queries.
+        task_type = args.gemini_task_type
+        if task_type == "RETRIEVAL_DOCUMENT" and mode == "query":
+            task_type = "RETRIEVAL_QUERY"
+        kwargs["task_type"] = task_type
 
     try:
         return create_embed_fn(args.provider, **kwargs)
