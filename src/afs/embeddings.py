@@ -281,6 +281,7 @@ def build_embedding_index(
             "id": doc_id,
             "source_path": str(path),
             "text_preview": preview,
+            "search_text": embed_text,
             "embedding": embedding,
             "size_bytes": stat.st_size if stat else 0,
             "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat()
@@ -345,7 +346,8 @@ def search_embedding_index(
         if query_embedding and embedding:
             score = _cosine_similarity(query_embedding, embedding)
         else:
-            score = _keyword_score(query, text_preview, doc_id)
+            search_text = data.get("search_text") or text_preview
+            score = _keyword_score(query, search_text, doc_id)
 
         if score >= min_score:
             results.append(
