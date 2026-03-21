@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from afs.event_log import build_session_replay, summarize_event_analytics
+from afs.event_log import (
+    build_session_replay,
+    build_session_timeline,
+    list_recorded_sessions,
+    summarize_event_analytics,
+)
 from afs.history import append_history_event
 
 
@@ -84,3 +89,63 @@ def test_build_session_replay_returns_matching_timeline(tmp_path: Path) -> None:
     assert replay["event_types"]["session"] == 1
     assert replay["event_types"]["mcp_tool"] == 1
     assert replay["events"][1]["payload"]["ok"] is True
+
+
+def test_list_recorded_sessions_groups_by_metadata_session_id(tmp_path: Path) -> None:
+    context_path, history_root = _make_context(tmp_path)
+    append_history_event(
+        history_root,
+        "session",
+        "afs.session",
+        op="bootstrap",
+        metadata={"session_id": "session-a"},
+    )
+    append_history_event(
+        history_root,
+        "mcp_tool",
+        "afs.mcp",
+        op="call",
+        metadata={"tool_name": "context.query", "session_id": "session-a"},
+    )
+    append_history_event(
+        history_root,
+        "session",
+        "afs.session",
+        op="bootstrap",
+        metadata={"session_id": "session-b"},
+    )
+
+    sessions = list_recorded_sessions(context_path)
+
+    assert [session["session_id"] for session in sessions] == ["session-b", "session-a"]
+    assert sessions[1]["event_count"] == 2
+
+
+def test_build_session_timeline_filters_by_explicit_session_id_metadata(tmp_path: Path) -> None:
+    context_path, history_root = _make_context(tmp_path)
+    append_history_event(
+        history_root,
+        "session",
+        "afs.session",
+        op="bootstrap",
+        metadata={"session_id": "session-a"},
+    )
+    append_history_event(
+        history_root,
+        "mcp_tool",
+        "afs.mcp",
+        op="call",
+        metadata={"tool_name": "context.query", "session_id": "session-a"},
+    )
+    append_history_event(
+        history_root,
+        "mcp_tool",
+        "afs.mcp",
+        op="call",
+        metadata={"tool_name": "context.status", "session_id": "session-b"},
+    )
+
+    timeline = build_session_timeline(context_path, session_id="session-a")
+
+    assert timeline["event_count"] == 2
+    assert all(event["id"] for event in timeline["timeline"])

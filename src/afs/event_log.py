@@ -138,6 +138,62 @@ def build_session_replay(
     }
 
 
+def list_recorded_sessions(
+    context_path: Path,
+    *,
+    config: Any = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Return recorded sessions grouped by explicit ``metadata.session_id``."""
+    history_root = resolve_mount_root(context_path, MountType.HISTORY, config=config)
+    sessions_by_id: dict[str, dict[str, Any]] = {}
+
+    for event in iter_history_events(history_root, include_payloads=False):
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        session_id = str(metadata.get("session_id", "")).strip()
+        timestamp = str(event.get("timestamp", "")).strip()
+        if not session_id or not timestamp:
+            continue
+        session = sessions_by_id.setdefault(
+            session_id,
+            {
+                "session_id": session_id,
+                "start": timestamp,
+                "end": timestamp,
+                "event_count": 0,
+                "event_types": set(),
+            },
+        )
+        session["start"] = min(str(session["start"]), timestamp)
+        session["end"] = max(str(session["end"]), timestamp)
+        session["event_count"] = int(session["event_count"]) + 1
+        session["event_types"].add(str(event.get("type", "")).strip())
+
+    sessions: list[dict[str, Any]] = []
+    for payload in sorted(
+        sessions_by_id.values(),
+        key=lambda item: str(item["end"]),
+        reverse=True,
+    ):
+        sessions.append(
+            {
+                "session_id": str(payload["session_id"]),
+                "start": str(payload["start"]),
+                "end": str(payload["end"]),
+                "event_count": int(payload["event_count"]),
+                "event_types": sorted(
+                    event_type
+                    for event_type in payload["event_types"]
+                    if event_type
+                ),
+            }
+        )
+        if len(sessions) >= limit:
+            break
+
+    return sessions
+
+
 def summarize_event_analytics(
     context_path: Path,
     *,
@@ -295,8 +351,14 @@ def build_session_timeline(
         timestamp = str(event.get("timestamp", "")).strip()
         if not timestamp:
             continue
-        if session_id and not timestamp.startswith(session_id):
-            continue
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        event_session_id = str(metadata.get("session_id", "")).strip()
+        if session_id:
+            if event_session_id:
+                if event_session_id != session_id:
+                    continue
+            elif not timestamp.startswith(session_id):
+                continue
         if since and timestamp < since:
             continue
         events.append(event)

@@ -145,6 +145,27 @@ usage, durations, and error rates; `events replay` reconstructs a session
 timeline from the shared `AFS_SESSION_ID` propagated by the client launch
 wrappers.
 
+## Training
+
+```bash
+./scripts/afs training freshness-gate --path ~/src/project-a
+./scripts/afs training freshness-gate --path ~/src/project-a --warn-only --json
+./scripts/afs training extract-sessions --path ~/src/project-a --output ./session_replay_training.jsonl
+./scripts/afs training generate-router-data --config ~/src/project-a/afs.toml --output ./router_from_capabilities.jsonl
+./scripts/training_watch.sh --debounce 45
+```
+
+`training freshness-gate` checks per-mount context freshness before training and
+returns a blocking or warning-only readiness report.
+
+`training extract-sessions` prefers explicit `AFS_SESSION_ID`-based replay data
+when present, and falls back to older date-grouped timelines only when the
+history log does not contain recorded sessions yet.
+
+`training generate-router-data` derives routing examples from the live agent
+capability registry, including extension agents enabled by the resolved runtime
+config.
+
 ## Claude
 
 ```bash

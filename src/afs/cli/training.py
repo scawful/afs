@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import json
+import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..manager import AFSManager
 
 # =============================================================================
 # Training Commands
@@ -699,6 +705,158 @@ def discriminator_score_command(args: argparse.Namespace) -> int:
 
 
 # =============================================================================
+# Phase 2 Training Integration Commands
+# =============================================================================
+
+
+def _training_start_dir(args: argparse.Namespace) -> Path:
+    raw_path = getattr(args, "path", None)
+    if raw_path:
+        return Path(raw_path).expanduser().resolve()
+    return Path.cwd()
+
+
+def _resolve_training_runtime(
+    args: argparse.Namespace,
+) -> tuple[AFSManager, Path]:
+    from ..manager import AFSManager
+    from ._utils import load_runtime_config_from_args, resolve_context_paths
+
+    config, _config_path = load_runtime_config_from_args(
+        args,
+        start_dir=_training_start_dir(args),
+    )
+    manager = AFSManager(config=config)
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+        args,
+        manager,
+    )
+    return manager, context_path
+
+
+def training_freshness_gate_command(args: argparse.Namespace) -> int:
+    """Check context freshness before training."""
+    from ..models import MountType
+    from ..training_integration.freshness_gate import (
+        FreshnessGateConfig,
+        check_training_readiness,
+    )
+
+    manager, context_path = _resolve_training_runtime(args)
+
+    gate_config = FreshnessGateConfig(
+        min_score=args.min_score,
+        decay_hours=args.decay_hours,
+        block_on_failure=not args.warn_only,
+    )
+    if args.mount:
+        try:
+            gate_config.mount_types = [MountType(m) for m in args.mount]
+        except ValueError as exc:
+            print(f"Invalid mount type: {exc}", file=sys.stderr)
+            return 1
+
+    report = check_training_readiness(
+        context_path, config=gate_config, afs_config=manager.config
+    )
+
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        status = "READY" if report.ready else "BLOCKED"
+        print(f"Training readiness: {status} (overall: {report.overall_score:.3f})")
+        for mount in report.mounts:
+            icon = "+" if mount.status == "ready" else "-"
+            print(f"  {icon} {mount.mount_type}: {mount.score:.3f} ({mount.status})")
+            if mount.stale_files:
+                print(f"    {mount.stale_files}/{mount.file_count} files stale")
+        for warning in report.warnings:
+            print(f"  ! {warning}")
+    return 0 if report.ready else 1
+
+
+def training_extract_sessions_command(args: argparse.Namespace) -> int:
+    """Extract training data from session replay timelines."""
+    from ..training_integration.session_source import (
+        SessionExtractionConfig,
+        extract_from_sessions,
+    )
+
+    manager, context_path = _resolve_training_runtime(args)
+    output_path = Path(args.output).expanduser().resolve()
+
+    extraction_config = SessionExtractionConfig(
+        quality_floor=args.quality_floor,
+    )
+
+    result = extract_from_sessions(
+        context_path,
+        output_path=output_path,
+        config=extraction_config,
+        session_limit=args.session_limit,
+        afs_config=manager.config,
+    )
+
+    if args.json:
+        print(json.dumps({
+            "sessions_scanned": result.sessions_scanned,
+            "sessions_with_data": result.sessions_with_data,
+            "samples_extracted": result.samples_extracted,
+            "samples_filtered": result.samples_filtered,
+            "output_path": str(result.output_path),
+        }, indent=2))
+    else:
+        print(f"Sessions scanned: {result.sessions_scanned}")
+        print(f"Sessions with data: {result.sessions_with_data}")
+        print(f"Samples extracted: {result.samples_extracted}")
+        print(f"Samples filtered: {result.samples_filtered}")
+        print(f"Output: {result.output_path}")
+    return 0
+
+
+def training_generate_router_command(args: argparse.Namespace) -> int:
+    """Generate router training data from agent capabilities."""
+    from ..generators.router_from_capabilities import (
+        RouterDatasetConfig,
+        generate_router_dataset,
+    )
+    from ._utils import load_runtime_config_from_args
+
+    config, _config_path = load_runtime_config_from_args(
+        args,
+        start_dir=_training_start_dir(args),
+    )
+    output_path = Path(args.output).expanduser().resolve()
+    router_config = RouterDatasetConfig(
+        samples_per_agent=args.samples_per_agent,
+        include_agents_without_capabilities=args.include_all,
+    )
+
+    result = generate_router_dataset(
+        output_path=output_path,
+        config=router_config,
+        afs_config=config,
+    )
+
+    if args.json:
+        print(json.dumps({
+            "agents_processed": result.agents_processed,
+            "agents_with_capabilities": result.agents_with_capabilities,
+            "samples_generated": result.samples_generated,
+            "agent_sample_counts": result.agent_sample_counts,
+            "output_path": str(result.output_path),
+        }, indent=2))
+    else:
+        print(f"Agents processed: {result.agents_processed}")
+        print(f"With capabilities: {result.agents_with_capabilities}")
+        print(f"Samples generated: {result.samples_generated}")
+        for agent, count in sorted(result.agent_sample_counts.items()):
+            print(f"  {agent}: {count} samples")
+        print(f"Output: {result.output_path}")
+    return 0
+
+
+# =============================================================================
 # Parser Registration
 # =============================================================================
 
@@ -1349,6 +1507,96 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Append JSONL files without rebalancing.",
     )
     train_rebalance.set_defaults(func=training_rebalance_command)
+
+    # =========================================================================
+    # Phase 2 Training Integrations
+    # =========================================================================
+
+    def add_context_args(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--config", help="Config path.")
+        parser.add_argument("--path", help="Project path.")
+        parser.add_argument("--context-root", help="Context root override.")
+        parser.add_argument("--context-dir", help="Context directory name.")
+
+    training_freshness = training_sub.add_parser(
+        "freshness-gate",
+        help="Check context freshness before training.",
+    )
+    add_context_args(training_freshness)
+    training_freshness.add_argument(
+        "--min-score",
+        type=float,
+        default=0.3,
+        help="Minimum freshness score to pass (default: 0.3).",
+    )
+    training_freshness.add_argument(
+        "--decay-hours",
+        type=float,
+        default=168.0,
+        help="Decay window in hours (default: 168).",
+    )
+    training_freshness.add_argument(
+        "--mount",
+        action="append",
+        help="Mount types to check (default: knowledge, tools, history, scratchpad).",
+    )
+    training_freshness.add_argument(
+        "--warn-only",
+        action="store_true",
+        help="Warn on stale mounts but don't fail.",
+    )
+    training_freshness.add_argument("--json", action="store_true", help="Output JSON.")
+    training_freshness.set_defaults(func=training_freshness_gate_command)
+
+    training_extract = training_sub.add_parser(
+        "extract-sessions",
+        help="Extract training data from session replay timelines.",
+    )
+    add_context_args(training_extract)
+    training_extract.add_argument(
+        "--output",
+        default="session_replay_training.jsonl",
+        help="Output JSONL path (default: session_replay_training.jsonl).",
+    )
+    training_extract.add_argument(
+        "--session-limit",
+        type=int,
+        default=20,
+        help="Max sessions to scan (default: 20).",
+    )
+    training_extract.add_argument(
+        "--quality-floor",
+        type=float,
+        default=0.6,
+        help="Minimum quality score (default: 0.6).",
+    )
+    training_extract.add_argument("--json", action="store_true", help="Output JSON.")
+    training_extract.set_defaults(func=training_extract_sessions_command)
+
+    training_router = training_sub.add_parser(
+        "generate-router-data",
+        help="Generate router training data from agent capabilities.",
+    )
+    training_router.add_argument("--config", help="Config path.")
+    training_router.add_argument("--path", help="Project path used for runtime config discovery.")
+    training_router.add_argument(
+        "--output",
+        default="router_from_capabilities.jsonl",
+        help="Output JSONL path (default: router_from_capabilities.jsonl).",
+    )
+    training_router.add_argument(
+        "--samples-per-agent",
+        type=int,
+        default=10,
+        help="Max samples per agent (default: 10).",
+    )
+    training_router.add_argument(
+        "--include-all",
+        action="store_true",
+        help="Include agents without declared capabilities.",
+    )
+    training_router.add_argument("--json", action="store_true", help="Output JSON.")
+    training_router.set_defaults(func=training_generate_router_command)
 
     # =========================================================================
     # Discriminator

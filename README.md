@@ -145,6 +145,22 @@ context indexes.
 Gemini, Claude, Codex, or generic clients. It writes model-specific pack
 artifacts under `.context/scratchpad/afs_agents/`.
 
+## Training Integrations
+
+AFS also exposes training-oriented surfaces backed by the same context and
+session systems:
+
+```bash
+./scripts/afs training freshness-gate --path ~/src/project-a
+./scripts/afs training extract-sessions --path ~/src/project-a --output ./session_replay_training.jsonl
+./scripts/afs training generate-router-data --config ~/src/project-a/afs.toml
+./scripts/training_watch.sh --debounce 45
+```
+
+These cover pre-training freshness checks, extraction of training samples from
+recorded AFS sessions, router-dataset generation from declared agent
+capabilities, and an optional watch wrapper for local dataset QA workflows.
+
 ## AFS Studio variants
 
 There are two "AFS Studio" implementations:

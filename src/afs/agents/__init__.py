@@ -133,9 +133,9 @@ def _load_core_agents() -> dict[str, AgentSpec]:
     return loaded
 
 
-def _load_extension_agents() -> dict[str, AgentSpec]:
+def _load_extension_agents(config: object = None) -> dict[str, AgentSpec]:
     loaded: dict[str, AgentSpec] = {}
-    for extension in load_enabled_extensions().values():
+    for extension in load_enabled_extensions(config=config).values():
         for module_name in extension.agent_modules:
             try:
                 with _extension_import_path(extension.root):
@@ -156,18 +156,18 @@ def _load_extension_agents() -> dict[str, AgentSpec]:
     return loaded
 
 
-def get_agent_registry() -> dict[str, AgentSpec]:
+def get_agent_registry(config: object = None) -> dict[str, AgentSpec]:
     registry = _load_core_agents()
-    registry.update(_load_extension_agents())
+    registry.update(_load_extension_agents(config=config))
     return registry
 
 
-def list_agents() -> list[AgentSpec]:
-    return sorted(get_agent_registry().values(), key=lambda spec: spec.name)
+def list_agents(config: object = None) -> list[AgentSpec]:
+    return sorted(get_agent_registry(config=config).values(), key=lambda spec: spec.name)
 
 
-def get_agent(name: str) -> AgentSpec | None:
-    return get_agent_registry().get(name)
+def get_agent(name: str, config: object = None) -> AgentSpec | None:
+    return get_agent_registry(config=config).get(name)
 
 
 __all__ = ["AgentCapability", "AgentSpec", "CORE_AGENT_MODULES", "get_agent_registry", "list_agents", "get_agent"]
