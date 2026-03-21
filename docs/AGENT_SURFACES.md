@@ -128,6 +128,9 @@ Built-in tools:
 - `session.pack`
 - `events.query`
 - `events.tail`
+- `events.analytics`
+- `events.replay`
+- `hivemind.reap`
 - `handoff.create`
 - `handoff.read`
 - `handoff.list`
@@ -169,6 +172,8 @@ The CLI equivalent is:
 ~/src/lab/afs/scripts/afs session bootstrap --json
 ~/src/lab/afs/scripts/afs session pack
 ~/src/lab/afs/scripts/afs session pack "sqlite" --model codex --json
+~/src/lab/afs/scripts/afs events analytics --hours 24 --json
+~/src/lab/afs/scripts/afs events replay --session-id "$AFS_SESSION_ID"
 ```
 
 The CLI also refreshes:
@@ -336,6 +341,7 @@ Client bootstrap wrappers:
 Each wrapper:
 
 - prefers the nearest repo-local `afs.toml`
+- exports a shared `AFS_SESSION_ID`
 - exports the latest bootstrap artifact paths
 - refreshes the session bootstrap snapshot before launching the client
 - biases Gemini toward `/google` when no explicit `AFS_MCP_ALLOWED_ROOTS` is set

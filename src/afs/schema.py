@@ -674,12 +674,14 @@ class ContextIndexConfig:
     include_content: bool = True
     max_file_size_bytes: int = 256 * 1024
     max_content_chars: int = 12000
+    decay_hours: float = 168.0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ContextIndexConfig:
         max_file_size_bytes = data.get("max_file_size_bytes", cls().max_file_size_bytes)
         max_content_chars = data.get("max_content_chars", cls().max_content_chars)
         db_filename = data.get("db_filename", cls().db_filename)
+        decay_hours = data.get("decay_hours", cls().decay_hours)
 
         if not isinstance(max_file_size_bytes, int) or max_file_size_bytes < 1024:
             max_file_size_bytes = cls().max_file_size_bytes
@@ -687,6 +689,8 @@ class ContextIndexConfig:
             max_content_chars = cls().max_content_chars
         if not isinstance(db_filename, str) or not db_filename.strip():
             db_filename = cls().db_filename
+        if not isinstance(decay_hours, (int, float)) or decay_hours <= 0:
+            decay_hours = cls().decay_hours
 
         return cls(
             enabled=bool(data.get("enabled", True)),
@@ -696,6 +700,7 @@ class ContextIndexConfig:
             include_content=bool(data.get("include_content", True)),
             max_file_size_bytes=max_file_size_bytes,
             max_content_chars=max_content_chars,
+            decay_hours=float(decay_hours),
         )
 
 
@@ -711,6 +716,22 @@ class SensitivityConfig:
             never_index=_as_str_list(data.get("never_index")),
             never_embed=_as_str_list(data.get("never_embed")),
             never_export=_as_str_list(data.get("never_export")),
+        )
+
+
+@dataclass
+class HivemindConfig:
+    default_ttl_hours: int = 24
+    reaper_enabled: bool = True
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> HivemindConfig:
+        default_ttl_hours = data.get("default_ttl_hours", cls().default_ttl_hours)
+        if not isinstance(default_ttl_hours, int) or default_ttl_hours < 1:
+            default_ttl_hours = cls().default_ttl_hours
+        return cls(
+            default_ttl_hours=default_ttl_hours,
+            reaper_enabled=bool(data.get("reaper_enabled", True)),
         )
 
 
@@ -732,6 +753,7 @@ class AFSConfig:
     )
     context_index: ContextIndexConfig = field(default_factory=ContextIndexConfig)
     sensitivity: SensitivityConfig = field(default_factory=SensitivityConfig)
+    hivemind: HivemindConfig = field(default_factory=HivemindConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> AFSConfig:
@@ -755,6 +777,7 @@ class AFSConfig:
         )
         context_index = ContextIndexConfig.from_dict(data.get("context_index", {}))
         sensitivity = SensitivityConfig.from_dict(data.get("sensitivity", {}))
+        hivemind = HivemindConfig.from_dict(data.get("hivemind", {}))
         return cls(
             general=general,
             plugins=plugins,
@@ -770,6 +793,7 @@ class AFSConfig:
             memory_consolidation=memory_consolidation,
             context_index=context_index,
             sensitivity=sensitivity,
+            hivemind=hivemind,
         )
 
 

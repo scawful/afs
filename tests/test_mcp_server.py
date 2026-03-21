@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from afs.agents.supervisor import AgentSupervisor
+from afs.history import append_history_event
 from afs.manager import AFSManager
 from afs.mcp_server import _handle_request, build_mcp_registry
 from afs.models import MountType
@@ -93,6 +94,9 @@ def test_tools_list_returns_afs_tools(tmp_path: Path) -> None:
         "context.status",
         "context.repair",
         "session.pack",
+        "events.analytics",
+        "events.replay",
+        "hivemind.reap",
     }.issubset(names)
 
 
@@ -129,6 +133,80 @@ def test_fs_write_and_read_tool_calls(tmp_path: Path) -> None:
     )
     assert read_response is not None
     assert read_response["result"]["structuredContent"]["content"] == "hello"
+
+
+def test_events_analytics_tool_reports_mcp_usage(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    history_root = manager.config.general.context_root / "history"
+    history_root.mkdir(parents=True, exist_ok=True)
+    append_history_event(
+        history_root,
+        "mcp_tool",
+        "afs.mcp",
+        op="call",
+        metadata={"tool_name": "context.status", "duration_ms": 15, "ok": True},
+    )
+
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 500,
+            "method": "tools/call",
+            "params": {
+                "name": "events.analytics",
+                "arguments": {
+                    "context_path": str(manager.config.general.context_root),
+                    "hours": 24,
+                },
+            },
+        },
+        manager,
+    )
+
+    assert response is not None
+    metrics = response["result"]["structuredContent"]["mcp_tools"]["context.status"]
+    assert metrics["count"] == 1
+
+
+def test_events_replay_tool_filters_by_session_id(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    history_root = manager.config.general.context_root / "history"
+    history_root.mkdir(parents=True, exist_ok=True)
+    append_history_event(
+        history_root,
+        "session",
+        "afs.session",
+        op="bootstrap",
+        metadata={"session_id": "session-a"},
+    )
+    append_history_event(
+        history_root,
+        "session",
+        "afs.session",
+        op="bootstrap",
+        metadata={"session_id": "session-b"},
+    )
+
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 501,
+            "method": "tools/call",
+            "params": {
+                "name": "events.replay",
+                "arguments": {
+                    "context_path": str(manager.config.general.context_root),
+                    "session_id": "session-a",
+                },
+            },
+        },
+        manager,
+    )
+
+    assert response is not None
+    content = response["result"]["structuredContent"]
+    assert content["session_id"] == "session-a"
+    assert content["count"] == 1
 
 
 def test_fs_list_allows_configured_workspace_root(tmp_path: Path) -> None:

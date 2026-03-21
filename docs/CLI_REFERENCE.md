@@ -134,10 +134,16 @@ pack, so blocked paths do not leak into session exports.
 ./scripts/afs events tail --json
 ./scripts/afs events list --type mcp_tool --limit 25
 ./scripts/afs events list --path ~/src/project-a --source afs.mcp
+./scripts/afs events analytics --hours 24 --json
+./scripts/afs events replay --session-id "$AFS_SESSION_ID"
+./scripts/afs hivemind reap --dry-run --json
 ```
 
 `events` reads the active context history log with the same config/context
-resolution as the rest of the CLI.
+resolution as the rest of the CLI. `events analytics` summarizes recent tool
+usage, durations, and error rates; `events replay` reconstructs a session
+timeline from the shared `AFS_SESSION_ID` propagated by the client launch
+wrappers.
 
 ## Claude
 
@@ -369,7 +375,9 @@ Client launch wrappers:
 ```
 
 These wrappers prefer repo-local config, refresh the session bootstrap packet,
-and export the bootstrap artifact paths before launching the client.
+and export the bootstrap artifact paths before launching the client. They also
+export a shared `AFS_SESSION_ID`, so MCP tool calls, embeddings, hivemind
+traffic, and CLI actions can be replayed later with `afs events replay`.
 
 ## Doctor
 

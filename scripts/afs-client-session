@@ -24,6 +24,14 @@ AFS_CLI="${AFS_ROOT}/scripts/afs"
 export AFS_ROOT
 export AFS_CLI
 export AFS_SESSION_CLIENT="${CLIENT_LABEL}"
+if [ -z "${AFS_SESSION_ID:-}" ]; then
+  export AFS_SESSION_ID="$(
+    python3 - <<'PY'
+import uuid
+print(uuid.uuid4().hex[:12])
+PY
+  )"
+fi
 
 find_repo_config() {
   local dir="$PWD"
@@ -73,6 +81,9 @@ fi
 
 if [ -n "${AFS_SESSION_BOOTSTRAP_MARKDOWN:-}" ]; then
   echo "AFS bootstrap (${CLIENT_LABEL}): ${AFS_SESSION_BOOTSTRAP_MARKDOWN}" >&2
+fi
+if [ -n "${AFS_SESSION_ID:-}" ]; then
+  echo "AFS session (${CLIENT_LABEL}): ${AFS_SESSION_ID}" >&2
 fi
 if [ -n "${AFS_CONFIG_PATH:-}" ]; then
   echo "AFS config (${CLIENT_LABEL}): ${AFS_CONFIG_PATH}" >&2

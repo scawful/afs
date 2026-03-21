@@ -206,7 +206,23 @@ class MCPToolRegistry:
             raise ValueError(f"Unknown tool: {name}")
         assert_tool_allowed(name)
         start = time.monotonic()
-        result = tool.handler(arguments, manager)
+        try:
+            result = tool.handler(arguments, manager)
+        except Exception as exc:
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            try:
+                from .history import log_mcp_tool_call
+
+                log_mcp_tool_call(
+                    name,
+                    arguments,
+                    {"error": str(exc)},
+                    duration_ms=elapsed_ms,
+                    context_root=manager.config.general.context_root,
+                )
+            except Exception:
+                pass
+            raise
         elapsed_ms = int((time.monotonic() - start) * 1000)
         try:
             from .history import log_mcp_tool_call
@@ -1104,10 +1120,20 @@ def _tool_hivemind_send(arguments: dict[str, Any], manager: AFSManager) -> dict[
     topic = arguments.get("topic")
     if isinstance(topic, str):
         topic = topic.strip() or None
+    ttl_hours = arguments.get("ttl_hours")
+    if ttl_hours is not None:
+        ttl_hours = _coerce_int(ttl_hours, default=24, minimum=1, maximum=24 * 30)
 
     context_path = _resolve_context_path(arguments, manager)
-    bus = HivemindBus(context_path)
-    msg = bus.send(from_agent.strip(), msg_type, payload, to=to, topic=topic)
+    bus = HivemindBus(context_path, config=manager.config)
+    msg = bus.send(
+        from_agent.strip(),
+        msg_type,
+        payload,
+        to=to,
+        topic=topic,
+        ttl_hours=ttl_hours,
+    )
     return msg.to_dict()
 
 
@@ -1126,7 +1152,7 @@ def _tool_hivemind_read(arguments: dict[str, Any], manager: AFSManager) -> dict[
     limit = _coerce_int(arguments.get("limit"), default=50, minimum=1, maximum=500)
 
     context_path = _resolve_context_path(arguments, manager)
-    bus = HivemindBus(context_path)
+    bus = HivemindBus(context_path, config=manager.config)
     messages = bus.read(agent_name=agent_name, msg_type=msg_type, topic=topic, limit=limit)
     return {"messages": [m.to_dict() for m in messages]}
 
@@ -1252,7 +1278,17 @@ def _tool_events_query(arguments: dict[str, Any], manager: AFSManager) -> dict[s
     source = arguments.get("source")
     if isinstance(source, str):
         source = source.strip() or None
-    events = query_events(history_root, event_types=event_types, since=since, limit=limit, source=source)
+    session_id = arguments.get("session_id")
+    if isinstance(session_id, str):
+        session_id = session_id.strip() or None
+    events = query_events(
+        history_root,
+        event_types=event_types,
+        since=since,
+        limit=limit,
+        source=source,
+        session_id=session_id,
+    )
     return {"events": events, "count": len(events)}
 
 
@@ -1267,6 +1303,39 @@ def _tool_events_tail(arguments: dict[str, Any], manager: AFSManager) -> dict[st
     return {"events": events, "count": len(events)}
 
 
+def _tool_events_analytics(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .event_log import summarize_event_analytics
+
+    context_path = _resolve_context_path(arguments, manager)
+    lookback_hours = _coerce_int(arguments.get("hours"), default=24, minimum=1, maximum=24 * 30)
+    event_type = arguments.get("event_type")
+    event_types = [event_type] if isinstance(event_type, str) and event_type.strip() else None
+    return summarize_event_analytics(
+        context_path,
+        lookback_hours=lookback_hours,
+        event_types=event_types,
+        config=manager.config,
+    )
+
+
+def _tool_events_replay(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .event_log import build_session_replay
+
+    session_id = arguments.get("session_id", "")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ValueError("session_id is required")
+    context_path = _resolve_context_path(arguments, manager)
+    limit = _coerce_int(arguments.get("limit"), default=200, minimum=0, maximum=2000)
+    include_payloads = bool(arguments.get("include_payloads", False))
+    return build_session_replay(
+        context_path,
+        session_id=session_id.strip(),
+        limit=limit,
+        include_payloads=include_payloads,
+        config=manager.config,
+    )
+
+
 def _tool_hivemind_subscribe(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     from .hivemind import HivemindBus
 
@@ -1278,8 +1347,15 @@ def _tool_hivemind_subscribe(arguments: dict[str, Any], manager: AFSManager) -> 
         raise ValueError("topics must be a non-empty list")
 
     context_path = _resolve_context_path(arguments, manager)
-    bus = HivemindBus(context_path)
-    sub = bus.subscribe(agent_name.strip(), [str(t).strip() for t in topics if str(t).strip()])
+    bus = HivemindBus(context_path, config=manager.config)
+    ttl_hours = arguments.get("ttl_hours")
+    if ttl_hours is not None:
+        ttl_hours = _coerce_int(ttl_hours, default=24, minimum=1, maximum=24 * 30)
+    sub = bus.subscribe(
+        agent_name.strip(),
+        [str(t).strip() for t in topics if str(t).strip()],
+        ttl_hours=ttl_hours,
+    )
     return sub.to_dict()
 
 
@@ -1294,9 +1370,23 @@ def _tool_hivemind_unsubscribe(arguments: dict[str, Any], manager: AFSManager) -
         raise ValueError("topics must be a non-empty list")
 
     context_path = _resolve_context_path(arguments, manager)
-    bus = HivemindBus(context_path)
+    bus = HivemindBus(context_path, config=manager.config)
     sub = bus.unsubscribe(agent_name.strip(), [str(t).strip() for t in topics if str(t).strip()])
     return sub.to_dict()
+
+
+def _tool_hivemind_reap(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .hivemind import HivemindBus
+
+    context_path = _resolve_context_path(arguments, manager)
+    bus = HivemindBus(context_path, config=manager.config)
+    max_age_hours = arguments.get("max_age_hours")
+    if max_age_hours is not None:
+        max_age_hours = _coerce_int(max_age_hours, default=24, minimum=1, maximum=24 * 30)
+    return bus.reap(
+        max_age_hours=max_age_hours,
+        dry_run=bool(arguments.get("dry_run", False)),
+    )
 
 
 def _tool_embeddings_index(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
@@ -1371,6 +1461,83 @@ def _tool_handoff_list(arguments: dict[str, Any], manager: AFSManager) -> dict[s
     limit = _coerce_int(arguments.get("limit"), default=10, minimum=1, maximum=100)
     packets = store.list(limit=limit)
     return {"packets": [p.to_dict() for p in packets], "count": len(packets)}
+
+
+def _tool_hivemind_cleanup(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .hivemind import HivemindBus
+
+    context_path = _resolve_context_path(arguments, manager)
+    max_age_hours = _coerce_int(arguments.get("max_age_hours"), default=manager.config.hivemind.default_ttl_hours, minimum=1, maximum=8760)
+    dry_run = bool(arguments.get("dry_run", False))
+    bus = HivemindBus(context_path)
+    return bus.cleanup_stats(max_age_hours=max_age_hours, dry_run=dry_run)
+
+
+def _tool_memory_status(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .memory_consolidation import memory_status
+
+    context_path = _resolve_context_path(arguments, manager)
+    return memory_status(context_path, config=manager.config)
+
+
+def _tool_memory_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .memory_consolidation import search_memory
+
+    context_path = _resolve_context_path(arguments, manager)
+    query = str(arguments.get("query", "")).strip()
+    if not query:
+        return {"error": "query is required", "results": []}
+    limit = _coerce_int(arguments.get("limit"), default=10, minimum=1, maximum=100)
+    results = search_memory(context_path, query, config=manager.config, limit=limit)
+    return {"query": query, "results": results, "count": len(results)}
+
+
+def _tool_agent_capabilities(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agents import list_agents
+
+    agent_name = arguments.get("agent_name")
+    agents = list_agents()
+    results = []
+    for spec in agents:
+        if agent_name and spec.name != agent_name:
+            continue
+        entry: dict[str, Any] = {"name": spec.name, "description": spec.description}
+        if spec.capabilities:
+            entry["capabilities"] = {
+                "tools": spec.capabilities.tools,
+                "topics": spec.capabilities.topics,
+                "mount_types": spec.capabilities.mount_types,
+                "description": spec.capabilities.description,
+            }
+        else:
+            entry["capabilities"] = None
+        results.append(entry)
+    return {"agents": results, "count": len(results)}
+
+
+def _tool_context_freshness(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    context_path = _resolve_context_path(arguments, manager)
+    index = ContextSQLiteIndex(manager, context_path)
+    mount_type_str = arguments.get("mount_type")
+    mount_types = None
+    if mount_type_str:
+        try:
+            mount_types = [MountType(mount_type_str)]
+        except ValueError:
+            return {"error": f"unknown mount type: {mount_type_str}"}
+    decay_hours = float(arguments.get("decay_hours", manager.config.context_index.decay_hours))
+    threshold = float(arguments.get("threshold", 0.0))
+    return index.freshness_scores(mount_types=mount_types, decay_hours=decay_hours, threshold=threshold)
+
+
+def _tool_session_replay(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .event_log import build_session_timeline
+
+    context_path = _resolve_context_path(arguments, manager)
+    session_id = arguments.get("session_id")
+    since = arguments.get("since")
+    limit = _coerce_int(arguments.get("limit"), default=100, minimum=1, maximum=1000)
+    return build_session_timeline(context_path, session_id=session_id, since=since, limit=limit, config=manager.config)
 
 
 def _builtin_tool_definitions() -> list[MCPToolDefinition]:
@@ -1712,6 +1879,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                     "payload": {"type": "object", "description": "Message payload."},
                     "to": {"type": "string", "description": "Optional recipient agent name."},
                     "topic": {"type": "string", "description": "Optional topic for pub/sub routing (e.g. context:repair, agent:lifecycle)."},
+                    "ttl_hours": {"type": "integer", "description": "Optional per-message retention window in hours."},
                 },
                 "required": ["from", "type"],
                 "additionalProperties": False,
@@ -1832,7 +2000,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
         ),
         MCPToolDefinition(
             name="events.query",
-            description="Query the AFS event log with optional type, source, since, and limit filters.",
+            description="Query the AFS event log with optional type, source, session, since, and limit filters.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -1840,6 +2008,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                     "since": {"type": "string", "description": "ISO 8601 datetime cutoff."},
                     "limit": {"type": "integer", "default": 50, "description": "Max events to return."},
                     "source": {"type": "string", "description": "Filter by event source."},
+                    "session_id": {"type": "string", "description": "Filter by recorded AFS session ID."},
                 },
                 "additionalProperties": False,
             },
@@ -1858,6 +2027,36 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             handler=_tool_events_tail,
         ),
         MCPToolDefinition(
+            name="events.analytics",
+            description="Summarize recent AFS event volume, MCP tool usage, durations, and error rates.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "hours": {"type": "integer", "default": 24, "description": "Lookback window in hours."},
+                    "event_type": {"type": "string", "description": "Optional single event type filter."},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_events_analytics,
+        ),
+        MCPToolDefinition(
+            name="events.replay",
+            description="Replay a recorded AFS session timeline by session ID.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "session_id": {"type": "string", "description": "Recorded AFS session ID."},
+                    "limit": {"type": "integer", "default": 200, "description": "Max events to return (0 for all)."},
+                    "include_payloads": {"type": "boolean", "default": False, "description": "Include event payloads when available."},
+                },
+                "required": ["session_id"],
+                "additionalProperties": False,
+            },
+            handler=_tool_events_replay,
+        ),
+        MCPToolDefinition(
             name="hivemind.subscribe",
             description="Subscribe an agent to one or more hivemind topics.",
             input_schema={
@@ -1866,6 +2065,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                     "context_path": {"type": "string"},
                     "agent_name": {"type": "string", "description": "Agent name."},
                     "topics": {"type": "array", "items": {"type": "string"}, "description": "Topics to subscribe to."},
+                    "ttl_hours": {"type": "integer", "description": "Optional subscription TTL window in hours."},
                 },
                 "required": ["agent_name", "topics"],
                 "additionalProperties": False,
@@ -1886,6 +2086,20 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_hivemind_unsubscribe,
+        ),
+        MCPToolDefinition(
+            name="hivemind.reap",
+            description="Remove expired or stale hivemind messages and return cleanup statistics.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "max_age_hours": {"type": "integer", "description": "Override retention window in hours."},
+                    "dry_run": {"type": "boolean", "default": False, "description": "Report removals without deleting files."},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_hivemind_reap,
         ),
         MCPToolDefinition(
             name="embeddings.index",
@@ -1950,6 +2164,89 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_handoff_list,
+        ),
+        MCPToolDefinition(
+            name="hivemind.cleanup",
+            description="Clean up old hivemind messages. Returns per-agent removal stats.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string", "description": "Context path."},
+                    "max_age_hours": {"type": "integer", "default": 24, "description": "Max message age in hours."},
+                    "dry_run": {"type": "boolean", "default": False, "description": "Preview without deleting."},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_hivemind_cleanup,
+        ),
+        MCPToolDefinition(
+            name="memory.status",
+            description="Show memory pipeline health: entry count, cursor position, staleness.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string", "description": "Context path."},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_memory_status,
+        ),
+        MCPToolDefinition(
+            name="memory.search",
+            description="Search durable memory entries by keyword.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string", "description": "Context path."},
+                    "query": {"type": "string", "description": "Search query."},
+                    "limit": {"type": "integer", "default": 10, "description": "Max results."},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            handler=_tool_memory_search,
+        ),
+        MCPToolDefinition(
+            name="agent.capabilities",
+            description="List agent capabilities: declared tools, topics, and mount types.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "agent_name": {"type": "string", "description": "Filter by agent name."},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_capabilities,
+        ),
+        MCPToolDefinition(
+            name="context.freshness",
+            description="Compute per-file freshness scores showing which context files are stale.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string", "description": "Context path."},
+                    "mount_type": {"type": "string", "description": "Filter by mount type."},
+                    "decay_hours": {"type": "number", "default": 168.0, "description": "Decay window in hours."},
+                    "threshold": {"type": "number", "default": 0.0, "description": "Min score threshold."},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_context_freshness,
+        ),
+        MCPToolDefinition(
+            name="session.replay",
+            description="Replay a session timeline showing chronological events.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string", "description": "Context path."},
+                    "session_id": {"type": "string", "description": "Session ID (date) to filter."},
+                    "since": {"type": "string", "description": "Filter events after this datetime."},
+                    "limit": {"type": "integer", "default": 100, "description": "Max events."},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_session_replay,
         ),
     ]
 

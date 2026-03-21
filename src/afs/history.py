@@ -129,6 +129,11 @@ def _parse_timestamp(timestamp: str | None) -> datetime:
         return datetime.now(timezone.utc)
 
 
+def _current_session_id() -> str | None:
+    raw = os.getenv("AFS_SESSION_ID", "").strip()
+    return raw or None
+
+
 def _history_log_path_for_root(history_root: Path, event_time: datetime) -> Path:
     history_root.mkdir(parents=True, exist_ok=True)
     stamp = event_time.strftime("%Y%m%d")
@@ -212,7 +217,10 @@ def append_history_event(
     event_id = event_id or uuid.uuid4().hex[:12]
     timestamp_value = timestamp or event_time.isoformat()
 
-    metadata_payload = metadata or {}
+    metadata_payload = dict(metadata or {})
+    session_id = _current_session_id()
+    if session_id and not metadata_payload.get("session_id"):
+        metadata_payload["session_id"] = session_id
     payload_data: dict[str, Any] | None = None
     payload_ref = None
     payload_sha256 = None
@@ -298,7 +306,10 @@ def log_event(
     event_id = uuid.uuid4().hex[:12]
     timestamp = datetime.now(timezone.utc).isoformat()
 
-    metadata_payload = metadata or {}
+    metadata_payload = dict(metadata or {})
+    session_id = _current_session_id()
+    if session_id and not metadata_payload.get("session_id"):
+        metadata_payload["session_id"] = session_id
     payload_data: dict[str, Any] | None = None
     payload_ref = None
     payload_sha256 = None
@@ -414,6 +425,7 @@ def query_events(
     since: str | None = None,
     limit: int = 50,
     source: str | None = None,
+    session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Query history events with filtering and return most recent N."""
     since_dt = _parse_timestamp(since) if since else None
@@ -425,6 +437,12 @@ def query_events(
                 continue
         if source and event.get("source") != source:
             continue
+        if session_id:
+            metadata = event.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            if str(metadata.get("session_id", "")).strip() != session_id:
+                continue
         results.append(event)
     if limit and len(results) > limit:
         results = results[-limit:]
@@ -444,6 +462,11 @@ def log_mcp_tool_call(
         metadata["duration_ms"] = duration_ms
     if arguments:
         metadata["arguments"] = arguments
+    if isinstance(result, dict):
+        has_error = "error" in result or result.get("ok") is False or result.get("isError") is True
+        metadata["ok"] = not has_error
+        if has_error:
+            metadata["error"] = str(result.get("error", "tool call failed"))
     return log_event(
         EVENT_MCP_TOOL,
         "afs.mcp",

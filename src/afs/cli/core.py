@@ -537,8 +537,14 @@ def hivemind_list_command(args: argparse.Namespace) -> int:
     """List recent hivemind messages."""
     from ..hivemind import HivemindBus
 
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
-    bus = HivemindBus(context_path)
+    bus = HivemindBus(context_path, config=manager.config)
     topic = getattr(args, "topic", None)
     messages = bus.read(limit=args.limit if hasattr(args, "limit") else 20, topic=topic)
     if not messages:
@@ -560,13 +566,19 @@ def hivemind_subscribe_command(args: argparse.Namespace) -> int:
     """Subscribe an agent to topics."""
     from ..hivemind import HivemindBus
 
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
-    bus = HivemindBus(context_path)
+    bus = HivemindBus(context_path, config=manager.config)
     topics = [t.strip() for t in args.topics.split(",") if t.strip()]
     if not topics:
         print("no topics specified")
         return 1
-    sub = bus.subscribe(args.agent, topics)
+    sub = bus.subscribe(args.agent, topics, ttl_hours=getattr(args, "ttl_hours", None))
     print(f"subscribed {args.agent} to {', '.join(sub.topics)}")
     return 0
 
@@ -575,8 +587,14 @@ def hivemind_unsubscribe_command(args: argparse.Namespace) -> int:
     """Unsubscribe an agent from topics."""
     from ..hivemind import HivemindBus
 
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
-    bus = HivemindBus(context_path)
+    bus = HivemindBus(context_path, config=manager.config)
     topics = [t.strip() for t in args.topics.split(",") if t.strip()]
     if not topics:
         print("no topics specified")
@@ -584,6 +602,36 @@ def hivemind_unsubscribe_command(args: argparse.Namespace) -> int:
     sub = bus.unsubscribe(args.agent, topics)
     remaining = ", ".join(sub.topics) if sub.topics else "(none)"
     print(f"unsubscribed {args.agent}; remaining topics: {remaining}")
+    return 0
+
+
+def hivemind_reap_command(args: argparse.Namespace) -> int:
+    """Reap expired or stale hivemind messages."""
+    from ..hivemind import HivemindBus
+
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
+    context_path = _resolve_command_context(args)
+    bus = HivemindBus(context_path, config=manager.config)
+    summary = bus.reap(
+        max_age_hours=getattr(args, "max_age_hours", None),
+        dry_run=bool(getattr(args, "dry_run", False)),
+    )
+
+    if getattr(args, "json", False):
+        print(json.dumps(summary, indent=2))
+        return 0
+
+    print(f"removed: {summary['removed_count']}")
+    print(f"remaining: {summary['remaining_count']}")
+    if summary.get("expired_count") is not None:
+        print(f"expired: {summary['expired_count']}")
+    if summary.get("aged_out_count") is not None:
+        print(f"aged_out: {summary['aged_out_count']}")
     return 0
 
 
@@ -638,6 +686,44 @@ def memory_consolidate_command(args: argparse.Namespace) -> int:
         print("notes:")
         for note in result.notes:
             print(f"  - {note}")
+    return 0
+
+
+def memory_status_command(args: argparse.Namespace) -> int:
+    """Show memory pipeline status."""
+    from ..memory_consolidation import memory_status
+
+    context_path = _resolve_command_context(args)
+    status = memory_status(context_path)
+    if args.json:
+        print(json.dumps(status, indent=2))
+        return 0
+    print(f"entries: {status['entries_count']}")
+    print(f"cursor: {status['cursor_timestamp'] or '(none)'}")
+    age = status["cursor_age_seconds"]
+    print(f"cursor_age: {int(age)}s" if age is not None else "cursor_age: n/a")
+    print(f"stale: {status['stale']}")
+    if status["latest_summary_path"]:
+        print(f"latest_summary: {status['latest_summary_path']}")
+    return 0
+
+
+def memory_search_command(args: argparse.Namespace) -> int:
+    """Search memory entries."""
+    from ..memory_consolidation import search_memory
+
+    context_path = _resolve_command_context(args)
+    results = search_memory(context_path, args.query, limit=args.limit)
+    if args.json:
+        print(json.dumps(results, indent=2))
+        return 0
+    if not results:
+        print("(no matches)")
+        return 0
+    for entry in results:
+        entry_id = entry.get("id", "?")
+        instruction = str(entry.get("instruction", ""))[:80]
+        print(f"  {entry_id}: {instruction}")
     return 0
 
 
@@ -810,6 +896,46 @@ def session_handoff_read_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def session_replay_command(args: argparse.Namespace) -> int:
+    """Replay session timeline."""
+    from ..event_log import build_session_timeline
+
+    context_path = _resolve_command_context(args)
+    timeline = build_session_timeline(
+        context_path,
+        session_id=args.session_id,
+        since=args.since,
+        limit=args.limit,
+    )
+    if args.json:
+        print(json.dumps(timeline, indent=2))
+        return 0
+    if not timeline["timeline"]:
+        print("(no events)")
+        return 0
+    for event in timeline["timeline"]:
+        ts = event["timestamp"][:19] if event["timestamp"] else "?"
+        print(f"  {ts} [{event['type']}] {event['summary']}")
+    return 0
+
+
+def session_replay_list_command(args: argparse.Namespace) -> int:
+    """List available sessions."""
+    from ..event_log import list_sessions
+
+    context_path = _resolve_command_context(args)
+    sessions = list_sessions(context_path, limit=args.limit)
+    if args.json:
+        print(json.dumps(sessions, indent=2))
+        return 0
+    if not sessions:
+        print("(no sessions)")
+        return 0
+    for session in sessions:
+        print(f"  {session['session_id']}: {session['event_count']} events ({', '.join(session['event_types'][:3])})")
+    return 0
+
+
 def agents_run_command(args: argparse.Namespace) -> int:
     """Run a built-in agent."""
     from ..agents import get_agent
@@ -822,6 +948,42 @@ def agents_run_command(args: argparse.Namespace) -> int:
     if agent_args and agent_args[0] == "--":
         agent_args = agent_args[1:]
     return agent.entrypoint(agent_args)
+
+
+def agents_capabilities_command(args: argparse.Namespace) -> int:
+    """List agent capabilities."""
+    from ..agents import list_agents
+
+    agents = list_agents()
+    results = []
+    for spec in agents:
+        entry: dict[str, Any] = {"name": spec.name, "description": spec.description}
+        if spec.capabilities:
+            entry["capabilities"] = {
+                "tools": spec.capabilities.tools,
+                "topics": spec.capabilities.topics,
+                "mount_types": spec.capabilities.mount_types,
+                "description": spec.capabilities.description,
+            }
+        else:
+            entry["capabilities"] = None
+        if args.agent and spec.name != args.agent:
+            continue
+        results.append(entry)
+
+    if args.json:
+        print(json.dumps(results, indent=2))
+        return 0
+    for entry in results:
+        caps = entry["capabilities"]
+        if caps:
+            print(f"{entry['name']}:")
+            print(f"  tools: {', '.join(caps['tools']) or '(none)'}")
+            print(f"  topics: {', '.join(caps['topics']) or '(none)'}")
+            print(f"  mounts: {', '.join(caps['mount_types']) or '(none)'}")
+        else:
+            print(f"{entry['name']}: (no capabilities declared)")
+    return 0
 
 
 def orchestrator_list_command(args: argparse.Namespace) -> int:
@@ -1255,6 +1417,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     agents_run.set_defaults(func=agents_run_command)
 
+    agents_caps = agents_sub.add_parser("capabilities", help="List agent capabilities.")
+    agents_caps.add_argument("--agent", help="Filter by agent name.")
+    agents_caps.add_argument("--json", action="store_true", help="Output JSON.")
+    agents_caps.set_defaults(func=agents_capabilities_command)
+
     # tasks
     tasks_parser = subparsers.add_parser("tasks", help="Task queue operations.")
     tasks_sub = tasks_parser.add_subparsers(dest="tasks_command")
@@ -1295,6 +1462,18 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     memory_consolidate.add_argument("--json", action="store_true", help="Output JSON.")
     memory_consolidate.set_defaults(func=memory_consolidate_command)
+
+    memory_status_p = memory_sub.add_parser("status", help="Show memory pipeline status.")
+    add_context_args(memory_status_p)
+    memory_status_p.add_argument("--json", action="store_true", help="Output JSON.")
+    memory_status_p.set_defaults(func=memory_status_command)
+
+    memory_search_p = memory_sub.add_parser("search", help="Search memory entries.")
+    add_context_args(memory_search_p)
+    memory_search_p.add_argument("query", help="Search query.")
+    memory_search_p.add_argument("--limit", type=int, default=10, help="Max results.")
+    memory_search_p.add_argument("--json", action="store_true", help="Output JSON.")
+    memory_search_p.set_defaults(func=memory_search_command)
 
     # session
     session_parser = subparsers.add_parser(
@@ -1395,6 +1574,20 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     handoff_read.add_argument("--json", action="store_true", help="Output JSON.")
     handoff_read.set_defaults(func=session_handoff_read_command)
 
+    session_replay = session_sub.add_parser("replay", help="Replay session timeline.")
+    add_context_args(session_replay)
+    session_replay.add_argument("--session-id", help="Filter by session ID (date).")
+    session_replay.add_argument("--since", help="Filter events after this datetime.")
+    session_replay.add_argument("--limit", type=int, default=100, help="Max events.")
+    session_replay.add_argument("--json", action="store_true", help="Output JSON.")
+    session_replay.set_defaults(func=session_replay_command)
+
+    session_replay_list = session_sub.add_parser("replay-list", help="List available sessions.")
+    add_context_args(session_replay_list)
+    session_replay_list.add_argument("--limit", type=int, default=20, help="Max sessions.")
+    session_replay_list.add_argument("--json", action="store_true", help="Output JSON.")
+    session_replay_list.set_defaults(func=session_replay_list_command)
+
     # hivemind
     hivemind_parser = subparsers.add_parser("hivemind", help="Inter-agent message bus.")
     hivemind_sub = hivemind_parser.add_subparsers(dest="hivemind_command")
@@ -1408,6 +1601,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     add_context_args(hivemind_sub_cmd)
     hivemind_sub_cmd.add_argument("--agent", required=True, help="Agent name.")
     hivemind_sub_cmd.add_argument("--topics", required=True, help="Comma-separated topics.")
+    hivemind_sub_cmd.add_argument("--ttl-hours", type=int, help="Optional subscription TTL window.")
     hivemind_sub_cmd.set_defaults(func=hivemind_subscribe_command)
 
     hivemind_unsub_cmd = hivemind_sub.add_parser("unsubscribe", help="Unsubscribe agent from topics.")
@@ -1415,6 +1609,16 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     hivemind_unsub_cmd.add_argument("--agent", required=True, help="Agent name.")
     hivemind_unsub_cmd.add_argument("--topics", required=True, help="Comma-separated topics.")
     hivemind_unsub_cmd.set_defaults(func=hivemind_unsubscribe_command)
+
+    hivemind_reap_cmd = hivemind_sub.add_parser(
+        "reap",
+        help="Remove expired or stale hivemind messages.",
+    )
+    add_context_args(hivemind_reap_cmd)
+    hivemind_reap_cmd.add_argument("--max-age-hours", type=int, help="Override retention window.")
+    hivemind_reap_cmd.add_argument("--dry-run", action="store_true", help="Report removals without deleting.")
+    hivemind_reap_cmd.add_argument("--json", action="store_true", help="Output JSON.")
+    hivemind_reap_cmd.set_defaults(func=hivemind_reap_command)
 
     # orchestrator
     orch_parser = subparsers.add_parser("orchestrator", help="Orchestrator helpers.")

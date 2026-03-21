@@ -114,8 +114,11 @@ In Antigravity, open `MCP Servers -> Manage MCP Servers -> View raw config`, the
 - `agent.logs`
 - `events.query`
 - `events.tail`
+- `events.analytics`
+- `events.replay`
 - `hivemind.subscribe`
 - `hivemind.unsubscribe`
+- `hivemind.reap`
 - `handoff.create`
 - `handoff.read`
 - `handoff.list`
