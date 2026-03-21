@@ -166,14 +166,18 @@ def events_replay_command(args: argparse.Namespace) -> int:
 
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register events command parsers."""
+    def _add_context_args(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--config", help="Config path.")
+        parser.add_argument("--path", help="Project path.")
+        parser.add_argument("--context-root", help="Context root override.")
+        parser.add_argument("--context-dir", help="Context directory name.")
+
     events_parser = subparsers.add_parser("events", help="Query the AFS event log.")
-    events_parser.add_argument("--config", help="Config path.")
-    events_parser.add_argument("--path", help="Project path.")
-    events_parser.add_argument("--context-root", help="Context root override.")
-    events_parser.add_argument("--context-dir", help="Context directory name.")
+    _add_context_args(events_parser)
     events_sub = events_parser.add_subparsers(dest="events_command")
 
     list_parser = events_sub.add_parser("list", help="List events with filters.")
+    _add_context_args(list_parser)
     list_parser.add_argument("--type", help="Filter by event type.")
     list_parser.add_argument("--since", help="ISO 8601 datetime cutoff.")
     list_parser.add_argument("--limit", type=int, default=50, help="Max events.")
@@ -183,6 +187,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     list_parser.set_defaults(func=events_list_command)
 
     tail_parser = events_sub.add_parser("tail", help="Show most recent events.")
+    _add_context_args(tail_parser)
     tail_parser.add_argument("--limit", type=int, default=20, help="Max events.")
     tail_parser.add_argument("--json", action="store_true", help="Output JSON.")
     tail_parser.set_defaults(func=events_tail_command)
@@ -191,6 +196,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         "analytics",
         help="Summarize event volume, MCP tool usage, and error rates.",
     )
+    _add_context_args(analytics_parser)
     analytics_parser.add_argument("--hours", type=int, default=24, help="Lookback window in hours.")
     analytics_parser.add_argument("--type", help="Filter analytics to a single event type.")
     analytics_parser.add_argument("--json", action="store_true", help="Output JSON.")
@@ -200,6 +206,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         "replay",
         help="Replay a recorded AFS session timeline by session ID.",
     )
+    _add_context_args(replay_parser)
     replay_parser.add_argument("--session-id", required=True, help="Recorded AFS session ID.")
     replay_parser.add_argument("--limit", type=int, default=200, help="Max events to show (0 for all).")
     replay_parser.add_argument("--include-payloads", action="store_true", help="Include event payloads in JSON output.")

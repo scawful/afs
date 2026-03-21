@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from argparse import Namespace
 from pathlib import Path
@@ -9,6 +10,7 @@ from afs.cli.events import (
     events_analytics_command,
     events_replay_command,
     events_tail_command,
+    register_parsers,
 )
 from afs.history import append_history_event
 from afs.manager import AFSManager
@@ -156,3 +158,25 @@ def test_events_replay_filters_by_session_id(
     payload = json.loads(capsys.readouterr().out)
     assert payload["session_id"] == "session-a"
     assert payload["count"] == 1
+
+
+def test_events_parser_accepts_context_flags_after_subcommand() -> None:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    register_parsers(subparsers)
+
+    args = parser.parse_args(
+        [
+            "events",
+            "analytics",
+            "--path",
+            "/tmp/project",
+            "--hours",
+            "12",
+        ]
+    )
+
+    assert args.command == "events"
+    assert args.events_command == "analytics"
+    assert args.path == "/tmp/project"
+    assert args.hours == 12
