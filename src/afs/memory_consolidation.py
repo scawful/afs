@@ -460,3 +460,106 @@ def _render_markdown(entry: dict[str, Any]) -> str:
         )
     lines.extend(["", "## Summary", "", str(output).strip(), ""])
     return "\n".join(lines).strip() + "\n"
+
+
+def memory_status(
+    context_root: Path,
+    *,
+    config: AFSConfig | None = None,
+) -> dict[str, Any]:
+    """Return memory pipeline health: entry count, cursor position, staleness."""
+    config = config or load_config_model()
+    context_root = context_root.expanduser().resolve()
+    consolidation_cfg = config.memory_consolidation
+    memory_root = resolve_mount_root(context_root, MountType.MEMORY, config=config)
+    agent_output_root = resolve_agent_output_root(context_root, config=config)
+    entries_path = memory_root / consolidation_cfg.entries_filename
+    checkpoint_path = agent_output_root / consolidation_cfg.checkpoint_filename
+    summary_dir = memory_root / consolidation_cfg.summary_dir_name
+
+    entries_count = 0
+    if entries_path.exists():
+        try:
+            entries_count = sum(
+                1 for line in entries_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )
+        except OSError:
+            pass
+
+    cursor = _load_cursor(checkpoint_path)
+    cursor_age_seconds: float | None = None
+    if checkpoint_path.exists():
+        try:
+            cursor_age_seconds = max(
+                0.0,
+                datetime.now(timezone.utc).timestamp() - checkpoint_path.stat().st_mtime,
+            )
+        except OSError:
+            pass
+
+    latest_summary_path: str | None = None
+    if summary_dir.exists():
+        try:
+            candidates = [p for p in summary_dir.glob("*.md") if p.is_file()]
+            if candidates:
+                latest = max(candidates, key=lambda p: p.stat().st_mtime)
+                latest_summary_path = str(latest)
+        except OSError:
+            pass
+
+    stale = cursor_age_seconds is not None and cursor_age_seconds > 3600.0
+
+    return {
+        "entries_count": entries_count,
+        "entries_path": str(entries_path),
+        "cursor_timestamp": cursor.timestamp,
+        "cursor_event_id": cursor.event_id,
+        "cursor_age_seconds": cursor_age_seconds,
+        "latest_summary_path": latest_summary_path,
+        "stale": stale,
+        "checkpoint_path": str(checkpoint_path),
+    }
+
+
+def search_memory(
+    context_root: Path,
+    query: str,
+    *,
+    config: AFSConfig | None = None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Keyword search across memory entries in entries.jsonl."""
+    config = config or load_config_model()
+    context_root = context_root.expanduser().resolve()
+    consolidation_cfg = config.memory_consolidation
+    memory_root = resolve_mount_root(context_root, MountType.MEMORY, config=config)
+    entries_path = memory_root / consolidation_cfg.entries_filename
+
+    if not entries_path.exists():
+        return []
+
+    query_lower = query.lower()
+    results: list[dict[str, Any]] = []
+    try:
+        for line in entries_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            searchable = " ".join([
+                str(entry.get("instruction", "")),
+                str(entry.get("output", "")),
+                " ".join(str(t) for t in entry.get("tags", []) if isinstance(t, str)),
+            ]).lower()
+            if query_lower in searchable:
+                results.append(entry)
+                if len(results) >= limit:
+                    break
+    except OSError:
+        pass
+
+    return results

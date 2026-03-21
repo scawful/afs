@@ -42,6 +42,8 @@ def merge_claude_settings(existing: dict[str, Any], afs_entry: dict[str, Any]) -
         merged[mcp_key] = {}
     if not isinstance(merged[mcp_key], dict):
         merged[mcp_key] = {}
+    else:
+        merged[mcp_key] = dict(merged[mcp_key])
     merged[mcp_key]["afs"] = afs_entry.get(mcp_key, {}).get("afs", {})
     return merged
 

@@ -693,8 +693,14 @@ def memory_status_command(args: argparse.Namespace) -> int:
     """Show memory pipeline status."""
     from ..memory_consolidation import memory_status
 
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
-    status = memory_status(context_path)
+    status = memory_status(context_path, config=manager.config)
     if args.json:
         print(json.dumps(status, indent=2))
         return 0
@@ -712,8 +718,14 @@ def memory_search_command(args: argparse.Namespace) -> int:
     """Search memory entries."""
     from ..memory_consolidation import search_memory
 
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
-    results = search_memory(context_path, args.query, limit=args.limit)
+    results = search_memory(context_path, args.query, config=manager.config, limit=args.limit)
     if args.json:
         print(json.dumps(results, indent=2))
         return 0
@@ -900,12 +912,19 @@ def session_replay_command(args: argparse.Namespace) -> int:
     """Replay session timeline."""
     from ..event_log import build_session_timeline
 
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
     timeline = build_session_timeline(
         context_path,
         session_id=args.session_id,
         since=args.since,
         limit=args.limit,
+        config=manager.config,
     )
     if args.json:
         print(json.dumps(timeline, indent=2))
@@ -923,8 +942,14 @@ def session_replay_list_command(args: argparse.Namespace) -> int:
     """List available sessions."""
     from ..event_log import list_sessions
 
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
-    sessions = list_sessions(context_path, limit=args.limit)
+    sessions = list_sessions(context_path, limit=args.limit, config=manager.config)
     if args.json:
         print(json.dumps(sessions, indent=2))
         return 0

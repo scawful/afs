@@ -34,6 +34,7 @@ from . import (
     profile,
     review,
     skills,
+    watch,
 )
 from ._help import render_default_help, render_topic_help
 
@@ -160,6 +161,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Register doctor command
     doctor.register_parsers(subparsers)
+
+    # Register watch command
+    watch.register_parsers(subparsers)
 
     # help
     help_parser = subparsers.add_parser("help", help="Show help for commands.")

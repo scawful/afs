@@ -537,6 +537,144 @@ class ContextSQLiteIndex:
             "total_changes": len(added) + len(modified) + len(deleted),
         }
 
+    def freshness_scores(
+        self,
+        *,
+        mount_types: list[MountType] | None = None,
+        decay_hours: float = 168.0,
+        threshold: float = 0.0,
+    ) -> dict[str, Any]:
+        """Compute per-file freshness scores based on index vs filesystem state.
+
+        Score = max(0, 1 - age_seconds / decay_seconds) for indexed files.
+        Modified or deleted files get 0.0.
+        """
+        selected_mounts = self._normalize_mount_types(mount_types)
+        decay_seconds = decay_hours * 3600.0
+        mount_scores: dict[str, float] = {}
+        files: dict[str, list[dict[str, Any]]] = {}
+        now = datetime.now(timezone.utc).timestamp()
+
+        with self._connect() as connection:
+            for mount_type in selected_mounts:
+                mount_key = mount_type.value
+                try:
+                    mount_root = self._manager.resolve_mount_root(
+                        self._context_path, mount_type
+                    )
+                except Exception:
+                    continue
+                if not mount_root.exists():
+                    files[mount_key] = []
+                    mount_scores[mount_key] = 1.0
+                    continue
+
+                fs_entries: dict[str, Path] = {}
+                for entry, relative_path in _iter_mount_entries(mount_root):
+                    if self._should_skip_relative_path(
+                        mount_type,
+                        relative_path,
+                        entry=entry,
+                    ):
+                        continue
+                    if not entry.is_file():
+                        continue
+                    fs_entries[relative_path] = entry
+
+                rows = connection.execute(
+                    """
+                    SELECT relative_path, modified_at, absolute_path
+                    FROM file_index
+                    WHERE context_path = ? AND mount_type = ? AND is_dir = 0
+                    """,
+                    (str(self._context_path), mount_key),
+                ).fetchall()
+
+                file_entries: list[dict[str, Any]] = []
+                score_sum = 0.0
+                count = 0
+                seen_paths: set[str] = set()
+
+                for rel_path, indexed_modified_at, abs_path in rows:
+                    seen_paths.add(rel_path)
+                    entry_path = Path(abs_path) if abs_path else mount_root / rel_path
+                    if not entry_path.exists():
+                        score = 0.0
+                        status = "deleted"
+                    else:
+                        try:
+                            current_mtime = entry_path.stat().st_mtime
+                        except OSError:
+                            score = 0.0
+                            status = "deleted"
+                            file_entries.append({
+                                "relative_path": rel_path,
+                                "mount_type": mount_key,
+                                "score": score,
+                                "status": status,
+                            })
+                            score_sum += score
+                            count += 1
+                            continue
+
+                        indexed_ts = self._parse_iso_timestamp(indexed_modified_at)
+                        if indexed_ts is not None and current_mtime > indexed_ts + 1.0:
+                            score = 0.0
+                            status = "modified"
+                        else:
+                            age = now - (indexed_ts or current_mtime)
+                            score = max(0.0, 1.0 - age / decay_seconds) if decay_seconds > 0 else 1.0
+                            status = "indexed"
+
+                    if score >= threshold:
+                        file_entries.append({
+                            "relative_path": rel_path,
+                            "mount_type": mount_key,
+                            "score": round(score, 4),
+                            "status": status,
+                        })
+                    score_sum += score
+                    count += 1
+
+                for rel_path in sorted(fs_entries):
+                    if rel_path in seen_paths:
+                        continue
+                    score = 0.0
+                    count += 1
+                    if score >= threshold:
+                        file_entries.append({
+                            "relative_path": rel_path,
+                            "mount_type": mount_key,
+                            "score": score,
+                            "status": "unindexed",
+                        })
+
+                file_entries.sort(key=lambda f: f["score"])
+                files[mount_key] = file_entries
+                mount_scores[mount_key] = round(score_sum / count, 4) if count > 0 else 1.0
+
+        return {
+            "mount_scores": mount_scores,
+            "files": files,
+            "decay_hours": decay_hours,
+            "threshold": threshold,
+        }
+
+    @staticmethod
+    def _parse_iso_timestamp(value: str | None) -> float | None:
+        if not value:
+            return None
+        try:
+            normalized = value.strip()
+            if normalized.endswith("Z"):
+                normalized = normalized[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(normalized)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except (ValueError, OSError):
+            return None
+
     def query(
         self,
         *,

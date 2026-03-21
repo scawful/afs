@@ -609,6 +609,44 @@ def workspace_sync_command(args: argparse.Namespace) -> int:
 
 
 
+def context_freshness_command(args: argparse.Namespace) -> int:
+    """Show per-file freshness scores."""
+    from ..context_index import ContextSQLiteIndex
+    from ..models import MountType
+
+    config_path = Path(args.config) if args.config else None
+    manager = load_manager(config_path)
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+        args, manager
+    )
+    index = ContextSQLiteIndex(manager, context_path)
+
+    mount_types = None
+    if args.mount:
+        try:
+            mount_types = [MountType(args.mount)]
+        except ValueError:
+            print(f"unknown mount type: {args.mount}")
+            return 1
+
+    decay_hours = args.decay_hours or manager.config.context_index.decay_hours
+    result = index.freshness_scores(
+        mount_types=mount_types,
+        decay_hours=decay_hours,
+        threshold=args.threshold,
+    )
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0
+
+    for mount_key, avg_score in result["mount_scores"].items():
+        print(f"{mount_key}: avg_score={avg_score:.4f}")
+        for f in result["files"].get(mount_key, [])[:10]:
+            print(f"  {f['score']:.4f} [{f['status']}] {f['relative_path']}")
+    return 0
+
+
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register context and workspace command parsers."""
     from ..models import MountType
@@ -740,6 +778,15 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     add_context_args(ctx_unprotect)
     ctx_unprotect.add_argument("path_to_unprotect", help="Path to unprotect.")
     ctx_unprotect.set_defaults(func=context_unprotect_command)
+
+    # context freshness
+    ctx_freshness = context_sub.add_parser("freshness", help="Show per-file freshness scores.")
+    add_context_args(ctx_freshness)
+    ctx_freshness.add_argument("--mount", help="Filter by mount type.")
+    ctx_freshness.add_argument("--threshold", type=float, default=0.0, help="Minimum score threshold.")
+    ctx_freshness.add_argument("--decay-hours", type=float, help="Decay window in hours.")
+    ctx_freshness.add_argument("--json", action="store_true", help="Output JSON.")
+    ctx_freshness.set_defaults(func=context_freshness_command)
 
     # graph
     graph_parser = subparsers.add_parser("graph", help="Project graph operations.")

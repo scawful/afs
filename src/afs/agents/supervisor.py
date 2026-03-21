@@ -307,11 +307,21 @@ class AgentSupervisor:
         """Build environment dict with sandbox vars if agent_config is set."""
         if agent_config is None:
             return None
-        if (
-            not agent_config.allowed_mounts
-            and not agent_config.allowed_tools
-            and not agent_config.workspace_isolated
-        ):
+        has_config_sandbox = (
+            agent_config.allowed_mounts
+            or agent_config.allowed_tools
+            or agent_config.workspace_isolated
+        )
+        has_capabilities = False
+        agent_spec = None
+        try:
+            from . import get_agent
+            agent_spec = get_agent(name)
+            if agent_spec and agent_spec.capabilities:
+                has_capabilities = True
+        except Exception:
+            pass
+        if not has_config_sandbox and not has_capabilities:
             return None
         env = dict(os.environ)
         env["AFS_AGENT_NAME"] = name
@@ -323,6 +333,11 @@ class AgentSupervisor:
             env["AFS_WORKSPACE_ISOLATED"] = "1"
             env["AFS_PREFER_REPO_CONFIG"] = "1"
             env["AFS_PREFER_USER_CONFIG"] = "0"
+        if agent_spec and agent_spec.capabilities:
+            if "AFS_ALLOWED_MOUNTS" not in env and agent_spec.capabilities.mount_types:
+                env["AFS_ALLOWED_MOUNTS"] = ",".join(agent_spec.capabilities.mount_types)
+            if "AFS_ALLOWED_TOOLS" not in env and agent_spec.capabilities.tools:
+                env["AFS_ALLOWED_TOOLS"] = ",".join(agent_spec.capabilities.tools)
         return env
 
     def _terminate_pid(self, pid: int, *, grace_seconds: float = 1.0) -> bool:

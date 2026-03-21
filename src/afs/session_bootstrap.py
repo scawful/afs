@@ -135,6 +135,20 @@ def build_session_bootstrap(
 
     handoff = _collect_latest_handoff(context_path, config=manager.config)
 
+    # Compute stale mounts
+    stale_mounts: list[str] = []
+    try:
+        index = ContextSQLiteIndex(manager, context_path)
+        if index.has_entries():
+            decay_hours = manager.config.context_index.decay_hours
+            freshness = index.freshness_scores(decay_hours=decay_hours)
+            stale_mounts = [
+                mount for mount, score in freshness["mount_scores"].items()
+                if score < 0.3
+            ]
+    except Exception:
+        pass
+
     summary = {
         "context_path": str(context_path),
         "project": context.project_name,
@@ -154,6 +168,7 @@ def build_session_bootstrap(
         "memory": memory,
         "agent_reports": reports,
         "handoff": handoff,
+        "stale_mounts": stale_mounts,
     }
     summary["recommended_actions"] = _build_recommendations(summary)
     try:
@@ -210,6 +225,10 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
         for action in status["actions"]:
             lines.append(f"  - {action}")
 
+    stale_mounts = summary.get("stale_mounts", [])
+    if stale_mounts:
+        lines.append(f"- stale_mounts: {', '.join(stale_mounts)}")
+
     lines.extend(["", "## Recent Drift"])
     if diff["available"]:
         lines.append(f"- total_changes: {diff['total_changes']}")
@@ -237,6 +256,10 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
         lines.append("- other_files:")
         for name in scratchpad["other_files"]:
             lines.append(f"  - {name}")
+    if scratchpad.get("agent_namespaces"):
+        lines.append("- agent_namespaces:")
+        for ns in scratchpad["agent_namespaces"]:
+            lines.append(f"  - {ns['agent_name']}: {ns['file_count']} files, {ns['size_bytes']} bytes")
     if not scratchpad["state_text"] and not scratchpad["deferred_text"] and not scratchpad["other_files"]:
         lines.append("- empty")
 
@@ -352,11 +375,38 @@ def _collect_scratchpad(manager: AFSManager, context_path: Path) -> dict[str, An
                     break
         except OSError:
             pass
+
+    agent_namespaces: list[dict[str, Any]] = []
+    agents_dir = scratchpad_root / "agents"
+    if agents_dir.exists():
+        try:
+            for agent_dir in sorted(agents_dir.iterdir()):
+                if not agent_dir.is_dir() or agent_dir.name.startswith("."):
+                    continue
+                files: list[str] = []
+                size_bytes = 0
+                for f in sorted(agent_dir.rglob("*")):
+                    if f.is_file():
+                        files.append(str(f.relative_to(agent_dir)))
+                        try:
+                            size_bytes += f.stat().st_size
+                        except OSError:
+                            pass
+                agent_namespaces.append({
+                    "agent_name": agent_dir.name,
+                    "file_count": len(files),
+                    "size_bytes": size_bytes,
+                    "files": files[:_MAX_LIST_ITEMS],
+                })
+        except OSError:
+            pass
+
     return {
         "path": str(scratchpad_root),
         "state_text": state_text,
         "deferred_text": deferred_text,
         "other_files": other_files,
+        "agent_namespaces": agent_namespaces,
     }
 
 
@@ -394,6 +444,14 @@ def _collect_hivemind(context_path: Path, *, limit: int) -> dict[str, Any]:
 
 
 def _collect_memory(manager: AFSManager, context_path: Path) -> dict[str, Any]:
+    pipeline_status: dict[str, Any] = {}
+    try:
+        from .memory_consolidation import memory_status
+
+        pipeline_status = memory_status(context_path, config=manager.config)
+    except Exception:
+        pipeline_status = {}
+
     memory_root = resolve_mount_root(context_path, MountType.MEMORY, config=manager.config)
     entries_path = memory_root / manager.config.memory_consolidation.entries_filename
     summary_dir = memory_root / manager.config.memory_consolidation.summary_dir_name
@@ -425,6 +483,7 @@ def _collect_memory(manager: AFSManager, context_path: Path) -> dict[str, Any]:
         "entries_count": entries_count,
         "latest_markdown_path": str(latest_markdown_path) if latest_markdown_path else "",
         "latest_markdown_excerpt": latest_markdown_excerpt,
+        "status": pipeline_status,
     }
 
 
@@ -505,6 +564,12 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
     if diff.get("available") and diff.get("total_changes", 0) > 0:
         recommendations.append("Review `context.diff` before editing because the workspace has unreviewed drift.")
 
+    stale_mounts = summary.get("stale_mounts", [])
+    if stale_mounts:
+        recommendations.append(
+            "Review low-freshness mounts before trusting older context summaries or search results."
+        )
+
     if scratchpad["state_text"] or scratchpad["deferred_text"]:
         recommendations.append("Read scratchpad state and deferred notes before making changes.")
 
@@ -518,6 +583,8 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
         recommendations.append("Scan the latest durable memory summary before asking for already-known context.")
     else:
         recommendations.append("No durable memory summary exists yet; run `afs memory consolidate` if handoff context matters.")
+    if memory.get("status", {}).get("stale"):
+        recommendations.append("Memory consolidation looks stale; run `afs memory consolidate` before relying on durable summaries.")
 
     handoff = summary.get("handoff", {})
     if handoff.get("available") and handoff.get("blocked"):

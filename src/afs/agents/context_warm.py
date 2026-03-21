@@ -35,6 +35,13 @@ from .base import (
 AGENT_NAME = "context-warm"
 AGENT_DESCRIPTION = "Sync workspace paths, discover contexts, and refresh embeddings."
 
+AGENT_CAPABILITIES = {
+    "mount_types": ["knowledge", "tools", "scratchpad"],
+    "topics": ["context:repair", "context:refresh"],
+    "tools": ["context.index.rebuild", "context.query"],
+    "description": "Syncs workspace paths, discovers contexts, refreshes indexes.",
+}
+
 
 @dataclass
 class EmbeddingProject:

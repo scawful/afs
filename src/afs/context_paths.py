@@ -62,3 +62,20 @@ def resolve_agent_output_root(
         config=config,
         directories=directories,
     ) / "afs_agents"
+
+
+def resolve_agent_scratchpad(
+    context_path: Path,
+    agent_name: str,
+    *,
+    config: AFSConfig | None = None,
+    directories: Iterable[DirectoryConfig] | None = None,
+) -> Path:
+    """Resolve a per-agent scratchpad directory within scratchpad/agents/<agent_name>/."""
+    scratchpad_root = resolve_mount_root(
+        context_path,
+        MountType.SCRATCHPAD,
+        config=config,
+        directories=directories,
+    )
+    return scratchpad_root / "agents" / agent_name

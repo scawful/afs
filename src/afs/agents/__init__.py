@@ -16,10 +16,19 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class AgentCapability:
+    tools: list[str]
+    topics: list[str]
+    mount_types: list[str]
+    description: str = ""
+
+
+@dataclass(frozen=True)
 class AgentSpec:
     name: str
     description: str
     entrypoint: Callable[[Sequence[str] | None], int]
+    capabilities: AgentCapability | None = None
 
 
 CORE_AGENT_MODULES = (
@@ -58,7 +67,25 @@ def _load_agent_module(module_name: str) -> AgentSpec | None:
     if not isinstance(name, str) or not name.strip() or not callable(entrypoint):
         logger.warning("Agent module %s is missing AGENT_NAME or main()", module_name)
         return None
-    return AgentSpec(name=name.strip(), description=str(description or "").strip(), entrypoint=entrypoint)
+
+    capabilities_raw = getattr(module, "AGENT_CAPABILITIES", None)
+    capabilities = None
+    if isinstance(capabilities_raw, dict):
+        capabilities = AgentCapability(
+            tools=list(capabilities_raw.get("tools", [])),
+            topics=list(capabilities_raw.get("topics", [])),
+            mount_types=list(capabilities_raw.get("mount_types", [])),
+            description=str(capabilities_raw.get("description", "")),
+        )
+    elif isinstance(capabilities_raw, AgentCapability):
+        capabilities = capabilities_raw
+
+    return AgentSpec(
+        name=name.strip(),
+        description=str(description or "").strip(),
+        entrypoint=entrypoint,
+        capabilities=capabilities,
+    )
 
 
 def _normalize_agent_specs(payload: object) -> list[AgentSpec]:
@@ -143,4 +170,4 @@ def get_agent(name: str) -> AgentSpec | None:
     return get_agent_registry().get(name)
 
 
-__all__ = ["AgentSpec", "CORE_AGENT_MODULES", "get_agent_registry", "list_agents", "get_agent"]
+__all__ = ["AgentCapability", "AgentSpec", "CORE_AGENT_MODULES", "get_agent_registry", "list_agents", "get_agent"]

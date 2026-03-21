@@ -20,6 +20,13 @@ from .base import (
 AGENT_NAME = "history-memory"
 AGENT_DESCRIPTION = "Consolidate recent history events into durable memory summaries."
 
+AGENT_CAPABILITIES = {
+    "mount_types": ["history", "memory", "scratchpad"],
+    "topics": ["agent:lifecycle"],
+    "tools": ["memory.search"],
+    "description": "Consolidates history events into durable memory summaries.",
+}
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = build_base_parser(AGENT_DESCRIPTION)

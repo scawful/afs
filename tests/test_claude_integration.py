@@ -58,6 +58,17 @@ def test_merge_preserves_other_servers() -> None:
     assert "afs" in merged["mcpServers"]
 
 
+def test_merge_does_not_mutate_existing() -> None:
+    existing = {
+        "mcpServers": {
+            "other-server": {"command": "other", "args": []},
+        }
+    }
+    afs_entry = generate_claude_settings(Path("/tmp/test"))
+    merge_claude_settings(existing, afs_entry)
+    assert "afs" not in existing["mcpServers"]
+
+
 def test_merge_creates_mcp_servers_if_missing() -> None:
     existing = {"someKey": "someValue"}
     afs_entry = generate_claude_settings(Path("/tmp/test"))
