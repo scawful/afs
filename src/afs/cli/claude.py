@@ -94,6 +94,65 @@ def claude_session_report_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def claude_setup_command(args: argparse.Namespace) -> int:
+    """Configure Claude Code to use AFS MCP server."""
+    from ..claude_integration import (
+        generate_claude_md,
+        generate_claude_settings,
+        merge_claude_settings,
+    )
+
+    config_path = Path(args.config) if getattr(args, "config", None) else None
+    manager = load_manager(config_path)
+    project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
+
+    # Generate and merge settings
+    afs_settings = generate_claude_settings(
+        project_path,
+        config=manager.config,
+        config_path=config_path,
+    )
+    settings_dir = project_path / ".claude"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = settings_dir / "settings.json"
+
+    existing: dict = {}
+    if settings_path.exists():
+        try:
+            existing = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+
+    merged = merge_claude_settings(existing, afs_settings)
+    settings_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote: {settings_path}")
+
+    # Generate CLAUDE.md
+    claude_md_path = project_path / "CLAUDE.md"
+    if not claude_md_path.exists() or getattr(args, "force", False):
+        project_name = project_path.name
+        content = generate_claude_md(project_name, str(context_path))
+        claude_md_path.write_text(content, encoding="utf-8")
+        print(f"wrote: {claude_md_path}")
+    else:
+        print(f"skipped: {claude_md_path} (exists, use --force to overwrite)")
+
+    return 0
+
+
+def claude_context_command(args: argparse.Namespace) -> int:
+    """Output Claude-optimized context block."""
+    from ..session_bootstrap import build_session_bootstrap, render_session_bootstrap
+
+    config_path = Path(args.config) if getattr(args, "config", None) else None
+    manager = load_manager(config_path)
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
+
+    summary = build_session_bootstrap(manager, context_path)
+    print(render_session_bootstrap(summary))
+    return 0
+
+
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     claude_parser = subparsers.add_parser("claude", help="Claude Code log analysis.")
     claude_sub = claude_parser.add_subparsers(dest="claude_command")
@@ -136,3 +195,25 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     report_parser.add_argument("--json", action="store_true", help="Output JSON.")
     report_parser.set_defaults(func=claude_session_report_command)
 
+    # setup
+    setup_parser = claude_sub.add_parser(
+        "setup", help="Configure Claude Code to use AFS MCP server."
+    )
+    setup_parser.add_argument("--config", help="Config path.")
+    setup_parser.add_argument("--path", help="Project path.")
+    setup_parser.add_argument("--context-root", help="Context root override.")
+    setup_parser.add_argument("--context-dir", help="Context directory name.")
+    setup_parser.add_argument(
+        "--force", action="store_true", help="Overwrite existing CLAUDE.md."
+    )
+    setup_parser.set_defaults(func=claude_setup_command)
+
+    # context
+    context_parser = claude_sub.add_parser(
+        "context", help="Output Claude-optimized context block."
+    )
+    context_parser.add_argument("--config", help="Config path.")
+    context_parser.add_argument("--path", help="Project path.")
+    context_parser.add_argument("--context-root", help="Context root override.")
+    context_parser.add_argument("--context-dir", help="Context directory name.")
+    context_parser.set_defaults(func=claude_context_command)

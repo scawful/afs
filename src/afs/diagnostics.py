@@ -19,9 +19,11 @@ import json
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from .context_paths import resolve_agent_output_root
 from .models import MountType
 
 _REQUIRED_CONTEXT_MOUNTS = (
@@ -35,6 +37,7 @@ _SERVICE_DIAGNOSTIC_NAMES = (
     "agent-supervisor",
     "history-memory",
 )
+DOCTOR_SNAPSHOT_JSON = "doctor_snapshot.json"
 
 
 @dataclass
@@ -709,3 +712,52 @@ def format_results_json(results: list[DiagnosticResult]) -> str:
         {"checks": [r.to_dict() for r in results]},
         indent=2,
     )
+
+
+def write_doctor_snapshot(
+    config_path: Path | None = None,
+    *,
+    results: list[DiagnosticResult] | None = None,
+) -> Path | None:
+    """Write the latest doctor snapshot into the active context agent output dir."""
+    try:
+        config, _manager, context_root = _load_runtime(config_path)
+    except Exception:
+        return None
+
+    resolved_results = results if results is not None else run_all_checks(config_path=config_path)
+    counts = {
+        "ok": sum(1 for result in resolved_results if result.status == "ok"),
+        "warn": sum(1 for result in resolved_results if result.status == "warn"),
+        "error": sum(1 for result in resolved_results if result.status == "error"),
+    }
+    overall_status = "ok"
+    if counts["error"]:
+        overall_status = "error"
+    elif counts["warn"]:
+        overall_status = "warn"
+
+    output_root = resolve_agent_output_root(context_root, config=config)
+    output_root.mkdir(parents=True, exist_ok=True)
+    output_path = output_root / DOCTOR_SNAPSHOT_JSON
+    now = datetime.now(timezone.utc).isoformat()
+    payload = {
+        "name": "doctor_snapshot",
+        "status": overall_status,
+        "started_at": now,
+        "finished_at": now,
+        "duration_seconds": 0.0,
+        "metrics": counts,
+        "notes": [
+            result.message
+            for result in resolved_results
+            if result.status != "ok"
+        ][:5],
+        "payload": {
+            "checks": [result.to_dict() for result in resolved_results],
+            "context_root": str(context_root),
+            "config_path": str(config_path) if config_path else None,
+        },
+    }
+    output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return output_path

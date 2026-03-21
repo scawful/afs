@@ -700,6 +700,21 @@ class ContextIndexConfig:
 
 
 @dataclass
+class SensitivityConfig:
+    never_index: list[str] = field(default_factory=list)
+    never_embed: list[str] = field(default_factory=list)
+    never_export: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SensitivityConfig:
+        return cls(
+            never_index=_as_str_list(data.get("never_index")),
+            never_embed=_as_str_list(data.get("never_embed")),
+            never_export=_as_str_list(data.get("never_export")),
+        )
+
+
+@dataclass
 class AFSConfig:
     general: GeneralConfig = field(default_factory=GeneralConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
@@ -716,6 +731,7 @@ class AFSConfig:
         default_factory=MemoryConsolidationConfig
     )
     context_index: ContextIndexConfig = field(default_factory=ContextIndexConfig)
+    sensitivity: SensitivityConfig = field(default_factory=SensitivityConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> AFSConfig:
@@ -738,6 +754,7 @@ class AFSConfig:
             data.get("memory_consolidation", {})
         )
         context_index = ContextIndexConfig.from_dict(data.get("context_index", {}))
+        sensitivity = SensitivityConfig.from_dict(data.get("sensitivity", {}))
         return cls(
             general=general,
             plugins=plugins,
@@ -752,6 +769,7 @@ class AFSConfig:
             memory_export=memory_export,
             memory_consolidation=memory_consolidation,
             context_index=context_index,
+            sensitivity=sensitivity,
         )
 
 

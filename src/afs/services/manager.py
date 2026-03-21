@@ -22,6 +22,7 @@ from .models import ServiceDefinition, ServiceState, ServiceStatus, ServiceType
 
 # State directory for tracking running services
 STATE_DIR = Path.home() / ".config" / "afs" / "services" / "state"
+LOG_DIRNAME = "logs"
 
 
 def _resolve_interval_env(name: str, *, default: int) -> int:
@@ -70,7 +71,25 @@ class ServiceManager:
         definition = self.get_definition(name)
         if not definition:
             raise KeyError(f"Unknown service: {name}")
-        return self._adapter.render(definition)
+        stdout_log, stderr_log = self.log_paths(name)
+        return self._adapter.render(
+            definition,
+            stdout_log=stdout_log,
+            stderr_log=stderr_log,
+        )
+
+    def unit_path(self, name: str) -> Path:
+        definition = self.get_definition(name)
+        if not definition:
+            raise KeyError(f"Unknown service: {name}")
+        return self._adapter.unit_path(self.service_root, definition)
+
+    def log_paths(self, name: str) -> tuple[Path, Path]:
+        log_root = self.service_root / LOG_DIRNAME
+        return (
+            log_root / f"{name}.out.log",
+            log_root / f"{name}.err.log",
+        )
 
     def status(self, name: str) -> ServiceStatus:
         """Get status of a service."""
@@ -79,6 +98,8 @@ class ServiceManager:
             return ServiceStatus(name=name, state=ServiceState.UNKNOWN, enabled=False)
 
         state_file = STATE_DIR / f"{name}.json"
+        unit_path = self._adapter.unit_path(self.service_root, definition)
+        stdout_log, stderr_log = self.log_paths(name)
         pid = None
         last_started = None
 
@@ -110,8 +131,29 @@ class ServiceManager:
             state=state,
             pid=pid,
             enabled=True,
+            installed=unit_path.exists(),
+            unit_path=unit_path,
+            stdout_log=stdout_log if stdout_log.exists() else stdout_log,
+            stderr_log=stderr_log if stderr_log.exists() else stderr_log,
             last_started=last_started,
         )
+
+    def system_status(self, name: str) -> dict[str, Any]:
+        definition = self.get_definition(name)
+        if not definition:
+            raise KeyError(f"Unknown service: {name}")
+        unit_path = self._adapter.unit_path(self.service_root, definition)
+        stdout_log, stderr_log = self.log_paths(name)
+        payload = self._adapter.system_status(definition, unit_path)
+        payload.update(
+            {
+                "name": name,
+                "unit_path": str(unit_path),
+                "stdout_log": str(stdout_log),
+                "stderr_log": str(stderr_log),
+            }
+        )
+        return payload
     def _check_docker_service(self, container_name: str) -> ServiceState:
         """Check if a docker container is running."""
         try:
@@ -142,6 +184,8 @@ class ServiceManager:
         # Build environment
         env = os.environ.copy()
         env.update(definition.environment)
+        stdout_log, stderr_log = self.log_paths(name)
+        stdout_log.parent.mkdir(parents=True, exist_ok=True)
 
         # Handle Open WebUI via chat-service to ensure secrets sync
         if name == "openwebui":
@@ -157,14 +201,15 @@ class ServiceManager:
             return True
 
         # Background daemon
-        process = subprocess.Popen(
-            definition.command,
-            cwd=definition.working_directory,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        with stdout_log.open("ab") as stdout_handle, stderr_log.open("ab") as stderr_handle:
+            process = subprocess.Popen(
+                definition.command,
+                cwd=definition.working_directory,
+                env=env,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+                start_new_session=True,
+            )
 
         # Save state
         state_file = STATE_DIR / f"{name}.json"
@@ -367,6 +412,72 @@ class ServiceManager:
         self.stop(name)
         return self.start(name)
 
+    def install(self, name: str, *, enable: bool = False) -> Path:
+        definition = self.get_definition(name)
+        if not definition:
+            raise KeyError(f"Unknown service: {name}")
+        stdout_log, stderr_log = self.log_paths(name)
+        stdout_log.parent.mkdir(parents=True, exist_ok=True)
+        unit_path = self._adapter.install(
+            self.service_root,
+            definition,
+            stdout_log=stdout_log,
+            stderr_log=stderr_log,
+        )
+        if enable:
+            result = self._adapter.enable(unit_path)
+            if result is not None and result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"Failed to enable {name}")
+        return unit_path
+
+    def uninstall(self, name: str, *, disable: bool = True) -> bool:
+        definition = self.get_definition(name)
+        if not definition:
+            raise KeyError(f"Unknown service: {name}")
+        unit_path = self._adapter.unit_path(self.service_root, definition)
+        if disable and unit_path.exists():
+            result = self._adapter.disable(unit_path)
+            if result is not None and result.returncode not in {0, 3, 5}:
+                raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"Failed to disable {name}")
+        return self._adapter.uninstall(self.service_root, definition)
+
+    def enable(self, name: str) -> bool:
+        definition = self.get_definition(name)
+        if not definition:
+            raise KeyError(f"Unknown service: {name}")
+        unit_path = self._adapter.unit_path(self.service_root, definition)
+        if not unit_path.exists():
+            self.install(name, enable=False)
+        result = self._adapter.enable(unit_path)
+        if result is not None and result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"Failed to enable {name}")
+        return True
+
+    def disable(self, name: str) -> bool:
+        definition = self.get_definition(name)
+        if not definition:
+            raise KeyError(f"Unknown service: {name}")
+        unit_path = self._adapter.unit_path(self.service_root, definition)
+        if not unit_path.exists():
+            return True
+        result = self._adapter.disable(unit_path)
+        if result is not None and result.returncode not in {0, 3, 5}:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"Failed to disable {name}")
+        return True
+
+    def logs(self, name: str, *, lines: int = 50) -> dict[str, Any]:
+        definition = self.get_definition(name)
+        if not definition:
+            raise KeyError(f"Unknown service: {name}")
+        stdout_log, stderr_log = self.log_paths(name)
+        return {
+            "name": name,
+            "stdout_log": str(stdout_log),
+            "stderr_log": str(stderr_log),
+            "stdout": _tail_file(stdout_log, lines),
+            "stderr": _tail_file(stderr_log, lines),
+        }
+
     def _merge_config(
         self, definitions: dict[str, ServiceDefinition]
     ) -> dict[str, ServiceDefinition]:
@@ -475,6 +586,7 @@ class ServiceManager:
             str(context_warm_report),
             "--interval",
             str(context_warm_interval),
+            "--doctor-snapshot",
             "--repair-mounts",
             "--rebuild-stale-indexes",
         ]
@@ -489,6 +601,7 @@ class ServiceManager:
             "--watch",
             "--watch-poll-seconds",
             str(context_watch_poll_seconds),
+            "--doctor-snapshot",
             "--repair-mounts",
             "--rebuild-stale-indexes",
             "--skip-workspace-sync",
@@ -770,6 +883,16 @@ def _replace_repeated_flag(
     for value in values:
         updated.extend([flag, value])
     return updated
+
+
+def _tail_file(path: Path, lines: int) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return content[-max(1, lines):]
 
 
 class LMStudioManager:

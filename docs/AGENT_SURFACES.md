@@ -67,6 +67,9 @@ export AFS_VENV=~/src/lab/afs/.venv
 ~/src/lab/afs/scripts/afs context discover --path ~/src
 ~/src/lab/afs/scripts/afs context ensure-all --path ~/src
 ~/src/lab/afs/scripts/afs session bootstrap --json
+~/src/lab/afs/scripts/afs session pack "current task" --model gemini --json
+~/src/lab/afs/scripts/afs events tail --json
+~/src/lab/afs/scripts/afs claude setup --path ~/src/project-a
 ~/src/lab/afs/scripts/afs doctor
 ~/src/lab/afs/scripts/afs profile current
 ~/src/lab/afs/scripts/afs skills list --profile work
@@ -122,6 +125,12 @@ Built-in tools:
 - `context.diff`
 - `context.status`
 - `context.repair`
+- `session.pack`
+- `events.query`
+- `events.tail`
+- `handoff.create`
+- `handoff.read`
+- `handoff.list`
 
 Paths are scoped to:
 
@@ -141,8 +150,8 @@ Paths are scoped to:
 
 Gemini-friendly prompts/resources are also exposed over MCP:
 
-- prompts: `afs.session.bootstrap`, `afs.context.overview`, `afs.query.search`, `afs.scratchpad.review`
-- resources: `afs://contexts`, `afs://context/<path>/bootstrap`, `.../metadata`, `.../mounts`, `.../index`
+- prompts: `afs.session.bootstrap`, `afs.session.pack`, `afs.context.overview`, `afs.query.search`, `afs.scratchpad.review`
+- resources: `afs://contexts`, `afs://claude/bootstrap`, `afs://context/<path>/bootstrap`, `.../metadata`, `.../mounts`, `.../index`
 
 `afs.session.bootstrap` is the preferred start-of-session surface. It combines:
 
@@ -158,12 +167,16 @@ The CLI equivalent is:
 ```bash
 ~/src/lab/afs/scripts/afs session bootstrap
 ~/src/lab/afs/scripts/afs session bootstrap --json
+~/src/lab/afs/scripts/afs session pack
+~/src/lab/afs/scripts/afs session pack "sqlite" --model codex --json
 ```
 
 The CLI also refreshes:
 
 - `.context/scratchpad/afs_agents/session_bootstrap.json`
 - `.context/scratchpad/afs_agents/session_bootstrap.md`
+- `.context/scratchpad/afs_agents/session_pack_<model>.json`
+- `.context/scratchpad/afs_agents/session_pack_<model>.md`
 
 Extensions can add their own MCP tools, prompts, and resources with
 `[mcp_server]` in `extension.toml`. Legacy tool-only factories under
@@ -221,7 +234,7 @@ Each run now audits discovered contexts for:
 - empty or stale SQLite indexes
 
 The built-in `context-warm` service now runs with `--repair-mounts
---rebuild-stale-indexes` by default, so it can seed provenance, remap missing
+--rebuild-stale-indexes --doctor-snapshot` by default, so it can seed provenance, remap missing
 sources conservatively, and reapply profile-managed mounts when the configured
 source still exists.
 
@@ -236,6 +249,14 @@ instead of `~/.config/afs/config.toml`, start them with an explicit config:
 ```bash
 ~/src/lab/afs/scripts/afs services start --config /path/to/afs.toml context-warm
 ~/src/lab/afs/scripts/afs services start --config /path/to/afs.toml agent-supervisor
+```
+
+Managed units can also be installed through the OS service adapter:
+
+```bash
+~/src/lab/afs/scripts/afs services install context-warm --enable
+~/src/lab/afs/scripts/afs services status --system
+~/src/lab/afs/scripts/afs services logs context-warm
 ```
 
 `afs services render|start|stop|status|restart` now preserve that explicit

@@ -16,6 +16,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
 from ..config import load_config_model
 from ..context_paths import resolve_agent_output_root, resolve_mount_root
 from ..core import find_root, resolve_context_root
+from ..event_log import summarize_mcp_tool_usage
 from ..history import iter_history_events
 from ..manager import AFSManager
 from ..mcp_server import get_mcp_status
@@ -78,7 +79,7 @@ def collect_afs_health(config_path: Path | None = None) -> dict[str, Any]:
     mcp_status = get_mcp_status(config_path=config_path)
     extensions = _extension_health(config, profile, mcp_status)
     hooks = _hook_health(config, profile, context_root)
-    mcp = _mcp_health(mcp_status)
+    mcp = _mcp_health(mcp_status, context_root=context_root, config=config)
     maintenance = _maintenance_health(config, context_root)
 
     return {
@@ -197,10 +198,20 @@ def render_afs_health(snapshot: dict[str, Any]) -> str:
         f"registered_clients={','.join(mcp['registered_client_names']) or 'none'} "
         f"tools={len(mcp['tools'])}"
     )
+    workflow_usage = mcp["workflow_usage"]
+    lines.append(
+        "mcp_workflow: "
+        f"proactive={str(workflow_usage['proactive']).lower()} "
+        + " ".join(
+            f"{name}={tool['count']}"
+            for name, tool in sorted(workflow_usage["tools"].items())
+        )
+    )
     warm = maintenance["reports"]["context_warm"]
     watch = maintenance["reports"]["context_watch"]
     supervisor_report = maintenance["reports"]["agent_supervisor"]
     history_memory = maintenance["reports"]["history_memory"]
+    doctor_snapshot = maintenance["reports"]["doctor_snapshot"]
     supervisor_audit = maintenance["supervisor"]
     lines.append(
         "maintenance: "
@@ -208,6 +219,7 @@ def render_afs_health(snapshot: dict[str, Any]) -> str:
         f"context_watch={watch['status'] or 'unknown'} "
         f"agent_supervisor={supervisor_report['status'] or 'unknown'} "
         f"history_memory={history_memory['status'] or 'unknown'} "
+        f"doctor={doctor_snapshot['status'] or 'unknown'} "
         f"age={_format_age(warm['age_seconds'])} "
         f"degraded_contexts={maintenance['degraded_contexts']} "
         f"remapped_mounts={maintenance['remapped_mounts']}"
@@ -338,7 +350,7 @@ def _hook_health(config, profile, context_root: Path) -> dict[str, Any]:
     return {"events": by_event}
 
 
-def _mcp_health(mcp_status: dict[str, Any]) -> dict[str, Any]:
+def _mcp_health(mcp_status: dict[str, Any], *, context_root: Path, config) -> dict[str, Any]:
     running, running_details = _detect_mcp_running()
     registrations = find_afs_mcp_registrations()
     registered_clients = {
@@ -348,6 +360,17 @@ def _mcp_health(mcp_status: dict[str, Any]) -> dict[str, Any]:
     registered_client_names = [
         client for client, is_registered in registered_clients.items() if is_registered
     ]
+    workflow_usage = summarize_mcp_tool_usage(
+        context_root,
+        tool_names=(
+            "afs.session.bootstrap",
+            "context.status",
+            "context.diff",
+            "context.query",
+            "session.pack",
+        ),
+        config=config,
+    )
     return {
         "running": running,
         "running_details": running_details,
@@ -363,6 +386,7 @@ def _mcp_health(mcp_status: dict[str, Any]) -> dict[str, Any]:
         "tools": mcp_status.get("tools", []),
         "extension_status": mcp_status.get("extension_status", []),
         "load_errors": mcp_status.get("load_errors", {}),
+        "workflow_usage": workflow_usage,
     }
 
 def _maintenance_health(config, context_root: Path) -> dict[str, Any]:
@@ -372,6 +396,7 @@ def _maintenance_health(config, context_root: Path) -> dict[str, Any]:
         "context_watch": _load_agent_report(agent_output_dir / "context_watch.json"),
         "agent_supervisor": _load_agent_report(agent_output_dir / "agent_supervisor.json"),
         "history_memory": _load_agent_report(agent_output_dir / "history_memory.json"),
+        "doctor_snapshot": _load_agent_report(agent_output_dir / "doctor_snapshot.json"),
         "gemini_workspace_brief": _load_agent_report(
             agent_output_dir / "gemini_workspace_brief.json"
         ),

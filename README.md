@@ -131,13 +131,19 @@ Use these first when bringing up AFS on a new machine or workspace:
 
 ```bash
 ./scripts/afs session bootstrap --json
+./scripts/afs session pack "current task" --model gemini --json
 ./scripts/afs doctor
 ./scripts/afs health
+./scripts/afs services status --system
 ```
 
 `afs doctor --fix` is the fastest path for repairing missing context roots,
 missing required mount directories, untracked/stale mount provenance, and stale
 context indexes.
+
+`afs session pack` is the compact, token-budgeted follow-on surface for
+Gemini, Claude, Codex, or generic clients. It writes model-specific pack
+artifacts under `.context/scratchpad/afs_agents/`.
 
 ## AFS Studio variants
 

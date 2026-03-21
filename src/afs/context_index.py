@@ -12,6 +12,7 @@ from typing import Any
 
 from .manager import AFSManager
 from .models import MountType
+from .sensitivity import matches_path_rules
 
 DEFAULT_DB_FILENAME = "context_index.sqlite3"
 DEFAULT_MAX_FILE_SIZE_BYTES = 256 * 1024
@@ -140,7 +141,11 @@ class ContextSQLiteIndex:
                 continue
 
             for entry, relative_path in _iter_mount_entries(mount_root):
-                if self._should_skip_relative_path(mount_type, relative_path):
+                if self._should_skip_relative_path(
+                    mount_type,
+                    relative_path,
+                    entry=entry,
+                ):
                     continue
                 try:
                     row, reason = self._build_row(
@@ -473,7 +478,11 @@ class ContextSQLiteIndex:
             # Build filesystem snapshot: relative_path -> (size, mtime)
             fs_entries: dict[str, tuple[int, str]] = {}
             for entry, relative_path in _iter_mount_entries(mount_root):
-                if self._should_skip_relative_path(mount_type, relative_path):
+                if self._should_skip_relative_path(
+                    mount_type,
+                    relative_path,
+                    entry=entry,
+                ):
                     continue
                 try:
                     stat = entry.stat()
@@ -748,7 +757,11 @@ class ContextSQLiteIndex:
                 continue
 
             for entry, relative_path in _iter_mount_entries(mount_root):
-                if self._should_skip_relative_path(mount_type, relative_path):
+                if self._should_skip_relative_path(
+                    mount_type,
+                    relative_path,
+                    entry=entry,
+                ):
                     continue
                 try:
                     stat = entry.stat()
@@ -772,17 +785,36 @@ class ContextSQLiteIndex:
             )
         return snapshot
 
-    def _should_skip_relative_path(self, mount_type: MountType, relative_path: str) -> bool:
+    def _should_skip_relative_path(
+        self,
+        mount_type: MountType,
+        relative_path: str,
+        *,
+        entry: Path | None = None,
+    ) -> bool:
         if mount_type != MountType.GLOBAL:
-            return False
-        db_name = self._db_path.name
-        ignored = {
-            db_name,
-            f"{db_name}-journal",
-            f"{db_name}-shm",
-            f"{db_name}-wal",
-        }
-        return relative_path in ignored
+            ignored_global = False
+        else:
+            db_name = self._db_path.name
+            ignored = {
+                db_name,
+                f"{db_name}-journal",
+                f"{db_name}-shm",
+                f"{db_name}-wal",
+            }
+            ignored_global = relative_path in ignored
+        if ignored_global:
+            return True
+
+        absolute_path = entry
+        if absolute_path is None:
+            absolute_path = self._manager.resolve_mount_root(self._context_path, mount_type) / relative_path
+        virtual_path = f"{mount_type.value}/{relative_path}".strip("/")
+        return matches_path_rules(
+            absolute_path,
+            relative_path=virtual_path,
+            patterns=self._manager.config.sensitivity.never_index,
+        )
 
     def _indexed_snapshot(
         self,

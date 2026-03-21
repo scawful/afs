@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..context_paths import resolve_mount_root
+from ..event_log import read_agent_events
 from ..memory_consolidation import consolidate_history_to_memory
 from ..models import MountType
 from ._utils import (
@@ -69,35 +70,6 @@ def _resolve_command_context(args: argparse.Namespace) -> Path:
         args, manager
     )
     return context_path
-
-
-def _read_agent_events(
-    context_path: Path,
-    *,
-    agent_name: str,
-    limit: int,
-) -> list[dict[str, Any]]:
-    history_dir = resolve_mount_root(context_path, MountType.HISTORY)
-    prefix = f"agent.{agent_name}"
-    events: list[dict[str, Any]] = []
-    if not history_dir.exists():
-        return events
-    for log_file in sorted(history_dir.glob("events_*.jsonl"), reverse=True):
-        for line in reversed(log_file.read_text(encoding="utf-8").splitlines()):
-            if not line.strip():
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if entry.get("source", "").startswith(prefix):
-                events.append(entry)
-                if len(events) >= limit:
-                    break
-        if len(events) >= limit:
-            break
-    events.reverse()
-    return events
 
 
 def init_command(args: argparse.Namespace) -> int:
@@ -272,6 +244,55 @@ def services_start_command(args: argparse.Namespace) -> int:
         return 1
 
 
+def services_install_command(args: argparse.Namespace) -> int:
+    """Install a managed service unit."""
+    manager = _load_service_manager(args)
+    try:
+        unit_path = manager.install(args.name, enable=args.enable)
+    except (KeyError, RuntimeError) as exc:
+        print(str(exc))
+        return 1
+    print(f"Installed: {args.name}")
+    print(f"  unit: {unit_path}")
+    return 0
+
+
+def services_uninstall_command(args: argparse.Namespace) -> int:
+    """Uninstall a managed service unit."""
+    manager = _load_service_manager(args)
+    try:
+        removed = manager.uninstall(args.name, disable=not args.keep_enabled)
+    except (KeyError, RuntimeError) as exc:
+        print(str(exc))
+        return 1
+    print(f"{'Removed' if removed else 'Not installed'}: {args.name}")
+    return 0
+
+
+def services_enable_command(args: argparse.Namespace) -> int:
+    """Enable a managed service unit."""
+    manager = _load_service_manager(args)
+    try:
+        manager.enable(args.name)
+    except (KeyError, RuntimeError) as exc:
+        print(str(exc))
+        return 1
+    print(f"Enabled: {args.name}")
+    return 0
+
+
+def services_disable_command(args: argparse.Namespace) -> int:
+    """Disable a managed service unit."""
+    manager = _load_service_manager(args)
+    try:
+        manager.disable(args.name)
+    except (KeyError, RuntimeError) as exc:
+        print(str(exc))
+        return 1
+    print(f"Disabled: {args.name}")
+    return 0
+
+
 def services_stop_command(args: argparse.Namespace) -> int:
     """Stop a service."""
     manager = _load_service_manager(args)
@@ -291,7 +312,26 @@ def services_status_command(args: argparse.Namespace) -> int:
     manager = _load_service_manager(args)
 
     if args.name:
+        if args.system:
+            try:
+                payload = manager.system_status(args.name)
+            except KeyError as exc:
+                print(str(exc))
+                return 1
+            if args.json:
+                print(json.dumps(payload, indent=2))
+                return 0
+            print(f"{payload['name']}: installed={str(payload['installed']).lower()} enabled={str(payload['enabled']).lower()} active={str(payload['active']).lower()}")
+            print(f"  unit: {payload['unit_path']}")
+            print(f"  stdout_log: {payload['stdout_log']}")
+            print(f"  stderr_log: {payload['stderr_log']}")
+            if payload.get("detail"):
+                print(f"  detail: {payload['detail']}")
+            return 0
         status = manager.status(args.name)
+        if args.json:
+            print(json.dumps(status.to_dict(), indent=2))
+            return 0
         symbol = "●" if status.state.value == "running" else "○"
         color = "\033[32m" if status.state.value == "running" else "\033[31m"
         reset = "\033[0m"
@@ -300,8 +340,32 @@ def services_status_command(args: argparse.Namespace) -> int:
             print(f"  PID: {status.pid}")
         if status.last_started:
             print(f"  Started: {status.last_started.isoformat()}")
+        print(f"  Installed: {'yes' if status.installed else 'no'}")
+        if status.unit_path:
+            print(f"  Unit: {status.unit_path}")
+        if status.stdout_log:
+            print(f"  Stdout: {status.stdout_log}")
+        if status.stderr_log:
+            print(f"  Stderr: {status.stderr_log}")
     else:
+        if args.system:
+            payload = []
+            for definition in manager.list_definitions():
+                payload.append(manager.system_status(definition.name))
+            if args.json:
+                print(json.dumps(payload, indent=2))
+                return 0
+            for item in payload:
+                print(
+                    f"{item['name']}: installed={str(item['installed']).lower()} "
+                    f"enabled={str(item['enabled']).lower()} active={str(item['active']).lower()}"
+                )
+            return 0
         # Show all services
+        if args.json:
+            payload = [manager.status(definition.name).to_dict() for definition in manager.list_definitions()]
+            print(json.dumps(payload, indent=2))
+            return 0
         for definition in manager.list_definitions():
             status = manager.status(definition.name)
             symbol = "●" if status.state.value == "running" else "○"
@@ -324,6 +388,27 @@ def services_restart_command(args: argparse.Namespace) -> int:
     except KeyError as e:
         print(str(e))
         return 1
+
+
+def services_logs_command(args: argparse.Namespace) -> int:
+    """Show captured stdout/stderr logs for a service."""
+    manager = _load_service_manager(args)
+    try:
+        payload = manager.logs(args.name, lines=args.lines)
+    except KeyError as exc:
+        print(str(exc))
+        return 1
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    print(f"stdout_log: {payload['stdout_log']}")
+    for line in payload["stdout"]:
+        print(line)
+    print()
+    print(f"stderr_log: {payload['stderr_log']}")
+    for line in payload["stderr"]:
+        print(line)
+    return 0
 
 
 def agents_list_command(args: argparse.Namespace) -> int:
@@ -397,12 +482,25 @@ def agents_watch_command(args: argparse.Namespace) -> int:
     """Show recent progress events for an agent."""
     agent_name = args.name
     limit = args.limit
-    context_path = _resolve_command_context(args)
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+        args, manager
+    )
     history_dir = resolve_mount_root(context_path, MountType.HISTORY)
     if not history_dir.exists():
         print("no history directory")
         return 1
-    events = _read_agent_events(context_path, agent_name=agent_name, limit=limit)
+    events = read_agent_events(
+        context_path,
+        agent_name=agent_name,
+        limit=limit,
+        config=manager.config,
+    )
     if not events:
         print(f"no events for {agent_name}")
         return 0
@@ -441,7 +539,8 @@ def hivemind_list_command(args: argparse.Namespace) -> int:
 
     context_path = _resolve_command_context(args)
     bus = HivemindBus(context_path)
-    messages = bus.read(limit=args.limit if hasattr(args, "limit") else 20)
+    topic = getattr(args, "topic", None)
+    messages = bus.read(limit=args.limit if hasattr(args, "limit") else 20, topic=topic)
     if not messages:
         print("no messages")
         print(_hint("agents communicate via: hivemind.send / hivemind.read"))
@@ -449,10 +548,42 @@ def hivemind_list_command(args: argparse.Namespace) -> int:
         return 0
     for msg in messages:
         to_part = f" -> {msg.to}" if msg.to else ""
-        print(f"{msg.timestamp[:19]}  [{msg.msg_type}]  {msg.from_agent}{to_part}")
+        topic_part = f" #{msg.topic}" if msg.topic else ""
+        print(f"{msg.timestamp[:19]}  [{msg.msg_type}]  {msg.from_agent}{to_part}{topic_part}")
         if msg.payload:
             for key, value in msg.payload.items():
                 print(f"  {key}: {value}")
+    return 0
+
+
+def hivemind_subscribe_command(args: argparse.Namespace) -> int:
+    """Subscribe an agent to topics."""
+    from ..hivemind import HivemindBus
+
+    context_path = _resolve_command_context(args)
+    bus = HivemindBus(context_path)
+    topics = [t.strip() for t in args.topics.split(",") if t.strip()]
+    if not topics:
+        print("no topics specified")
+        return 1
+    sub = bus.subscribe(args.agent, topics)
+    print(f"subscribed {args.agent} to {', '.join(sub.topics)}")
+    return 0
+
+
+def hivemind_unsubscribe_command(args: argparse.Namespace) -> int:
+    """Unsubscribe an agent from topics."""
+    from ..hivemind import HivemindBus
+
+    context_path = _resolve_command_context(args)
+    bus = HivemindBus(context_path)
+    topics = [t.strip() for t in args.topics.split(",") if t.strip()]
+    if not topics:
+        print("no topics specified")
+        return 1
+    sub = bus.unsubscribe(args.agent, topics)
+    remaining = ", ".join(sub.topics) if sub.topics else "(none)"
+    print(f"unsubscribed {args.agent}; remaining topics: {remaining}")
     return 0
 
 
@@ -543,6 +674,139 @@ def session_bootstrap_command(args: argparse.Namespace) -> int:
         return 0
 
     print(render_session_bootstrap(summary))
+    return 0
+
+
+def session_pack_command(args: argparse.Namespace) -> int:
+    """Build a token-budgeted context pack for a target model."""
+    from ..context_pack import (
+        build_context_pack,
+        render_context_pack,
+        write_context_pack_artifacts,
+    )
+
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
+    context_path = _resolve_command_context(args)
+    pack = build_context_pack(
+        manager,
+        context_path,
+        query=args.query or "",
+        model=args.model,
+        token_budget=args.token_budget,
+        include_content=args.include_content,
+        max_query_results=args.max_query_results,
+        max_embedding_results=args.max_embedding_results,
+    )
+    if not args.no_write_artifacts:
+        pack["artifact_paths"] = write_context_pack_artifacts(
+            manager,
+            context_path,
+            pack,
+        )
+
+    if args.json:
+        print(json.dumps(pack, indent=2))
+        return 0
+
+    print(render_context_pack(pack))
+    return 0
+
+
+def session_handoff_command(args: argparse.Namespace) -> int:
+    """Create a handoff packet."""
+    from ..handoff import HandoffStore
+
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
+    context_path = _resolve_command_context(args)
+    store = HandoffStore(context_path, config=manager.config)
+
+    accomplished = [s.strip() for s in (args.accomplished or "").split(";") if s.strip()]
+    blocked = [s.strip() for s in (args.blocked or "").split(";") if s.strip()]
+    next_steps = [s.strip() for s in (getattr(args, "next", None) or "").split(";") if s.strip()]
+
+    packet = store.create(
+        agent_name=getattr(args, "agent_name", None) or "cli",
+        accomplished=accomplished,
+        blocked=blocked,
+        next_steps=next_steps,
+    )
+
+    if getattr(args, "json", False):
+        print(json.dumps(packet.to_dict(), indent=2))
+    else:
+        print(f"handoff created: {packet.session_id}")
+    return 0
+
+
+def session_handoff_list_command(args: argparse.Namespace) -> int:
+    """List handoff packets."""
+    from ..handoff import HandoffStore
+
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
+    context_path = _resolve_command_context(args)
+    store = HandoffStore(context_path, config=manager.config)
+    packets = store.list(limit=args.limit)
+
+    if getattr(args, "json", False):
+        print(json.dumps([p.to_dict() for p in packets], indent=2))
+        return 0
+
+    for p in packets:
+        print(f"{p.timestamp[:19]}  {p.session_id}  {p.agent_name}")
+    return 0
+
+
+def session_handoff_read_command(args: argparse.Namespace) -> int:
+    """Read a handoff packet."""
+    from ..handoff import HandoffStore
+
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
+    context_path = _resolve_command_context(args)
+    store = HandoffStore(context_path, config=manager.config)
+    packet = store.read(session_id=getattr(args, "session_id", None))
+
+    if packet is None:
+        print("no handoff packet found")
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps(packet.to_dict(), indent=2))
+    else:
+        print(f"session_id: {packet.session_id}")
+        print(f"agent: {packet.agent_name}")
+        print(f"timestamp: {packet.timestamp}")
+        if packet.accomplished:
+            print("accomplished:")
+            for item in packet.accomplished:
+                print(f"  - {item}")
+        if packet.blocked:
+            print("blocked:")
+            for item in packet.blocked:
+                print(f"  - {item}")
+        if packet.next_steps:
+            print("next_steps:")
+            for item in packet.next_steps:
+                print(f"  - {item}")
     return 0
 
 
@@ -911,6 +1175,28 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     services_render.add_argument("name", help="Service name.")
     services_render.set_defaults(func=services_render_command)
 
+    services_install = services_sub.add_parser("install", help="Install a managed service unit.")
+    services_install.add_argument("--config", help="Config path.")
+    services_install.add_argument("--enable", action="store_true", help="Enable/load the service after installing.")
+    services_install.add_argument("name", help="Service name.")
+    services_install.set_defaults(func=services_install_command)
+
+    services_uninstall = services_sub.add_parser("uninstall", help="Remove a managed service unit.")
+    services_uninstall.add_argument("--config", help="Config path.")
+    services_uninstall.add_argument("--keep-enabled", action="store_true", help="Skip disable/unload before removing the unit file.")
+    services_uninstall.add_argument("name", help="Service name.")
+    services_uninstall.set_defaults(func=services_uninstall_command)
+
+    services_enable = services_sub.add_parser("enable", help="Enable/load a managed service unit.")
+    services_enable.add_argument("--config", help="Config path.")
+    services_enable.add_argument("name", help="Service name.")
+    services_enable.set_defaults(func=services_enable_command)
+
+    services_disable = services_sub.add_parser("disable", help="Disable/unload a managed service unit.")
+    services_disable.add_argument("--config", help="Config path.")
+    services_disable.add_argument("name", help="Service name.")
+    services_disable.set_defaults(func=services_disable_command)
+
     services_start = services_sub.add_parser("start", help="Start a service.")
     services_start.add_argument("--config", help="Config path.")
     services_start.add_argument("name", help="Service name.")
@@ -924,6 +1210,8 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 
     services_status = services_sub.add_parser("status", help="Get service status.")
     services_status.add_argument("--config", help="Config path.")
+    services_status.add_argument("--json", action="store_true", help="Output JSON.")
+    services_status.add_argument("--system", action="store_true", help="Inspect installed OS-level service state.")
     services_status.add_argument("name", nargs="?", help="Service name (optional, shows all if omitted).")
     services_status.set_defaults(func=services_status_command)
 
@@ -931,6 +1219,13 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     services_restart.add_argument("--config", help="Config path.")
     services_restart.add_argument("name", help="Service name.")
     services_restart.set_defaults(func=services_restart_command)
+
+    services_logs = services_sub.add_parser("logs", help="Show captured service logs.")
+    services_logs.add_argument("--config", help="Config path.")
+    services_logs.add_argument("--json", action="store_true", help="Output JSON.")
+    services_logs.add_argument("--lines", type=int, default=50, help="Number of lines per log stream.")
+    services_logs.add_argument("name", help="Service name.")
+    services_logs.set_defaults(func=services_logs_command)
 
     # agents
     agents_parser = subparsers.add_parser("agents", help="Run built-in agents.")
@@ -1032,13 +1327,94 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     session_bootstrap.add_argument("--json", action="store_true", help="Output JSON.")
     session_bootstrap.set_defaults(func=session_bootstrap_command)
 
+    session_pack = session_sub.add_parser(
+        "pack",
+        help="Build a token-budgeted context pack for Gemini, Claude, Codex, or generic clients.",
+    )
+    add_context_args(session_pack)
+    session_pack.add_argument("query", nargs="?", help="Optional retrieval query.")
+    session_pack.add_argument(
+        "--model",
+        default="generic",
+        choices=["generic", "gemini", "claude", "codex"],
+        help="Target model profile (default: generic).",
+    )
+    session_pack.add_argument(
+        "--token-budget",
+        type=int,
+        help="Approximate token budget (defaults depend on model).",
+    )
+    session_pack.add_argument(
+        "--include-content",
+        action="store_true",
+        help="Include indexed file content instead of excerpts when available.",
+    )
+    session_pack.add_argument(
+        "--max-query-results",
+        type=int,
+        default=6,
+        help="Maximum indexed hits to include.",
+    )
+    session_pack.add_argument(
+        "--max-embedding-results",
+        type=int,
+        default=4,
+        help="Maximum embedding hits to include.",
+    )
+    session_pack.add_argument(
+        "--no-write-artifacts",
+        action="store_true",
+        help="Do not update scratchpad/afs_agents/session_pack_<model>.{json,md}.",
+    )
+    session_pack.add_argument("--json", action="store_true", help="Output JSON.")
+    session_pack.set_defaults(func=session_pack_command)
+
+    session_handoff = session_sub.add_parser(
+        "handoff", help="Create or read handoff packets."
+    )
+    session_handoff_sub = session_handoff.add_subparsers(dest="handoff_command")
+
+    handoff_create = session_handoff_sub.add_parser("create", help="Create a handoff packet.")
+    add_context_args(handoff_create)
+    handoff_create.add_argument("--accomplished", help="Semicolon-separated accomplished items.")
+    handoff_create.add_argument("--blocked", help="Semicolon-separated blocked items.")
+    handoff_create.add_argument("--next", help="Semicolon-separated next steps.")
+    handoff_create.add_argument("--agent-name", help="Agent name (default: cli).")
+    handoff_create.add_argument("--json", action="store_true", help="Output JSON.")
+    handoff_create.set_defaults(func=session_handoff_command)
+
+    handoff_list = session_handoff_sub.add_parser("list", help="List handoff packets.")
+    add_context_args(handoff_list)
+    handoff_list.add_argument("--limit", type=int, default=10, help="Max packets.")
+    handoff_list.add_argument("--json", action="store_true", help="Output JSON.")
+    handoff_list.set_defaults(func=session_handoff_list_command)
+
+    handoff_read = session_handoff_sub.add_parser("read", help="Read a handoff packet.")
+    add_context_args(handoff_read)
+    handoff_read.add_argument("--session-id", help="Session ID (latest if omitted).")
+    handoff_read.add_argument("--json", action="store_true", help="Output JSON.")
+    handoff_read.set_defaults(func=session_handoff_read_command)
+
     # hivemind
     hivemind_parser = subparsers.add_parser("hivemind", help="Inter-agent message bus.")
     hivemind_sub = hivemind_parser.add_subparsers(dest="hivemind_command")
     hivemind_ls = hivemind_sub.add_parser("list", help="List recent messages.")
     add_context_args(hivemind_ls)
     hivemind_ls.add_argument("--limit", type=int, default=20, help="Max messages.")
+    hivemind_ls.add_argument("--topic", help="Filter by topic.")
     hivemind_ls.set_defaults(func=hivemind_list_command)
+
+    hivemind_sub_cmd = hivemind_sub.add_parser("subscribe", help="Subscribe agent to topics.")
+    add_context_args(hivemind_sub_cmd)
+    hivemind_sub_cmd.add_argument("--agent", required=True, help="Agent name.")
+    hivemind_sub_cmd.add_argument("--topics", required=True, help="Comma-separated topics.")
+    hivemind_sub_cmd.set_defaults(func=hivemind_subscribe_command)
+
+    hivemind_unsub_cmd = hivemind_sub.add_parser("unsubscribe", help="Unsubscribe agent from topics.")
+    add_context_args(hivemind_unsub_cmd)
+    hivemind_unsub_cmd.add_argument("--agent", required=True, help="Agent name.")
+    hivemind_unsub_cmd.add_argument("--topics", required=True, help="Comma-separated topics.")
+    hivemind_unsub_cmd.set_defaults(func=hivemind_unsubscribe_command)
 
     # orchestrator
     orch_parser = subparsers.add_parser("orchestrator", help="Orchestrator helpers.")

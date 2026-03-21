@@ -98,6 +98,9 @@ metadata-first history events, writes durable summaries into
 ```bash
 ./scripts/afs session bootstrap
 ./scripts/afs session bootstrap --json
+./scripts/afs session pack
+./scripts/afs session pack "sqlite indexing" --model gemini
+./scripts/afs session pack "runtime bug" --model codex --token-budget 12000 --json
 ```
 
 `session bootstrap` is the preferred start-of-session surface. It combines:
@@ -113,6 +116,41 @@ It also refreshes:
 
 - `.context/scratchpad/afs_agents/session_bootstrap.json`
 - `.context/scratchpad/afs_agents/session_bootstrap.md`
+
+`session pack` is the compact follow-on surface when an agent needs a bounded
+working set for Gemini, Claude, Codex, or a generic client. It builds a
+token-budgeted packet from bootstrap state, scratchpad, queued tasks, hivemind,
+durable memory, and indexed retrieval hits, then writes:
+
+- `.context/scratchpad/afs_agents/session_pack_<model>.json`
+- `.context/scratchpad/afs_agents/session_pack_<model>.md`
+
+`never_export` sensitivity rules are applied to indexed content included in the
+pack, so blocked paths do not leak into session exports.
+
+## Events
+
+```bash
+./scripts/afs events tail --json
+./scripts/afs events list --type mcp_tool --limit 25
+./scripts/afs events list --path ~/src/project-a --source afs.mcp
+```
+
+`events` reads the active context history log with the same config/context
+resolution as the rest of the CLI.
+
+## Claude
+
+```bash
+./scripts/afs claude setup --path ~/src/project-a
+./scripts/afs claude context --path ~/src/project-a
+./scripts/afs claude session-report --session <uuid> --write-scratchpad
+```
+
+`claude setup` writes `project/.claude/settings.json` and `project/CLAUDE.md`
+for the resolved project path, not just the current shell directory. When an
+`afs.toml` is present, the generated Claude MCP entry pins `AFS_CONFIG_PATH`
+and `AFS_PREFER_REPO_CONFIG=1` so Claude uses the repo-local AFS config.
 
 ## Workspace
 
@@ -257,7 +295,7 @@ Gemini brief agent:
 `context-warm` now audits each discovered context for broken symlink mounts,
 duplicate mount targets, missing profile-managed mounts, untracked/stale mount
 provenance, and stale SQLite indexes. The built-in service now runs with
-`--repair-mounts --rebuild-stale-indexes` by default.
+`--repair-mounts --rebuild-stale-indexes --doctor-snapshot` by default.
 
 For continuous maintenance, start the watcher:
 
@@ -285,10 +323,21 @@ If you want background services to stay pinned to a repo-local config and
 ./scripts/afs services start --config /path/to/afs.toml agent-supervisor
 ```
 
-`afs services render|start|stop|status|restart` preserve that explicit
+OS-managed service lifecycle is also available:
+
+```bash
+./scripts/afs services install context-warm --enable
+./scripts/afs services status --system
+./scripts/afs services logs context-warm
+./scripts/afs services disable context-warm
+./scripts/afs services uninstall context-warm
+```
+
+`afs services render|install|enable|disable|start|stop|status|restart|logs` preserve that explicit
 `AFS_CONFIG_PATH` for the spawned service process. `afs status` and
 `afs health` also surface the `history-memory` maintenance report alongside
-`context-warm`, `context-watch`, and `agent-supervisor`.
+`context-warm`, `context-watch`, `agent-supervisor`, and the periodic
+`doctor_snapshot`.
 
 `context-watch` uses `context-warm --watch` and reacts to changes under the
 context root and mounted source paths. If the optional `watchfiles` package is
@@ -351,6 +400,11 @@ problems without the server crashing. The startup subset is lighter than the
 full `doctor` run and skips operator-only checks like service registration
 state.
 
+`context-warm` and `context-watch` now write
+`.context/scratchpad/afs_agents/doctor_snapshot.json` so `afs health` can
+surface the latest maintenance-time diagnosis even when you have not run the
+doctor manually.
+
 ## Health
 
 ```bash
@@ -362,9 +416,10 @@ state.
 `afs health` reports AFS MCP registration for Gemini, Claude, and Codex, and it
 detects both `python -m afs.mcp_server` and `afs mcp serve` processes. It also
 reports broken mounts, duplicate mount targets, provenance drift, repair/remap
-activity, maintenance service state, and supervisor agent state so you can see
-context drift or failed background agents without opening the directory
-manually.
+activity, recent MCP workflow usage (`afs.session.bootstrap`, `context.status`,
+`context.diff`, `context.query`, `session.pack`), maintenance service state,
+and supervisor agent state so you can see context drift or failed background
+agents without opening the directory manually.
 
 Repair a context directly when you want an explicit fix instead of waiting for a
 background service:

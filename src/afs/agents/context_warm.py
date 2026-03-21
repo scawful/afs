@@ -138,6 +138,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seconds between runs (0 = run once).",
     )
     parser.add_argument(
+        "--doctor-snapshot",
+        action="store_true",
+        help="Write a fresh doctor snapshot after each run.",
+    )
+    parser.add_argument(
         "--max-runs",
         type=int,
         default=0,
@@ -611,6 +616,18 @@ def _emit_agent_result(args: argparse.Namespace, result: AgentResult) -> None:
         force_stdout=args.stdout,
         pretty=args.pretty,
     )
+    if getattr(args, "doctor_snapshot", False):
+        try:
+            from ..diagnostics import write_doctor_snapshot
+
+            config_path = (
+                Path(args.config).expanduser().resolve()
+                if getattr(args, "config", None)
+                else None
+            )
+            write_doctor_snapshot(config_path=config_path)
+        except Exception:
+            pass
 
 
 def _run_watch_loop(args: argparse.Namespace, config) -> int:

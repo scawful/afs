@@ -19,6 +19,7 @@ from afs.diagnostics import (
     format_results_json,
     format_results_text,
     run_all_checks,
+    write_doctor_snapshot,
 )
 from afs.manager import AFSManager
 from afs.models import MountType, ProjectMetadata
@@ -256,3 +257,20 @@ def test_format_results_json() -> None:
     parsed = json.loads(output)
     assert "checks" in parsed
     assert parsed["checks"][0]["name"] == "foo"
+
+
+def test_write_doctor_snapshot_writes_agent_report(tmp_path: Path) -> None:
+    context_root = tmp_path / "context"
+    config_path = tmp_path / "afs.toml"
+    _write_config(config_path, context_root)
+
+    path = write_doctor_snapshot(
+        config_path=config_path,
+        results=[DiagnosticResult(name="config", status="warn", message="needs attention")],
+    )
+
+    assert path is not None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["status"] == "warn"
+    assert payload["payload"]["context_root"] == str(context_root)
+    assert payload["payload"]["checks"][0]["name"] == "config"

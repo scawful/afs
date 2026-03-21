@@ -5,7 +5,7 @@ from pathlib import Path
 
 import afs.history as history_module
 from afs.context_fs import ContextFileSystem
-from afs.history import log_cli_invocation, log_event
+from afs.history import log_cli_invocation, log_event, log_session_event
 from afs.manager import AFSManager
 from afs.models import MountType
 from afs.schema import AFSConfig, GeneralConfig, HistoryConfig
@@ -140,6 +140,27 @@ def test_log_event_can_explicitly_include_payloads(tmp_path, monkeypatch) -> Non
 
     event = json.loads(log_files[0].read_text(encoding="utf-8").splitlines()[-1])
     assert event.get("payload_ref")
+
+
+def test_log_session_event_respects_explicit_context_root(tmp_path, monkeypatch) -> None:
+    context_root = tmp_path / "context"
+    config = AFSConfig(
+        general=GeneralConfig(
+            context_root=tmp_path / "other-context",
+            agent_workspaces_dir=(tmp_path / "other-context" / "workspaces"),
+        )
+    )
+    context_root.mkdir(parents=True, exist_ok=True)
+    (context_root / "history").mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(history_module, "load_config_model", lambda *args, **kwargs: config)
+    monkeypatch.delenv("AFS_HISTORY_DISABLED", raising=False)
+
+    event_id = log_session_event("bootstrap", context_root=context_root)
+
+    assert event_id
+    log_files = list((context_root / "history").glob("events_*.jsonl"))
+    assert log_files
 
 
 def test_context_fs_history_records_metadata_not_file_contents(tmp_path, monkeypatch) -> None:

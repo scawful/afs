@@ -92,6 +92,7 @@ def test_tools_list_returns_afs_tools(tmp_path: Path) -> None:
         "context.diff",
         "context.status",
         "context.repair",
+        "session.pack",
     }.issubset(names)
 
 
@@ -1296,6 +1297,7 @@ def test_prompts_list_returns_expected_prompts(tmp_path: Path) -> None:
     names = {p["name"] for p in prompts}
     assert {
         "afs.session.bootstrap",
+        "afs.session.pack",
         "afs.context.overview",
         "afs.query.search",
         "afs.scratchpad.review",
@@ -1330,6 +1332,78 @@ def test_prompts_get_session_bootstrap(tmp_path: Path) -> None:
     text = messages[0]["content"]["text"]
     assert "AFS Session Bootstrap" in text
     assert "bootstrap state" in text
+
+
+def test_tool_session_pack(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    (context_root / "knowledge").mkdir(exist_ok=True)
+    (context_root / "knowledge" / "guide.md").write_text(
+        "codex service guide",
+        encoding="utf-8",
+    )
+    from afs.context_index import ContextSQLiteIndex
+
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE],
+        include_content=True,
+    )
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 126,
+            "method": "tools/call",
+            "params": {
+                "name": "session.pack",
+                "arguments": {
+                    "context_path": str(context_root),
+                    "query": "service guide",
+                    "model": "codex",
+                },
+            },
+        },
+        manager,
+    )
+    assert response is not None
+    payload = response["result"]["structuredContent"]
+    assert payload["model"] == "codex"
+    assert any("guide.md" in source for source in payload["sources"])
+
+
+def test_prompts_get_session_pack(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    (context_root / "knowledge").mkdir(exist_ok=True)
+    (context_root / "knowledge" / "guide.md").write_text(
+        "gemini service guide",
+        encoding="utf-8",
+    )
+    from afs.context_index import ContextSQLiteIndex
+
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE],
+        include_content=True,
+    )
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 127,
+            "method": "prompts/get",
+            "params": {
+                "name": "afs.session.pack",
+                "arguments": {
+                    "context_path": str(context_root),
+                    "query": "service guide",
+                    "model": "gemini",
+                },
+            },
+        },
+        manager,
+    )
+    assert response is not None
+    text = response["result"]["messages"][0]["content"]["text"]
+    assert "AFS Context Pack" in text
+    assert "gemini" in text.lower()
 
 
 def test_prompts_get_context_overview(tmp_path: Path) -> None:

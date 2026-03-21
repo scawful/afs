@@ -21,10 +21,12 @@ from ..profiles import resolve_active_profile
 from . import (
     briefing,
     bundle,
+    claude,
     context,
     core,
     doctor,
     embeddings,
+    events,
     fs,
     gemini,
     gws_cli,
@@ -149,6 +151,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Register health commands
     health_cli.register_parsers(subparsers)
+
+    # Register events commands
+    events.register_parsers(subparsers)
+
+    # Register claude commands
+    claude.register_parsers(subparsers)
 
     # Register doctor command
     doctor.register_parsers(subparsers)

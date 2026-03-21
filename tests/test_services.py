@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from afs.schema import (
@@ -60,6 +61,7 @@ def test_context_warm_service_rebuilds_stale_indexes() -> None:
     manager = ServiceManager(config=AFSConfig(), platform_name="linux")
     definition = manager.get_definition("context-warm")
     assert definition is not None
+    assert "--doctor-snapshot" in definition.command
     assert "--repair-mounts" in definition.command
     assert "--rebuild-stale-indexes" in definition.command
 
@@ -69,6 +71,7 @@ def test_context_watch_service_uses_watch_mode() -> None:
     definition = manager.get_definition("context-watch")
     assert definition is not None
     assert "--watch" in definition.command
+    assert "--doctor-snapshot" in definition.command
     assert "--skip-embeddings" in definition.command
 
 
@@ -160,3 +163,68 @@ def test_service_manager_uses_remapped_scratchpad_for_reports(tmp_path: Path) ->
 
     assert definition is not None
     assert str(context_root / "notes" / "afs_agents" / "context_warm.json") in definition.command
+
+
+def test_service_install_writes_unit_with_log_paths(tmp_path: Path) -> None:
+    manager = ServiceManager(
+        config=AFSConfig(),
+        platform_name="linux",
+        service_root=tmp_path / "services",
+    )
+
+    unit_path = manager.install("context-warm")
+    rendered = unit_path.read_text(encoding="utf-8")
+
+    assert unit_path.exists()
+    assert "StandardOutput=append:" in rendered
+    assert "StandardError=append:" in rendered
+    stdout_log, stderr_log = manager.log_paths("context-warm")
+    assert str(stdout_log) in rendered
+    assert str(stderr_log) in rendered
+
+
+def test_service_logs_reads_captured_output(tmp_path: Path) -> None:
+    manager = ServiceManager(
+        config=AFSConfig(),
+        platform_name="linux",
+        service_root=tmp_path / "services",
+    )
+    stdout_log, stderr_log = manager.log_paths("context-warm")
+    stdout_log.parent.mkdir(parents=True, exist_ok=True)
+    stdout_log.write_text("a\nb\nc\n", encoding="utf-8")
+    stderr_log.write_text("err1\nerr2\n", encoding="utf-8")
+
+    payload = manager.logs("context-warm", lines=2)
+
+    assert payload["stdout"] == ["b", "c"]
+    assert payload["stderr"] == ["err1", "err2"]
+
+
+def test_service_system_status_reports_unit_state(tmp_path: Path, monkeypatch) -> None:
+    manager = ServiceManager(
+        config=AFSConfig(),
+        platform_name="linux",
+        service_root=tmp_path / "services",
+    )
+    unit_path = manager.install("context-warm")
+
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd, check=False, capture_output=True, text=True):
+        calls.append(list(cmd))
+        if "is-active" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="active\n", stderr="")
+        if "is-enabled" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="enabled\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("afs.services.adapters.systemd.subprocess.run", _fake_run)
+
+    payload = manager.system_status("context-warm")
+
+    assert payload["installed"] is True
+    assert payload["enabled"] is True
+    assert payload["active"] is True
+    assert payload["unit_path"] == str(unit_path)
+    assert any("is-active" in " ".join(cmd) for cmd in calls)
+    assert any("is-enabled" in " ".join(cmd) for cmd in calls)

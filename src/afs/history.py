@@ -21,6 +21,13 @@ SENSITIVE_MARKERS = ("key", "token", "secret", "password")
 EVENT_FILE_PREFIX = "events"
 DEFAULT_MAX_INLINE_CHARS = 4000
 
+# Structured event type constants
+EVENT_MCP_TOOL = "mcp_tool"
+EVENT_HIVEMIND = "hivemind"
+EVENT_EMBEDDING = "embedding"
+EVENT_AGENT_LIFECYCLE = "agent_lifecycle"
+EVENT_SESSION = "session"
+
 
 @dataclass(frozen=True)
 class HistoryEvent:
@@ -398,6 +405,130 @@ def iter_history_events(
                     yield event
         except OSError:
             continue
+
+
+def query_events(
+    history_root: Path,
+    *,
+    event_types: set[str] | None = None,
+    since: str | None = None,
+    limit: int = 50,
+    source: str | None = None,
+) -> list[dict[str, Any]]:
+    """Query history events with filtering and return most recent N."""
+    since_dt = _parse_timestamp(since) if since else None
+    results: list[dict[str, Any]] = []
+    for event in iter_history_events(history_root, event_types=event_types):
+        if since_dt:
+            event_ts = _parse_timestamp(event.get("timestamp"))
+            if event_ts < since_dt:
+                continue
+        if source and event.get("source") != source:
+            continue
+        results.append(event)
+    if limit and len(results) > limit:
+        results = results[-limit:]
+    return results
+
+
+def log_mcp_tool_call(
+    tool_name: str,
+    arguments: dict[str, Any] | None = None,
+    result: dict[str, Any] | None = None,
+    duration_ms: int | None = None,
+    context_root: Path | None = None,
+) -> str | None:
+    """Log an MCP tool call event."""
+    metadata: dict[str, Any] = {"tool_name": tool_name}
+    if duration_ms is not None:
+        metadata["duration_ms"] = duration_ms
+    if arguments:
+        metadata["arguments"] = arguments
+    return log_event(
+        EVENT_MCP_TOOL,
+        "afs.mcp",
+        op="call",
+        metadata=metadata,
+        payload=result,
+        context_root=context_root,
+    )
+
+
+def log_hivemind_event(
+    op: str,
+    agent_name: str,
+    msg_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    context_root: Path | None = None,
+) -> str | None:
+    """Log a hivemind bus event."""
+    meta: dict[str, Any] = {"agent_name": agent_name}
+    if msg_id:
+        meta["msg_id"] = msg_id
+    if metadata:
+        meta.update(metadata)
+    return log_event(
+        EVENT_HIVEMIND,
+        "afs.hivemind",
+        op=op,
+        metadata=meta,
+        context_root=context_root,
+    )
+
+
+def log_embedding_event(
+    op: str,
+    metadata: dict[str, Any] | None = None,
+    context_root: Path | None = None,
+) -> str | None:
+    """Log an embedding index/search event."""
+    return log_event(
+        EVENT_EMBEDDING,
+        "afs.embeddings",
+        op=op,
+        metadata=metadata or {},
+        context_root=context_root,
+    )
+
+
+def log_agent_lifecycle(
+    agent_name: str,
+    op: str,
+    metadata: dict[str, Any] | None = None,
+    context_root: Path | None = None,
+) -> str | None:
+    """Log an agent lifecycle event."""
+    meta: dict[str, Any] = {"agent_name": agent_name}
+    if metadata:
+        meta.update(metadata)
+    return log_event(
+        EVENT_AGENT_LIFECYCLE,
+        "afs.agents",
+        op=op,
+        metadata=meta,
+        context_root=context_root,
+    )
+
+
+def log_session_event(
+    op: str,
+    session_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    context_root: Path | None = None,
+) -> str | None:
+    """Log a session event."""
+    meta: dict[str, Any] = {}
+    if session_id:
+        meta["session_id"] = session_id
+    if metadata:
+        meta.update(metadata)
+    return log_event(
+        EVENT_SESSION,
+        "afs.session",
+        op=op,
+        metadata=meta,
+        context_root=context_root,
+    )
 
 
 def load_history_payload(event: dict[str, Any], history_root: Path) -> dict[str, Any] | None:

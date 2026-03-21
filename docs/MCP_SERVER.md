@@ -70,6 +70,12 @@ the client build, that is typically either `~/.claude/settings.json` or
 }
 ```
 
+Project-local setup is also available:
+
+```bash
+afs claude setup --path /path/to/project
+```
+
 ## Antigravity Custom Config
 
 In Antigravity, open `MCP Servers -> Manage MCP Servers -> View raw config`, then add:
@@ -101,9 +107,19 @@ In Antigravity, open `MCP Servers -> Manage MCP Servers -> View raw config`, the
 - `context.diff`
 - `context.status`
 - `context.repair`
+- `session.pack`
 - `agent.spawn`
 - `agent.ps`
 - `agent.stop`
+- `agent.logs`
+- `events.query`
+- `events.tail`
+- `hivemind.subscribe`
+- `hivemind.unsubscribe`
+- `handoff.create`
+- `handoff.read`
+- `handoff.list`
+- `embeddings.index`
 
 `context.query` uses a SQLite index with FTS ranking when available, and falls
 back to `LIKE` matching if FTS is unavailable on the host SQLite build.
@@ -115,6 +131,7 @@ via mount fingerprints, including external renames that keep file counts stable.
 Gemini-facing MCP prompts:
 
 - `afs.session.bootstrap`
+- `afs.session.pack`
 - `afs.context.overview`
 - `afs.query.search`
 - `afs.scratchpad.review`
@@ -122,6 +139,7 @@ Gemini-facing MCP prompts:
 Gemini-facing MCP resources:
 
 - `afs://contexts`
+- `afs://claude/bootstrap`
 - `afs://context/<path>/bootstrap`
 - `afs://context/<path>/metadata`
 - `afs://context/<path>/mounts`
@@ -130,6 +148,11 @@ Gemini-facing MCP resources:
 `afs.session.bootstrap` is the recommended first call in a new session. It
 packages health, drift, scratchpad notes, task queue state, recent hivemind
 messages, and the latest durable memory summary into one startup packet.
+
+`session.pack` / `afs.session.pack` is the compact follow-on surface for
+model-specific working context. It builds a token-budgeted pack for Gemini,
+Claude, Codex, or generic clients and respects `never_export` sensitivity rules
+when including indexed content.
 
 Index behavior can be tuned in `afs.toml`:
 
@@ -295,7 +318,7 @@ export:
 `context-warm` now audits discovered contexts for broken symlink mounts,
 duplicate mount targets, missing profile-managed mounts, untracked/stale mount
 provenance, and stale indexes. The built-in service runs with
-`--repair-mounts --rebuild-stale-indexes` by default.
+`--repair-mounts --rebuild-stale-indexes --doctor-snapshot` by default.
 
 `context-watch` is the on-change companion surface. It runs `context-warm
 --watch`, monitors the context root and mounted source paths, and only reruns
@@ -321,7 +344,7 @@ config surfaces, and it recognizes both `python -m afs.mcp_server` and
 wrapper-style `afs mcp serve` processes. It also surfaces context mount drift so
 agents can distinguish path access problems from index staleness quickly, and it
 includes maintenance report/service state for `context-warm`, `context-watch`,
-`agent-supervisor`, and `gemini-workspace-brief`.
+`agent-supervisor`, `doctor_snapshot`, and `gemini-workspace-brief`.
 
 ## Example Call Shape
 

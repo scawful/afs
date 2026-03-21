@@ -42,7 +42,13 @@ def discover_mcp_config_paths(
 
     configs: dict[str, list[Path]] = {client: [] for client in SUPPORTED_MCP_CLIENTS}
     for client, candidates in _JSON_CONFIG_CANDIDATES.items():
-        configs[client] = _existing_paths(home_dir / candidate for candidate in candidates)
+        paths = [home_dir / candidate for candidate in candidates]
+        # Also check project-level .claude/settings.json
+        if client == "claude":
+            project_candidate = cwd_dir / ".claude" / "settings.json"
+            if project_candidate not in paths:
+                paths.append(project_candidate)
+        configs[client] = _existing_paths(paths)
 
     for client, candidates in _TOML_CONFIG_CANDIDATES.items():
         paths = [home_dir / candidate for candidate in candidates]

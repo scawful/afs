@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 EmbeddingFactory = Callable[..., Callable[[str], list[float]]]
 _EMBEDDING_BACKENDS: dict[str, EmbeddingFactory] = {}
@@ -21,13 +22,19 @@ class EmbeddingIndexResult:
     total_files: int = 0
     indexed: int = 0
     skipped: int = 0
+    reused: int = 0
+    removed: int = 0
+    mode: str = "full"
     errors: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
-        return (
+        parts = [
             f"total={self.total_files} indexed={self.indexed} "
             f"skipped={self.skipped} errors={len(self.errors)}"
-        )
+        ]
+        if self.mode == "incremental":
+            parts.append(f"reused={self.reused} removed={self.removed}")
+        return " ".join(parts)
 
 
 @dataclass
@@ -301,6 +308,48 @@ def create_hf_embed_fn(
     return embed
 
 
+def _load_existing_index(output_dir: Path) -> tuple[dict[str, str], dict[str, dict]]:
+    """Load existing index and per-doc metadata (size_bytes, modified_at)."""
+    index_path = output_dir / "embedding_index.json"
+    embeddings_dir = output_dir / "embeddings"
+    old_index: dict[str, str] = {}
+    old_meta: dict[str, dict] = {}
+    if not index_path.exists():
+        return old_index, old_meta
+    try:
+        raw = json.loads(index_path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            old_index = {k: v for k, v in raw.items() if k != "_metadata"}
+    except (json.JSONDecodeError, OSError):
+        return old_index, old_meta
+    for doc_id, filename in old_index.items():
+        entry_path = embeddings_dir / filename
+        try:
+            data = json.loads(entry_path.read_text(encoding="utf-8"))
+            old_meta[doc_id] = {
+                "size_bytes": data.get("size_bytes", 0),
+                "modified_at": data.get("modified_at"),
+            }
+        except (json.JSONDecodeError, OSError):
+            pass
+    return old_index, old_meta
+
+
+def _file_changed(path: Path, old_size: int, old_mtime: str | None) -> bool:
+    """Check if file changed based on size+mtime comparison."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return True
+    if stat.st_size != old_size:
+        return True
+    if old_mtime:
+        current_mtime = datetime.fromtimestamp(stat.st_mtime).isoformat()
+        if current_mtime != old_mtime:
+            return True
+    return False
+
+
 def build_embedding_index(
     sources: Iterable[Path],
     output_dir: Path,
@@ -313,6 +362,8 @@ def build_embedding_index(
     max_bytes: int | None = 2_000_000,
     embed_fn: Callable[[str], list[float]] | None = None,
     include_hidden: bool = False,
+    skip_path: Callable[[Path, Path], bool] | None = None,
+    incremental: bool = False,
 ) -> EmbeddingIndexResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     embeddings_dir = output_dir / "embeddings"
@@ -321,14 +372,37 @@ def build_embedding_index(
 
     index: dict[str, str] = {}
     result = EmbeddingIndexResult()
+    result.mode = "incremental" if incremental else "full"
+
+    old_index: dict[str, str] = {}
+    old_meta: dict[str, dict] = {}
+    if incremental:
+        old_index, old_meta = _load_existing_index(output_dir)
 
     include = list(include_patterns) if include_patterns else []
     exclude = list(exclude_patterns) if exclude_patterns else []
 
+    seen_doc_ids: set[str] = set()
     for source_root, path in _iter_source_files(
         sources, include, exclude, max_files, include_hidden
     ):
         result.total_files += 1
+        if skip_path is not None and skip_path(source_root, path):
+            result.skipped += 1
+            continue
+
+        doc_id = _build_doc_id(source_root, path)
+        seen_doc_ids.add(doc_id)
+        filename = f"{_hash_doc_id(doc_id)}.json"
+
+        # Incremental: reuse unchanged files
+        if incremental and doc_id in old_index and doc_id in old_meta:
+            meta = old_meta[doc_id]
+            if not _file_changed(path, meta.get("size_bytes", 0), meta.get("modified_at")):
+                index[doc_id] = old_index[doc_id]
+                result.reused += 1
+                continue
+
         try:
             text = _read_text_file(path, max_bytes=max_bytes)
         except OSError as exc:
@@ -348,8 +422,6 @@ def build_embedding_index(
                 result.errors.append(f"{path}: embed failed ({exc})")
                 embedding = []
 
-        doc_id = _build_doc_id(source_root, path)
-        filename = f"{_hash_doc_id(doc_id)}.json"
         stat = None
         if path.exists():
             try:
@@ -379,10 +451,49 @@ def build_embedding_index(
         index[doc_id] = filename
         result.indexed += 1
 
+    # Detect deletions in incremental mode
+    if incremental:
+        for old_doc_id, old_filename in old_index.items():
+            if old_doc_id not in seen_doc_ids:
+                result.removed += 1
+                stale_path = embeddings_dir / old_filename
+                try:
+                    stale_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    # Write _metadata block into index
+    metadata_block: dict[str, Any] = {
+        "indexed_at": datetime.now().isoformat(),
+        "mode": result.mode,
+        "stats": {
+            "total_files": result.total_files,
+            "reused": result.reused,
+            "re_embedded": result.indexed,
+            "removed": result.removed,
+        },
+    }
+    index_with_meta: dict[str, Any] = {"_metadata": metadata_block}
+    index_with_meta.update(index)
+
     index_path.write_text(
-        json.dumps(index, indent=2, ensure_ascii=True) + "\n",
+        json.dumps(index_with_meta, indent=2, ensure_ascii=True) + "\n",
         encoding="utf-8",
     )
+    try:
+        from .history import log_embedding_event
+        log_embedding_event("index_build", metadata={
+            "output_dir": str(output_dir),
+            "total_files": result.total_files,
+            "indexed": result.indexed,
+            "skipped": result.skipped,
+            "reused": result.reused,
+            "removed": result.removed,
+            "mode": result.mode,
+            "errors_count": len(result.errors),
+        })
+    except Exception:
+        pass
     return result
 
 
@@ -413,6 +524,8 @@ def search_embedding_index(
 
     results: list[SearchResult] = []
     for doc_id, filename in index.items():
+        if doc_id == "_metadata":
+            continue
         entry_path = embeddings_dir / filename
         try:
             data = json.loads(entry_path.read_text(encoding="utf-8"))

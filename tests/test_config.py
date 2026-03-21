@@ -110,6 +110,23 @@ def test_load_config_model_parses_mcp_allowed_roots(tmp_path) -> None:
     assert model.general.mcp_allowed_roots == [allowed.resolve()]
 
 
+def test_load_config_model_parses_sensitivity_rules(tmp_path) -> None:
+    config_path = tmp_path / "sensitivity.toml"
+    config_path.write_text(
+        "[sensitivity]\n"
+        "never_index = [\"knowledge/private/*\"]\n"
+        "never_embed = [\"**/*.secret.md\"]\n"
+        "never_export = [\"memory/raw/*\"]\n",
+        encoding="utf-8",
+    )
+
+    model = load_config_model(config_path=config_path, merge_user=False)
+
+    assert model.sensitivity.never_index == ["knowledge/private/*"]
+    assert model.sensitivity.never_embed == ["**/*.secret.md"]
+    assert model.sensitivity.never_export == ["memory/raw/*"]
+
+
 def test_load_config_model_merges_env_mcp_allowed_roots(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "mcp_env.toml"
     configured = tmp_path / "configured"

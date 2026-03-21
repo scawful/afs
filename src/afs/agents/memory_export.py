@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ..context_paths import resolve_mount_root
 from ..models import MountType
+from ..sensitivity import filtered_tree_copy
 from ..training import export_memory_to_dataset
 from .base import (
     AgentResult,
@@ -91,45 +92,46 @@ def _run_export(args: argparse.Namespace, config) -> AgentResult:
 
     started_at = now_iso()
     start = time.monotonic()
-    export_result = export_memory_to_dataset(
-        memory_root,
-        dataset_output,
-        default_domain=args.domain,
-        allow_raw=args.allow_raw or config.memory_export.allow_raw,
-        allow_raw_tags=config.memory_export.allow_raw_tags,
-        default_instruction=args.default_instruction or config.memory_export.default_instruction,
-        limit=_resolve_limit(args, config),
-        require_quality=config.memory_export.require_quality,
-        min_quality_score=config.memory_export.min_quality_score,
-        score_profile=config.memory_export.score_profile,
-        enable_asar=config.memory_export.enable_asar,
-    )
-    route_results = []
-    for route in config.memory_export.routes:
-        if not route.tags:
-            continue
-        route_output = Path(route.output)
-        route_result = export_memory_to_dataset(
-            memory_root,
-            route_output,
-            default_domain=route.domain or args.domain,
+    with filtered_tree_copy(memory_root, config.sensitivity.never_export) as export_root:
+        export_result = export_memory_to_dataset(
+            export_root,
+            dataset_output,
+            default_domain=args.domain,
             allow_raw=args.allow_raw or config.memory_export.allow_raw,
             allow_raw_tags=config.memory_export.allow_raw_tags,
             default_instruction=args.default_instruction or config.memory_export.default_instruction,
-            include_tags=route.tags,
             limit=_resolve_limit(args, config),
             require_quality=config.memory_export.require_quality,
             min_quality_score=config.memory_export.min_quality_score,
             score_profile=config.memory_export.score_profile,
             enable_asar=config.memory_export.enable_asar,
         )
-        route_results.append({
-            "tags": list(route.tags),
-            "output": str(route_output),
-            "exported": route_result.exported,
-            "skipped": route_result.skipped,
-            "filtered": route_result.filtered,
-        })
+        route_results = []
+        for route in config.memory_export.routes:
+            if not route.tags:
+                continue
+            route_output = Path(route.output)
+            route_result = export_memory_to_dataset(
+                export_root,
+                route_output,
+                default_domain=route.domain or args.domain,
+                allow_raw=args.allow_raw or config.memory_export.allow_raw,
+                allow_raw_tags=config.memory_export.allow_raw_tags,
+                default_instruction=args.default_instruction or config.memory_export.default_instruction,
+                include_tags=route.tags,
+                limit=_resolve_limit(args, config),
+                require_quality=config.memory_export.require_quality,
+                min_quality_score=config.memory_export.min_quality_score,
+                score_profile=config.memory_export.score_profile,
+                enable_asar=config.memory_export.enable_asar,
+            )
+            route_results.append({
+                "tags": list(route.tags),
+                "output": str(route_output),
+                "exported": route_result.exported,
+                "skipped": route_result.skipped,
+                "filtered": route_result.filtered,
+            })
     duration = time.monotonic() - start
 
     result = AgentResult(
@@ -148,6 +150,7 @@ def _run_export(args: argparse.Namespace, config) -> AgentResult:
         notes=export_result.errors[:5],
         payload={
             "memory_root": str(memory_root),
+            "export_root": str(export_root),
             "dataset_output": str(dataset_output),
             "routes": route_results,
         },

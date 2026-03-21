@@ -15,15 +15,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .agent_scope import assert_mount_allowed, assert_tool_allowed
+from .agent_scope import assert_tool_allowed
 from .config import load_config_model
 from .context_index import (
     DEFAULT_MAX_CONTENT_CHARS,
     DEFAULT_MAX_FILE_SIZE_BYTES,
     ContextSQLiteIndex,
 )
+from .context_pack import build_context_pack, render_context_pack
 from .context_paths import resolve_mount_root
 from .discovery import discover_contexts
+from .event_log import read_agent_events
 from .manager import AFSManager
 from .models import MountType
 from .plugins import load_enabled_extensions
@@ -39,12 +41,13 @@ from .session_bootstrap import (
 SERVER_NAME = "afs"
 SERVER_VERSION = "0.1.0"
 PROTOCOL_VERSION = "2024-11-05"
-_CORE_RESOURCE_URIS = {"afs://contexts"}
+_CORE_RESOURCE_URIS = {"afs://contexts", "afs://claude/bootstrap"}
 _CORE_RESOURCE_PREFIXES = ("afs://context/",)
 _CORE_PROMPT_NAMES = {
     "afs.context.overview",
     "afs.query.search",
     "afs.session.bootstrap",
+    "afs.session.pack",
     "afs.scratchpad.review",
 }
 
@@ -196,11 +199,27 @@ class MCPToolRegistry:
         arguments: dict[str, Any],
         manager: AFSManager,
     ) -> dict[str, Any]:
+        import time
+
         tool = self.tools.get(name)
         if not tool:
             raise ValueError(f"Unknown tool: {name}")
         assert_tool_allowed(name)
-        return tool.handler(arguments, manager)
+        start = time.monotonic()
+        result = tool.handler(arguments, manager)
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        try:
+            from .history import log_mcp_tool_call
+            log_mcp_tool_call(
+                name,
+                arguments,
+                result,
+                duration_ms=elapsed_ms,
+                context_root=manager.config.general.context_root,
+            )
+        except Exception:
+            pass
+        return result
 
     def read_resource(self, uri: str, manager: AFSManager) -> dict[str, Any]:
         resource = self.resources.get(uri)
@@ -881,6 +900,45 @@ def _tool_context_status(arguments: dict[str, Any], manager: AFSManager) -> dict
     return collect_context_status(manager, context_path)
 
 
+def _tool_session_pack(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    """Build a token-budgeted context pack for a target model."""
+    context_path = _resolve_context_path(arguments, manager)
+    query_value = arguments.get("query", "")
+    if query_value is None:
+        query_value = ""
+    if not isinstance(query_value, str):
+        raise ValueError("query must be a string")
+    model = arguments.get("model", "generic")
+    if not isinstance(model, str):
+        raise ValueError("model must be a string")
+    return build_context_pack(
+        manager,
+        context_path,
+        query=query_value,
+        model=model,
+        token_budget=_coerce_int(
+            arguments.get("token_budget"),
+            default=0,
+            minimum=0,
+            maximum=200000,
+        )
+        or None,
+        include_content=bool(arguments.get("include_content", False)),
+        max_query_results=_coerce_int(
+            arguments.get("max_query_results"),
+            default=6,
+            minimum=1,
+            maximum=50,
+        ),
+        max_embedding_results=_coerce_int(
+            arguments.get("max_embedding_results"),
+            default=4,
+            minimum=1,
+            maximum=50,
+        ),
+    )
+
+
 def _tool_context_repair(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     """Repair provenance, broken mounts, and stale indexes for a context."""
     context_path = _resolve_context_path(arguments, manager)
@@ -983,35 +1041,6 @@ def _agent_supervisor(manager: AFSManager):
     return AgentSupervisor(config=manager.config)
 
 
-def _read_agent_events(
-    context_path: Path,
-    *,
-    agent_name: str,
-    limit: int,
-) -> list[dict[str, Any]]:
-    assert_mount_allowed(MountType.HISTORY, operation="read")
-    history_dir = resolve_mount_root(context_path, MountType.HISTORY)
-    prefix = f"agent.{agent_name}"
-    events: list[dict[str, Any]] = []
-    if history_dir.exists():
-        for log_file in sorted(history_dir.glob("events_*.jsonl"), reverse=True):
-            for line in reversed(log_file.read_text(encoding="utf-8").splitlines()):
-                if not line.strip():
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if entry.get("source", "").startswith(prefix):
-                    events.append(entry)
-                    if len(events) >= limit:
-                        break
-            if len(events) >= limit:
-                break
-    events.reverse()
-    return events
-
-
 def _tool_agent_spawn(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     name_value = arguments.get("name", "")
     module_value = arguments.get("module", "")
@@ -1072,10 +1101,13 @@ def _tool_hivemind_send(arguments: dict[str, Any], manager: AFSManager) -> dict[
     to = arguments.get("to")
     if isinstance(to, str):
         to = to.strip() or None
+    topic = arguments.get("topic")
+    if isinstance(topic, str):
+        topic = topic.strip() or None
 
     context_path = _resolve_context_path(arguments, manager)
     bus = HivemindBus(context_path)
-    msg = bus.send(from_agent.strip(), msg_type, payload, to=to)
+    msg = bus.send(from_agent.strip(), msg_type, payload, to=to, topic=topic)
     return msg.to_dict()
 
 
@@ -1088,11 +1120,14 @@ def _tool_hivemind_read(arguments: dict[str, Any], manager: AFSManager) -> dict[
     msg_type = arguments.get("type")
     if isinstance(msg_type, str):
         msg_type = msg_type.strip() or None
+    topic = arguments.get("topic")
+    if isinstance(topic, str):
+        topic = topic.strip() or None
     limit = _coerce_int(arguments.get("limit"), default=50, minimum=1, maximum=500)
 
     context_path = _resolve_context_path(arguments, manager)
     bus = HivemindBus(context_path)
-    messages = bus.read(agent_name=agent_name, msg_type=msg_type, limit=limit)
+    messages = bus.read(agent_name=agent_name, msg_type=msg_type, topic=topic, limit=limit)
     return {"messages": [m.to_dict() for m in messages]}
 
 
@@ -1158,10 +1193,11 @@ def _tool_agent_logs(arguments: dict[str, Any], manager: AFSManager) -> dict[str
         raise ValueError("name is required")
     limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=500)
     context_path = _resolve_context_path(arguments, manager)
-    events = _read_agent_events(
+    events = read_agent_events(
         context_path,
         agent_name=agent_name.strip(),
         limit=limit,
+        config=manager.config,
     )
     return {"events": events}
 
@@ -1201,6 +1237,140 @@ def _tool_briefing(arguments: dict[str, Any], manager: AFSManager) -> dict[str, 
     from .cli.briefing import _build_briefing
     days = arguments.get("days", 7)
     return _build_briefing(days=days)
+
+
+def _tool_events_query(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .context_paths import resolve_mount_root
+    from .history import query_events
+
+    context_path = _resolve_context_path(arguments, manager)
+    history_root = resolve_mount_root(context_path, MountType.HISTORY, config=manager.config)
+    event_type = arguments.get("event_type")
+    event_types = {event_type} if isinstance(event_type, str) and event_type.strip() else None
+    since = arguments.get("since")
+    limit = _coerce_int(arguments.get("limit"), default=50, minimum=1, maximum=500)
+    source = arguments.get("source")
+    if isinstance(source, str):
+        source = source.strip() or None
+    events = query_events(history_root, event_types=event_types, since=since, limit=limit, source=source)
+    return {"events": events, "count": len(events)}
+
+
+def _tool_events_tail(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .context_paths import resolve_mount_root
+    from .history import query_events
+
+    context_path = _resolve_context_path(arguments, manager)
+    history_root = resolve_mount_root(context_path, MountType.HISTORY, config=manager.config)
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=500)
+    events = query_events(history_root, limit=limit)
+    return {"events": events, "count": len(events)}
+
+
+def _tool_hivemind_subscribe(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .hivemind import HivemindBus
+
+    agent_name = arguments.get("agent_name", "")
+    if not isinstance(agent_name, str) or not agent_name.strip():
+        raise ValueError("agent_name is required")
+    topics = arguments.get("topics", [])
+    if not isinstance(topics, list) or not topics:
+        raise ValueError("topics must be a non-empty list")
+
+    context_path = _resolve_context_path(arguments, manager)
+    bus = HivemindBus(context_path)
+    sub = bus.subscribe(agent_name.strip(), [str(t).strip() for t in topics if str(t).strip()])
+    return sub.to_dict()
+
+
+def _tool_hivemind_unsubscribe(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .hivemind import HivemindBus
+
+    agent_name = arguments.get("agent_name", "")
+    if not isinstance(agent_name, str) or not agent_name.strip():
+        raise ValueError("agent_name is required")
+    topics = arguments.get("topics", [])
+    if not isinstance(topics, list) or not topics:
+        raise ValueError("topics must be a non-empty list")
+
+    context_path = _resolve_context_path(arguments, manager)
+    bus = HivemindBus(context_path)
+    sub = bus.unsubscribe(agent_name.strip(), [str(t).strip() for t in topics if str(t).strip()])
+    return sub.to_dict()
+
+
+def _tool_embeddings_index(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .embeddings import build_embedding_index
+
+    sources_raw = arguments.get("sources", [])
+    if not isinstance(sources_raw, list) or not sources_raw:
+        raise ValueError("sources must be a non-empty list of paths")
+    sources = [Path(s).expanduser().resolve() for s in sources_raw]
+    output_dir = Path(str(arguments.get("output_dir", ""))).expanduser().resolve()
+    include_patterns = arguments.get("include_patterns")
+    exclude_patterns = arguments.get("exclude_patterns")
+    incremental = bool(arguments.get("incremental", False))
+
+    result = build_embedding_index(
+        sources,
+        output_dir,
+        include_patterns=include_patterns,
+        exclude_patterns=exclude_patterns,
+        incremental=incremental,
+    )
+    return {
+        "summary": result.summary(),
+        "total_files": result.total_files,
+        "indexed": result.indexed,
+        "skipped": result.skipped,
+        "reused": getattr(result, "reused", 0),
+        "removed": getattr(result, "removed", 0),
+        "errors": result.errors[:10],
+    }
+
+
+def _tool_handoff_create(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .handoff import HandoffStore
+
+    agent_name = arguments.get("agent_name", "")
+    if not isinstance(agent_name, str) or not agent_name.strip():
+        raise ValueError("agent_name is required")
+
+    context_path = _resolve_context_path(arguments, manager)
+    store = HandoffStore(context_path, config=manager.config)
+    packet = store.create(
+        session_id=arguments.get("session_id"),
+        agent_name=agent_name.strip(),
+        accomplished=arguments.get("accomplished", []),
+        blocked=arguments.get("blocked", []),
+        next_steps=arguments.get("next_steps", []),
+        context_snapshot=arguments.get("context_snapshot", {}),
+        open_tasks=arguments.get("open_tasks", []),
+        metadata=arguments.get("metadata", {}),
+    )
+    return packet.to_dict()
+
+
+def _tool_handoff_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .handoff import HandoffStore
+
+    context_path = _resolve_context_path(arguments, manager)
+    store = HandoffStore(context_path, config=manager.config)
+    session_id = arguments.get("session_id")
+    packet = store.read(session_id=session_id)
+    if packet is None:
+        return {"error": "no handoff packet found"}
+    return packet.to_dict()
+
+
+def _tool_handoff_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .handoff import HandoffStore
+
+    context_path = _resolve_context_path(arguments, manager)
+    store = HandoffStore(context_path, config=manager.config)
+    limit = _coerce_int(arguments.get("limit"), default=10, minimum=1, maximum=100)
+    packets = store.list(limit=limit)
+    return {"packets": [p.to_dict() for p in packets], "count": len(packets)}
 
 
 def _builtin_tool_definitions() -> list[MCPToolDefinition]:
@@ -1435,6 +1605,28 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             handler=_tool_context_status,
         ),
         MCPToolDefinition(
+            name="session.pack",
+            description="Build a token-budgeted context pack for Gemini, Claude, Codex, or generic clients. Use this after bootstrap when the agent needs a compact cited working set.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "query": {"type": "string", "description": "Optional retrieval query."},
+                    "model": {
+                        "type": "string",
+                        "enum": ["generic", "gemini", "claude", "codex"],
+                        "default": "generic",
+                    },
+                    "token_budget": {"type": "integer", "description": "Approximate token budget."},
+                    "include_content": {"type": "boolean", "default": False},
+                    "max_query_results": {"type": "integer", "default": 6},
+                    "max_embedding_results": {"type": "integer", "default": 4},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_session_pack,
+        ),
+        MCPToolDefinition(
             name="context.repair",
             description="Repair mount provenance, broken mounts, and stale indexes for a context.",
             input_schema={
@@ -1519,6 +1711,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                     "type": {"type": "string", "description": "Message type: finding, request, or status."},
                     "payload": {"type": "object", "description": "Message payload."},
                     "to": {"type": "string", "description": "Optional recipient agent name."},
+                    "topic": {"type": "string", "description": "Optional topic for pub/sub routing (e.g. context:repair, agent:lifecycle)."},
                 },
                 "required": ["from", "type"],
                 "additionalProperties": False,
@@ -1534,6 +1727,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                     "context_path": {"type": "string"},
                     "agent": {"type": "string", "description": "Filter by sender agent name."},
                     "type": {"type": "string", "description": "Filter by message type."},
+                    "topic": {"type": "string", "description": "Filter by topic."},
                     "limit": {"type": "integer", "description": "Max messages to return.", "default": 50},
                 },
                 "additionalProperties": False,
@@ -1635,6 +1829,127 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_review_reject,
+        ),
+        MCPToolDefinition(
+            name="events.query",
+            description="Query the AFS event log with optional type, source, since, and limit filters.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "event_type": {"type": "string", "description": "Filter by event type (mcp_tool, hivemind, embedding, agent_lifecycle, session)."},
+                    "since": {"type": "string", "description": "ISO 8601 datetime cutoff."},
+                    "limit": {"type": "integer", "default": 50, "description": "Max events to return."},
+                    "source": {"type": "string", "description": "Filter by event source."},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_events_query,
+        ),
+        MCPToolDefinition(
+            name="events.tail",
+            description="Show the most recent AFS events.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "default": 20, "description": "Max events to return."},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_events_tail,
+        ),
+        MCPToolDefinition(
+            name="hivemind.subscribe",
+            description="Subscribe an agent to one or more hivemind topics.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "agent_name": {"type": "string", "description": "Agent name."},
+                    "topics": {"type": "array", "items": {"type": "string"}, "description": "Topics to subscribe to."},
+                },
+                "required": ["agent_name", "topics"],
+                "additionalProperties": False,
+            },
+            handler=_tool_hivemind_subscribe,
+        ),
+        MCPToolDefinition(
+            name="hivemind.unsubscribe",
+            description="Unsubscribe an agent from one or more hivemind topics.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "agent_name": {"type": "string", "description": "Agent name."},
+                    "topics": {"type": "array", "items": {"type": "string"}, "description": "Topics to unsubscribe from."},
+                },
+                "required": ["agent_name", "topics"],
+                "additionalProperties": False,
+            },
+            handler=_tool_hivemind_unsubscribe,
+        ),
+        MCPToolDefinition(
+            name="embeddings.index",
+            description="Build an embedding index for source paths. Supports incremental mode to skip unchanged files.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "sources": {"type": "array", "items": {"type": "string"}, "description": "Source paths to index."},
+                    "output_dir": {"type": "string", "description": "Output directory for the index."},
+                    "include_patterns": {"type": "array", "items": {"type": "string"}, "description": "Glob patterns to include."},
+                    "exclude_patterns": {"type": "array", "items": {"type": "string"}, "description": "Glob patterns to exclude."},
+                    "incremental": {"type": "boolean", "default": False, "description": "Skip unchanged files using size+mtime comparison."},
+                },
+                "required": ["sources", "output_dir"],
+                "additionalProperties": False,
+            },
+            handler=_tool_embeddings_index,
+        ),
+        MCPToolDefinition(
+            name="handoff.create",
+            description="Create a conversation handoff packet for the next session.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "agent_name": {"type": "string", "description": "Agent creating the handoff."},
+                    "accomplished": {"type": "array", "items": {"type": "string"}, "description": "What got done."},
+                    "blocked": {"type": "array", "items": {"type": "string"}, "description": "What's stuck."},
+                    "next_steps": {"type": "array", "items": {"type": "string"}, "description": "Recommended actions."},
+                    "context_snapshot": {"type": "object", "description": "Scratchpad state, open files, etc."},
+                    "open_tasks": {"type": "array", "items": {"type": "object"}, "description": "Open task dicts."},
+                    "metadata": {"type": "object", "description": "Freeform metadata."},
+                    "session_id": {"type": "string", "description": "Optional session ID (auto-generated if omitted)."},
+                },
+                "required": ["agent_name"],
+                "additionalProperties": False,
+            },
+            handler=_tool_handoff_create,
+        ),
+        MCPToolDefinition(
+            name="handoff.read",
+            description="Read a handoff packet. Returns the latest if no session_id is given.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "session_id": {"type": "string", "description": "Session ID to read (latest if omitted)."},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_handoff_read,
+        ),
+        MCPToolDefinition(
+            name="handoff.list",
+            description="List recent handoff packets.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "limit": {"type": "integer", "default": 10, "description": "Max packets to return."},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_handoff_list,
         ),
     ]
 
@@ -2332,6 +2647,12 @@ def _list_resources(
             "description": "All discovered .context roots",
             "mimeType": "application/json",
         },
+        {
+            "uri": "afs://claude/bootstrap",
+            "name": "Claude Bootstrap",
+            "description": "Session bootstrap as Claude-optimized markdown",
+            "mimeType": "text/markdown",
+        },
     ]
     for ctx in _discover_allowed_contexts(manager):
         ctx_uri = f"afs://context/{ctx.path}"
@@ -2381,6 +2702,12 @@ def _read_resource(
             for ctx in _discover_allowed_contexts(manager)
         ]
         return {"uri": uri, "mimeType": "application/json", "text": json.dumps(data)}
+
+    if uri == "afs://claude/bootstrap":
+        context_path = _resolve_context_path({}, manager)
+        payload = build_session_bootstrap(manager, context_path)
+        text = render_session_bootstrap(payload)
+        return {"uri": uri, "mimeType": "text/markdown", "text": text}
 
     if registry is not None and uri in registry.resources:
         return registry.read_resource(uri, manager)
@@ -2454,6 +2781,32 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                 {
                     "name": "message_limit",
                     "description": "Maximum hivemind messages to include (default 10)",
+                    "required": False,
+                },
+            ],
+        },
+        {
+            "name": "afs.session.pack",
+            "description": "Build a token-budgeted context pack with cited working context for Gemini, Claude, Codex, or generic clients.",
+            "arguments": [
+                {
+                    "name": "context_path",
+                    "description": "Path to .context root (uses configured default if omitted)",
+                    "required": False,
+                },
+                {
+                    "name": "query",
+                    "description": "Optional retrieval query to bias the pack.",
+                    "required": False,
+                },
+                {
+                    "name": "model",
+                    "description": "Target model profile: generic, gemini, claude, codex.",
+                    "required": False,
+                },
+                {
+                    "name": "token_budget",
+                    "description": "Approximate token budget override.",
                     "required": False,
                 },
             ],
@@ -2533,6 +2886,24 @@ def _get_prompt(
             message_limit=_coerce_int(arguments.get("message_limit"), default=10, minimum=1, maximum=100),
         )
         text = render_session_bootstrap(payload)
+        return [{"role": "user", "content": {"type": "text", "text": text}}]
+
+    if name == "afs.session.pack":
+        context_path = _resolve_prompt_context_path(arguments, manager)
+        payload = build_context_pack(
+            manager,
+            context_path,
+            query=str(arguments.get("query", "") or ""),
+            model=str(arguments.get("model", "generic") or "generic"),
+            token_budget=_coerce_int(
+                arguments.get("token_budget"),
+                default=0,
+                minimum=0,
+                maximum=200000,
+            )
+            or None,
+        )
+        text = render_context_pack(payload)
         return [{"role": "user", "content": {"type": "text", "text": text}}]
 
     if name == "afs.context.overview":

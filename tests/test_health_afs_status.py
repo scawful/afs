@@ -83,9 +83,11 @@ def test_collect_afs_health_snapshot(tmp_path: Path, monkeypatch) -> None:
     assert "registered_clients" in snapshot["mcp"]
     assert "registered_with_claude" in snapshot["mcp"]
     assert "registered_with_codex" in snapshot["mcp"]
+    assert "workflow_usage" in snapshot["mcp"]
     assert "supervisor" in snapshot["maintenance"]
     assert "agent_supervisor" in snapshot["maintenance"]["reports"]
     assert "history_memory" in snapshot["maintenance"]["reports"]
+    assert "doctor_snapshot" in snapshot["maintenance"]["reports"]
 
 
 def test_detect_mcp_running_matches_cli_variants() -> None:
@@ -118,12 +120,25 @@ def test_collect_afs_health_uses_remapped_history_and_scratchpad(
         json.dumps({"status": "ok", "payload": {}}),
         encoding="utf-8",
     )
+    (report_dir / "doctor_snapshot.json").write_text(
+        json.dumps({"status": "warn", "payload": {"checks": []}}),
+        encoding="utf-8",
+    )
     (context_root / "ledger" / "events_20260317.jsonl").write_text(
         json.dumps(
             {
                 "type": "hook",
                 "op": "before_context_read",
                 "timestamp": "2026-03-17T12:00:00+00:00",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "mcp_tool",
+                "timestamp": "2026-03-17T12:05:00+00:00",
+                "source": "afs.mcp",
+                "metadata": {"tool_name": "afs.session.bootstrap"},
             }
         )
         + "\n",
@@ -147,3 +162,7 @@ def test_collect_afs_health_uses_remapped_history_and_scratchpad(
     assert snapshot["maintenance"]["reports"]["history_memory"]["path"] == str(
         report_dir / "history_memory.json"
     )
+    assert snapshot["maintenance"]["reports"]["doctor_snapshot"]["path"] == str(
+        report_dir / "doctor_snapshot.json"
+    )
+    assert snapshot["mcp"]["workflow_usage"]["tools"]["afs.session.bootstrap"]["count"] == 1

@@ -17,6 +17,7 @@ from ..embeddings import (
     search_embedding_index,
 )
 from ..models import MountType
+from ..sensitivity import matches_path_rules
 
 
 def embeddings_index_command(args: argparse.Namespace) -> int:
@@ -49,6 +50,12 @@ def embeddings_index_command(args: argparse.Namespace) -> int:
         max_bytes=args.max_bytes,
         embed_fn=embed_fn,
         include_hidden=args.include_hidden,
+        skip_path=lambda source_root, path: matches_path_rules(
+            path,
+            relative_path=path.relative_to(source_root).as_posix(),
+            patterns=config.sensitivity.never_embed,
+        ),
+        incremental=getattr(args, "incremental", False),
     )
 
     if args.json:
@@ -59,6 +66,9 @@ def embeddings_index_command(args: argparse.Namespace) -> int:
             "total_files": result.total_files,
             "indexed": result.indexed,
             "skipped": result.skipped,
+            "reused": result.reused,
+            "removed": result.removed,
+            "mode": result.mode,
             "errors": result.errors,
         }
         print(json.dumps(payload, indent=2))
@@ -343,6 +353,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     add_provider_args(emb_index)
     emb_index.add_argument(
         "--include-hidden", action="store_true", help="Include hidden files."
+    )
+    emb_index.add_argument(
+        "--incremental", action="store_true", help="Skip unchanged files (size+mtime comparison)."
     )
     emb_index.add_argument("--json", action="store_true", help="Output JSON.")
     emb_index.set_defaults(func=embeddings_index_command)

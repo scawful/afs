@@ -133,6 +133,8 @@ def build_session_bootstrap(
     memory = _collect_memory(manager, context_path)
     reports = _collect_agent_reports(manager, context_path)
 
+    handoff = _collect_latest_handoff(context_path, config=manager.config)
+
     summary = {
         "context_path": str(context_path),
         "project": context.project_name,
@@ -151,8 +153,18 @@ def build_session_bootstrap(
         "hivemind": hivemind,
         "memory": memory,
         "agent_reports": reports,
+        "handoff": handoff,
     }
     summary["recommended_actions"] = _build_recommendations(summary)
+    try:
+        from .history import log_session_event
+        log_session_event(
+            "bootstrap",
+            metadata={"context_path": str(context_path)},
+            context_root=context_path,
+        )
+    except Exception:
+        pass
     return summary
 
 
@@ -266,6 +278,25 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
         lines.append(
             f"- {report['name']}: {report['status'] or 'unknown'} age={age_label}"
         )
+
+    handoff = summary.get("handoff", {})
+    if handoff.get("available"):
+        lines.extend(["", "## Latest Handoff"])
+        lines.append(f"- session_id: {handoff.get('session_id', '')}")
+        lines.append(f"- agent: {handoff.get('agent_name', '')}")
+        lines.append(f"- timestamp: {handoff.get('timestamp', '')}")
+        if handoff.get("accomplished"):
+            lines.append("- accomplished:")
+            for item in handoff["accomplished"]:
+                lines.append(f"  - {item}")
+        if handoff.get("blocked"):
+            lines.append("- blocked:")
+            for item in handoff["blocked"]:
+                lines.append(f"  - {item}")
+        if handoff.get("next_steps"):
+            lines.append("- next_steps:")
+            for item in handoff["next_steps"]:
+                lines.append(f"  - {item}")
 
     lines.extend(["", "## Recommended Actions"])
     for action in summary["recommended_actions"]:
@@ -435,6 +466,22 @@ def _collect_agent_reports(manager: AFSManager, context_path: Path) -> dict[str,
     return {"path": str(output_root), "reports": reports}
 
 
+def _collect_latest_handoff(context_path: Path, *, config: Any = None) -> dict[str, Any]:
+    """Collect the latest handoff packet if available."""
+    try:
+        from .handoff import HandoffStore
+
+        store = HandoffStore(context_path, config=config)
+        packet = store.read()
+        if packet is None:
+            return {"available": False}
+        result = packet.to_dict()
+        result["available"] = True
+        return result
+    except Exception:
+        return {"available": False}
+
+
 def _build_recommendations(summary: dict[str, Any]) -> list[str]:
     status = summary["status"]
     diff = summary["diff"]
@@ -471,6 +518,10 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
         recommendations.append("Scan the latest durable memory summary before asking for already-known context.")
     else:
         recommendations.append("No durable memory summary exists yet; run `afs memory consolidate` if handoff context matters.")
+
+    handoff = summary.get("handoff", {})
+    if handoff.get("available") and handoff.get("blocked"):
+        recommendations.append("Review blocked items from last handoff before starting new work.")
 
     recommendations.append("Prefer scratchpad updates, task queue entries, and hivemind notes for handoff instead of ad hoc chat summaries.")
     return recommendations

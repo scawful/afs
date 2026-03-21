@@ -57,6 +57,10 @@ class ServiceStatus:
     state: ServiceState
     pid: int | None = None
     enabled: bool = False
+    installed: bool = False
+    unit_path: Path | None = None
+    stdout_log: Path | None = None
+    stderr_log: Path | None = None
     last_started: datetime | None = None
     last_stopped: datetime | None = None
     error_message: str | None = None
@@ -67,6 +71,10 @@ class ServiceStatus:
             "state": self.state.value,
             "pid": self.pid,
             "enabled": self.enabled,
+            "installed": self.installed,
+            "unit_path": str(self.unit_path) if self.unit_path else None,
+            "stdout_log": str(self.stdout_log) if self.stdout_log else None,
+            "stderr_log": str(self.stderr_log) if self.stderr_log else None,
             "last_started": self.last_started.isoformat() if self.last_started else None,
             "last_stopped": self.last_stopped.isoformat() if self.last_stopped else None,
             "error_message": self.error_message,
