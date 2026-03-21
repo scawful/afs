@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from afs.config import load_config, load_config_model
+from afs.cli._utils import write_config
+from afs.config import load_config, load_config_model, load_runtime_config_model
+from afs.schema import AFSConfig
 
 
 def test_load_config_merges_workspace_registry(tmp_path, monkeypatch) -> None:
@@ -41,6 +43,27 @@ def test_load_config_model_uses_explicit_path(tmp_path) -> None:
     )
 
     model = load_config_model(config_path=config_path, merge_user=False)
+    assert model.general.context_root == context_root.resolve()
+
+
+def test_load_runtime_config_model_uses_nearest_repo_config(tmp_path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    nested = repo_root / "a" / "b"
+    nested.mkdir(parents=True)
+    context_root = repo_root / ".context"
+    config_path = repo_root / "afs.toml"
+    config_path.write_text(
+        f"[general]\ncontext_root = \"{context_root}\"\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(nested)
+    model, resolved_path = load_runtime_config_model(
+        merge_user=False,
+        start_dir=nested,
+    )
+
+    assert resolved_path == config_path.resolve()
     assert model.general.context_root == context_root.resolve()
 
 
@@ -190,3 +213,139 @@ def test_load_config_model_parses_service_context_filters(tmp_path) -> None:
 
     service = model.services.services["context-watch"]
     assert service.context_filters == [(tmp_path / "lab").resolve()]
+
+
+def test_write_config_round_trips_extended_sections(tmp_path) -> None:
+    config_path = tmp_path / "afs.toml"
+    config = AFSConfig.from_dict(
+        {
+            "general": {
+                "context_root": str(tmp_path / "context"),
+                "agent_workspaces_dir": str(tmp_path / "context" / "workspaces"),
+                "python_executable": str(tmp_path / "venv" / "bin" / "python"),
+                "workspace_directories": [
+                    {"path": str(tmp_path / "workspace"), "description": "Lab"}
+                ],
+                "mcp_allowed_roots": [str(tmp_path / "google")],
+                "discovery_ignore": ["archive", "vendor"],
+            },
+            "directories": [
+                {"name": "memory", "policy": "read_only", "role": "memory"},
+                {"name": "scratchpad", "policy": "writable", "role": "scratchpad"},
+            ],
+            "orchestrator": {
+                "enabled": True,
+                "max_agents": 7,
+                "auto_routing": False,
+                "default_agents": [
+                    {
+                        "name": "planner",
+                        "role": "planner",
+                        "backend": "local",
+                        "allowed_tools": ["context.status"],
+                    }
+                ],
+            },
+            "services": {
+                "enabled": True,
+                "services": {
+                    "context-watch": {
+                        "enabled": True,
+                        "auto_start": True,
+                        "context_filters": [str(tmp_path / "workspace")],
+                        "environment": {"AFS_TEST": "1"},
+                    }
+                },
+            },
+            "history": {
+                "enabled": True,
+                "include_payloads": True,
+                "max_inline_chars": 2048,
+                "payload_dir_name": "payload_archive",
+                "redact_sensitive": False,
+            },
+            "memory_export": {
+                "interval_seconds": 60,
+                "dataset_output": str(tmp_path / "datasets" / "memory.jsonl"),
+                "report_output": str(tmp_path / "reports" / "memory.json"),
+                "allow_raw": True,
+                "allow_raw_tags": ["allow_raw", "trusted"],
+                "default_instruction": "Summarize this memory",
+                "limit": 12,
+                "require_quality": False,
+                "min_quality_score": 0.25,
+                "score_profile": "gemini",
+                "enable_asar": True,
+                "auto_start": True,
+                "routes": [
+                    {
+                        "tags": ["scribe"],
+                        "output": str(tmp_path / "datasets" / "scribe.jsonl"),
+                        "domain": "scribe",
+                    }
+                ],
+            },
+            "memory_consolidation": {
+                "enabled": True,
+                "auto_start": True,
+                "interval_seconds": 900,
+                "report_output": str(tmp_path / "reports" / "history_memory.json"),
+                "entries_filename": "durable.jsonl",
+                "summary_dir_name": "history_notes",
+                "checkpoint_filename": "cursor.json",
+                "max_events_per_run": 42,
+                "max_events_per_entry": 7,
+                "include_event_types": ["fs", "context"],
+                "write_markdown": False,
+            },
+            "context_index": {
+                "enabled": True,
+                "db_filename": "sqlite/context.db",
+                "auto_index": False,
+                "auto_refresh": False,
+                "include_content": False,
+                "max_file_size_bytes": 8192,
+                "max_content_chars": 1024,
+                "decay_hours": 72.0,
+            },
+            "sensitivity": {
+                "never_index": ["knowledge/private/*"],
+                "never_embed": ["**/*.secret.md"],
+                "never_export": ["memory/raw/*"],
+            },
+            "hivemind": {
+                "default_ttl_hours": 8,
+                "reaper_enabled": False,
+            },
+        }
+    )
+
+    write_config(config_path, config)
+    roundtrip = load_config_model(config_path=config_path, merge_user=False)
+    text = config_path.read_text(encoding="utf-8")
+
+    assert "[services]" in text
+    assert "[history]" in text
+    assert "[memory_export]" in text
+    assert "[memory_consolidation]" in text
+    assert "[context_index]" in text
+    assert "[sensitivity]" in text
+    assert "[hivemind]" in text
+    assert roundtrip.general.python_executable == (tmp_path / "venv" / "bin" / "python").resolve()
+    assert roundtrip.general.discovery_ignore == ["archive", "vendor"]
+    assert roundtrip.orchestrator.enabled is True
+    assert roundtrip.orchestrator.max_agents == 7
+    assert roundtrip.orchestrator.default_agents[0].name == "planner"
+    assert roundtrip.services.enabled is True
+    assert roundtrip.services.services["context-watch"].context_filters == [
+        (tmp_path / "workspace").resolve()
+    ]
+    assert roundtrip.services.services["context-watch"].environment == {"AFS_TEST": "1"}
+    assert roundtrip.history.include_payloads is True
+    assert roundtrip.history.payload_dir_name == "payload_archive"
+    assert roundtrip.memory_export.allow_raw is True
+    assert roundtrip.memory_export.routes[0].domain == "scribe"
+    assert roundtrip.memory_consolidation.entries_filename == "durable.jsonl"
+    assert roundtrip.context_index.decay_hours == 72.0
+    assert roundtrip.sensitivity.never_embed == ["**/*.secret.md"]
+    assert roundtrip.hivemind.default_ttl_hours == 8

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..config import load_runtime_config_model
 from ..context_paths import resolve_mount_root
 from ..event_log import read_agent_events
 from ..memory_consolidation import consolidate_history_to_memory
@@ -37,18 +38,17 @@ def _hint(text: str) -> str:
 
 
 def _load_service_manager(args: argparse.Namespace):
-    from ..config import load_config_model
     from ..services import ServiceManager
 
-    config_path = (
+    explicit_config_path = (
         Path(args.config).expanduser().resolve()
         if getattr(args, "config", None)
         else None
     )
-    config = (
-        load_config_model(config_path=config_path, merge_user=True)
-        if config_path is not None
-        else None
+    config, config_path = load_runtime_config_model(
+        config_path=explicit_config_path,
+        merge_user=True,
+        start_dir=Path.cwd(),
     )
     return ServiceManager(config=config, config_path=config_path)
 
@@ -1147,7 +1147,6 @@ def _human_size(size_bytes: int) -> str:
 
 def status_command(args: argparse.Namespace) -> int:
     """Show AFS status."""
-    from ..config import load_config_model
     from ..core import find_root, resolve_context_root
     from ..health.afs_status import _maintenance_health
     from ..manager import AFSManager
@@ -1155,7 +1154,10 @@ def status_command(args: argparse.Namespace) -> int:
 
     start_dir = Path(args.start_dir).expanduser().resolve() if args.start_dir else None
     root = find_root(start_dir)
-    config = load_config_model()
+    config, _resolved_config_path = load_runtime_config_model(
+        merge_user=True,
+        start_dir=start_dir or Path.cwd(),
+    )
     context_root = resolve_context_root(config, root)
     manager = AFSManager(config=config)
 

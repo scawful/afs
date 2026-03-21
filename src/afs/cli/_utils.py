@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..config import load_runtime_config_model, resolve_runtime_config_path
+
 if TYPE_CHECKING:
     from ..manager import AFSManager
     from ..models import MountType
@@ -134,11 +136,43 @@ def studio_build(
 
 def load_manager(config_path: Path | None) -> AFSManager:
     """Load the AFS manager with configuration."""
-    from ..config import load_config_model
     from ..manager import AFSManager
 
-    config = load_config_model(config_path=config_path, merge_user=True)
+    config, _resolved_path = load_runtime_config_model(
+        config_path=config_path,
+        merge_user=True,
+        start_dir=Path.cwd(),
+    )
     return AFSManager(config=config)
+
+
+def resolve_args_config_path(
+    args: argparse.Namespace,
+    *,
+    start_dir: Path | None = None,
+) -> Path | None:
+    """Resolve config path from argparse args, env, or nearest repo config."""
+    raw_config = getattr(args, "config", None)
+    return resolve_runtime_config_path(
+        Path(raw_config) if raw_config else None,
+        start_dir=start_dir or Path.cwd(),
+    )
+
+
+def load_runtime_config_from_args(
+    args: argparse.Namespace,
+    *,
+    merge_user: bool = True,
+    start_dir: Path | None = None,
+) -> tuple[AFSConfig, Path | None]:
+    """Load runtime config using argparse config semantics."""
+    raw_config = getattr(args, "config", None)
+    config_path = Path(raw_config) if raw_config else None
+    return load_runtime_config_model(
+        config_path=config_path,
+        merge_user=merge_user,
+        start_dir=start_dir or Path.cwd(),
+    )
 
 
 def resolve_context_paths(
@@ -180,14 +214,43 @@ def write_config(path: Path, config: AFSConfig) -> None:
     else:
         doc = tomlkit.document()
 
+    def _table() -> tomlkit.items.Table:
+        return tomlkit.table()
+
+    def _add_agent_array(
+        parent: tomlkit.items.Table,
+        key: str,
+        agents: list,
+    ) -> None:
+        if not agents:
+            return
+        agents_aot = tomlkit.aot()
+        for agent in agents:
+            a_table = tomlkit.table()
+            a_table["name"] = agent.name
+            a_table["role"] = agent.role
+            a_table["backend"] = agent.backend
+            a_table["description"] = agent.description
+            a_table["tags"] = list(agent.tags)
+            a_table["auto_start"] = agent.auto_start
+            a_table["triggers"] = list(agent.triggers)
+            a_table["schedule"] = agent.schedule
+            a_table["module"] = agent.module
+            a_table["watch_paths"] = [str(p) for p in agent.watch_paths]
+            a_table["allowed_mounts"] = list(agent.allowed_mounts)
+            a_table["allowed_tools"] = list(agent.allowed_tools)
+            a_table["workspace_isolated"] = agent.workspace_isolated
+            agents_aot.append(a_table)
+        parent[key] = agents_aot
+
     # --- [general] ---
     general = config.general
-    gen_table = doc.get("general")
-    if not isinstance(gen_table, dict):
-        gen_table = tomlkit.table()
-        doc["general"] = gen_table
+    gen_table = _table()
     gen_table["context_root"] = str(general.context_root)
     gen_table["agent_workspaces_dir"] = str(general.agent_workspaces_dir)
+    if general.python_executable:
+        gen_table["python_executable"] = str(general.python_executable)
+    gen_table["discovery_ignore"] = list(general.discovery_ignore)
     if general.mcp_allowed_roots:
         gen_table["mcp_allowed_roots"] = [str(p) for p in general.mcp_allowed_roots]
     if general.workspace_directories:
@@ -199,31 +262,25 @@ def write_config(path: Path, config: AFSConfig) -> None:
                 ws_item["description"] = ws.description
             ws_aot.append(ws_item)
         gen_table["workspace_directories"] = ws_aot
+    doc["general"] = gen_table
 
     # --- [plugins] ---
-    plugins_table = doc.get("plugins")
-    if not isinstance(plugins_table, dict):
-        plugins_table = tomlkit.table()
-        doc["plugins"] = plugins_table
+    plugins_table = _table()
     plugins_table["auto_discover"] = config.plugins.auto_discover
     plugins_table["auto_discover_prefixes"] = list(config.plugins.auto_discover_prefixes)
     plugins_table["enabled_plugins"] = list(config.plugins.enabled_plugins)
     plugins_table["plugin_dirs"] = [str(p) for p in config.plugins.plugin_dirs]
+    doc["plugins"] = plugins_table
 
     # --- [extensions] ---
-    ext_table = doc.get("extensions")
-    if not isinstance(ext_table, dict):
-        ext_table = tomlkit.table()
-        doc["extensions"] = ext_table
+    ext_table = _table()
     ext_table["auto_discover"] = config.extensions.auto_discover
     ext_table["enabled_extensions"] = list(config.extensions.enabled_extensions)
     ext_table["extension_dirs"] = [str(p) for p in config.extensions.extension_dirs]
+    doc["extensions"] = ext_table
 
     # --- [profiles] ---
-    prof_table = doc.get("profiles")
-    if not isinstance(prof_table, dict):
-        prof_table = tomlkit.table()
-        doc["profiles"] = prof_table
+    prof_table = _table()
     prof_table["active_profile"] = config.profiles.active_profile
     prof_table["auto_apply"] = config.profiles.auto_apply
     for name, profile in config.profiles.profiles.items():
@@ -236,46 +293,157 @@ def write_config(path: Path, config: AFSConfig) -> None:
         p_table["policies"] = list(profile.policies)
         p_table["mcp_tools"] = list(profile.mcp_tools)
         p_table["cli_modules"] = list(profile.cli_modules)
-        if profile.agent_configs:
-            agents_aot = tomlkit.aot()
-            for agent in profile.agent_configs:
-                a_table = tomlkit.table()
-                a_table["name"] = agent.name
-                a_table["role"] = agent.role
-                a_table["backend"] = agent.backend
-                a_table["description"] = agent.description
-                a_table["tags"] = list(agent.tags)
-                a_table["auto_start"] = agent.auto_start
-                a_table["triggers"] = list(agent.triggers)
-                a_table["schedule"] = agent.schedule
-                a_table["module"] = agent.module
-                a_table["watch_paths"] = [str(p) for p in agent.watch_paths]
-                a_table["allowed_mounts"] = list(agent.allowed_mounts)
-                a_table["allowed_tools"] = list(agent.allowed_tools)
-                a_table["workspace_isolated"] = agent.workspace_isolated
-                agents_aot.append(a_table)
-            p_table["agent_configs"] = agents_aot
+        _add_agent_array(p_table, "agent_configs", profile.agent_configs)
         prof_table[name] = p_table
+    doc["profiles"] = prof_table
 
     # --- [hooks] ---
-    hooks_table = doc.get("hooks")
-    if not isinstance(hooks_table, dict):
-        hooks_table = tomlkit.table()
-        doc["hooks"] = hooks_table
+    hooks_table = _table()
     hooks_table["before_context_read"] = list(config.hooks.before_context_read)
     hooks_table["after_context_write"] = list(config.hooks.after_context_write)
     hooks_table["before_agent_dispatch"] = list(config.hooks.before_agent_dispatch)
+    doc["hooks"] = hooks_table
+
+    # --- [[directories]] ---
+    directories_aot = tomlkit.aot()
+    for directory in config.directories:
+        dir_table = tomlkit.table()
+        dir_table["name"] = directory.name
+        dir_table["policy"] = directory.policy.value
+        if directory.description:
+            dir_table["description"] = directory.description
+        if directory.role is not None:
+            dir_table["role"] = directory.role.value
+        directories_aot.append(dir_table)
+    doc["directories"] = directories_aot
 
     # --- [cognitive] ---
-    cog_table = doc.get("cognitive")
-    if not isinstance(cog_table, dict):
-        cog_table = tomlkit.table()
-        doc["cognitive"] = cog_table
+    cog_table = _table()
     cog_table["enabled"] = config.cognitive.enabled
     cog_table["record_emotions"] = config.cognitive.record_emotions
     cog_table["record_metacognition"] = config.cognitive.record_metacognition
     cog_table["record_goals"] = config.cognitive.record_goals
     cog_table["record_epistemic"] = config.cognitive.record_epistemic
+    doc["cognitive"] = cog_table
+
+    # --- [orchestrator] ---
+    orchestrator_table = _table()
+    orchestrator_table["enabled"] = config.orchestrator.enabled
+    orchestrator_table["max_agents"] = config.orchestrator.max_agents
+    orchestrator_table["auto_routing"] = config.orchestrator.auto_routing
+    _add_agent_array(
+        orchestrator_table,
+        "default_agents",
+        config.orchestrator.default_agents,
+    )
+    doc["orchestrator"] = orchestrator_table
+
+    # --- [services] ---
+    services_table = _table()
+    services_table["enabled"] = config.services.enabled
+    if config.services.services:
+        services_subtable = _table()
+        for name, service in config.services.services.items():
+            service_table = _table()
+            service_table["enabled"] = service.enabled
+            service_table["auto_start"] = service.auto_start
+            if service.command:
+                service_table["command"] = list(service.command)
+            if service.context_filters:
+                service_table["context_filters"] = [
+                    str(path) for path in service.context_filters
+                ]
+            if service.working_directory is not None:
+                service_table["working_directory"] = str(service.working_directory)
+            if service.environment:
+                env_table = _table()
+                for key, value in service.environment.items():
+                    env_table[key] = value
+                service_table["environment"] = env_table
+            services_subtable[name] = service_table
+        services_table["services"] = services_subtable
+    doc["services"] = services_table
+
+    # --- [history] ---
+    history_table = _table()
+    history_table["enabled"] = config.history.enabled
+    history_table["include_payloads"] = config.history.include_payloads
+    history_table["max_inline_chars"] = config.history.max_inline_chars
+    history_table["payload_dir_name"] = config.history.payload_dir_name
+    history_table["redact_sensitive"] = config.history.redact_sensitive
+    doc["history"] = history_table
+
+    # --- [memory_export] ---
+    memory_export_table = _table()
+    memory_export_table["interval_seconds"] = config.memory_export.interval_seconds
+    memory_export_table["dataset_output"] = str(config.memory_export.dataset_output)
+    if config.memory_export.report_output is not None:
+        memory_export_table["report_output"] = str(config.memory_export.report_output)
+    memory_export_table["allow_raw"] = config.memory_export.allow_raw
+    memory_export_table["allow_raw_tags"] = list(config.memory_export.allow_raw_tags)
+    memory_export_table["default_instruction"] = config.memory_export.default_instruction
+    memory_export_table["limit"] = config.memory_export.limit
+    memory_export_table["require_quality"] = config.memory_export.require_quality
+    memory_export_table["min_quality_score"] = config.memory_export.min_quality_score
+    memory_export_table["score_profile"] = config.memory_export.score_profile
+    memory_export_table["enable_asar"] = config.memory_export.enable_asar
+    memory_export_table["auto_start"] = config.memory_export.auto_start
+    if config.memory_export.routes:
+        routes_aot = tomlkit.aot()
+        for route in config.memory_export.routes:
+            route_table = tomlkit.table()
+            route_table["tags"] = list(route.tags)
+            route_table["output"] = str(route.output)
+            if route.domain:
+                route_table["domain"] = route.domain
+            routes_aot.append(route_table)
+        memory_export_table["routes"] = routes_aot
+    doc["memory_export"] = memory_export_table
+
+    # --- [memory_consolidation] ---
+    memory_consolidation_table = _table()
+    memory_consolidation_table["enabled"] = config.memory_consolidation.enabled
+    memory_consolidation_table["auto_start"] = config.memory_consolidation.auto_start
+    memory_consolidation_table["interval_seconds"] = config.memory_consolidation.interval_seconds
+    if config.memory_consolidation.report_output is not None:
+        memory_consolidation_table["report_output"] = str(
+            config.memory_consolidation.report_output
+        )
+    memory_consolidation_table["entries_filename"] = config.memory_consolidation.entries_filename
+    memory_consolidation_table["summary_dir_name"] = config.memory_consolidation.summary_dir_name
+    memory_consolidation_table["checkpoint_filename"] = config.memory_consolidation.checkpoint_filename
+    memory_consolidation_table["max_events_per_run"] = config.memory_consolidation.max_events_per_run
+    memory_consolidation_table["max_events_per_entry"] = config.memory_consolidation.max_events_per_entry
+    memory_consolidation_table["include_event_types"] = list(
+        config.memory_consolidation.include_event_types
+    )
+    memory_consolidation_table["write_markdown"] = config.memory_consolidation.write_markdown
+    doc["memory_consolidation"] = memory_consolidation_table
+
+    # --- [context_index] ---
+    context_index_table = _table()
+    context_index_table["enabled"] = config.context_index.enabled
+    context_index_table["db_filename"] = config.context_index.db_filename
+    context_index_table["auto_index"] = config.context_index.auto_index
+    context_index_table["auto_refresh"] = config.context_index.auto_refresh
+    context_index_table["include_content"] = config.context_index.include_content
+    context_index_table["max_file_size_bytes"] = config.context_index.max_file_size_bytes
+    context_index_table["max_content_chars"] = config.context_index.max_content_chars
+    context_index_table["decay_hours"] = config.context_index.decay_hours
+    doc["context_index"] = context_index_table
+
+    # --- [sensitivity] ---
+    sensitivity_table = _table()
+    sensitivity_table["never_index"] = list(config.sensitivity.never_index)
+    sensitivity_table["never_embed"] = list(config.sensitivity.never_embed)
+    sensitivity_table["never_export"] = list(config.sensitivity.never_export)
+    doc["sensitivity"] = sensitivity_table
+
+    # --- [hivemind] ---
+    hivemind_table = _table()
+    hivemind_table["default_ttl_hours"] = config.hivemind.default_ttl_hours
+    hivemind_table["reaper_enabled"] = config.hivemind.reaper_enabled
+    doc["hivemind"] = hivemind_table
 
     path.write_text(tomlkit.dumps(doc), encoding="utf-8")
 

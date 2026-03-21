@@ -71,11 +71,15 @@ class DiagnosticResult:
 
 
 def _load_runtime(config_path: Path | None = None):
-    from .config import load_config_model
+    from .config import load_runtime_config_model
     from .core import find_root, resolve_context_root
     from .manager import AFSManager
 
-    config = load_config_model(config_path=config_path, merge_user=True)
+    config, _resolved_config_path = load_runtime_config_model(
+        config_path=config_path,
+        merge_user=True,
+        start_dir=Path.cwd(),
+    )
     linked_root = None if config_path else find_root(Path.cwd())
     context_root = resolve_context_root(config, linked_root)
     manager = AFSManager(config=config)

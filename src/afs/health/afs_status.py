@@ -13,7 +13,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - optional dependency
     psutil = None
 
-from ..config import load_config_model
+from ..config import load_runtime_config_model
 from ..context_paths import resolve_agent_output_root, resolve_mount_root
 from ..core import find_root, resolve_context_root
 from ..event_log import summarize_mcp_tool_usage
@@ -40,7 +40,11 @@ HOOK_EVENTS = (
 
 def collect_afs_health(config_path: Path | None = None) -> dict[str, Any]:
     """Collect AFS-focused health diagnostics."""
-    config = load_config_model(config_path=config_path, merge_user=True)
+    config, _resolved_config_path = load_runtime_config_model(
+        config_path=config_path,
+        merge_user=True,
+        start_dir=Path.cwd(),
+    )
     manager = AFSManager(config=config)
     profile = resolve_active_profile(config)
     linked_root = None if config_path else find_root(Path.cwd())

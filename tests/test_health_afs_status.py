@@ -71,7 +71,11 @@ def test_collect_afs_health_snapshot(tmp_path: Path, monkeypatch) -> None:
         encoding="utf-8",
     )
     config = config_module.load_config_model(config_path=config_path, merge_user=False)
-    monkeypatch.setattr(afs_status_module, "load_config_model", lambda **_kwargs: config)
+    monkeypatch.setattr(
+        afs_status_module,
+        "load_runtime_config_model",
+        lambda **_kwargs: (config, config_path.resolve()),
+    )
 
     snapshot = collect_afs_health(config_path=config_path)
     assert snapshot["profile"]["active"] == "work"
@@ -145,7 +149,11 @@ def test_collect_afs_health_uses_remapped_history_and_scratchpad(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(afs_status_module, "load_config_model", lambda **_kwargs: config)
+    monkeypatch.setattr(
+        afs_status_module,
+        "load_runtime_config_model",
+        lambda **_kwargs: (config, None),
+    )
     monkeypatch.setattr(afs_status_module, "find_root", lambda _start_dir=None: context_root)
     monkeypatch.setattr(
         afs_status_module,

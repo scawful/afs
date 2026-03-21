@@ -1,8 +1,8 @@
 """AFS command-line interface package.
 
-Core `afs` exposes filesystem/context/runtime primitives.
-Legacy model-training, benchmark, and gateway surfaces are extension-owned and
-should be reintroduced by extension manifests such as `afs-scawful`.
+Core ``afs`` exposes context/runtime primitives plus the built-in training
+workflow surfaces that now depend on those primitives. Legacy benchmark,
+gateway, and other domain-specific extensions remain extension-owned.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
 
-from ..config import load_config_model
+from ..config import load_runtime_config_model
 from ..health import cli as health_cli
 from ..history import log_cli_invocation
 from ..profiles import resolve_active_profile
@@ -34,6 +34,7 @@ from . import (
     profile,
     review,
     skills,
+    training,
     watch,
 )
 from ._help import render_default_help, render_topic_help
@@ -109,7 +110,21 @@ def _multi_extension_import_path(search_roots: Iterable[Path]) -> Iterable[None]
         sys.path = original
 
 
-def build_parser() -> argparse.ArgumentParser:
+def _extract_config_argument(argv: Iterable[str] | None) -> Path | None:
+    if argv is None:
+        return None
+    tokens = list(argv)
+    for index, token in enumerate(tokens):
+        if token == "--config" and index + 1 < len(tokens):
+            return Path(tokens[index + 1]).expanduser().resolve()
+        if token.startswith("--config="):
+            _, _, value = token.partition("=")
+            if value:
+                return Path(value).expanduser().resolve()
+    return None
+
+
+def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
     """Build the main argument parser."""
     parser = argparse.ArgumentParser(prog="afs")
     subparsers = parser.add_subparsers(dest="command")
@@ -162,6 +177,9 @@ def build_parser() -> argparse.ArgumentParser:
     # Register doctor command
     doctor.register_parsers(subparsers)
 
+    # Register training pipeline commands
+    training.register_parsers(subparsers)
+
     # Register watch command
     watch.register_parsers(subparsers)
 
@@ -186,7 +204,12 @@ def build_parser() -> argparse.ArgumentParser:
             load_enabled_plugins,
         )
 
-        config = load_config_model(merge_user=True)
+        config_path = _extract_config_argument(argv)
+        config, _resolved_config_path = load_runtime_config_model(
+            config_path=config_path,
+            merge_user=True,
+            start_dir=Path.cwd(),
+        )
         plugins = load_enabled_plugins(config=config)
         call_plugin_hook("register_cli", subparsers, plugins=plugins.values())
         call_plugin_hook("register_parsers", subparsers, plugins=plugins.values())
@@ -250,8 +273,9 @@ def _requires_subcommand(
 
 def main(argv: Iterable[str] | None = None) -> int:
     """Main CLI entry point."""
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    argv_list = list(argv) if argv is not None else sys.argv[1:]
+    parser = build_parser(argv_list)
+    args = parser.parse_args(argv_list)
 
     if not getattr(args, "command", None):
         render_default_help(parser)
@@ -286,7 +310,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 1
 
     try:
-        log_cli_invocation(argv or sys.argv[1:], exit_code)
+        log_cli_invocation(argv_list, exit_code)
     except Exception:
         pass
     return exit_code

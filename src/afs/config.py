@@ -31,6 +31,32 @@ def _parse_bool(value: str | None, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def find_repo_config(start_dir: Path | None = None) -> Path | None:
+    """Find the nearest ``afs.toml`` by walking upward from ``start_dir``."""
+    current = (start_dir or Path.cwd()).expanduser().resolve()
+    for parent in [current, *current.parents]:
+        candidate = parent / "afs.toml"
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
+def resolve_runtime_config_path(
+    config_path: str | Path | None = None,
+    *,
+    start_dir: Path | None = None,
+) -> Path | None:
+    """Resolve the runtime config path from explicit args, env, or nearest repo config."""
+    if config_path is not None:
+        return Path(config_path).expanduser().resolve()
+
+    env_config = os.environ.get("AFS_CONFIG_PATH")
+    if env_config:
+        return Path(env_config).expanduser().resolve()
+
+    return find_repo_config(start_dir)
+
+
 def _expand_config_paths(config_data: dict[str, Any]) -> None:
     if "general" in config_data:
         general = config_data["general"]
@@ -128,14 +154,33 @@ def _expand_config_paths(config_data: dict[str, Any]) -> None:
             )
 
 
-def load_config(config_path: Path | None = None, merge_user: bool = True) -> dict[str, Any]:
+def load_config(
+    config_path: Path | None = None,
+    merge_user: bool = True,
+    *,
+    start_dir: Path | None = None,
+    prefer_local: bool | None = None,
+) -> dict[str, Any]:
     """Load configuration with basic precedence and path expansion."""
+    explicit_path = Path(config_path).expanduser().resolve() if config_path else None
     env_config = os.environ.get("AFS_CONFIG_PATH")
-    if config_path is None and env_config:
-        config_path = Path(env_config).expanduser()
+    env_path = (
+        Path(env_config).expanduser().resolve()
+        if explicit_path is None and env_config
+        else None
+    )
+    local_path = find_repo_config(start_dir)
+    effective_explicit_path = explicit_path or env_path
+    explicit_override = explicit_path is not None or env_path is not None
 
-    prefer_user = _parse_bool(os.environ.get("AFS_PREFER_USER_CONFIG"), default=True)
-    prefer_repo = _parse_bool(os.environ.get("AFS_PREFER_REPO_CONFIG"))
+    prefer_user = _parse_bool(
+        os.environ.get("AFS_PREFER_USER_CONFIG"),
+        default=not bool(prefer_local),
+    )
+    prefer_repo = _parse_bool(
+        os.environ.get("AFS_PREFER_REPO_CONFIG"),
+        default=bool(prefer_local),
+    )
     if prefer_repo:
         prefer_user = False
 
@@ -150,8 +195,7 @@ def load_config(config_path: Path | None = None, merge_user: bool = True) -> dic
             with open(user_path, "rb") as f:
                 user_raw = tomllib.load(f)
 
-    local_path = Path("afs.toml")
-    if local_path.exists():
+    if local_path and local_path.exists() and not explicit_override:
         with open(local_path, "rb") as f:
             local_raw = tomllib.load(f)
 
@@ -162,8 +206,8 @@ def load_config(config_path: Path | None = None, merge_user: bool = True) -> dic
         config_data = _deep_merge(config_data, user_raw)
         config_data = _deep_merge(config_data, local_raw)
 
-    if config_path and config_path.exists():
-        with open(config_path, "rb") as f:
+    if effective_explicit_path and effective_explicit_path.exists() and explicit_override:
+        with open(effective_explicit_path, "rb") as f:
             explicit_raw = tomllib.load(f)
         config_data = _deep_merge(config_data, explicit_raw)
 
@@ -176,10 +220,36 @@ def load_config(config_path: Path | None = None, merge_user: bool = True) -> dic
 def load_config_model(
     config_path: Path | None = None,
     merge_user: bool = True,
+    *,
+    start_dir: Path | None = None,
+    prefer_local: bool | None = None,
 ) -> AFSConfig:
     """Load configuration and return a typed model."""
-    data = load_config(config_path=config_path, merge_user=merge_user)
+    data = load_config(
+        config_path=config_path,
+        merge_user=merge_user,
+        start_dir=start_dir,
+        prefer_local=prefer_local,
+    )
     return AFSConfig.from_dict(data)
+
+
+def load_runtime_config_model(
+    config_path: Path | None = None,
+    merge_user: bool = True,
+    *,
+    start_dir: Path | None = None,
+    prefer_local: bool = True,
+) -> tuple[AFSConfig, Path | None]:
+    """Load runtime config and return both the model and the resolved config path."""
+    resolved_path = resolve_runtime_config_path(config_path=config_path, start_dir=start_dir)
+    model = load_config_model(
+        config_path=config_path,
+        merge_user=merge_user,
+        start_dir=start_dir,
+        prefer_local=prefer_local,
+    )
+    return model, resolved_path
 
 
 def _merge_workspace_registry(config_data: dict[str, Any]) -> None:

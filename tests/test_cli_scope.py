@@ -18,7 +18,13 @@ def test_core_parser_excludes_legacy_model_command_groups(
     tmp_path: Path,
 ) -> None:
     config_path = tmp_path / "afs.toml"
-    config_path.write_text("[extensions]\nauto_discover = false\n", encoding="utf-8")
+    config_path.write_text(
+        "[extensions]\n"
+        "auto_discover = false\n\n"
+        "[plugins]\n"
+        "auto_discover = false\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("AFS_CONFIG_PATH", str(config_path))
     monkeypatch.delenv("AFS_EXTENSION_DIRS", raising=False)
     monkeypatch.delenv("AFS_ENABLED_EXTENSIONS", raising=False)
@@ -35,7 +41,6 @@ def test_core_parser_excludes_legacy_model_command_groups(
     assert "claude" in commands
     assert "events" in commands
 
-    assert "training" not in commands
     assert "gateway" not in commands
     assert "vastai" not in commands
     assert "benchmark" not in commands
@@ -106,6 +111,76 @@ def test_profile_cli_modules_can_register_commands(
     commands = _command_choices(parser)
 
     assert "profile-demo" in commands
+
+
+def test_build_parser_uses_explicit_config_argument_for_profile_modules(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    external = tmp_path / "external"
+    external.mkdir()
+    (tmp_path / "profile_cli.py").write_text(
+        "def register_parsers(subparsers):\n"
+        "    parser = subparsers.add_parser('argv-profile-demo', help='argv profile demo command')\n"
+        "    parser.set_defaults(func=lambda _args: 0)\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "afs.toml"
+    config_path.write_text(
+        "[extensions]\n"
+        "auto_discover = false\n\n"
+        "[profiles]\n"
+        "active_profile = \"work\"\n\n"
+        "[profiles.work]\n"
+        "cli_modules = [\"profile_cli\"]\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(external)
+    monkeypatch.delenv("AFS_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("AFS_EXTENSION_DIRS", raising=False)
+    monkeypatch.delenv("AFS_ENABLED_EXTENSIONS", raising=False)
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    parser = build_parser(["profile-demo", "--config", str(config_path)])
+    commands = _command_choices(parser)
+
+    assert "argv-profile-demo" in commands
+
+
+def test_build_parser_uses_nearest_repo_config_for_profile_modules(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    nested = repo_root / "subdir" / "more"
+    nested.mkdir(parents=True)
+    (repo_root / "profile_cli.py").write_text(
+        "def register_parsers(subparsers):\n"
+        "    parser = subparsers.add_parser('nearest-profile-demo', help='nearest profile demo command')\n"
+        "    parser.set_defaults(func=lambda _args: 0)\n",
+        encoding="utf-8",
+    )
+    (repo_root / "afs.toml").write_text(
+        "[extensions]\n"
+        "auto_discover = false\n\n"
+        "[profiles]\n"
+        "active_profile = \"work\"\n\n"
+        "[profiles.work]\n"
+        "cli_modules = [\"profile_cli\"]\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(nested)
+    monkeypatch.delenv("AFS_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("AFS_EXTENSION_DIRS", raising=False)
+    monkeypatch.delenv("AFS_ENABLED_EXTENSIONS", raising=False)
+    monkeypatch.syspath_prepend(str(repo_root))
+
+    parser = build_parser()
+    commands = _command_choices(parser)
+
+    assert "nearest-profile-demo" in commands
 
 
 def test_services_subcommands_accept_config_flag(

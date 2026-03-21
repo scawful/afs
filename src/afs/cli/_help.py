@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ..config import load_config_model
+from ..config import load_runtime_config_model, resolve_runtime_config_path
 from ..schema import AFSConfig, GeneralConfig
 
 _TOP_LEVEL_ORDER = [
@@ -78,7 +78,7 @@ def render_default_help(parser: argparse.ArgumentParser, config: AFSConfig | Non
 
     env_config = os.getenv("AFS_CONFIG_PATH")
     user_config_path = Path.home() / ".config" / "afs" / "config.toml"
-    local_config_path = Path.cwd() / "afs.toml"
+    local_config_path = resolve_runtime_config_path(start_dir=Path.cwd())
 
     lines: list[str] = []
     lines.append(_section("AFS CLI"))
@@ -249,7 +249,11 @@ def _safe_load_config(config: AFSConfig | None) -> tuple[AFSConfig | None, str |
     if config is not None:
         return config, None
     try:
-        return load_config_model(merge_user=True), None
+        loaded, _resolved_path = load_runtime_config_model(
+            merge_user=True,
+            start_dir=Path.cwd(),
+        )
+        return loaded, None
     except Exception as exc:  # pragma: no cover - defensive
         return None, str(exc)
 
