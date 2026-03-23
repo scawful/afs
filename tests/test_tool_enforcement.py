@@ -24,6 +24,7 @@ from afs.session_workflows import (
 def test_get_tool_profile_surfaces_returns_known_profile() -> None:
     surfaces = get_tool_profile_surfaces("context_readonly")
     assert isinstance(surfaces, frozenset)
+    assert "operator.digest" in surfaces
     assert "context.query" in surfaces
     assert "context.read" in surfaces
     # context_readonly should NOT include repair tools
@@ -141,6 +142,7 @@ def test_tools_list_filtered_by_tool_profile(tmp_path: Path, monkeypatch) -> Non
         if surface in {t.name for t in registry.tools.values()}:
             assert surface in tool_names, f"{surface} should be in filtered tools/list"
 
+    assert "operator.digest" in tool_names
     # Should NOT include tools outside the profile
     assert "context.repair" not in tool_names
     assert "context.write" not in tool_names

@@ -93,6 +93,9 @@ Implemented in this pass:
   `verification-summary`, and `handoff-summary`
 - `session pack` now supports explicit `pack_mode` selection for `focused`,
   `retrieval`, and `full_slice` context shaping
+- MCP tool `operator.digest` now compresses `pytest`, `traceback`, `grep`,
+  `diffstat`, and generic command output into compact summaries before that
+  output goes back into model context
 
 This gives Gemini users a better prompt scaffold immediately while keeping the
 underlying abstractions generic enough for Claude, Codex, and future adapters.
@@ -105,4 +108,6 @@ underlying abstractions generic enough for Claude, Codex, and future adapters.
    verify rails instead of leaving them as advisory contracts only.
 3. Split stable pack prefixes from volatile suffixes so cache reuse becomes
    measurable and explicit.
-4. Add command/test/diff compression helpers for noisy terminal output.
+4. Extend `operator.digest` beyond the initial `pytest` / `traceback` / `grep`
+   / `diffstat` parsers with richer command-family digests where they prove
+   useful in practice.

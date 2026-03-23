@@ -103,6 +103,7 @@ def test_tools_list_returns_preferred_and_compatibility_file_tools(tmp_path: Pat
         "context.query",
         "context.diff",
         "context.status",
+        "operator.digest",
         "context.repair",
         "session.pack",
         "events.analytics",
@@ -1635,6 +1636,35 @@ def test_tool_session_pack(tmp_path: Path) -> None:
     assert payload["execution_profile"]["workflow"] == "edit_fast"
     assert payload["pack_mode"] == "retrieval"
     assert any("guide.md" in source for source in payload["sources"])
+
+
+def test_tool_operator_digest(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 128,
+            "method": "tools/call",
+            "params": {
+                "name": "operator.digest",
+                "arguments": {
+                    "label": "pytest -q",
+                    "text": (
+                        "FAILED tests/test_pack.py::test_cache - AssertionError: miss\n"
+                        "========================= 88 passed, 1 failed in 2.10s ========================"
+                    ),
+                },
+            },
+        },
+        manager,
+    )
+    assert response is not None
+    payload = response["result"]["structuredContent"]
+    assert payload["label"] == "pytest -q"
+    assert payload["kind"] == "pytest"
+    assert payload["details"]["counts"]["passed"] == 88
+    assert payload["details"]["counts"]["failed"] == 1
+    assert "Summary: pytest failed" in payload["digest_text"]
 
 
 def test_prompts_get_session_pack(tmp_path: Path) -> None:

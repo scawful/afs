@@ -155,6 +155,7 @@ TOOL_PROFILE_DEFINITIONS = {
         preferred_surfaces=(
             "session.bootstrap",
             "session.pack",
+            "operator.digest",
             "context.status",
             "context.diff",
             "context.query",
@@ -172,6 +173,7 @@ TOOL_PROFILE_DEFINITIONS = {
         preferred_surfaces=(
             "session.bootstrap",
             "session.pack",
+            "operator.digest",
             "context.status",
             "context.diff",
             "context.query",
@@ -187,6 +189,7 @@ TOOL_PROFILE_DEFINITIONS = {
         summary="AFS context repair and freshness recovery.",
         preferred_surfaces=(
             "session.bootstrap",
+            "operator.digest",
             "context.status",
             "context.diff",
             "context.repair",
@@ -203,6 +206,7 @@ TOOL_PROFILE_DEFINITIONS = {
         preferred_surfaces=(
             "session.bootstrap",
             "session.pack",
+            "operator.digest",
             "context.status",
             "context.diff",
             "context.query",

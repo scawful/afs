@@ -206,6 +206,12 @@ a stable `cache.prefix_hash` for adapter-side cache reuse work. `--pack-mode`
 lets callers choose between the normal focused pack, a query-first retrieval
 pack, and a broader full-slice pack for long-context models.
 
+For noisy command output, use MCP tool `operator.digest` before pasting raw
+logs back into a model turn. It can auto-detect and compress `pytest`,
+`traceback`, `grep`, and `git diff --stat` style output into a compact summary
+plus structured fields, and it is included in the default, readonly, repair,
+and edit-oriented tool bundles.
+
 Extensions can add their own MCP tools, prompts, and resources with
 `[mcp_server]` in `extension.toml`. Legacy tool-only factories under
 `[mcp_tools]` still work. Core `afs://contexts`, `afs://context/...`, and the

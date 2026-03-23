@@ -28,6 +28,7 @@ from .discovery import discover_contexts
 from .event_log import read_agent_events
 from .manager import AFSManager
 from .models import MountType
+from .operator_digests import KIND_CHOICES, digest_operator_output
 from .plugins import load_enabled_extensions
 from .profiles import resolve_active_profile
 from .response_schemas import (
@@ -1588,6 +1589,27 @@ def _tool_training_antigravity_status(
     return antigravity_status(db_path=resolved_db, state_keys=parsed_state_keys)
 
 
+def _tool_operator_digest(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    _ = manager
+    text = arguments.get("text")
+    if not isinstance(text, str):
+        raise ValueError("text must be a string")
+
+    kind = arguments.get("kind", "auto")
+    if not isinstance(kind, str):
+        raise ValueError("kind must be a string")
+
+    payload = digest_operator_output(
+        text,
+        kind=kind,
+        max_items=_coerce_int(arguments.get("max_items"), default=5, minimum=1, maximum=20),
+    )
+    label = arguments.get("label")
+    if isinstance(label, str) and label.strip():
+        payload["label"] = label.strip()
+    return payload
+
+
 def _tool_session_replay(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     from .event_log import build_session_timeline
 
@@ -1927,6 +1949,37 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_session_pack,
+        ),
+        MCPToolDefinition(
+            name="operator.digest",
+            description="Compress noisy command, test, traceback, grep, or diffstat output into a small digest before sending it back into model context.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Raw command or tool output to summarize.",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": list(KIND_CHOICES),
+                        "default": "auto",
+                        "description": "Digest strategy hint. Use auto unless the caller already knows the output type.",
+                    },
+                    "max_items": {
+                        "type": "integer",
+                        "default": 5,
+                        "description": "Maximum highlighted entries to keep in the digest.",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Optional human label such as `pytest -q` or `git diff --stat`.",
+                    },
+                },
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+            handler=_tool_operator_digest,
         ),
         MCPToolDefinition(
             name="context.repair",
