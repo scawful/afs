@@ -224,6 +224,7 @@ Gemini-facing MCP prompts:
 Gemini-facing MCP resources:
 
 - `afs://contexts`
+- `afs://schemas/<name>`
 - `afs://claude/bootstrap`
 - `afs://context/<path>/bootstrap`
 - `afs://context/<path>/metadata`
@@ -238,7 +239,24 @@ messages, and the latest durable memory summary into one startup packet.
 model-specific working context. It builds a token-budgeted pack for Gemini,
 Claude, Codex, or generic clients, respects `never_export` sensitivity rules
 when including indexed content, and reuses the stored pack artifact on repeated
-calls when the bootstrap snapshot and pack inputs have not changed.
+calls when the bootstrap snapshot and pack inputs have not changed. The prompt
+and tool forms also accept optional `task`, `workflow`, and `tool_profile`
+arguments so callers can encode a short execution contract and put the explicit
+task at the end of the rendered pack. Returned pack JSON includes
+`cache.prefix_hash` for stable-prefix cache experiments in adapters.
+
+`afs://schemas/<name>` exposes compact response contracts for structured agent
+workflows. Built-in names currently include:
+
+- `plan`
+- `file-shortlist`
+- `review-findings`
+- `edit-intent`
+- `verification-summary`
+- `handoff-summary`
+
+These resources return `application/schema+json` so Gemini or other MCP clients
+can request a tiny output contract before asking for a structured response.
 
 Index behavior can be tuned in `afs.toml`:
 

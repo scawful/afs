@@ -1358,6 +1358,8 @@ def test_resources_list_returns_contexts_resource(tmp_path: Path) -> None:
     resources = response["result"]["resources"]
     uris = [r["uri"] for r in resources]
     assert "afs://contexts" in uris
+    assert "afs://schemas/plan" in uris
+    assert "afs://schemas/verification-summary" in uris
     assert f"afs://context/{manager.config.general.context_root}/bootstrap" in uris
 
 
@@ -1379,6 +1381,44 @@ def test_resources_read_contexts(tmp_path: Path) -> None:
     assert contents[0]["mimeType"] == "application/json"
     data = json.loads(contents[0]["text"])
     assert isinstance(data, list)
+
+
+def test_resources_read_schema_contract(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 221,
+            "method": "resources/read",
+            "params": {"uri": "afs://schemas/plan"},
+        },
+        manager,
+    )
+    assert response is not None
+    contents = response["result"]["contents"]
+    assert len(contents) == 1
+    assert contents[0]["uri"] == "afs://schemas/plan"
+    assert contents[0]["mimeType"] == "application/schema+json"
+    schema = json.loads(contents[0]["text"])
+    assert schema["title"] == "AFS Plan"
+    assert schema["required"] == ["goal", "steps", "completion_signal", "confidence"]
+    assert schema["additionalProperties"] is False
+
+
+def test_resources_read_unknown_schema_uri_returns_error(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 222,
+            "method": "resources/read",
+            "params": {"uri": "afs://schemas/not-real"},
+        },
+        manager,
+    )
+    assert response is not None
+    assert "error" in response
+    assert "Unknown resource URI" in response["error"]["message"]
 
 
 def test_resources_read_contexts_filters_out_disallowed_contexts(
@@ -1578,7 +1618,10 @@ def test_tool_session_pack(tmp_path: Path) -> None:
                 "arguments": {
                     "context_path": str(context_root),
                     "query": "service guide",
+                    "task": "Implement the service guide fix.",
                     "model": "codex",
+                    "workflow": "edit_fast",
+                    "tool_profile": "edit_and_verify",
                 },
             },
         },
@@ -1587,6 +1630,8 @@ def test_tool_session_pack(tmp_path: Path) -> None:
     assert response is not None
     payload = response["result"]["structuredContent"]
     assert payload["model"] == "codex"
+    assert payload["task"] == "Implement the service guide fix."
+    assert payload["execution_profile"]["workflow"] == "edit_fast"
     assert any("guide.md" in source for source in payload["sources"])
 
 
@@ -1614,7 +1659,9 @@ def test_prompts_get_session_pack(tmp_path: Path) -> None:
                 "arguments": {
                     "context_path": str(context_root),
                     "query": "service guide",
+                    "task": "Review the service guide findings.",
                     "model": "gemini",
+                    "workflow": "review_deep",
                 },
             },
         },
@@ -1624,6 +1671,7 @@ def test_prompts_get_session_pack(tmp_path: Path) -> None:
     text = response["result"]["messages"][0]["content"]["text"]
     assert "AFS Context Pack" in text
     assert "gemini" in text.lower()
+    assert "## Task" in text
 
 
 def test_prompts_get_context_overview(tmp_path: Path) -> None:
@@ -2090,6 +2138,12 @@ def test_extension_mcp_server_conflicts_do_not_override_core_surface(
         "                'name': 'duplicate resource',\n"
         "                'description': 'duplicate resource',\n"
         "                'handler': duplicate_resource,\n"
+        "            },\n"
+        "            {\n"
+        "                'uri': 'afs://schemas/plan',\n"
+        "                'name': 'duplicate schema resource',\n"
+        "                'description': 'duplicate schema resource',\n"
+        "                'handler': duplicate_resource,\n"
         "            }\n"
         "        ],\n"
         "        'prompts': [\n"
@@ -2123,6 +2177,10 @@ def test_extension_mcp_server_conflicts_do_not_override_core_surface(
     assert any("Tool 'context.read' already registered by core" in message for message in errors.values())
     assert any(
         "Resource 'afs://contexts' already registered by core" in message
+        for message in errors.values()
+    )
+    assert any(
+        "Resource 'afs://schemas/plan' already registered by core" in message
         for message in errors.values()
     )
     assert any(

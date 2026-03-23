@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .agent_scope import assert_tool_allowed
+from .agent_scope import assert_tool_allowed, is_tool_allowed
 from .config import load_config_model
 from .context_index import (
     DEFAULT_MAX_CONTENT_CHARS,
@@ -30,6 +30,12 @@ from .manager import AFSManager
 from .models import MountType
 from .plugins import load_enabled_extensions
 from .profiles import resolve_active_profile
+from .response_schemas import (
+    SCHEMA_MIME_TYPE,
+    SCHEMA_URI_PREFIX,
+    get_response_schema,
+    list_response_schema_specs,
+)
 from .schema import ContextIndexConfig
 from .session_bootstrap import (
     build_session_bootstrap,
@@ -44,7 +50,7 @@ PROTOCOL_VERSION = "2025-06-18"
 LEGACY_PROTOCOL_VERSION = "2024-11-05"
 SUPPORTED_PROTOCOL_VERSIONS = (PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION)
 _CORE_RESOURCE_URIS = {"afs://contexts", "afs://claude/bootstrap"}
-_CORE_RESOURCE_PREFIXES = ("afs://context/",)
+_CORE_RESOURCE_PREFIXES = ("afs://context/", SCHEMA_URI_PREFIX)
 _CORE_PROMPT_NAMES = {
     "afs.context.overview",
     "afs.query.search",
@@ -957,7 +963,10 @@ def _tool_session_pack(arguments: dict[str, Any], manager: AFSManager) -> dict[s
         manager,
         context_path,
         query=query_value,
+        task=str(arguments.get("task", "") or ""),
         model=model,
+        workflow=str(arguments.get("workflow", "general") or "general"),
+        tool_profile=str(arguments.get("tool_profile", "default") or "default"),
         token_budget=_coerce_int(
             arguments.get("token_budget"),
             default=0,
@@ -1873,10 +1882,36 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "properties": {
                     "context_path": {"type": "string"},
                     "query": {"type": "string", "description": "Optional retrieval query."},
+                    "task": {
+                        "type": "string",
+                        "description": "Explicit task statement to render at the end of the pack.",
+                    },
                     "model": {
                         "type": "string",
                         "enum": ["generic", "gemini", "claude", "codex"],
                         "default": "generic",
+                    },
+                    "workflow": {
+                        "type": "string",
+                        "enum": [
+                            "general",
+                            "scan_fast",
+                            "edit_fast",
+                            "review_deep",
+                            "root_cause_deep",
+                        ],
+                        "default": "general",
+                    },
+                    "tool_profile": {
+                        "type": "string",
+                        "enum": [
+                            "default",
+                            "context_readonly",
+                            "context_repair",
+                            "edit_and_verify",
+                            "handoff_only",
+                        ],
+                        "default": "default",
                     },
                     "token_budget": {"type": "integer", "description": "Approximate token budget."},
                     "include_content": {"type": "boolean", "default": False},
@@ -3028,8 +3063,10 @@ def build_mcp_registry(manager: AFSManager) -> MCPToolRegistry:
 
 def _tool_specs(registry: MCPToolRegistry | None = None) -> list[dict[str, Any]]:
     if registry is None:
-        return [tool.to_spec() for tool in _builtin_tool_definitions()]
-    return registry.specs()
+        specs = [tool.to_spec() for tool in _builtin_tool_definitions()]
+    else:
+        specs = registry.specs()
+    return [spec for spec in specs if is_tool_allowed(spec["name"])]
 
 
 def get_mcp_status(config_path: Path | None = None) -> dict[str, Any]:
@@ -3065,6 +3102,7 @@ def _list_resources(
             "mimeType": "text/markdown",
         },
     ]
+    resources.extend(list_response_schema_specs())
     for ctx in _discover_allowed_contexts(manager):
         ctx_uri = f"afs://context/{ctx.path}"
         resources.append({
@@ -3119,6 +3157,18 @@ def _read_resource(
         payload = build_session_bootstrap(manager, context_path)
         text = render_session_bootstrap(payload)
         return {"uri": uri, "mimeType": "text/markdown", "text": text}
+
+    if uri.startswith(SCHEMA_URI_PREFIX):
+        name = uri[len(SCHEMA_URI_PREFIX) :].strip()
+        try:
+            schema = get_response_schema(name)
+        except KeyError as exc:
+            raise ValueError(f"Unknown resource URI: {uri}") from exc
+        return {
+            "uri": uri,
+            "mimeType": SCHEMA_MIME_TYPE,
+            "text": json.dumps(schema),
+        }
 
     if registry is not None and uri in registry.resources:
         return registry.read_resource(uri, manager)
@@ -3216,6 +3266,21 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                     "required": False,
                 },
                 {
+                    "name": "task",
+                    "description": "Explicit task statement rendered after the context sections.",
+                    "required": False,
+                },
+                {
+                    "name": "workflow",
+                    "description": "Execution workflow profile: general, scan_fast, edit_fast, review_deep, root_cause_deep.",
+                    "required": False,
+                },
+                {
+                    "name": "tool_profile",
+                    "description": "Preferred AFS surface mix: default, context_readonly, context_repair, edit_and_verify, handoff_only.",
+                    "required": False,
+                },
+                {
                     "name": "token_budget",
                     "description": "Approximate token budget override.",
                     "required": False,
@@ -3305,7 +3370,10 @@ def _get_prompt(
             manager,
             context_path,
             query=str(arguments.get("query", "") or ""),
+            task=str(arguments.get("task", "") or ""),
             model=str(arguments.get("model", "generic") or "generic"),
+            workflow=str(arguments.get("workflow", "general") or "general"),
+            tool_profile=str(arguments.get("tool_profile", "default") or "default"),
             token_budget=_coerce_int(
                 arguments.get("token_budget"),
                 default=0,

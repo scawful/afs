@@ -121,6 +121,7 @@ See `docs/JOURNAL_AGENT.md` for full argument reference and JSON output shape.
 ./scripts/afs session bootstrap --json
 ./scripts/afs session pack
 ./scripts/afs session pack "sqlite indexing" --model gemini
+./scripts/afs session pack "sqlite indexing" --model gemini --workflow scan_fast --task "Find the three most relevant SQLite files"
 ./scripts/afs session pack "runtime bug" --model codex --token-budget 12000 --json
 ```
 
@@ -150,6 +151,18 @@ durable memory, and indexed retrieval hits, then writes or reuses:
 pack, so blocked paths do not leak into session exports. When the bootstrap
 snapshot and pack inputs have not changed, repeated calls reuse the stored
 artifact instead of rebuilding from scratch.
+
+`session pack` now also accepts:
+
+- `--task` to append an explicit task block after the context sections
+- `--workflow` to encode a generic execution profile such as `scan_fast`,
+  `edit_fast`, `review_deep`, or `root_cause_deep`
+- `--tool-profile` to encode a preferred AFS surface mix such as
+  `context_readonly`, `context_repair`, `edit_and_verify`, or `handoff_only`
+
+Pack JSON now includes `execution_profile` metadata and `cache.prefix_hash` so
+Gemini-side adapters can distinguish a stable context prefix from a changing
+task suffix.
 
 ## Events
 

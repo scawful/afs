@@ -166,6 +166,7 @@ Gemini-friendly prompts/resources are also exposed over MCP:
 
 - prompts: `afs.session.bootstrap`, `afs.session.pack`, `afs.context.overview`, `afs.query.search`, `afs.scratchpad.review`
 - resources: `afs://contexts`, `afs://claude/bootstrap`, `afs://context/<path>/bootstrap`, `.../metadata`, `.../mounts`, `.../index`
+- schema resources: `afs://schemas/plan`, `afs://schemas/file-shortlist`, `afs://schemas/review-findings`, `afs://schemas/edit-intent`, `afs://schemas/verification-summary`, `afs://schemas/handoff-summary`
 
 `afs.session.bootstrap` is the preferred start-of-session surface. It combines:
 
@@ -182,6 +183,7 @@ The CLI equivalent is:
 ~/src/lab/afs/scripts/afs session bootstrap
 ~/src/lab/afs/scripts/afs session bootstrap --json
 ~/src/lab/afs/scripts/afs session pack
+~/src/lab/afs/scripts/afs session pack "sqlite" --model gemini --workflow scan_fast --task "Shortlist the relevant SQLite files"
 ~/src/lab/afs/scripts/afs session pack "sqlite" --model codex --json
 ~/src/lab/afs/scripts/afs events analytics --hours 24 --json
 ~/src/lab/afs/scripts/afs events replay --session-id "$AFS_SESSION_ID"
@@ -196,7 +198,9 @@ The CLI also refreshes:
 
 `session pack` is an explicit follow-on step, not the default startup path.
 When the bootstrap snapshot and pack inputs have not changed, repeated calls
-reuse the stored pack artifact instead of rebuilding all sections.
+reuse the stored pack artifact instead of rebuilding all sections. Packs now
+also carry an `execution_profile` block, a task-at-end suffix via `--task`, and
+a stable `cache.prefix_hash` for adapter-side cache reuse work.
 
 Extensions can add their own MCP tools, prompts, and resources with
 `[mcp_server]` in `extension.toml`. Legacy tool-only factories under

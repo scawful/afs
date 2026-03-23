@@ -795,7 +795,10 @@ def session_pack_command(args: argparse.Namespace) -> int:
         manager,
         context_path,
         query=args.query or "",
+        task=args.task or "",
         model=args.model,
+        workflow=args.workflow,
+        tool_profile=args.tool_profile,
         token_budget=args.token_budget,
         include_content=args.include_content,
         max_query_results=args.max_query_results,
@@ -1545,10 +1548,38 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     add_context_args(session_pack)
     session_pack.add_argument("query", nargs="?", help="Optional retrieval query.")
     session_pack.add_argument(
+        "--task",
+        help="Explicit task statement to place at the end of the rendered pack.",
+    )
+    session_pack.add_argument(
         "--model",
         default="generic",
         choices=["generic", "gemini", "claude", "codex"],
         help="Target model profile (default: generic).",
+    )
+    session_pack.add_argument(
+        "--workflow",
+        default="general",
+        choices=[
+            "general",
+            "scan_fast",
+            "edit_fast",
+            "review_deep",
+            "root_cause_deep",
+        ],
+        help="Execution workflow profile to encode into the pack.",
+    )
+    session_pack.add_argument(
+        "--tool-profile",
+        default="default",
+        choices=[
+            "default",
+            "context_readonly",
+            "context_repair",
+            "edit_and_verify",
+            "handoff_only",
+        ],
+        help="Preferred AFS surface mix to encode into the pack.",
     )
     session_pack.add_argument(
         "--token-budget",

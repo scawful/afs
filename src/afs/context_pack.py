@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +16,7 @@ from .manager import AFSManager
 from .models import MountType
 from .sensitivity import matches_path_rules
 from .session_bootstrap import _build_recommendations, build_session_bootstrap
+from .session_workflows import build_session_execution_profile
 
 DEFAULT_CONTEXT_PACK_TOKENS = {
     "generic": 8000,
@@ -64,7 +65,10 @@ def build_context_pack(
     context_path: Path,
     *,
     query: str = "",
+    task: str = "",
     model: str = "generic",
+    workflow: str = "general",
+    tool_profile: str = "default",
     token_budget: int | None = None,
     include_content: bool = False,
     max_query_results: int = 6,
@@ -74,13 +78,21 @@ def build_context_pack(
     context_path = context_path.expanduser().resolve()
     normalized_model = _normalize_model(model)
     resolved_budget = token_budget or DEFAULT_CONTEXT_PACK_TOKENS[normalized_model]
+    execution_profile = build_session_execution_profile(
+        model=normalized_model,
+        workflow=workflow,
+        tool_profile=tool_profile,
+    )
     bootstrap = build_session_bootstrap(manager, context_path, record_event=False)
     cached_bootstrap = _cache_bootstrap(manager, context_path, bootstrap)
     cache_key = _context_pack_cache_key(
         context_path,
         bootstrap=cached_bootstrap,
         query=query,
+        task=task,
         model=normalized_model,
+        workflow=str(execution_profile["workflow"]),
+        tool_profile=str((execution_profile.get("tool_profile") or {}).get("name", "default")),
         token_budget=resolved_budget,
         include_content=include_content,
         max_query_results=max_query_results,
@@ -94,6 +106,13 @@ def build_context_pack(
     )
     if cached is not None:
         return cached
+    execution_profile_text = _render_execution_profile_block(execution_profile)
+    focus_block = _render_focus_block(task=task, query=query)
+    reserved_tokens = 0
+    if execution_profile_text:
+        reserved_tokens += estimate_tokens(execution_profile_text) + estimate_tokens("Execution Profile")
+    if focus_block:
+        reserved_tokens += estimate_tokens(focus_block["body"]) + estimate_tokens(focus_block["title"])
     guidance = _model_guidance(normalized_model)
     sections = _build_sections(
         manager,
@@ -105,16 +124,21 @@ def build_context_pack(
         max_query_results=max_query_results,
         max_embedding_results=max_embedding_results,
     )
-    chosen, omitted = _select_sections(sections, token_budget=resolved_budget)
+    chosen, omitted = _select_sections(
+        sections,
+        token_budget=max(0, resolved_budget - reserved_tokens),
+    )
     sources = sorted({source for section in chosen for source in section.sources})
-    estimated = sum(section.estimated_tokens() for section in chosen)
+    estimated = reserved_tokens + sum(section.estimated_tokens() for section in chosen)
 
-    return {
+    pack = {
         "context_path": str(context_path),
         "project": bootstrap["project"],
         "profile": bootstrap["profile"],
         "model": normalized_model,
         "query": query,
+        "task": task,
+        "execution_profile": execution_profile,
         "token_budget": resolved_budget,
         "estimated_tokens": estimated,
         "guidance": guidance,
@@ -127,6 +151,9 @@ def build_context_pack(
             "hit": False,
         },
     }
+    pack["cache"]["prefix_hash"] = _context_pack_prefix_hash(pack)
+    pack["cache"]["stable_prefix_hash"] = _context_pack_stable_prefix_hash(pack)
+    return pack
 
 
 def render_context_pack(pack: dict[str, Any]) -> str:
@@ -138,8 +165,10 @@ def render_context_pack(pack: dict[str, Any]) -> str:
         f"Target model: {pack['model']}",
         f"Token budget: {pack['estimated_tokens']}/{pack['token_budget']}",
     ]
-    if pack.get("query"):
-        lines.append(f"Query: {pack['query']}")
+    execution_profile = pack.get("execution_profile")
+    execution_profile_text = _render_execution_profile_block(execution_profile)
+    if execution_profile_text:
+        lines.extend(["", "## Execution Profile", execution_profile_text])
     guidance = pack.get("guidance")
     if isinstance(guidance, str) and guidance.strip():
         lines.extend(["", "## Guidance", guidance.strip()])
@@ -154,6 +183,12 @@ def render_context_pack(pack: dict[str, Any]) -> str:
     omitted = pack.get("omitted_sections") or []
     if omitted:
         lines.extend(["", "## Omitted", ", ".join(str(item) for item in omitted)])
+    focus_block = _render_focus_block(
+        task=str(pack.get("task", "")),
+        query=str(pack.get("query", "")),
+    )
+    if focus_block is not None:
+        lines.extend(["", f"## {focus_block['title']}", focus_block["body"]])
     return "\n".join(lines)
 
 
@@ -203,7 +238,10 @@ def _context_pack_cache_key(
     *,
     bootstrap: dict[str, Any],
     query: str,
+    task: str,
     model: str,
+    workflow: str,
+    tool_profile: str,
     token_budget: int,
     include_content: bool,
     max_query_results: int,
@@ -213,7 +251,10 @@ def _context_pack_cache_key(
         "version": CONTEXT_PACK_CACHE_VERSION,
         "context_path": str(context_path),
         "query": query,
+        "task": task,
         "model": model,
+        "workflow": workflow,
+        "tool_profile": tool_profile,
         "token_budget": token_budget,
         "include_content": include_content,
         "max_query_results": max_query_results,
@@ -587,7 +628,7 @@ def _select_sections(
     chosen: list[ContextPackSection] = []
     omitted: list[ContextPackSection] = []
     used = 0
-    for section in sorted(sections, key=lambda item: item.priority):
+    for section in sorted(sections, key=lambda item: (item.priority, item.title)):
         cost = section.estimated_tokens()
         if chosen and used + cost > token_budget:
             omitted.append(section)
@@ -676,6 +717,132 @@ def _render_hivemind_block(hivemind: dict[str, Any]) -> str:
             f"- {message.get('timestamp', '')[:19]} [{message.get('type', '')}] {message.get('from', '')}{target}{topic}"
         )
     return "\n".join(lines)
+
+
+def _render_execution_profile_block(profile: Any) -> str:
+    if not isinstance(profile, dict):
+        return ""
+    tool_profile = profile.get("tool_profile")
+    lines = [
+        f"Workflow: {profile.get('workflow', 'general')}",
+        f"Summary: {profile.get('summary', '')}",
+        f"Intent: {profile.get('intent', '')}",
+    ]
+    model_hint = str(profile.get("model_hint", "")).strip()
+    if model_hint:
+        lines.append(f"Model hint: {model_hint}")
+    if isinstance(tool_profile, dict):
+        lines.append(
+            f"Tool profile: {tool_profile.get('name', 'default')} - {tool_profile.get('summary', '')}"
+        )
+        preferred = tool_profile.get("preferred_surfaces") or []
+        if preferred:
+            lines.append("Preferred surfaces:")
+            lines.extend(f"- {value}" for value in preferred[:10])
+        notes = tool_profile.get("notes") or []
+        if notes:
+            lines.append("Tool notes:")
+            lines.extend(f"- {value}" for value in notes[:6])
+    prompt_contract = profile.get("prompt_contract") or []
+    if prompt_contract:
+        lines.append("Prompt contract:")
+        lines.extend(f"- {value}" for value in prompt_contract[:8])
+    verification_contract = profile.get("verification_contract") or []
+    if verification_contract:
+        lines.append("Verification contract:")
+        lines.extend(f"- {value}" for value in verification_contract[:8])
+    return "\n".join(line for line in lines if line.strip())
+
+
+def _render_focus_block(*, task: str, query: str) -> dict[str, str] | None:
+    task_text = task.strip()
+    if task_text:
+        return {"title": "Task", "body": task_text}
+    query_text = query.strip()
+    if query_text:
+        return {"title": "Focus Query", "body": query_text}
+    return None
+
+
+def _context_pack_prefix_hash(pack: dict[str, Any]) -> str:
+    lines = [
+        f"project={pack.get('project', '')}",
+        f"context={pack.get('context_path', '')}",
+        f"profile={pack.get('profile', '')}",
+        f"model={pack.get('model', '')}",
+    ]
+    execution_profile_text = _render_execution_profile_block(pack.get("execution_profile"))
+    if execution_profile_text:
+        lines.extend(["## Execution Profile", execution_profile_text])
+    guidance = str(pack.get("guidance", "")).strip()
+    if guidance:
+        lines.extend(["## Guidance", guidance])
+    for section in pack.get("sections", []):
+        if not isinstance(section, dict):
+            continue
+        title = str(section.get("title", "")).strip()
+        if title == "Context Health":
+            continue
+        body = str(section.get("body", "")).strip()
+        if not body:
+            continue
+        lines.extend(["## " + title, body])
+        sources = section.get("sources") or []
+        if sources:
+            lines.append("Sources:")
+            lines.extend(f"- {source}" for source in sources)
+    payload = "\n".join(lines).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+# Sections that change between sessions or on every scratchpad write.
+# Excluded from stable_prefix_hash so Gemini context caching can hit on
+# the knowledge-heavy prefix even when volatile state drifts.
+_VOLATILE_SECTION_TITLES = frozenset({
+    "Context Health",
+    "Recommended Actions",
+    "Scratchpad State",
+    "Latest Handoff",
+    "Open Tasks",
+    "Recent Hivemind",
+})
+
+
+def _context_pack_stable_prefix_hash(pack: dict[str, Any]) -> str:
+    """Hash only the stable corpus prefix (knowledge, execution profile, guidance).
+
+    Volatile sections (scratchpad, tasks, hivemind, handoff, health) are
+    excluded so Gemini context-cache adapters can match on the stable prefix
+    even when session state drifts between calls.
+    """
+    lines = [
+        f"project={pack.get('project', '')}",
+        f"context={pack.get('context_path', '')}",
+        f"profile={pack.get('profile', '')}",
+        f"model={pack.get('model', '')}",
+    ]
+    execution_profile_text = _render_execution_profile_block(pack.get("execution_profile"))
+    if execution_profile_text:
+        lines.extend(["## Execution Profile", execution_profile_text])
+    guidance = str(pack.get("guidance", "")).strip()
+    if guidance:
+        lines.extend(["## Guidance", guidance])
+    for section in pack.get("sections", []):
+        if not isinstance(section, dict):
+            continue
+        title = str(section.get("title", "")).strip()
+        if title in _VOLATILE_SECTION_TITLES:
+            continue
+        body = str(section.get("body", "")).strip()
+        if not body:
+            continue
+        lines.extend(["## " + title, body])
+        sources = section.get("sources") or []
+        if sources:
+            lines.append("Sources:")
+            lines.extend(f"- {source}" for source in sorted(sources))
+    payload = "\n".join(lines).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _render_memory_block(memory: dict[str, Any]) -> str:

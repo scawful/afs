@@ -7,7 +7,11 @@ from pathlib import Path
 import afs.cli.core as cli_core_module
 from afs.cli.core import session_pack_command
 from afs.context_index import ContextSQLiteIndex
-from afs.context_pack import build_context_pack, write_context_pack_artifacts
+from afs.context_pack import (
+    build_context_pack,
+    render_context_pack,
+    write_context_pack_artifacts,
+)
 from afs.manager import AFSManager
 from afs.models import MountType
 from afs.schema import AFSConfig, GeneralConfig, SensitivityConfig
@@ -61,13 +65,18 @@ def test_build_context_pack_respects_sensitivity_and_budget(tmp_path: Path) -> N
         manager,
         context_root,
         query="service wiring",
+        task="Fix the service wiring issue with minimal edits.",
         model="gemini",
-        token_budget=500,
+        workflow="edit_fast",
+        token_budget=900,
         include_content=True,
     )
 
     assert pack["model"] == "gemini"
-    assert pack["estimated_tokens"] <= 500
+    assert pack["task"] == "Fix the service wiring issue with minimal edits."
+    assert pack["execution_profile"]["workflow"] == "edit_fast"
+    assert pack["execution_profile"]["tool_profile"]["name"] == "edit_and_verify"
+    assert pack["estimated_tokens"] <= 900
     assert any(section["title"] == "Scratchpad State" for section in pack["sections"])
     assert any("guide.md" in source for source in pack["sources"])
     assert all("secret.md" not in source for source in pack["sources"])
@@ -97,7 +106,10 @@ def test_session_pack_command_outputs_json_and_writes_artifacts(
             context_root=context_root,
             context_dir=None,
             query="codex pack",
+            task="Implement the codex pack update.",
             model="codex",
+            workflow="edit_fast",
+            tool_profile="edit_and_verify",
             token_budget=400,
             include_content=False,
             max_query_results=4,
@@ -110,6 +122,9 @@ def test_session_pack_command_outputs_json_and_writes_artifacts(
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["model"] == "codex"
+    assert payload["task"] == "Implement the codex pack update."
+    assert payload["execution_profile"]["workflow"] == "edit_fast"
+    assert payload["cache"]["prefix_hash"]
     assert payload["artifact_paths"]["json"].endswith("session_pack_codex.json")
     assert Path(payload["artifact_paths"]["json"]).exists()
     assert Path(payload["artifact_paths"]["markdown"]).exists()
@@ -134,7 +149,10 @@ def test_session_pack_command_skips_artifact_rewrite_on_cache_hit(
         context_root=context_root,
         context_dir=None,
         query="cached command",
+        task="Keep the cached command pack stable.",
         model="codex",
+        workflow="general",
+        tool_profile="default",
         token_budget=400,
         include_content=False,
         max_query_results=4,
@@ -177,7 +195,9 @@ def test_build_context_pack_reuses_cached_artifact_when_inputs_match(
         manager,
         context_root,
         query="cached pack",
+        task="Keep the cached pack stable.",
         model="codex",
+        workflow="general",
         token_budget=400,
     )
     write_context_pack_artifacts(manager, context_root, first_pack)
@@ -191,7 +211,9 @@ def test_build_context_pack_reuses_cached_artifact_when_inputs_match(
         manager,
         context_root,
         query="cached pack",
+        task="Keep the cached pack stable.",
         model="codex",
+        workflow="general",
         token_budget=400,
     )
 
@@ -211,6 +233,7 @@ def test_build_context_pack_invalidates_cache_when_bootstrap_changes(tmp_path: P
         manager,
         context_root,
         query="state drift",
+        task="Investigate state drift.",
         model="codex",
     )
     write_context_pack_artifacts(manager, context_root, first_pack)
@@ -221,6 +244,7 @@ def test_build_context_pack_invalidates_cache_when_bootstrap_changes(tmp_path: P
         manager,
         context_root,
         query="state drift",
+        task="Investigate state drift.",
         model="codex",
     )
 
@@ -236,9 +260,24 @@ def test_write_context_pack_artifacts_writes_files(tmp_path: Path) -> None:
         "profile": "default",
         "model": "generic",
         "query": "",
+        "task": "Summarize the pack",
         "token_budget": 100,
         "estimated_tokens": 10,
         "guidance": "use this pack",
+        "execution_profile": {
+            "workflow": "general",
+            "summary": "Balanced workflow when the task is not classified yet.",
+            "intent": "Read the cited context, keep the plan flat, and move to action without over-scaffolding.",
+            "model_hint": "Use the model's default reasoning level and escalate only when the evidence stays ambiguous.",
+            "prompt_contract": [],
+            "verification_contract": [],
+            "tool_profile": {
+                "name": "default",
+                "summary": "Balanced AFS surface for normal repo work.",
+                "preferred_surfaces": [],
+                "notes": [],
+            },
+        },
         "sections": [],
         "sources": [],
         "omitted_sections": [],
@@ -248,3 +287,138 @@ def test_write_context_pack_artifacts_writes_files(tmp_path: Path) -> None:
 
     assert Path(artifact_paths["json"]).exists()
     assert Path(artifact_paths["markdown"]).exists()
+
+
+def test_rendered_context_pack_places_task_at_end(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    pack = build_context_pack(
+        manager,
+        context_root,
+        query="service guide",
+        task="Review the service guide and propose the smallest fix.",
+        model="gemini",
+        workflow="review_deep",
+        tool_profile="context_readonly",
+        token_budget=400,
+    )
+
+    rendered = render_context_pack(pack)
+    assert "## Task" in rendered
+    assert rendered.rstrip().endswith("Review the service guide and propose the smallest fix.")
+
+
+def test_context_pack_prefix_hash_stays_stable_when_only_task_changes(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "guide.md").write_text("stable prefix guide", encoding="utf-8")
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE],
+        include_content=True,
+    )
+
+    first = build_context_pack(
+        manager,
+        context_root,
+        query="stable prefix",
+        task="First task wording.",
+        model="gemini",
+        workflow="edit_fast",
+        token_budget=700,
+    )
+    second = build_context_pack(
+        manager,
+        context_root,
+        query="stable prefix",
+        task="Second task wording.",
+        model="gemini",
+        workflow="edit_fast",
+        token_budget=700,
+    )
+
+    assert first["cache"]["prefix_hash"] == second["cache"]["prefix_hash"]
+    assert first["cache"]["stable_prefix_hash"] == second["cache"]["stable_prefix_hash"]
+
+
+def test_stable_prefix_hash_ignores_scratchpad_and_task_drift(tmp_path: Path) -> None:
+    """stable_prefix_hash stays the same even when scratchpad content changes."""
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "ref.md").write_text("stable reference doc", encoding="utf-8")
+    scratchpad_root = manager.resolve_mount_root(context_root, MountType.SCRATCHPAD)
+    scratchpad_root.mkdir(parents=True, exist_ok=True)
+    (scratchpad_root / "state.md").write_text("state version A", encoding="utf-8")
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE, MountType.SCRATCHPAD],
+        include_content=True,
+    )
+
+    first = build_context_pack(
+        manager,
+        context_root,
+        query="stable reference",
+        task="Task A",
+        model="gemini",
+        workflow="edit_fast",
+        token_budget=900,
+    )
+
+    # Change scratchpad content
+    (scratchpad_root / "state.md").write_text("state version B", encoding="utf-8")
+
+    second = build_context_pack(
+        manager,
+        context_root,
+        query="stable reference",
+        task="Task B",
+        model="gemini",
+        workflow="edit_fast",
+        token_budget=900,
+    )
+
+    # stable_prefix_hash should match (scratchpad is volatile, excluded)
+    assert first["cache"]["stable_prefix_hash"] == second["cache"]["stable_prefix_hash"]
+    # But full prefix_hash may differ because it includes scratchpad
+    # (we don't assert inequality since both *might* match if scratchpad
+    # happens to render identically, but the stable hash is the guarantee)
+
+
+def test_stable_prefix_hash_changes_when_knowledge_changes(tmp_path: Path) -> None:
+    """stable_prefix_hash must change when knowledge docs change."""
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "ref.md").write_text("knowledge version A", encoding="utf-8")
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE],
+        include_content=True,
+    )
+
+    first = build_context_pack(
+        manager,
+        context_root,
+        query="knowledge",
+        model="gemini",
+        token_budget=700,
+    )
+
+    (knowledge_root / "ref.md").write_text("knowledge version B", encoding="utf-8")
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE],
+        include_content=True,
+    )
+
+    second = build_context_pack(
+        manager,
+        context_root,
+        query="knowledge",
+        model="gemini",
+        token_budget=700,
+    )
+
+    assert first["cache"]["stable_prefix_hash"] != second["cache"]["stable_prefix_hash"]

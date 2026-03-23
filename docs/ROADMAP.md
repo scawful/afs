@@ -24,10 +24,11 @@ AFS now has a usable core operator loop:
    `src/afs/mcp_server.py` is too large. Split transport, built-in tools,
    prompts/resources, extension loading, and diagnostics into separate modules.
 
-3. Model-aware context pack builder
-   Build context packets for Gemini/Claude/Codex with token budgeting,
-   deduplication, retrieval ranking, and citations instead of relying only on
-   raw bootstrap plus manual query steps.
+3. Gemini-oriented workflow scaffolding on top of session packs
+   The basic model-aware context pack builder exists now. The next layer is
+   workflow profiles, tool-profile narrowing, task-at-end prompt shaping, and
+   later plan/verify contracts that help Gemini stay disciplined without making
+   core AFS Google-specific.
 
 4. Better agent observability
    Extend `afs status` / `afs health` to show what agents produced, what is
