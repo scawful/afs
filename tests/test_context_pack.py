@@ -75,6 +75,9 @@ def test_build_context_pack_respects_sensitivity_and_budget(tmp_path: Path) -> N
     assert pack["model"] == "gemini"
     assert pack["task"] == "Fix the service wiring issue with minimal edits."
     assert pack["execution_profile"]["workflow"] == "edit_fast"
+    assert pack["execution_profile"]["loop_policy"].startswith("Prompt-only rail.")
+    assert "Retry on Flash for a narrower edit" in pack["execution_profile"]["retry_hint"]
+    assert len(pack["execution_profile"]["retry_contract"]) == 2
     assert pack["execution_profile"]["tool_profile"]["name"] == "edit_and_verify"
     assert pack["estimated_tokens"] <= 900
     assert any(section["title"] == "Scratchpad State" for section in pack["sections"])
@@ -272,8 +275,11 @@ def test_write_context_pack_artifacts_writes_files(tmp_path: Path) -> None:
             "summary": "Balanced workflow when the task is not classified yet.",
             "intent": "Read the cited context, keep the plan flat, and move to action without over-scaffolding.",
             "model_hint": "Use the model's default reasoning level and escalate only when the evidence stays ambiguous.",
+            "loop_policy": "Prompt-only rail.",
+            "retry_hint": "Retry with a narrower query or smaller pack before escalating the workflow.",
             "prompt_contract": [],
             "verification_contract": [],
+            "retry_contract": [],
             "tool_profile": {
                 "name": "default",
                 "summary": "Balanced AFS surface for normal repo work.",
@@ -308,6 +314,8 @@ def test_rendered_context_pack_places_task_at_end(tmp_path: Path) -> None:
 
     rendered = render_context_pack(pack)
     assert "## Task" in rendered
+    assert "Loop policy:" in rendered
+    assert "Retry contract:" in rendered
     assert rendered.rstrip().endswith("Review the service guide and propose the smallest fix.")
 
 

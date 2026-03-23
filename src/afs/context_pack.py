@@ -873,6 +873,12 @@ def _render_execution_profile_block(profile: Any) -> str:
     model_hint = str(profile.get("model_hint", "")).strip()
     if model_hint:
         lines.append(f"Model hint: {model_hint}")
+    loop_policy = str(profile.get("loop_policy", "")).strip()
+    if loop_policy:
+        lines.append(f"Loop policy: {loop_policy}")
+    retry_hint = str(profile.get("retry_hint", "")).strip()
+    if retry_hint:
+        lines.append(f"Retry hint: {retry_hint}")
     if isinstance(tool_profile, dict):
         lines.append(
             f"Tool profile: {tool_profile.get('name', 'default')} - {tool_profile.get('summary', '')}"
@@ -893,6 +899,10 @@ def _render_execution_profile_block(profile: Any) -> str:
     if verification_contract:
         lines.append("Verification contract:")
         lines.extend(f"- {value}" for value in verification_contract[:8])
+    retry_contract = profile.get("retry_contract") or []
+    if retry_contract:
+        lines.append("Retry contract:")
+        lines.extend(f"- {value}" for value in retry_contract[:8])
     return "\n".join(line for line in lines if line.strip())
 
 

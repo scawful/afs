@@ -100,6 +100,9 @@ Implemented in this pass:
 - MCP tool `operator.digest` now compresses `pytest`, `traceback`, `grep`,
   `diffstat`, and generic command output into compact summaries before that
   output goes back into model context
+- `execution_profile` now carries a prompt-only loop policy plus workflow/model
+  retry guidance so Gemini can narrow context, switch schemas, or escalate
+  models without AFS taking over host-managed session state
 
 This gives Gemini users a better prompt scaffold immediately while keeping the
 underlying abstractions generic enough for Claude, Codex, and future adapters.
@@ -115,13 +118,15 @@ underlying abstractions generic enough for Claude, Codex, and future adapters.
    recommendations) so Gemini context-cache adapters can match on the
    knowledge-heavy prefix even when session state drifts between calls.
    Sections also use deterministic `(priority, title)` sort ordering.
+3. Structured rail placement: `afs.workflow.structured` stays prompt-only for
+   now. Host CLIs keep their own turn loops; AFS carries schemas, tool
+   narrowing, operator digests, and retry guidance without introducing
+   execution state into core.
 
 ## Next Steps
 
-1. Decide whether `afs.workflow.structured` should stay a prompt-only rail or
-   grow into a fuller plan/review/verify loop with execution state.
-2. Extend `operator.digest` beyond the initial `pytest` / `traceback` / `grep`
+1. Extend `operator.digest` beyond the initial `pytest` / `traceback` / `grep`
    / `diffstat` parsers with richer command-family digests where they prove
    useful in practice.
-3. Build the Gemini adapter layer: thinking-level/budget mapping, cache API
+2. Build the Gemini adapter layer: thinking-level/budget mapping, cache API
    integration, thought-signature handling, Gemini-specific prompt templates.

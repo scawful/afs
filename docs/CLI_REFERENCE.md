@@ -167,7 +167,10 @@ artifact instead of rebuilding from scratch.
 
 Pack JSON now includes `execution_profile` metadata and `cache.prefix_hash` so
 Gemini-side adapters can distinguish a stable context prefix from a changing
-task suffix. It also records `pack_mode` and `pack_mode_summary`.
+task suffix. It also records `pack_mode` and `pack_mode_summary`. The
+`execution_profile` now carries prompt-only loop policy and retry guidance, so
+Gemini-facing wrappers can rerun with narrower context, schema-bound prompts,
+or different model tiers without AFS owning the turn loop.
 
 ## Events
 

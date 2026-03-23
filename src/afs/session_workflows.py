@@ -30,6 +30,8 @@ class SessionWorkflowDefinition:
     prompt_contract: tuple[str, ...]
     verification_contract: tuple[str, ...]
     model_hints: dict[str, str]
+    retry_contract: tuple[str, ...]
+    retry_hints: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,12 @@ class SessionToolProfileDefinition:
     summary: str
     preferred_surfaces: tuple[str, ...]
     notes: tuple[str, ...]
+
+
+PROMPT_ONLY_LOOP_POLICY = (
+    "Prompt-only rail. Let the host CLI manage turn state; AFS supplies context, "
+    "schemas, tool narrowing, and digest hints without owning execution state."
+)
 
 
 WORKFLOW_DEFINITIONS = {
@@ -61,6 +69,16 @@ WORKFLOW_DEFINITIONS = {
             "claude": "Prefer a short execution plan before editing.",
             "codex": "Bias toward concrete files, diffs, and checks over general discussion.",
         },
+        retry_contract=(
+            "If the answer gets diffuse, retry with a narrower query or retrieval pack before changing workflows.",
+            "Use a schema-bound prompt only when the response format matters more than free-form explanation.",
+        ),
+        retry_hints={
+            "generic": "Retry with a narrower query or smaller pack before escalating the workflow.",
+            "gemini": "If Flash diffuses, retry with a narrower query or retrieval pack; escalate to Pro only after the context is clean.",
+            "claude": "Retry with a shorter execution contract before widening the context.",
+            "codex": "Retry with fewer files and a concrete verification target before broadening the task.",
+        },
     ),
     "scan_fast": SessionWorkflowDefinition(
         name="scan_fast",
@@ -81,6 +99,16 @@ WORKFLOW_DEFINITIONS = {
             "gemini": "Flash is the default fit here; escalate to Pro only if the evidence needs synthesis.",
             "claude": "Keep the scan bounded and path-oriented.",
             "codex": "Prefer concrete hits and next files to inspect.",
+        },
+        retry_contract=(
+            "Retry with a tighter query or smaller shortlist before widening the search.",
+            "Escalate to a deeper workflow only when the evidence conflicts or stays incomplete.",
+        ),
+        retry_hints={
+            "generic": "Retry with a narrower retrieval query before switching workflows.",
+            "gemini": "Stay on Flash for the retry; move to Pro only if the extracted evidence still needs synthesis.",
+            "claude": "Retry with a shorter prompt and clearer decision target.",
+            "codex": "Retry with concrete file filters instead of reading more files by default.",
         },
     ),
     "edit_fast": SessionWorkflowDefinition(
@@ -103,6 +131,16 @@ WORKFLOW_DEFINITIONS = {
             "claude": "Translate the pack into a concise edit checklist before touching files.",
             "codex": "Focus on implementation order and verification commands.",
         },
+        retry_contract=(
+            "If the edit loop drifts, rerun with `afs.workflow.structured` and the `edit-intent` schema.",
+            "Retry with fewer files or a retrieval pack before widening the patch.",
+        ),
+        retry_hints={
+            "generic": "Retry with a smaller patch scope and explicit verification target.",
+            "gemini": "Retry on Flash for a narrower edit; escalate to Pro only when the change crosses modules or constraints.",
+            "claude": "Retry with a three-step checklist and concrete files.",
+            "codex": "Retry with a reduced file set and immediate verification command.",
+        },
     ),
     "review_deep": SessionWorkflowDefinition(
         name="review_deep",
@@ -124,6 +162,16 @@ WORKFLOW_DEFINITIONS = {
             "claude": "Keep the report structured and evidence-backed.",
             "codex": "Bias toward bugs, regressions, and missing tests over summaries.",
         },
+        retry_contract=(
+            "If findings become essay-like, rerun with `afs.workflow.structured` and the `review-findings` schema.",
+            "Prefer smaller cited context before escalating to a deeper model or workflow.",
+        ),
+        retry_hints={
+            "generic": "Retry with a smaller cited context and clearer severity target.",
+            "gemini": "Use Pro first; reserve Deep Think for unresolved cross-cutting reasoning after the evidence is narrowed.",
+            "claude": "Retry with stricter finding ordering and fewer files in scope.",
+            "codex": "Retry with concrete risk categories and missing-test focus.",
+        },
     ),
     "root_cause_deep": SessionWorkflowDefinition(
         name="root_cause_deep",
@@ -144,6 +192,16 @@ WORKFLOW_DEFINITIONS = {
             "gemini": "Deep Think or Pro fits this workflow; keep the hypothesis list short so the model does not wander.",
             "claude": "Translate each hypothesis into a concrete file or command check.",
             "codex": "Stay close to stack traces, diffs, and runnable checks.",
+        },
+        retry_contract=(
+            "If hypotheses multiply, retry with a retrieval pack and operator digests for the failing output.",
+            "Keep the hypothesis list short; only widen scope after disproving the current top candidate.",
+        ),
+        retry_hints={
+            "generic": "Retry with compressed evidence before adding more hypotheses.",
+            "gemini": "Retry on Pro with compressed traces and digests first; use Deep Think only after the evidence is already clean.",
+            "claude": "Retry with one hypothesis per check and explicit stop conditions.",
+            "codex": "Retry with stack traces, diffs, and one runnable check per hypothesis.",
         },
     ),
 }
@@ -291,12 +349,18 @@ def build_session_execution_profile(
         "workflow": workflow_name,
         "summary": workflow_definition.summary,
         "intent": workflow_definition.intent,
+        "loop_policy": PROMPT_ONLY_LOOP_POLICY,
         "model_hint": workflow_definition.model_hints.get(
             model,
             workflow_definition.model_hints["generic"],
         ),
+        "retry_hint": workflow_definition.retry_hints.get(
+            model,
+            workflow_definition.retry_hints["generic"],
+        ),
         "prompt_contract": list(workflow_definition.prompt_contract),
         "verification_contract": list(workflow_definition.verification_contract),
+        "retry_contract": list(workflow_definition.retry_contract),
         "tool_profile": {
             "name": tool_profile_name,
             "summary": tool_definition.summary,

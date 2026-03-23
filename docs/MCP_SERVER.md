@@ -246,7 +246,10 @@ arguments so callers can encode a short execution contract and put the explicit
 task at the end of the rendered pack. Returned pack JSON includes
 `cache.prefix_hash` for stable-prefix cache experiments in adapters. `pack_mode`
 supports `focused`, `retrieval`, and `full_slice` shaping for query-first vs
-broader long-context packs.
+broader long-context packs. The `execution_profile` block now also carries a
+prompt-only loop policy plus retry guidance so the host CLI keeps session
+control while AFS still suggests narrower retries, schema-bound reruns, or
+model escalation paths.
 
 `afs://schemas/<name>` exposes compact response contracts for structured agent
 workflows. Built-in names currently include:

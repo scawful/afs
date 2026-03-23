@@ -1635,6 +1635,8 @@ def test_tool_session_pack(tmp_path: Path) -> None:
     assert payload["model"] == "codex"
     assert payload["task"] == "Implement the service guide fix."
     assert payload["execution_profile"]["workflow"] == "edit_fast"
+    assert payload["execution_profile"]["loop_policy"].startswith("Prompt-only rail.")
+    assert payload["execution_profile"]["retry_hint"]
     assert payload["pack_mode"] == "retrieval"
     assert any("guide.md" in source for source in payload["sources"])
 

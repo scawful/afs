@@ -204,7 +204,10 @@ reuse the stored pack artifact instead of rebuilding all sections. Packs now
 also carry an `execution_profile` block, a task-at-end suffix via `--task`, and
 a stable `cache.prefix_hash` for adapter-side cache reuse work. `--pack-mode`
 lets callers choose between the normal focused pack, a query-first retrieval
-pack, and a broader full-slice pack for long-context models.
+pack, and a broader full-slice pack for long-context models. The
+`execution_profile` now also spells out that `afs.workflow.structured` is a
+prompt-only rail and includes retry guidance so the host loop stays in Gemini
+CLI or Claude Code instead of moving into core AFS.
 
 For noisy command output, use MCP tool `operator.digest` before pasting raw
 logs back into a model turn. It can auto-detect and compress `pytest`,
