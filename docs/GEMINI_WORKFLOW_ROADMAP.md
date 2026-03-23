@@ -91,6 +91,10 @@ Implemented in this pass:
 - built-in `afs://schemas/<name>` resources now expose compact JSON contracts
   for `plan`, `file-shortlist`, `review-findings`, `edit-intent`,
   `verification-summary`, and `handoff-summary`
+- MCP prompt `afs.workflow.structured` now combines one of those built-in
+  schemas with a normal `session.pack` payload so clients can request a
+  schema-bound plan/review/verification response without hand-assembling the
+  prompt contract
 - `session pack` now supports explicit `pack_mode` selection for `focused`,
   `retrieval`, and `full_slice` context shaping
 - MCP tool `operator.digest` now compresses `pytest`, `traceback`, `grep`,
@@ -100,14 +104,24 @@ Implemented in this pass:
 This gives Gemini users a better prompt scaffold immediately while keeping the
 underlying abstractions generic enough for Claude, Codex, and future adapters.
 
+## Completed Follow-ups
+
+1. Tool-profile enforcement: `AFS_TOOL_PROFILE` env var now filters both
+   `tools/list` responses and `tools/call` enforcement via `agent_scope.py`.
+   `AFS_ALLOWED_TOOLS` (explicit globs) takes precedence when both are set.
+   `is_tool_allowed()` enables non-raising filtering at the MCP layer.
+2. Stable prefix hash: `cache.stable_prefix_hash` in context packs excludes
+   volatile sections (scratchpad, tasks, hivemind, handoff, health,
+   recommendations) so Gemini context-cache adapters can match on the
+   knowledge-heavy prefix even when session state drifts between calls.
+   Sections also use deterministic `(priority, title)` sort ordering.
+
 ## Next Steps
 
-1. Turn workflow/tool profiles from advisory metadata into optional MCP tool
-   filtering for Gemini-facing wrappers.
-2. Turn the compact schema resources into optional higher-level plan/review /
-   verify rails instead of leaving them as advisory contracts only.
-3. Split stable pack prefixes from volatile suffixes so cache reuse becomes
-   measurable and explicit.
-4. Extend `operator.digest` beyond the initial `pytest` / `traceback` / `grep`
+1. Decide whether `afs.workflow.structured` should stay a prompt-only rail or
+   grow into a fuller plan/review/verify loop with execution state.
+2. Extend `operator.digest` beyond the initial `pytest` / `traceback` / `grep`
    / `diffstat` parsers with richer command-family digests where they prove
    useful in practice.
+3. Build the Gemini adapter layer: thinking-level/budget mapping, cache API
+   integration, thought-signature handling, Gemini-specific prompt templates.

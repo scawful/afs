@@ -217,6 +217,7 @@ Gemini-facing MCP prompts:
 
 - `afs.session.bootstrap`
 - `afs.session.pack`
+- `afs.workflow.structured`
 - `afs.context.overview`
 - `afs.query.search`
 - `afs.scratchpad.review`
@@ -259,6 +260,12 @@ workflows. Built-in names currently include:
 
 These resources return `application/schema+json` so Gemini or other MCP clients
 can request a tiny output contract before asking for a structured response.
+
+`afs.workflow.structured` is the first higher-level rail built on top of those
+schemas. It combines `session.pack` context shaping with an inline built-in
+schema so a client can ask for a plan, review, edit intent, verification
+summary, or handoff packet in one MCP prompt without hand-assembling the
+contract each time.
 
 For noisy command output, `operator.digest` provides a small compression step
 before the text goes back into model context. It accepts raw `text` plus an

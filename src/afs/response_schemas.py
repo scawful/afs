@@ -204,6 +204,11 @@ def list_response_schema_specs() -> list[dict[str, str]]:
     return resources
 
 
+def list_response_schema_names() -> list[str]:
+    """Return the built-in response schema names."""
+    return sorted(_SCHEMA_DEFINITIONS)
+
+
 def get_response_schema(name: str) -> dict[str, Any]:
     """Return a copy of a named response schema."""
     schema = _SCHEMA_DEFINITIONS.get(name)

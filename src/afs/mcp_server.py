@@ -35,6 +35,7 @@ from .response_schemas import (
     SCHEMA_MIME_TYPE,
     SCHEMA_URI_PREFIX,
     get_response_schema,
+    list_response_schema_names,
     list_response_schema_specs,
 )
 from .schema import ContextIndexConfig
@@ -58,6 +59,7 @@ _CORE_PROMPT_NAMES = {
     "afs.session.bootstrap",
     "afs.session.pack",
     "afs.scratchpad.review",
+    "afs.workflow.structured",
 }
 
 ToolHandler = Callable[[dict[str, Any], AFSManager], dict[str, Any]]
@@ -3363,6 +3365,58 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
             ],
         },
         {
+            "name": "afs.workflow.structured",
+            "description": "Build a structured workflow prompt by combining a session pack with one of the built-in AFS response schemas.",
+            "arguments": [
+                {
+                    "name": "context_path",
+                    "description": "Path to .context root (uses configured default if omitted)",
+                    "required": False,
+                },
+                {
+                    "name": "schema_name",
+                    "description": "Built-in response schema name. Supported: "
+                    + ", ".join(list_response_schema_names()),
+                    "required": False,
+                },
+                {
+                    "name": "task",
+                    "description": "Explicit task statement for the structured response",
+                    "required": True,
+                },
+                {
+                    "name": "query",
+                    "description": "Optional retrieval query to narrow the context pack",
+                    "required": False,
+                },
+                {
+                    "name": "model",
+                    "description": "Prompt-shaping target: generic, gemini, claude, or codex.",
+                    "required": False,
+                },
+                {
+                    "name": "workflow",
+                    "description": "Workflow profile: general, scan_fast, edit_fast, review_deep, or root_cause_deep.",
+                    "required": False,
+                },
+                {
+                    "name": "tool_profile",
+                    "description": "Optional tool profile hint carried into the session pack.",
+                    "required": False,
+                },
+                {
+                    "name": "pack_mode",
+                    "description": "Context shaping mode: focused, retrieval, or full_slice.",
+                    "required": False,
+                },
+                {
+                    "name": "token_budget",
+                    "description": "Optional pack token budget.",
+                    "required": False,
+                },
+            ],
+        },
+        {
             "name": "afs.query.search",
             "description": "Search the context index with a query",
             "arguments": [
@@ -3475,6 +3529,54 @@ def _get_prompt(
             lines.append(f"Agents: {', '.join(ctx_root.metadata.agents) or '(none)'}")
             if ctx_root.metadata.manual_only:
                 lines.append(f"Protected paths: {', '.join(ctx_root.metadata.manual_only)}")
+        return [{"role": "user", "content": {"type": "text", "text": "\n".join(lines)}}]
+
+    if name == "afs.workflow.structured":
+        schema_names = set(list_response_schema_names())
+        schema_name = str(arguments.get("schema_name", "plan") or "plan").strip()
+        if schema_name not in schema_names:
+            raise ValueError(
+                "schema_name must be one of: " + ", ".join(sorted(schema_names))
+            )
+        task = arguments.get("task", "")
+        if not isinstance(task, str) or not task.strip():
+            raise ValueError("task argument is required")
+        context_path = _resolve_prompt_context_path(arguments, manager)
+        payload = build_context_pack(
+            manager,
+            context_path,
+            query=str(arguments.get("query", "") or ""),
+            task=task,
+            model=str(arguments.get("model", "generic") or "generic"),
+            workflow=str(arguments.get("workflow", "general") or "general"),
+            tool_profile=str(arguments.get("tool_profile", "default") or "default"),
+            pack_mode=str(arguments.get("pack_mode", "focused") or "focused"),
+            token_budget=_coerce_int(
+                arguments.get("token_budget"),
+                default=0,
+                minimum=0,
+                maximum=200000,
+            )
+            or None,
+        )
+        schema = get_response_schema(schema_name)
+        lines = [
+            "# AFS Structured Workflow Prompt",
+            "",
+            "Return only JSON matching the response schema below.",
+            "Do not wrap the response in markdown fences.",
+            "Keep every field grounded in the supplied context. If evidence is missing, keep the answer minimal and note the uncertainty in fields that allow it.",
+            "",
+            f"Schema resource: {SCHEMA_URI_PREFIX}{schema_name}",
+            "",
+            "## Response Schema",
+            "```json",
+            json.dumps(schema, indent=2),
+            "```",
+            "",
+            "## Working Context",
+            render_context_pack(payload),
+        ]
         return [{"role": "user", "content": {"type": "text", "text": "\n".join(lines)}}]
 
     if name == "afs.query.search":

@@ -164,7 +164,7 @@ Paths are scoped to:
 
 Gemini-friendly prompts/resources are also exposed over MCP:
 
-- prompts: `afs.session.bootstrap`, `afs.session.pack`, `afs.context.overview`, `afs.query.search`, `afs.scratchpad.review`
+- prompts: `afs.session.bootstrap`, `afs.session.pack`, `afs.workflow.structured`, `afs.context.overview`, `afs.query.search`, `afs.scratchpad.review`
 - resources: `afs://contexts`, `afs://claude/bootstrap`, `afs://context/<path>/bootstrap`, `.../metadata`, `.../mounts`, `.../index`
 - schema resources: `afs://schemas/plan`, `afs://schemas/file-shortlist`, `afs://schemas/review-findings`, `afs://schemas/edit-intent`, `afs://schemas/verification-summary`, `afs://schemas/handoff-summary`
 
@@ -211,6 +211,11 @@ logs back into a model turn. It can auto-detect and compress `pytest`,
 `traceback`, `grep`, and `git diff --stat` style output into a compact summary
 plus structured fields, and it is included in the default, readonly, repair,
 and edit-oriented tool bundles.
+
+For schema-bound plan or verification work, use prompt `afs.workflow.structured`.
+It inlines one built-in response schema together with a normal `session.pack`
+payload so the model can stay inside a small JSON contract without the caller
+manually stitching the prompt together.
 
 Extensions can add their own MCP tools, prompts, and resources with
 `[mcp_server]` in `extension.toml`. Legacy tool-only factories under

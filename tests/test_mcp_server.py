@@ -1559,6 +1559,7 @@ def test_prompts_list_returns_expected_prompts(tmp_path: Path) -> None:
     assert {
         "afs.session.bootstrap",
         "afs.session.pack",
+        "afs.workflow.structured",
         "afs.context.overview",
         "afs.query.search",
         "afs.scratchpad.review",
@@ -1706,6 +1707,68 @@ def test_prompts_get_session_pack(tmp_path: Path) -> None:
     assert "gemini" in text.lower()
     assert "Pack mode: full_slice" in text
     assert "## Task" in text
+
+
+def test_prompts_get_workflow_structured(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    (context_root / "knowledge").mkdir(exist_ok=True)
+    (context_root / "knowledge" / "guide.md").write_text(
+        "gemini planning guide",
+        encoding="utf-8",
+    )
+    from afs.context_index import ContextSQLiteIndex
+
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE],
+        include_content=True,
+    )
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 1281,
+            "method": "prompts/get",
+            "params": {
+                "name": "afs.workflow.structured",
+                "arguments": {
+                    "context_path": str(context_root),
+                    "schema_name": "plan",
+                    "task": "Plan the guide update.",
+                    "query": "planning guide",
+                    "model": "gemini",
+                    "workflow": "scan_fast",
+                    "pack_mode": "retrieval",
+                },
+            },
+        },
+        manager,
+    )
+    assert response is not None
+    text = response["result"]["messages"][0]["content"]["text"]
+    assert "# AFS Structured Workflow Prompt" in text
+    assert "Schema resource: afs://schemas/plan" in text
+    assert '"completion_signal"' in text
+    assert "Pack mode: retrieval" in text
+    assert "Plan the guide update." in text
+
+
+def test_prompts_get_workflow_structured_rejects_unknown_schema(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 1282,
+            "method": "prompts/get",
+            "params": {
+                "name": "afs.workflow.structured",
+                "arguments": {"schema_name": "nope", "task": "Plan it."},
+            },
+        },
+        manager,
+    )
+    assert response is not None
+    assert "error" in response
+    assert "schema_name must be one of" in response["error"]["message"]
 
 
 def test_prompts_get_context_overview(tmp_path: Path) -> None:
