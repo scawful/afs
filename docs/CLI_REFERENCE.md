@@ -122,6 +122,8 @@ See `docs/JOURNAL_AGENT.md` for full argument reference and JSON output shape.
 ./scripts/afs session pack
 ./scripts/afs session pack "sqlite indexing" --model gemini
 ./scripts/afs session pack "sqlite indexing" --model gemini --workflow scan_fast --task "Find the three most relevant SQLite files"
+./scripts/afs session pack "sprite" --model gemini --pack-mode retrieval
+./scripts/afs session pack --model gemini --pack-mode full_slice
 ./scripts/afs session pack "runtime bug" --model codex --token-budget 12000 --json
 ```
 
@@ -159,10 +161,13 @@ artifact instead of rebuilding from scratch.
   `edit_fast`, `review_deep`, or `root_cause_deep`
 - `--tool-profile` to encode a preferred AFS surface mix such as
   `context_readonly`, `context_repair`, `edit_and_verify`, or `handoff_only`
+- `--pack-mode` to choose `focused`, `retrieval`, or `full_slice` context
+  shaping depending on whether Gemini needs a narrow query-first pack or a
+  broader long-context slice
 
 Pack JSON now includes `execution_profile` metadata and `cache.prefix_hash` so
 Gemini-side adapters can distinguish a stable context prefix from a changing
-task suffix.
+task suffix. It also records `pack_mode` and `pack_mode_summary`.
 
 ## Events
 

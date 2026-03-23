@@ -1622,6 +1622,7 @@ def test_tool_session_pack(tmp_path: Path) -> None:
                     "model": "codex",
                     "workflow": "edit_fast",
                     "tool_profile": "edit_and_verify",
+                    "pack_mode": "retrieval",
                 },
             },
         },
@@ -1632,6 +1633,7 @@ def test_tool_session_pack(tmp_path: Path) -> None:
     assert payload["model"] == "codex"
     assert payload["task"] == "Implement the service guide fix."
     assert payload["execution_profile"]["workflow"] == "edit_fast"
+    assert payload["pack_mode"] == "retrieval"
     assert any("guide.md" in source for source in payload["sources"])
 
 
@@ -1662,6 +1664,7 @@ def test_prompts_get_session_pack(tmp_path: Path) -> None:
                     "task": "Review the service guide findings.",
                     "model": "gemini",
                     "workflow": "review_deep",
+                    "pack_mode": "full_slice",
                 },
             },
         },
@@ -1671,6 +1674,7 @@ def test_prompts_get_session_pack(tmp_path: Path) -> None:
     text = response["result"]["messages"][0]["content"]["text"]
     assert "AFS Context Pack" in text
     assert "gemini" in text.lower()
+    assert "Pack mode: full_slice" in text
     assert "## Task" in text
 
 

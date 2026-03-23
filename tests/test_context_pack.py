@@ -110,6 +110,7 @@ def test_session_pack_command_outputs_json_and_writes_artifacts(
             model="codex",
             workflow="edit_fast",
             tool_profile="edit_and_verify",
+            pack_mode="focused",
             token_budget=400,
             include_content=False,
             max_query_results=4,
@@ -124,6 +125,7 @@ def test_session_pack_command_outputs_json_and_writes_artifacts(
     assert payload["model"] == "codex"
     assert payload["task"] == "Implement the codex pack update."
     assert payload["execution_profile"]["workflow"] == "edit_fast"
+    assert payload["pack_mode"] == "focused"
     assert payload["cache"]["prefix_hash"]
     assert payload["artifact_paths"]["json"].endswith("session_pack_codex.json")
     assert Path(payload["artifact_paths"]["json"]).exists()
@@ -153,6 +155,7 @@ def test_session_pack_command_skips_artifact_rewrite_on_cache_hit(
         model="codex",
         workflow="general",
         tool_profile="default",
+        pack_mode="focused",
         token_budget=400,
         include_content=False,
         max_query_results=4,
@@ -422,3 +425,53 @@ def test_stable_prefix_hash_changes_when_knowledge_changes(tmp_path: Path) -> No
     )
 
     assert first["cache"]["stable_prefix_hash"] != second["cache"]["stable_prefix_hash"]
+
+
+def test_retrieval_pack_mode_prioritizes_indexed_hits(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    scratchpad_root = manager.resolve_mount_root(context_root, MountType.SCRATCHPAD)
+    scratchpad_root.mkdir(parents=True, exist_ok=True)
+    (scratchpad_root / "state.md").write_text("scratch context", encoding="utf-8")
+    knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "guide.md").write_text("sprite service guide", encoding="utf-8")
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE, MountType.SCRATCHPAD],
+        include_content=True,
+    )
+
+    pack = build_context_pack(
+        manager,
+        context_root,
+        query="service guide",
+        model="gemini",
+        pack_mode="retrieval",
+        token_budget=700,
+    )
+
+    titles = [section["title"] for section in pack["sections"]]
+    assert pack["pack_mode"] == "retrieval"
+    assert "Indexed Hit 1" in titles
+    assert titles.index("Indexed Hit 1") < titles.index("Scratchpad State")
+
+
+def test_full_slice_pack_mode_adds_knowledge_slice_without_query(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "guide.md").write_text("# Guide\n\nKnowledge slice content", encoding="utf-8")
+
+    pack = build_context_pack(
+        manager,
+        context_root,
+        model="gemini",
+        pack_mode="full_slice",
+        token_budget=900,
+    )
+
+    titles = [section["title"] for section in pack["sections"]]
+    assert pack["pack_mode"] == "full_slice"
+    assert "Knowledge Slice" in titles
+    assert "Broader long-context slice" in pack["pack_mode_summary"]

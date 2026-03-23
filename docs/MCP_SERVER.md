@@ -243,7 +243,9 @@ calls when the bootstrap snapshot and pack inputs have not changed. The prompt
 and tool forms also accept optional `task`, `workflow`, and `tool_profile`
 arguments so callers can encode a short execution contract and put the explicit
 task at the end of the rendered pack. Returned pack JSON includes
-`cache.prefix_hash` for stable-prefix cache experiments in adapters.
+`cache.prefix_hash` for stable-prefix cache experiments in adapters. `pack_mode`
+supports `focused`, `retrieval`, and `full_slice` shaping for query-first vs
+broader long-context packs.
 
 `afs://schemas/<name>` exposes compact response contracts for structured agent
 workflows. Built-in names currently include:

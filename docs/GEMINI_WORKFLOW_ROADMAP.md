@@ -91,6 +91,8 @@ Implemented in this pass:
 - built-in `afs://schemas/<name>` resources now expose compact JSON contracts
   for `plan`, `file-shortlist`, `review-findings`, `edit-intent`,
   `verification-summary`, and `handoff-summary`
+- `session pack` now supports explicit `pack_mode` selection for `focused`,
+  `retrieval`, and `full_slice` context shaping
 
 This gives Gemini users a better prompt scaffold immediately while keeping the
 underlying abstractions generic enough for Claude, Codex, and future adapters.

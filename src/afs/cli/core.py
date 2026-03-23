@@ -799,6 +799,7 @@ def session_pack_command(args: argparse.Namespace) -> int:
         model=args.model,
         workflow=args.workflow,
         tool_profile=args.tool_profile,
+        pack_mode=args.pack_mode,
         token_budget=args.token_budget,
         include_content=args.include_content,
         max_query_results=args.max_query_results,
@@ -1580,6 +1581,12 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
             "handoff_only",
         ],
         help="Preferred AFS surface mix to encode into the pack.",
+    )
+    session_pack.add_argument(
+        "--pack-mode",
+        default="focused",
+        choices=["focused", "retrieval", "full_slice"],
+        help="Context shaping mode: focused, retrieval, or full_slice.",
     )
     session_pack.add_argument(
         "--token-budget",

@@ -967,6 +967,7 @@ def _tool_session_pack(arguments: dict[str, Any], manager: AFSManager) -> dict[s
         model=model,
         workflow=str(arguments.get("workflow", "general") or "general"),
         tool_profile=str(arguments.get("tool_profile", "default") or "default"),
+        pack_mode=str(arguments.get("pack_mode", "focused") or "focused"),
         token_budget=_coerce_int(
             arguments.get("token_budget"),
             default=0,
@@ -1912,6 +1913,11 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                             "handoff_only",
                         ],
                         "default": "default",
+                    },
+                    "pack_mode": {
+                        "type": "string",
+                        "enum": ["focused", "retrieval", "full_slice"],
+                        "default": "focused",
                     },
                     "token_budget": {"type": "integer", "description": "Approximate token budget."},
                     "include_content": {"type": "boolean", "default": False},
@@ -3281,6 +3287,11 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                     "required": False,
                 },
                 {
+                    "name": "pack_mode",
+                    "description": "Context shaping mode: focused, retrieval, or full_slice.",
+                    "required": False,
+                },
+                {
                     "name": "token_budget",
                     "description": "Approximate token budget override.",
                     "required": False,
@@ -3374,6 +3385,7 @@ def _get_prompt(
             model=str(arguments.get("model", "generic") or "generic"),
             workflow=str(arguments.get("workflow", "general") or "general"),
             tool_profile=str(arguments.get("tool_profile", "default") or "default"),
+            pack_mode=str(arguments.get("pack_mode", "focused") or "focused"),
             token_budget=_coerce_int(
                 arguments.get("token_budget"),
                 default=0,

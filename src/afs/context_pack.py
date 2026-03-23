@@ -24,6 +24,11 @@ DEFAULT_CONTEXT_PACK_TOKENS = {
     "claude": 12000,
     "codex": 12000,
 }
+PACK_MODE_CHOICES = (
+    "focused",
+    "retrieval",
+    "full_slice",
+)
 DEFAULT_SEARCH_MOUNTS = (
     MountType.SCRATCHPAD,
     MountType.MEMORY,
@@ -69,6 +74,7 @@ def build_context_pack(
     model: str = "generic",
     workflow: str = "general",
     tool_profile: str = "default",
+    pack_mode: str = "focused",
     token_budget: int | None = None,
     include_content: bool = False,
     max_query_results: int = 6,
@@ -77,7 +83,16 @@ def build_context_pack(
     """Build a model-aware context pack from AFS state."""
     context_path = context_path.expanduser().resolve()
     normalized_model = _normalize_model(model)
+    normalized_pack_mode = _normalize_pack_mode(pack_mode)
     resolved_budget = token_budget or DEFAULT_CONTEXT_PACK_TOKENS[normalized_model]
+    resolved_include_content, resolved_max_query_results, resolved_max_embedding_results = (
+        _resolve_pack_mode_settings(
+            normalized_pack_mode,
+            include_content=include_content,
+            max_query_results=max_query_results,
+            max_embedding_results=max_embedding_results,
+        )
+    )
     execution_profile = build_session_execution_profile(
         model=normalized_model,
         workflow=workflow,
@@ -91,12 +106,13 @@ def build_context_pack(
         query=query,
         task=task,
         model=normalized_model,
+        pack_mode=normalized_pack_mode,
         workflow=str(execution_profile["workflow"]),
         tool_profile=str((execution_profile.get("tool_profile") or {}).get("name", "default")),
         token_budget=resolved_budget,
-        include_content=include_content,
-        max_query_results=max_query_results,
-        max_embedding_results=max_embedding_results,
+        include_content=resolved_include_content,
+        max_query_results=resolved_max_query_results,
+        max_embedding_results=resolved_max_embedding_results,
     )
     cached = _load_cached_context_pack(
         manager,
@@ -120,9 +136,10 @@ def build_context_pack(
         bootstrap=bootstrap,
         query=query,
         model=normalized_model,
-        include_content=include_content,
-        max_query_results=max_query_results,
-        max_embedding_results=max_embedding_results,
+        pack_mode=normalized_pack_mode,
+        include_content=resolved_include_content,
+        max_query_results=resolved_max_query_results,
+        max_embedding_results=resolved_max_embedding_results,
     )
     chosen, omitted = _select_sections(
         sections,
@@ -136,6 +153,8 @@ def build_context_pack(
         "project": bootstrap["project"],
         "profile": bootstrap["profile"],
         "model": normalized_model,
+        "pack_mode": normalized_pack_mode,
+        "pack_mode_summary": _pack_mode_summary(normalized_pack_mode),
         "query": query,
         "task": task,
         "execution_profile": execution_profile,
@@ -163,6 +182,7 @@ def render_context_pack(pack: dict[str, Any]) -> str:
         f"Context: {pack['context_path']}",
         f"Profile: {pack['profile']}",
         f"Target model: {pack['model']}",
+        f"Pack mode: {pack.get('pack_mode', 'focused')}",
         f"Token budget: {pack['estimated_tokens']}/{pack['token_budget']}",
     ]
     execution_profile = pack.get("execution_profile")
@@ -172,6 +192,9 @@ def render_context_pack(pack: dict[str, Any]) -> str:
     guidance = pack.get("guidance")
     if isinstance(guidance, str) and guidance.strip():
         lines.extend(["", "## Guidance", guidance.strip()])
+    pack_mode_summary = str(pack.get("pack_mode_summary", "")).strip()
+    if pack_mode_summary:
+        lines.extend(["", "## Pack Mode", pack_mode_summary])
 
     for section in pack.get("sections", []):
         lines.extend(["", f"## {section['title']}", section["body"]])
@@ -240,6 +263,7 @@ def _context_pack_cache_key(
     query: str,
     task: str,
     model: str,
+    pack_mode: str,
     workflow: str,
     tool_profile: str,
     token_budget: int,
@@ -253,6 +277,7 @@ def _context_pack_cache_key(
         "query": query,
         "task": task,
         "model": model,
+        "pack_mode": pack_mode,
         "workflow": workflow,
         "tool_profile": tool_profile,
         "token_budget": token_budget,
@@ -386,6 +411,46 @@ def _normalize_model(model: str) -> str:
     return normalized
 
 
+def _normalize_pack_mode(pack_mode: str | None) -> str:
+    normalized = (pack_mode or "focused").strip().lower()
+    if normalized not in PACK_MODE_CHOICES:
+        return "focused"
+    return normalized
+
+
+def _resolve_pack_mode_settings(
+    pack_mode: str,
+    *,
+    include_content: bool,
+    max_query_results: int,
+    max_embedding_results: int,
+) -> tuple[bool, int, int]:
+    resolved_include_content = bool(include_content)
+    resolved_query_results = max(1, max_query_results)
+    resolved_embedding_results = max(1, max_embedding_results)
+    if pack_mode == "full_slice":
+        resolved_include_content = True
+        resolved_query_results = max(resolved_query_results, 8)
+        resolved_embedding_results = max(resolved_embedding_results, 6)
+    elif pack_mode == "retrieval":
+        resolved_query_results = max(resolved_query_results, 6)
+        resolved_embedding_results = max(resolved_embedding_results, 4)
+    return (
+        resolved_include_content,
+        resolved_query_results,
+        resolved_embedding_results,
+    )
+
+
+def _pack_mode_summary(pack_mode: str) -> str:
+    summaries = {
+        "focused": "Balanced working set for a bounded task. Keeps the normal session context shape and retrieval breadth.",
+        "retrieval": "Query-first working set that moves indexed and embedding hits ahead of broader session context.",
+        "full_slice": "Broader long-context slice that expands retrieval breadth and adds a knowledge inventory section.",
+    }
+    return summaries[pack_mode]
+
+
 def _model_guidance(model: str) -> str:
     guidance = {
         "generic": "Prefer the highest-signal sections first. Cite file paths when acting on retrieved context.",
@@ -403,6 +468,7 @@ def _build_sections(
     bootstrap: dict[str, Any],
     query: str,
     model: str,
+    pack_mode: str,
     include_content: bool,
     max_query_results: int,
     max_embedding_results: int,
@@ -467,6 +533,14 @@ def _build_sections(
             sources=[memory["latest_markdown_path"]] if memory.get("latest_markdown_path") else [],
         )
     )
+    if pack_mode == "full_slice":
+        knowledge_slice = _knowledge_slice_section(
+            manager,
+            context_path,
+            limit=max_query_results,
+        )
+        if knowledge_slice is not None:
+            sections.append(knowledge_slice)
 
     if query.strip():
         query_sections = _query_sections(
@@ -475,6 +549,7 @@ def _build_sections(
             query=query,
             include_content=include_content,
             max_results=max_query_results,
+            pack_mode=pack_mode,
         )
         sections.extend(query_sections)
         embedding_section = _embedding_section(
@@ -482,6 +557,7 @@ def _build_sections(
             context_path,
             query=query,
             max_results=max_embedding_results,
+            pack_mode=pack_mode,
         )
         if embedding_section is not None:
             sections.append(embedding_section)
@@ -503,6 +579,7 @@ def _query_sections(
     query: str,
     include_content: bool,
     max_results: int,
+    pack_mode: str,
 ) -> list[ContextPackSection]:
     settings = manager.config.context_index
     mount_types = list(DEFAULT_SEARCH_MOUNTS)
@@ -554,7 +631,7 @@ def _query_sections(
             ContextPackSection(
                 title=f"Indexed Hit {offset}",
                 body="\n".join(body_lines),
-                priority=35 + offset,
+                priority=_query_section_priority(pack_mode, offset),
                 sources=[source] if source else [],
             )
         )
@@ -567,6 +644,7 @@ def _embedding_section(
     *,
     query: str,
     max_results: int,
+    pack_mode: str,
 ) -> ContextPackSection | None:
     knowledge_root = resolve_mount_root(context_path, MountType.KNOWLEDGE, config=manager.config)
     candidates: list[Path] = []
@@ -615,9 +693,73 @@ def _embedding_section(
     return ContextPackSection(
         title="Embedding Hits",
         body="\n".join(lines),
-        priority=60,
+        priority=_embedding_section_priority(pack_mode),
         sources=sources,
     )
+
+
+def _knowledge_slice_section(
+    manager: AFSManager,
+    context_path: Path,
+    *,
+    limit: int,
+) -> ContextPackSection | None:
+    knowledge_root = resolve_mount_root(context_path, MountType.KNOWLEDGE, config=manager.config)
+    if not knowledge_root.exists():
+        return None
+
+    index_path = knowledge_root / "INDEX.md"
+    if index_path.exists() and not _path_blocked(
+        index_path,
+        relative_path="INDEX.md",
+        patterns=manager.config.sensitivity.never_export,
+    ):
+        text = index_path.read_text(encoding="utf-8", errors="replace")
+        return ContextPackSection(
+            title="Knowledge Slice",
+            body=_trim_text(text, limit=1600),
+            priority=32,
+            sources=[str(index_path)],
+        )
+
+    lines: list[str] = []
+    sources: list[str] = []
+    for path in sorted(knowledge_root.rglob("*.md")):
+        rel = path.relative_to(knowledge_root).as_posix()
+        if _path_blocked(path, relative_path=rel, patterns=manager.config.sensitivity.never_export):
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        lines.append(f"- {rel} ({size} bytes)")
+        sources.append(str(path))
+        if len(sources) >= max(1, limit):
+            break
+    if not lines:
+        return None
+    return ContextPackSection(
+        title="Knowledge Slice",
+        body="\n".join(lines),
+        priority=32,
+        sources=sources,
+    )
+
+
+def _query_section_priority(pack_mode: str, offset: int) -> int:
+    if pack_mode == "retrieval":
+        return 8 + offset
+    if pack_mode == "full_slice":
+        return 33 + offset
+    return 35 + offset
+
+
+def _embedding_section_priority(pack_mode: str) -> int:
+    if pack_mode == "retrieval":
+        return 14
+    if pack_mode == "full_slice":
+        return 50
+    return 60
 
 
 def _select_sections(
@@ -770,6 +912,7 @@ def _context_pack_prefix_hash(pack: dict[str, Any]) -> str:
         f"context={pack.get('context_path', '')}",
         f"profile={pack.get('profile', '')}",
         f"model={pack.get('model', '')}",
+        f"pack_mode={pack.get('pack_mode', 'focused')}",
     ]
     execution_profile_text = _render_execution_profile_block(pack.get("execution_profile"))
     if execution_profile_text:
@@ -777,6 +920,9 @@ def _context_pack_prefix_hash(pack: dict[str, Any]) -> str:
     guidance = str(pack.get("guidance", "")).strip()
     if guidance:
         lines.extend(["## Guidance", guidance])
+    pack_mode_summary = str(pack.get("pack_mode_summary", "")).strip()
+    if pack_mode_summary:
+        lines.extend(["## Pack Mode", pack_mode_summary])
     for section in pack.get("sections", []):
         if not isinstance(section, dict):
             continue
@@ -820,6 +966,7 @@ def _context_pack_stable_prefix_hash(pack: dict[str, Any]) -> str:
         f"context={pack.get('context_path', '')}",
         f"profile={pack.get('profile', '')}",
         f"model={pack.get('model', '')}",
+        f"pack_mode={pack.get('pack_mode', 'focused')}",
     ]
     execution_profile_text = _render_execution_profile_block(pack.get("execution_profile"))
     if execution_profile_text:
@@ -827,6 +974,9 @@ def _context_pack_stable_prefix_hash(pack: dict[str, Any]) -> str:
     guidance = str(pack.get("guidance", "")).strip()
     if guidance:
         lines.extend(["## Guidance", guidance])
+    pack_mode_summary = str(pack.get("pack_mode_summary", "")).strip()
+    if pack_mode_summary:
+        lines.extend(["## Pack Mode", pack_mode_summary])
     for section in pack.get("sections", []):
         if not isinstance(section, dict):
             continue

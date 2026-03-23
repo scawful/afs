@@ -184,6 +184,8 @@ The CLI equivalent is:
 ~/src/lab/afs/scripts/afs session bootstrap --json
 ~/src/lab/afs/scripts/afs session pack
 ~/src/lab/afs/scripts/afs session pack "sqlite" --model gemini --workflow scan_fast --task "Shortlist the relevant SQLite files"
+~/src/lab/afs/scripts/afs session pack "sqlite" --model gemini --pack-mode retrieval
+~/src/lab/afs/scripts/afs session pack --model gemini --pack-mode full_slice
 ~/src/lab/afs/scripts/afs session pack "sqlite" --model codex --json
 ~/src/lab/afs/scripts/afs events analytics --hours 24 --json
 ~/src/lab/afs/scripts/afs events replay --session-id "$AFS_SESSION_ID"
@@ -200,7 +202,9 @@ The CLI also refreshes:
 When the bootstrap snapshot and pack inputs have not changed, repeated calls
 reuse the stored pack artifact instead of rebuilding all sections. Packs now
 also carry an `execution_profile` block, a task-at-end suffix via `--task`, and
-a stable `cache.prefix_hash` for adapter-side cache reuse work.
+a stable `cache.prefix_hash` for adapter-side cache reuse work. `--pack-mode`
+lets callers choose between the normal focused pack, a query-first retrieval
+pack, and a broader full-slice pack for long-context models.
 
 Extensions can add their own MCP tools, prompts, and resources with
 `[mcp_server]` in `extension.toml`. Legacy tool-only factories under
