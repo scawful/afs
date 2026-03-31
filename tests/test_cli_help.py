@@ -1,0 +1,60 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from afs.cli import build_parser
+from afs.cli._help import render_topic_help
+
+
+def _write_base_config(path: Path) -> None:
+    path.write_text(
+        "[extensions]\n"
+        "auto_discover = false\n\n"
+        "[plugins]\n"
+        "auto_discover = false\n",
+        encoding="utf-8",
+    )
+
+
+def test_render_topic_help_suggests_leaf_command_typo(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    config_path = tmp_path / "afs.toml"
+    _write_base_config(config_path)
+    monkeypatch.setenv("AFS_CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("AFS_EXTENSION_DIRS", raising=False)
+    monkeypatch.delenv("AFS_ENABLED_EXTENSIONS", raising=False)
+
+    parser = build_parser()
+
+    exit_code = render_topic_help(parser, ["session", "bootstap"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Unknown command: session bootstap" in captured.out
+    assert "Closest matches:" in captured.out
+    assert "session bootstrap" in captured.out
+
+
+def test_render_topic_help_suggests_top_level_command_typo(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    config_path = tmp_path / "afs.toml"
+    _write_base_config(config_path)
+    monkeypatch.setenv("AFS_CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("AFS_EXTENSION_DIRS", raising=False)
+    monkeypatch.delenv("AFS_ENABLED_EXTENSIONS", raising=False)
+
+    parser = build_parser()
+
+    exit_code = render_topic_help(parser, ["gmini"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Unknown command: gmini" in captured.out
+    assert "Closest matches:" in captured.out
+    assert "gemini" in captured.out

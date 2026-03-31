@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -232,6 +233,17 @@ def render_topic_help(parser: argparse.ArgumentParser, topic: list[str] | None) 
         sub_action = _get_subparser_action(current)
         if not sub_action or token not in sub_action.choices:
             print(f"Unknown command: {' '.join(tokens)}")
+            suggestions = _suggest_command_paths(parser, tokens)
+            if suggestions:
+                print("Closest matches:")
+                width = max(len(" ".join(match["path"])) for match in suggestions)
+                for match in suggestions:
+                    label = " ".join(match["path"]).ljust(width)
+                    description = match.get("help") or ""
+                    if description:
+                        print(f"  - {label}  {description}")
+                    else:
+                        print(f"  - {label}")
             print("Use 'afs help' to list commands.")
             return 1
         current = sub_action.choices[token]
@@ -317,6 +329,96 @@ def _build_command_tree(parser: argparse.ArgumentParser) -> dict[str, dict[str, 
         }
 
     return tree
+
+
+def _flatten_command_tree(
+    tree: dict[str, dict[str, Any]],
+    prefix: tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    keys = _sort_keys(list(tree.keys()), _TOP_LEVEL_ORDER if not prefix else None)
+    for key in keys:
+        node = tree[key]
+        path = prefix + (key,)
+        entries.append({"path": path, "help": node.get("help") or ""})
+        children = node.get("children") or {}
+        if children:
+            entries.extend(_flatten_command_tree(children, path))
+    return entries
+
+
+def _suggest_command_paths(
+    parser: argparse.ArgumentParser,
+    tokens: list[str],
+    *,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    query_tokens = [token.lower() for token in tokens if token]
+    if not query_tokens:
+        return []
+
+    query = " ".join(query_tokens)
+    entries = _flatten_command_tree(_build_command_tree(parser))
+    scored: list[tuple[tuple[int, int, float, int, str], dict[str, Any]]] = []
+
+    for entry in entries:
+        path = tuple(entry["path"])
+        path_text = " ".join(path)
+        path_key = path_text.lower()
+        leaf_key = path[-1].lower()
+        help_key = str(entry.get("help") or "").lower()
+        path_parts = [part.lower() for part in path]
+
+        full_prefix = path_key.startswith(query)
+        leaf_prefix = leaf_key.startswith(query_tokens[-1])
+        token_prefix = all(
+            any(part.startswith(token) for part in path_parts)
+            for token in query_tokens
+        )
+        token_contains = all(
+            token in path_key or token in help_key for token in query_tokens
+        )
+        similarity = max(
+            SequenceMatcher(None, query, path_key).ratio(),
+            SequenceMatcher(None, query_tokens[-1], leaf_key).ratio(),
+        )
+
+        if not (full_prefix or leaf_prefix or token_prefix or token_contains or similarity >= 0.55):
+            continue
+
+        if full_prefix:
+            tier = 0
+        elif leaf_prefix:
+            tier = 1
+        elif token_prefix:
+            tier = 2
+        elif token_contains:
+            tier = 3
+        else:
+            tier = 4
+
+        score = (
+            tier,
+            -sum(1 for part, token in zip(path_parts, query_tokens, strict=False) if part == token),
+            -similarity,
+            len(path),
+            path_text,
+        )
+        scored.append((score, entry))
+
+    scored.sort(key=lambda item: item[0])
+
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    for _score, entry in scored:
+        path = tuple(entry["path"])
+        if path in seen:
+            continue
+        seen.add(path)
+        unique.append(entry)
+        if len(unique) >= limit:
+            break
+    return unique
 
 
 def _get_subparser_action(
