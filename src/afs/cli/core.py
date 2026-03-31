@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from typing import Any
 from ..config import load_runtime_config_model
 from ..context_paths import resolve_mount_root
 from ..event_log import read_agent_events
+from ..history import query_events
 from ..memory_consolidation import consolidate_history_to_memory
 from ..models import MountType
 from ._utils import (
@@ -70,6 +72,34 @@ def _resolve_command_context(args: argparse.Namespace) -> Path:
         args, manager
     )
     return context_path
+
+
+def _load_manager_context_and_config_path(
+    args: argparse.Namespace,
+):
+    from ..manager import AFSManager
+
+    explicit_config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    config, resolved_config_path = load_runtime_config_model(
+        config_path=explicit_config_path,
+        merge_user=True,
+        start_dir=Path.cwd(),
+    )
+    if not hasattr(args, "path"):
+        args.path = None
+    if not hasattr(args, "context_root"):
+        args.context_root = None
+    if not hasattr(args, "context_dir"):
+        args.context_dir = None
+    manager = AFSManager(config=config)
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+        args, manager
+    )
+    return manager, context_path, resolved_config_path
 
 
 def init_command(args: argparse.Namespace) -> int:
@@ -456,6 +486,8 @@ def agents_ps_command(args: argparse.Namespace) -> int:
                 "pid": agent.pid,
                 "started_at": agent.started_at,
                 "module": agent.module,
+                "session_id": agent.session_id,
+                "launch_reason": agent.launch_reason,
                 "last_event": agent.last_event,
                 "last_error": agent.last_error,
                 "manually_stopped": agent.manually_stopped,
@@ -469,6 +501,8 @@ def agents_ps_command(args: argparse.Namespace) -> int:
         extra = []
         if agent.last_event:
             extra.append(f"event={agent.last_event}")
+        if agent.session_id:
+            extra.append(f"session={agent.session_id}")
         if agent.manually_stopped:
             extra.append("manual-stop")
         if agent.last_error:
@@ -476,6 +510,258 @@ def agents_ps_command(args: argparse.Namespace) -> int:
         suffix = f"\t{' '.join(extra)}" if extra else ""
         print(f"{agent.name}\t{agent.state}\tpid={pid}\t{agent.started_at}{suffix}")
     return 0
+
+
+def _wait_target_names(
+    agents: list[Any],
+    *,
+    agent_name: str | None,
+    include_all: bool,
+    session_id: str,
+) -> list[str]:
+    filtered = [
+        agent
+        for agent in agents
+        if not session_id or getattr(agent, "session_id", "") == session_id
+    ]
+    if agent_name:
+        filtered = [agent for agent in filtered if agent.name == agent_name]
+    elif include_all:
+        filtered = [agent for agent in filtered if agent.state == "running"]
+    else:
+        return []
+    return [agent.name for agent in filtered]
+
+
+def _format_agent_event(event: dict[str, Any], agent_name: str) -> str:
+    timestamp = str(event.get("timestamp", ""))[:19] or "?"
+    op = str(event.get("op", "") or "-")
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    detail = str(metadata.get("detail", "") or "")
+    if detail:
+        return f"{timestamp}  {agent_name}  {op}  {detail}"
+    return f"{timestamp}  {agent_name}  {op}"
+
+
+def _event_agent_name(event: dict[str, Any]) -> str:
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    agent_name = str(metadata.get("agent_name", "") or metadata.get("agent", "")).strip()
+    if agent_name:
+        return agent_name
+    source = str(event.get("source", "") or "")
+    if source.startswith("agent."):
+        return source.split(".", 1)[1]
+    return ""
+
+
+def _stream_agent_events(
+    context_path: Path,
+    *,
+    config: Any,
+    session_id: str,
+    agent_name: str | None,
+    since: str | None,
+) -> list[dict[str, Any]]:
+    if session_id:
+        history_root = resolve_mount_root(context_path, MountType.HISTORY, config=config)
+        events = query_events(
+            history_root,
+            event_types={"agent_progress", "agent_lifecycle"},
+            since=since,
+            limit=0,
+            session_id=session_id,
+        )
+        if agent_name:
+            events = [event for event in events if _event_agent_name(event) == agent_name]
+        return events
+    if agent_name:
+        return read_agent_events(
+            context_path,
+            agent_name=agent_name,
+            limit=200,
+            config=config,
+        )
+    history_root = resolve_mount_root(context_path, MountType.HISTORY, config=config)
+    return query_events(
+        history_root,
+        event_types={"agent_progress", "agent_lifecycle"},
+        since=since,
+        limit=0,
+    )
+
+
+def agents_wait_command(args: argparse.Namespace) -> int:
+    """Wait for one or more background agents to settle."""
+    from ..agents.supervisor import AgentSupervisor
+
+    if not args.name and not args.all:
+        print("specify an agent name or --all")
+        return 2
+
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
+    context_path = _resolve_command_context(args)
+    supervisor = AgentSupervisor(config=manager.config)
+    session_id = str(getattr(args, "session_id", "") or "").strip()
+    target_names = _wait_target_names(
+        supervisor.list_agents(),
+        agent_name=getattr(args, "name", None),
+        include_all=bool(getattr(args, "all", False)),
+        session_id=session_id,
+    )
+
+    if not target_names:
+        if getattr(args, "name", None):
+            print("no matching running agents")
+        elif args.json:
+            print(json.dumps({"matched": [], "states": {}, "timed_out": False}, indent=2))
+        return 0
+
+    seen_event_ids: dict[str, set[str]] = {}
+    for name in target_names:
+        seen_event_ids[name] = {
+            str(event.get("id", "")).strip()
+            for event in read_agent_events(
+                context_path,
+                agent_name=name,
+                limit=max(args.limit, 50),
+                config=manager.config,
+            )
+            if str(event.get("id", "")).strip()
+        }
+
+    state_by_name: dict[str, str] = {}
+    start_monotonic = time.monotonic()
+
+    if not args.json:
+        scope = f" session={session_id}" if session_id else ""
+        print(f"waiting for {len(target_names)} agent(s){scope}: {', '.join(target_names)}")
+
+    while True:
+        current_states: dict[str, str] = {}
+        for name in target_names:
+            events = read_agent_events(
+                context_path,
+                agent_name=name,
+                limit=max(args.limit, 50),
+                config=manager.config,
+            )
+            for event in events:
+                event_id = str(event.get("id", "")).strip()
+                if event_id and event_id in seen_event_ids[name]:
+                    continue
+                if event_id:
+                    seen_event_ids[name].add(event_id)
+                if not args.json:
+                    print(_format_agent_event(event, name))
+
+            agent = supervisor.status(name)
+            state = agent.state if agent is not None else "unknown"
+            if state_by_name.get(name) and state_by_name[name] != state and not args.json:
+                print(f"{datetime.now().isoformat()[:19]}  {name}  state={state}")
+            state_by_name[name] = state
+            current_states[name] = state
+
+        active = [name for name, state in current_states.items() if state == "running"]
+        if not active:
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "matched": target_names,
+                            "states": current_states,
+                            "timed_out": False,
+                            "session_id": session_id or None,
+                        },
+                        indent=2,
+                    )
+                )
+            return 0
+
+        if args.timeout and (time.monotonic() - start_monotonic) >= args.timeout:
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "matched": target_names,
+                            "states": current_states,
+                            "timed_out": True,
+                            "session_id": session_id or None,
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                print(f"timeout waiting for agents: {', '.join(active)}")
+            return 124
+
+        time.sleep(max(0.05, float(args.poll_interval)))
+
+
+def agents_monitor_command(args: argparse.Namespace) -> int:
+    """Stream session-scoped background agent events."""
+    if not args.name and not args.session_id and not args.all:
+        print("specify an agent name, --session-id, or --all")
+        return 2
+
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
+    context_path = _resolve_command_context(args)
+    session_id = str(getattr(args, "session_id", "") or "").strip()
+    agent_name = getattr(args, "name", None)
+    seen_event_ids: set[str] = set()
+    since: str | None = None
+    start_monotonic = time.monotonic()
+
+    if not args.json:
+        scope_parts = []
+        if session_id:
+            scope_parts.append(f"session={session_id}")
+        if agent_name:
+            scope_parts.append(f"agent={agent_name}")
+        elif args.all:
+            scope_parts.append("all-agents")
+        scope = " ".join(scope_parts)
+        print(f"monitoring background agent events {scope}".strip())
+
+    while True:
+        events = _stream_agent_events(
+            context_path,
+            config=manager.config,
+            session_id=session_id,
+            agent_name=agent_name,
+            since=since,
+        )
+
+        for event in events:
+            event_id = str(event.get("id", "")).strip()
+            if event_id and event_id in seen_event_ids:
+                continue
+            if event_id:
+                seen_event_ids.add(event_id)
+
+            current_agent = _event_agent_name(event) or agent_name or "agent"
+            if args.json:
+                print(json.dumps({"agent": current_agent, "event": event}, indent=None))
+            else:
+                print(_format_agent_event(event, current_agent))
+
+            timestamp = str(event.get("timestamp", "")).strip()
+            if timestamp:
+                since = timestamp
+
+        if args.timeout and (time.monotonic() - start_monotonic) >= args.timeout:
+            return 0
+
+        time.sleep(max(0.05, float(args.poll_interval)))
 
 
 def agents_watch_command(args: argparse.Namespace) -> int:
@@ -817,6 +1103,312 @@ def session_pack_command(args: argparse.Namespace) -> int:
         return 0
 
     print(render_context_pack(pack))
+    return 0
+
+
+def session_prepare_client_command(args: argparse.Namespace) -> int:
+    """Build a reusable session payload for client wrappers and IDE harnesses."""
+    from ..session_harness import build_client_session_payload
+
+    manager, context_path, config_path = _load_manager_context_and_config_path(args)
+    skills_prompt = args.skills_prompt
+    if skills_prompt is None:
+        skills_prompt = args.query or ""
+
+    payload = build_client_session_payload(
+        manager,
+        context_path,
+        client=args.client,
+        session_id=args.session_id or os.getenv("AFS_SESSION_ID", "").strip(),
+        config_path=config_path,
+        cwd=Path(args.cwd).expanduser().resolve() if args.cwd else Path.cwd(),
+        query=args.query or "",
+        task=args.task or "",
+        model=args.model,
+        workflow=args.workflow,
+        tool_profile=args.tool_profile,
+        pack_mode=args.pack_mode,
+        token_budget=args.token_budget,
+        include_content=args.include_content,
+        max_query_results=args.max_query_results,
+        max_embedding_results=args.max_embedding_results,
+        include_pack=not args.no_session_pack,
+        skills_prompt=skills_prompt,
+        include_skills=not args.no_skills_match,
+        skills_top_k=args.skills_top_k,
+        write_artifacts=not args.no_write_artifacts,
+    )
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print(f"client: {payload['client']}")
+    print(f"session_id: {payload['session_id']}")
+    print(f"context_path: {payload['context_path']}")
+    bootstrap_paths = (payload.get("bootstrap") or {}).get("artifact_paths") or {}
+    if bootstrap_paths.get("markdown"):
+        print(f"bootstrap: {bootstrap_paths['markdown']}")
+    pack_paths = (payload.get("pack") or {}).get("artifact_paths") or {}
+    if pack_paths.get("markdown"):
+        print(f"pack: {pack_paths['markdown']}")
+    skill_paths = (payload.get("skills") or {}).get("artifact_paths") or {}
+    if skill_paths.get("json"):
+        print(f"skills: {skill_paths['json']}")
+    payload_paths = payload.get("artifact_paths") or {}
+    if payload_paths.get("json"):
+        print(f"payload: {payload_paths['json']}")
+    return 0
+
+
+def _load_optional_json_payload(raw_path: str | None) -> tuple[dict[str, Any], Path | None]:
+    if not raw_path:
+        return {}, None
+    payload_path = Path(raw_path).expanduser().resolve()
+    return json.loads(payload_path.read_text(encoding="utf-8")), payload_path
+
+
+def _session_prompt_text(args: argparse.Namespace) -> str:
+    prompt = str(getattr(args, "prompt", "") or "").strip()
+    prompt_file = str(getattr(args, "prompt_file", "") or "").strip()
+    if prompt_file:
+        return Path(prompt_file).expanduser().resolve().read_text(encoding="utf-8")
+    return prompt
+
+
+def _emit_session_event(
+    *,
+    manager,
+    context_path: Path,
+    config_path: Path | None,
+    event_name: str,
+    client: str,
+    session_id: str,
+    cwd: Path,
+    payload_file: Path | None,
+    prompt: str = "",
+    turn_id: str = "",
+    task_id: str = "",
+    task_title: str = "",
+    summary: str = "",
+    status: str = "",
+    reason: str = "",
+    exit_code: int | None = None,
+    seed_payload: dict[str, Any] | None = None,
+    update_activity: bool = True,
+) -> dict[str, Any]:
+    from ..grounding_hooks import run_grounding_hooks
+    from ..history import log_session_event
+    from ..session_harness import record_client_session_activity
+
+    payload = dict(seed_payload or {})
+    payload["context_path"] = str(context_path)
+    payload["client"] = client
+    payload["session_id"] = session_id
+    payload["config_path"] = str(config_path) if config_path else ""
+    payload["cwd"] = str(cwd)
+    if prompt:
+        payload["prompt"] = prompt
+    if turn_id:
+        payload["turn_id"] = turn_id
+    if task_id:
+        payload["task_id"] = task_id
+    if task_title:
+        payload["task_title"] = task_title
+    if summary:
+        payload["summary"] = summary
+    if status:
+        payload["status"] = status
+    if reason:
+        payload["reason"] = reason
+    if exit_code is not None:
+        payload["exit_code"] = exit_code
+
+    run_grounding_hooks(
+        event=event_name,
+        payload=payload,
+        config=manager.config,
+    )
+
+    metadata: dict[str, Any] = {
+        "client": client,
+        "turn_id": turn_id,
+        "task_id": task_id,
+        "task_title": task_title,
+        "status": status,
+        "reason": reason,
+        "exit_code": exit_code,
+        "summary": summary[:160] if summary else "",
+        "prompt_preview": prompt[:180] if prompt else "",
+    }
+    metadata = {key: value for key, value in metadata.items() if value not in ("", None)}
+    log_session_event(
+        event_name,
+        session_id=session_id or None,
+        metadata=metadata,
+        payload={
+            key: value
+            for key, value in payload.items()
+            if key
+            not in {
+                "context_path",
+                "config_path",
+                "cwd",
+            }
+        },
+        context_root=context_path,
+    )
+
+    updated_payload = None
+    if update_activity and client:
+        updated_payload = record_client_session_activity(
+            manager,
+            context_path,
+            client=client,
+            event_name=event_name,
+            event_payload=payload,
+            payload_file=payload_file,
+            session_id=session_id,
+            config_path=config_path,
+            cwd=cwd,
+        )
+    payload_file_value = str(payload_file) if payload_file else ""
+    if isinstance(updated_payload, dict):
+        artifact_paths = updated_payload.get("artifact_paths")
+        if isinstance(artifact_paths, dict) and artifact_paths.get("json"):
+            payload_file_value = str(artifact_paths["json"])
+
+    return {
+        "event": event_name,
+        "client": client,
+        "session_id": session_id,
+        "payload_file": payload_file_value,
+        "payload": payload,
+        "updated_payload": updated_payload,
+    }
+
+
+def session_hook_command(args: argparse.Namespace) -> int:
+    """Run session lifecycle hooks with a harness-prepared payload."""
+
+    manager, context_path, config_path = _load_manager_context_and_config_path(args)
+    payload, payload_path = _load_optional_json_payload(args.payload_file)
+    client = (
+        args.client
+        or str(payload.get("client") or os.getenv("AFS_SESSION_CLIENT", "")).strip()
+    )
+    session_id = (
+        args.session_id
+        or str(payload.get("session_id") or os.getenv("AFS_SESSION_ID", "")).strip()
+    )
+    cwd = Path(args.cwd).expanduser().resolve() if args.cwd else Path.cwd()
+
+    try:
+        result = _emit_session_event(
+            manager=manager,
+            context_path=context_path,
+            config_path=config_path,
+            event_name=args.event,
+            client=client,
+            session_id=session_id,
+            cwd=cwd,
+            payload_file=payload_path,
+            reason=args.reason or "",
+            exit_code=args.exit_code,
+            seed_payload=payload,
+        )
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "event": result["event"],
+                    "client": result["client"],
+                    "session_id": result["session_id"],
+                    "payload_file": result["payload_file"],
+                    "status": "ok",
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    print(
+        f"{result['event']}: client={result['client']} session={result['session_id']}"
+    )
+    return 0
+
+
+def session_event_command(args: argparse.Namespace) -> int:
+    """Record prompt/turn/task lifecycle events for a client harness."""
+    manager, context_path, config_path = _load_manager_context_and_config_path(args)
+    payload, payload_path = _load_optional_json_payload(args.payload_file)
+    client = (
+        args.client
+        or str(payload.get("client") or os.getenv("AFS_SESSION_CLIENT", "")).strip()
+    )
+    session_id = (
+        args.session_id
+        or str(payload.get("session_id") or os.getenv("AFS_SESSION_ID", "")).strip()
+    )
+    cwd = Path(args.cwd).expanduser().resolve() if args.cwd else Path.cwd()
+    prompt = _session_prompt_text(args)
+    turn_id = str(args.turn_id or payload.get("turn_id") or "").strip()
+    task_id = str(args.task_id or "").strip()
+    task_title = str(args.task_title or "").strip()
+    summary = str(args.summary or "").strip()
+    status = str(args.status or "").strip()
+    reason = str(args.reason or "").strip()
+
+    try:
+        result = _emit_session_event(
+            manager=manager,
+            context_path=context_path,
+            config_path=config_path,
+            event_name=args.event,
+            client=client,
+            session_id=session_id,
+            cwd=cwd,
+            payload_file=payload_path,
+            prompt=prompt,
+            turn_id=turn_id,
+            task_id=task_id,
+            task_title=task_title,
+            summary=summary,
+            status=status,
+            reason=reason,
+            exit_code=args.exit_code,
+            seed_payload=payload,
+        )
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if args.json:
+        updated_payload = result.get("updated_payload") or {}
+        activity = updated_payload.get("activity") if isinstance(updated_payload, dict) else {}
+        print(
+            json.dumps(
+                {
+                    "event": result["event"],
+                    "client": result["client"],
+                    "session_id": result["session_id"],
+                    "payload_file": result["payload_file"],
+                    "last_event": activity.get("last_event", {}),
+                    "active_tasks": activity.get("active_tasks", []),
+                    "status": "ok",
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    print(
+        f"{result['event']}: client={result['client']} session={result['session_id']}"
+    )
     return 0
 
 
@@ -1440,6 +2032,27 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     agents_watch.add_argument("--limit", type=int, default=20, help="Max events to show.")
     agents_watch.set_defaults(func=agents_watch_command)
 
+    agents_monitor = agents_sub.add_parser("monitor", help="Stream background agent events.")
+    add_context_args(agents_monitor)
+    agents_monitor.add_argument("name", nargs="?", help="Optional agent name.")
+    agents_monitor.add_argument("--all", action="store_true", help="Monitor all matching agent events.")
+    agents_monitor.add_argument("--session-id", help="Restrict to a specific AFS session id.")
+    agents_monitor.add_argument("--timeout", type=float, default=0.0, help="Stop after N seconds (0 = run until interrupted).")
+    agents_monitor.add_argument("--poll-interval", type=float, default=0.25, help="Polling interval in seconds.")
+    agents_monitor.add_argument("--json", action="store_true", help="Emit NDJSON event objects.")
+    agents_monitor.set_defaults(func=agents_monitor_command)
+
+    agents_wait = agents_sub.add_parser("wait", help="Wait for background agents to settle.")
+    add_context_args(agents_wait)
+    agents_wait.add_argument("name", nargs="?", help="Agent name.")
+    agents_wait.add_argument("--all", action="store_true", help="Wait for all currently running agents.")
+    agents_wait.add_argument("--session-id", help="Restrict matches to a specific AFS session id.")
+    agents_wait.add_argument("--timeout", type=float, default=30.0, help="Maximum seconds to wait (default: 30).")
+    agents_wait.add_argument("--poll-interval", type=float, default=0.25, help="Polling interval in seconds.")
+    agents_wait.add_argument("--limit", type=int, default=50, help="Max events to scan per poll.")
+    agents_wait.add_argument("--json", action="store_true", help="Output JSON.")
+    agents_wait.set_defaults(func=agents_wait_command)
+
     agents_run = agents_sub.add_parser("run", help="Run a built-in agent.")
     agents_run.add_argument("name", help="Agent name.")
     agents_run.add_argument(
@@ -1617,6 +2230,163 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     session_pack.add_argument("--json", action="store_true", help="Output JSON.")
     session_pack.set_defaults(func=session_pack_command)
+
+    session_prepare = session_sub.add_parser(
+        "prepare-client",
+        help="Build session bootstrap/pack/skill artifacts for a client harness.",
+    )
+    add_context_args(session_prepare)
+    session_prepare.add_argument("--client", required=True, help="Client label (for example: codex, claude, gemini).")
+    session_prepare.add_argument("--session-id", help="Session ID override (defaults to AFS_SESSION_ID).")
+    session_prepare.add_argument("--cwd", help="Working directory to encode into the payload.")
+    session_prepare.add_argument("--query", default="", help="Optional retrieval query for the session pack.")
+    session_prepare.add_argument("--task", help="Optional task statement for the session pack.")
+    session_prepare.add_argument(
+        "--model",
+        default="generic",
+        choices=["generic", "gemini", "claude", "codex"],
+        help="Target model profile for the generated context pack.",
+    )
+    session_prepare.add_argument(
+        "--workflow",
+        default="general",
+        choices=[
+            "general",
+            "scan_fast",
+            "edit_fast",
+            "review_deep",
+            "root_cause_deep",
+        ],
+        help="Execution workflow profile to encode into the pack.",
+    )
+    session_prepare.add_argument(
+        "--tool-profile",
+        default="default",
+        choices=[
+            "default",
+            "context_readonly",
+            "context_repair",
+            "edit_and_verify",
+            "handoff_only",
+        ],
+        help="Preferred AFS surface mix to encode into the pack.",
+    )
+    session_prepare.add_argument(
+        "--pack-mode",
+        default="focused",
+        choices=["focused", "retrieval", "full_slice"],
+        help="Context shaping mode: focused, retrieval, or full_slice.",
+    )
+    session_prepare.add_argument("--token-budget", type=int, help="Approximate token budget.")
+    session_prepare.add_argument(
+        "--include-content",
+        action="store_true",
+        help="Include indexed file content instead of excerpts when available.",
+    )
+    session_prepare.add_argument(
+        "--max-query-results",
+        type=int,
+        default=6,
+        help="Maximum indexed hits to include in the session pack.",
+    )
+    session_prepare.add_argument(
+        "--max-embedding-results",
+        type=int,
+        default=4,
+        help="Maximum embedding hits to include in the session pack.",
+    )
+    session_prepare.add_argument(
+        "--skills-prompt",
+        help="Prompt to score against discovered skills (defaults to --query).",
+    )
+    session_prepare.add_argument(
+        "--skills-top-k",
+        type=int,
+        default=10,
+        help="Maximum skill matches to retain.",
+    )
+    session_prepare.add_argument(
+        "--no-session-pack",
+        action="store_true",
+        help="Skip session-pack generation for this prepared payload.",
+    )
+    session_prepare.add_argument(
+        "--no-skills-match",
+        action="store_true",
+        help="Skip skill-match generation for this prepared payload.",
+    )
+    session_prepare.add_argument(
+        "--no-write-artifacts",
+        action="store_true",
+        help="Do not update scratchpad/afs_agents/session_client_<client>.json or related artifacts.",
+    )
+    session_prepare.add_argument("--json", action="store_true", help="Output JSON.")
+    session_prepare.set_defaults(func=session_prepare_client_command)
+
+    session_hook = session_sub.add_parser(
+        "hook",
+        help="Run session lifecycle hooks for client wrappers and harnesses.",
+    )
+    add_context_args(session_hook)
+    session_hook.add_argument(
+        "event",
+        choices=["session_start", "session_end"],
+        help="Hook event name.",
+    )
+    session_hook.add_argument("--client", help="Client label override.")
+    session_hook.add_argument("--session-id", help="Session ID override.")
+    session_hook.add_argument("--cwd", help="Working directory override.")
+    session_hook.add_argument(
+        "--payload-file",
+        help="JSON payload file produced by `afs session prepare-client`.",
+    )
+    session_hook.add_argument("--exit-code", type=int, help="Client exit code for session_end.")
+    session_hook.add_argument("--reason", help="Optional end-of-session reason.")
+    session_hook.add_argument("--json", action="store_true", help="Output JSON.")
+    session_hook.set_defaults(func=session_hook_command)
+
+    session_event = session_sub.add_parser(
+        "event",
+        help="Record prompt, turn, or task lifecycle activity for a client session.",
+    )
+    add_context_args(session_event)
+    session_event.add_argument(
+        "event",
+        choices=[
+            "session_start",
+            "session_end",
+            "user_prompt_submit",
+            "turn_started",
+            "turn_completed",
+            "turn_failed",
+            "task_created",
+            "task_progress",
+            "task_completed",
+            "task_failed",
+        ],
+        help="Event name.",
+    )
+    session_event.add_argument("--client", help="Client label override.")
+    session_event.add_argument("--session-id", help="Session ID override.")
+    session_event.add_argument("--cwd", help="Working directory override.")
+    session_event.add_argument(
+        "--payload-file",
+        help="JSON payload file produced by `afs session prepare-client`.",
+    )
+    session_event.add_argument("--turn-id", help="Turn identifier.")
+    session_event.add_argument("--task-id", help="Task identifier.")
+    session_event.add_argument("--task-title", help="Task title.")
+    session_event.add_argument("--summary", help="Short event summary or progress text.")
+    session_event.add_argument("--status", help="Explicit status override.")
+    session_event.add_argument("--reason", help="Optional failure/end reason.")
+    session_event.add_argument("--prompt", help="Prompt text for user_prompt_submit.")
+    session_event.add_argument(
+        "--prompt-file",
+        help="Read prompt text from a file instead of the command line.",
+    )
+    session_event.add_argument("--exit-code", type=int, help="Exit code for terminal events.")
+    session_event.add_argument("--json", action="store_true", help="Output JSON.")
+    session_event.set_defaults(func=session_event_command)
 
     session_handoff = session_sub.add_parser(
         "handoff", help="Create or read handoff packets."

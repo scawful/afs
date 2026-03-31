@@ -299,6 +299,16 @@ def write_config(path: Path, config: AFSConfig) -> None:
     hooks_table["before_context_read"] = list(config.hooks.before_context_read)
     hooks_table["after_context_write"] = list(config.hooks.after_context_write)
     hooks_table["before_agent_dispatch"] = list(config.hooks.before_agent_dispatch)
+    hooks_table["session_start"] = list(config.hooks.session_start)
+    hooks_table["session_end"] = list(config.hooks.session_end)
+    hooks_table["user_prompt_submit"] = list(config.hooks.user_prompt_submit)
+    hooks_table["turn_started"] = list(config.hooks.turn_started)
+    hooks_table["turn_completed"] = list(config.hooks.turn_completed)
+    hooks_table["turn_failed"] = list(config.hooks.turn_failed)
+    hooks_table["task_created"] = list(config.hooks.task_created)
+    hooks_table["task_progress"] = list(config.hooks.task_progress)
+    hooks_table["task_completed"] = list(config.hooks.task_completed)
+    hooks_table["task_failed"] = list(config.hooks.task_failed)
     doc["hooks"] = hooks_table
 
     # --- [[directories]] ---

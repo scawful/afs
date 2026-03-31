@@ -83,7 +83,11 @@ def test_load_config_model_parses_profiles_extensions_hooks(tmp_path) -> None:
         "enabled_extensions = [\"workspace_adapter\"]\n"
         "policies = [\"no_zelda\"]\n\n"
         "[hooks]\n"
-        "before_context_read = [\"scripts/hooks/read.sh\"]\n",
+        "before_context_read = [\"scripts/hooks/read.sh\"]\n"
+        "session_start = [\"scripts/hooks/session_start.sh\"]\n"
+        "session_end = [\"scripts/hooks/session_end.sh\"]\n"
+        "user_prompt_submit = [\"scripts/hooks/prompt.sh\"]\n"
+        "task_completed = [\"scripts/hooks/task_completed.sh\"]\n",
         encoding="utf-8",
     )
 
@@ -94,6 +98,10 @@ def test_load_config_model_parses_profiles_extensions_hooks(tmp_path) -> None:
     work = model.profiles.profiles["work"]
     assert work.policies == ["no_zelda"]
     assert model.hooks.before_context_read == ["scripts/hooks/read.sh"]
+    assert model.hooks.session_start == ["scripts/hooks/session_start.sh"]
+    assert model.hooks.session_end == ["scripts/hooks/session_end.sh"]
+    assert model.hooks.user_prompt_submit == ["scripts/hooks/prompt.sh"]
+    assert model.hooks.task_completed == ["scripts/hooks/task_completed.sh"]
 
 
 def test_load_config_model_parses_context_index_settings(tmp_path) -> None:

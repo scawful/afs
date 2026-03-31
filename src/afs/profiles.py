@@ -366,6 +366,26 @@ def merge_extension_hooks(
         configured = hooks.after_context_write
     elif event == "before_agent_dispatch":
         configured = hooks.before_agent_dispatch
+    elif event == "session_start":
+        configured = hooks.session_start
+    elif event == "session_end":
+        configured = hooks.session_end
+    elif event == "user_prompt_submit":
+        configured = hooks.user_prompt_submit
+    elif event == "turn_started":
+        configured = hooks.turn_started
+    elif event == "turn_completed":
+        configured = hooks.turn_completed
+    elif event == "turn_failed":
+        configured = hooks.turn_failed
+    elif event == "task_created":
+        configured = hooks.task_created
+    elif event == "task_progress":
+        configured = hooks.task_progress
+    elif event == "task_completed":
+        configured = hooks.task_completed
+    elif event == "task_failed":
+        configured = hooks.task_failed
 
     extension_commands = profile.extension_hooks.get(event, [])
     return _merge_unique_str(configured, extension_commands)

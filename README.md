@@ -26,7 +26,7 @@ Core `afs` now supports profile-driven context injection via `afs.toml`.
 
 - Use `[profiles]` + `[profiles.<name>]` to control `knowledge_mounts`, `skill_roots`, and `model_registries`.
 - Use `[extensions]` + `extensions/*/extension.toml` to load external adapters (for example, a private workspace adapter) without forking core files.
-- Use `[hooks]` (`before_context_read`, `after_context_write`, `before_agent_dispatch`) for grounding policies.
+- Use `[hooks]` for grounding policies and client-session lifecycle hooks, including `session_start`, `session_end`, `user_prompt_submit`, `turn_*`, and `task_*`.
 
 Inspect and apply profiles:
 
@@ -160,6 +160,22 @@ rebuilding from scratch.
 ```bash
 ./scripts/afs session pack "current task" --model gemini --json
 ```
+
+### Client Session Harness
+
+Use the session harness when a wrapper, IDE adapter, or child shell script
+needs a stable contract for AFS context and lifecycle events.
+
+```bash
+./scripts/afs session prepare-client --client codex --json
+./scripts/afs session event user_prompt_submit --client codex --session-id "$AFS_SESSION_ID" --prompt "current task"
+./scripts/afs-session-notify task_progress --task-id bg-1 --summary "Indexing symbols"
+```
+
+- `session prepare-client` writes the shared session payload together with cached bootstrap, pack, and skill-match artifacts.
+- Wrappers such as `afs-codex`, `afs-claude`, and `afs-gemini` export `AFS_SESSION_BOOTSTRAP_*`, `AFS_SESSION_PACK_*`, `AFS_SESSION_SKILLS_JSON`, and `AFS_SESSION_CLIENT_PAYLOAD_JSON`.
+- When launched with `--prompt`, `--prompt-file`, or `--turn-id`, wrappers also export `AFS_SESSION_EVENT_BIN` / `AFS_SESSION_DEFAULT_TURN_ID` and emit `user_prompt_submit`, `turn_started`, and `turn_completed` / `turn_failed` around the client process.
+- Child scripts can call `afs-session-notify` to append `task_*` lifecycle events without rebuilding session context.
 
 ## Training Integrations
 

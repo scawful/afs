@@ -537,6 +537,7 @@ def log_session_event(
     op: str,
     session_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    payload: Any | None = None,
     context_root: Path | None = None,
 ) -> str | None:
     """Log a session event."""
@@ -550,6 +551,7 @@ def log_session_event(
         "afs.session",
         op=op,
         metadata=meta,
+        payload=payload,
         context_root=context_root,
     )
 

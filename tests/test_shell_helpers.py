@@ -10,6 +10,7 @@ from pathlib import Path
 SHELL_INIT = Path(__file__).parent.parent / "scripts" / "afs-shell-init.sh"
 AFS_CHECK = Path(__file__).parent.parent / "scripts" / "afs-check"
 AFS_CLIENT_SESSION = Path(__file__).parent.parent / "scripts" / "afs-client-session"
+AFS_SESSION_NOTIFY = Path(__file__).parent.parent / "scripts" / "afs-session-notify"
 
 
 def _write_fake_python(root: Path, log_path: Path) -> Path:
@@ -33,22 +34,64 @@ def _write_fake_python(root: Path, log_path: Path) -> Path:
     return python_bin
 
 
-def _write_fake_afs_cli(root: Path, bootstrap_json: Path, bootstrap_markdown: Path, context_root: Path) -> Path:
+def _write_fake_afs_cli(
+    root: Path,
+    bootstrap_json: Path,
+    bootstrap_markdown: Path,
+    pack_json: Path,
+    pack_markdown: Path,
+    skills_json: Path,
+    payload_json: Path,
+    context_root: Path,
+) -> Path:
     afs_cli = root / "scripts" / "afs"
     afs_cli.parent.mkdir(parents=True, exist_ok=True)
     afs_cli.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
-        "if [ \"$#\" -eq 3 ] && [ \"$1\" = \"session\" ] && [ \"$2\" = \"bootstrap\" ] && [ \"$3\" = \"--json\" ]; then\n"
+        "if [ -n \"${FAKE_AFS_LOG:-}\" ]; then\n"
+        "  printf '%s\\n' \"$*\" >> \"$FAKE_AFS_LOG\"\n"
+        "fi\n"
+        "if [ \"$#\" -ge 3 ] && [ \"$1\" = \"session\" ] && [ \"$2\" = \"prepare-client\" ]; then\n"
         f"  cat <<'JSON'\n"
         "{\n"
-        "  \"artifact_paths\": {\n"
-        f"    \"json\": \"{bootstrap_json}\",\n"
-        f"    \"markdown\": \"{bootstrap_markdown}\"\n"
+        f"  \"client\": \"fake-client\",\n"
+        "  \"session_id\": \"sess-from-prepare\",\n"
+        f"  \"context_path\": \"{context_root}\",\n"
+        "  \"bootstrap\": {\n"
+        "    \"artifact_paths\": {\n"
+        f"      \"json\": \"{bootstrap_json}\",\n"
+        f"      \"markdown\": \"{bootstrap_markdown}\"\n"
+        "    }\n"
         "  },\n"
-        f"  \"context_path\": \"{context_root}\"\n"
+        "  \"pack\": {\n"
+        "    \"artifact_paths\": {\n"
+        f"      \"json\": \"{pack_json}\",\n"
+        f"      \"markdown\": \"{pack_markdown}\"\n"
+        "    }\n"
+        "  },\n"
+        "  \"skills\": {\n"
+        "    \"artifact_paths\": {\n"
+        f"      \"json\": \"{skills_json}\"\n"
+        "    }\n"
+        "  },\n"
+        "  \"artifact_paths\": {\n"
+        f"    \"json\": \"{payload_json}\"\n"
+        "  }\n"
         "}\n"
         "JSON\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$#\" -ge 3 ] && [ \"$1\" = \"session\" ] && [ \"$2\" = \"hook\" ]; then\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$#\" -ge 3 ] && [ \"$1\" = \"session\" ] && [ \"$2\" = \"event\" ]; then\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$#\" -ge 2 ] && [ \"$1\" = \"agents\" ] && [ \"$2\" = \"wait\" ]; then\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$#\" -ge 2 ] && [ \"$1\" = \"agents\" ] && [ \"$2\" = \"monitor\" ]; then\n"
         "  exit 0\n"
         "fi\n"
         "exit 1\n",
@@ -71,7 +114,14 @@ def _write_fake_client(path: Path, log_path: Path) -> Path:
         "    'AFS_MCP_ALLOWED_ROOTS': os.environ.get('AFS_MCP_ALLOWED_ROOTS'),\n"
         "    'AFS_SESSION_BOOTSTRAP_JSON': os.environ.get('AFS_SESSION_BOOTSTRAP_JSON'),\n"
         "    'AFS_SESSION_BOOTSTRAP_MARKDOWN': os.environ.get('AFS_SESSION_BOOTSTRAP_MARKDOWN'),\n"
+        "    'AFS_SESSION_PACK_JSON': os.environ.get('AFS_SESSION_PACK_JSON'),\n"
+        "    'AFS_SESSION_PACK_MARKDOWN': os.environ.get('AFS_SESSION_PACK_MARKDOWN'),\n"
+        "    'AFS_SESSION_SKILLS_JSON': os.environ.get('AFS_SESSION_SKILLS_JSON'),\n"
+        "    'AFS_SESSION_CLIENT_PAYLOAD_JSON': os.environ.get('AFS_SESSION_CLIENT_PAYLOAD_JSON'),\n"
+        "    'AFS_SESSION_EVENT_BIN': os.environ.get('AFS_SESSION_EVENT_BIN'),\n"
+        "    'AFS_SESSION_DEFAULT_TURN_ID': os.environ.get('AFS_SESSION_DEFAULT_TURN_ID'),\n"
         "    'AFS_ACTIVE_CONTEXT_ROOT': os.environ.get('AFS_ACTIVE_CONTEXT_ROOT'),\n"
+        "    'AFS_SESSION_ID': os.environ.get('AFS_SESSION_ID'),\n"
         "}\n"
         f"Path({str(log_path)!r}).write_text(json.dumps(payload), encoding='utf-8')\n",
         encoding="utf-8",
@@ -121,6 +171,8 @@ def _run_client_session(
     *,
     client_label: str = "gemini",
     env_overrides: dict[str, str] | None = None,
+    wrapper_args: list[str] | None = None,
+    client_args: list[str] | None = None,
 ) -> dict[str, object]:
     root = tmp_path / "afs-copy"
     scripts_dir = root / "scripts"
@@ -129,15 +181,33 @@ def _run_client_session(
     copied = scripts_dir / "afs-client-session"
     copied.write_text(AFS_CLIENT_SESSION.read_text(encoding="utf-8"), encoding="utf-8")
     copied.chmod(copied.stat().st_mode | stat.S_IXUSR)
+    copied_notify = scripts_dir / "afs-session-notify"
+    copied_notify.write_text(AFS_SESSION_NOTIFY.read_text(encoding="utf-8"), encoding="utf-8")
+    copied_notify.chmod(copied_notify.stat().st_mode | stat.S_IXUSR)
 
     bootstrap_json = tmp_path / "bootstrap.json"
     bootstrap_markdown = tmp_path / "bootstrap.md"
+    pack_json = tmp_path / "session_pack_gemini.json"
+    pack_markdown = tmp_path / "session_pack_gemini.md"
+    skills_json = tmp_path / "session_skills_gemini.json"
+    payload_json = tmp_path / "session_client_gemini.json"
     context_root = tmp_path / "context"
-    _write_fake_afs_cli(root, bootstrap_json, bootstrap_markdown, context_root)
+    payload_json.write_text("{}", encoding="utf-8")
+    _write_fake_afs_cli(
+        root,
+        bootstrap_json,
+        bootstrap_markdown,
+        pack_json,
+        pack_markdown,
+        skills_json,
+        payload_json,
+        context_root,
+    )
 
     client_log = tmp_path / "client-log.json"
     client = tmp_path / "fake-client"
     _write_fake_client(client, client_log)
+    afs_log = tmp_path / "afs-log.txt"
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -145,9 +215,21 @@ def _run_client_session(
     env = os.environ.copy()
     if env_overrides:
         env.update(env_overrides)
+    env["FAKE_AFS_LOG"] = str(afs_log)
+    wrapper_args = wrapper_args or []
+    client_args = client_args or ["ping"]
 
     result = subprocess.run(
-        ["bash", str(copied), client_label, str(client), "FAKE_CLIENT_CMD", "ping"],
+        [
+            "bash",
+            str(copied),
+            client_label,
+            str(client),
+            "FAKE_CLIENT_CMD",
+            *wrapper_args,
+            "--",
+            *client_args,
+        ],
         cwd=workspace,
         capture_output=True,
         text=True,
@@ -155,7 +237,10 @@ def _run_client_session(
         check=False,
     )
     assert result.returncode == 0, result.stderr or result.stdout
-    return json.loads(client_log.read_text(encoding="utf-8"))
+    payload = json.loads(client_log.read_text(encoding="utf-8"))
+    payload["_afs_calls"] = afs_log.read_text(encoding="utf-8").splitlines() if afs_log.exists() else []
+    payload["_workspace"] = str(workspace)
+    return payload
 
 
 def test_afs_shell_init_has_valid_bash_syntax() -> None:
@@ -171,6 +256,16 @@ def test_afs_shell_init_has_valid_bash_syntax() -> None:
 def test_afs_client_session_has_valid_bash_syntax() -> None:
     result = subprocess.run(
         ["bash", "-n", str(AFS_CLIENT_SESSION)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_afs_session_notify_has_valid_bash_syntax() -> None:
+    result = subprocess.run(
+        ["bash", "-n", str(AFS_SESSION_NOTIFY)],
         capture_output=True,
         text=True,
         check=False,
@@ -280,6 +375,10 @@ def test_afs_client_session_uses_client_specific_allowed_roots(tmp_path: Path) -
     assert payload["AFS_MCP_ALLOWED_ROOTS"] == "/workspaces/company"
     assert payload["AFS_SESSION_BOOTSTRAP_JSON"].endswith("bootstrap.json")
     assert payload["AFS_SESSION_BOOTSTRAP_MARKDOWN"].endswith("bootstrap.md")
+    assert payload["AFS_SESSION_PACK_JSON"].endswith("session_pack_gemini.json")
+    assert payload["AFS_SESSION_PACK_MARKDOWN"].endswith("session_pack_gemini.md")
+    assert payload["AFS_SESSION_SKILLS_JSON"].endswith("session_skills_gemini.json")
+    assert payload["AFS_SESSION_CLIENT_PAYLOAD_JSON"].endswith("session_client_gemini.json")
     assert payload["AFS_ACTIVE_CONTEXT_ROOT"].endswith("context")
 
 
@@ -294,3 +393,194 @@ def test_afs_client_session_preserves_explicit_allowed_roots(tmp_path: Path) -> 
     )
 
     assert payload["AFS_MCP_ALLOWED_ROOTS"] == "/already/set"
+
+
+def test_afs_client_session_waits_for_session_agents_by_default(tmp_path: Path) -> None:
+    payload = _run_client_session(tmp_path)
+
+    assert payload["AFS_SESSION_ID"]
+    assert any(call.startswith("session prepare-client --client gemini ") for call in payload["_afs_calls"])
+    assert any(call.startswith("session hook session_start --client gemini ") for call in payload["_afs_calls"])
+    assert not any(call.startswith("session event ") for call in payload["_afs_calls"])
+    assert any(
+        call == f"agents monitor --session-id {payload['AFS_SESSION_ID']}"
+        for call in payload["_afs_calls"]
+    )
+    assert any(
+        call.startswith(f"agents wait --all --session-id {payload['AFS_SESSION_ID']} --timeout ")
+        for call in payload["_afs_calls"]
+    )
+    assert any(call.startswith("session hook session_end --client gemini ") for call in payload["_afs_calls"])
+
+
+def test_afs_client_session_can_disable_agent_drain(tmp_path: Path) -> None:
+    payload = _run_client_session(
+        tmp_path,
+        env_overrides={"AFS_CLIENT_WAIT_FOR_AGENTS": "0"},
+    )
+
+    assert any(call.startswith("session hook session_start ") for call in payload["_afs_calls"])
+    assert any(call.startswith("agents monitor ") for call in payload["_afs_calls"])
+    assert not any(call.startswith("agents wait ") for call in payload["_afs_calls"])
+
+
+def test_afs_client_session_can_disable_live_monitor(tmp_path: Path) -> None:
+    payload = _run_client_session(
+        tmp_path,
+        env_overrides={"AFS_CLIENT_MONITOR_AGENTS": "0"},
+    )
+
+    assert not any(call.startswith("agents monitor ") for call in payload["_afs_calls"])
+    assert any(call.startswith("agents wait ") for call in payload["_afs_calls"])
+
+
+def test_afs_client_session_can_disable_session_pack_and_skill_match(tmp_path: Path) -> None:
+    payload = _run_client_session(
+        tmp_path,
+        env_overrides={
+            "AFS_CLIENT_SESSION_PACK": "0",
+            "AFS_CLIENT_SKILLS_MATCH": "0",
+        },
+    )
+
+    prepare_call = next(
+        call for call in payload["_afs_calls"] if call.startswith("session prepare-client ")
+    )
+    assert "--no-session-pack" in prepare_call
+    assert "--no-skills-match" in prepare_call
+
+
+def test_afs_session_notify_uses_session_env_defaults(tmp_path: Path) -> None:
+    root = tmp_path / "afs-copy"
+    scripts_dir = root / "scripts"
+    scripts_dir.mkdir(parents=True)
+
+    copied_notify = scripts_dir / "afs-session-notify"
+    copied_notify.write_text(AFS_SESSION_NOTIFY.read_text(encoding="utf-8"), encoding="utf-8")
+    copied_notify.chmod(copied_notify.stat().st_mode | stat.S_IXUSR)
+
+    bootstrap_json = tmp_path / "bootstrap.json"
+    bootstrap_markdown = tmp_path / "bootstrap.md"
+    pack_json = tmp_path / "session_pack_codex.json"
+    pack_markdown = tmp_path / "session_pack_codex.md"
+    skills_json = tmp_path / "session_skills_codex.json"
+    payload_json = tmp_path / "session_client_codex.json"
+    context_root = tmp_path / "context"
+    _write_fake_afs_cli(
+        root,
+        bootstrap_json,
+        bootstrap_markdown,
+        pack_json,
+        pack_markdown,
+        skills_json,
+        payload_json,
+        context_root,
+    )
+
+    afs_log = tmp_path / "afs-log.txt"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    env = os.environ.copy()
+    env["AFS_ROOT"] = str(root)
+    env["AFS_CLI"] = str(root / "scripts" / "afs")
+    env["AFS_SESSION_CLIENT"] = "codex"
+    env["AFS_SESSION_ID"] = "sess-123"
+    env["AFS_SESSION_CLIENT_PAYLOAD_JSON"] = str(payload_json)
+    env["AFS_SESSION_DEFAULT_TURN_ID"] = "turn-123"
+    env["FAKE_AFS_LOG"] = str(afs_log)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(copied_notify),
+            "task_created",
+            "--task-id",
+            "bg-1",
+            "--task-title",
+            "Index context",
+        ],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert afs_log.read_text(encoding="utf-8").splitlines() == [
+        (
+            "session event task_created "
+            f"--cwd {workspace} "
+            "--client codex "
+            "--session-id sess-123 "
+            f"--payload-file {payload_json} "
+            "--turn-id turn-123 "
+            "--task-id bg-1 "
+            "--task-title Index context"
+        )
+    ]
+
+
+def test_afs_client_session_emits_prompt_and_turn_events(tmp_path: Path) -> None:
+    prompt = "Investigate live harness session updates."
+    payload = _run_client_session(
+        tmp_path,
+        wrapper_args=["--prompt", prompt],
+    )
+
+    turn_id = str(payload["AFS_SESSION_DEFAULT_TURN_ID"])
+    assert payload["AFS_SESSION_EVENT_BIN"].endswith("scripts/afs-session-notify")
+    assert turn_id.startswith("turn-")
+
+    calls = payload["_afs_calls"]
+    session_start_index = next(
+        index for index, call in enumerate(calls) if call.startswith("session hook session_start ")
+    )
+    prompt_index = next(
+        index for index, call in enumerate(calls) if call.startswith("session event user_prompt_submit ")
+    )
+    turn_started_index = next(
+        index for index, call in enumerate(calls) if call.startswith("session event turn_started ")
+    )
+    turn_completed_index = next(
+        index for index, call in enumerate(calls) if call.startswith("session event turn_completed ")
+    )
+    session_end_index = next(
+        index for index, call in enumerate(calls) if call.startswith("session hook session_end ")
+    )
+
+    assert session_start_index < prompt_index < turn_started_index < turn_completed_index < session_end_index
+    assert any(
+        call.startswith(
+            "session event user_prompt_submit "
+            f"--cwd {payload['_workspace']} "
+            "--client gemini "
+            f"--session-id {payload['AFS_SESSION_ID']} "
+        )
+        and f"--turn-id {turn_id} " in call
+        and f"--prompt {prompt}" in call
+        for call in calls
+    )
+    assert any(
+        call.startswith(
+            "session event turn_started "
+            f"--cwd {payload['_workspace']} "
+            "--client gemini "
+            f"--session-id {payload['AFS_SESSION_ID']} "
+        )
+        and f"--turn-id {turn_id}" in call
+        for call in calls
+    )
+    assert any(
+        call.startswith(
+            "session event turn_completed "
+            f"--cwd {payload['_workspace']} "
+            "--client gemini "
+            f"--session-id {payload['AFS_SESSION_ID']} "
+        )
+        and f"--turn-id {turn_id} " in call
+        and "--exit-code 0 " in call
+        and "--reason client_exit" in call
+        for call in calls
+    )

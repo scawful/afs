@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -lt 1 ]; then
+  echo "usage: afs-session-notify <event> [session-event-args...]" >&2
+  exit 2
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AFS_ROOT="${AFS_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+AFS_CLI="${AFS_CLI:-${AFS_ROOT}/scripts/afs}"
+
+EVENT_NAME="$1"
+shift
+
+CLIENT_LABEL="${AFS_SESSION_CLIENT:-}"
+SESSION_ID="${AFS_SESSION_ID:-}"
+PAYLOAD_FILE="${AFS_SESSION_CLIENT_PAYLOAD_JSON:-}"
+DEFAULT_TURN_ID="${AFS_SESSION_DEFAULT_TURN_ID:-}"
+
+HAS_TURN_ID=0
+for arg in "$@"; do
+  if [ "$arg" = "--turn-id" ]; then
+    HAS_TURN_ID=1
+    break
+  fi
+done
+
+ARGS=(session event "${EVENT_NAME}" --cwd "${PWD}")
+if [ -n "${CLIENT_LABEL}" ]; then
+  ARGS+=(--client "${CLIENT_LABEL}")
+fi
+if [ -n "${SESSION_ID}" ]; then
+  ARGS+=(--session-id "${SESSION_ID}")
+fi
+if [ -n "${PAYLOAD_FILE}" ]; then
+  ARGS+=(--payload-file "${PAYLOAD_FILE}")
+fi
+if [ "${HAS_TURN_ID}" = "0" ] && [ -n "${DEFAULT_TURN_ID}" ]; then
+  case "${EVENT_NAME}" in
+    session_start|session_end) ;;
+    *)
+      ARGS+=(--turn-id "${DEFAULT_TURN_ID}")
+      ;;
+  esac
+fi
+
+exec "${AFS_CLI}" "${ARGS[@]}" "$@"

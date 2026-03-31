@@ -23,14 +23,22 @@ def read_agent_events(
     """Read recent history events emitted by a named agent."""
     history_root = resolve_mount_root(context_path, MountType.HISTORY, config=config)
     prefix = f"agent.{agent_name}"
-    events = [
-        event
-        for event in iter_history_events(
-            history_root,
-            include_payloads=False,
-        )
-        if str(event.get("source", "")).startswith(prefix)
-    ]
+    events = []
+    for event in iter_history_events(
+        history_root,
+        include_payloads=False,
+    ):
+        source = str(event.get("source", ""))
+        if source.startswith(prefix):
+            events.append(event)
+            continue
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        if (
+            str(event.get("type", "")) == "agent_lifecycle"
+            and str(metadata.get("agent_name", "")).strip() == agent_name
+        ):
+            events.append(event)
+    events.sort(key=lambda event: str(event.get("timestamp", "")))
     if limit > 0 and len(events) > limit:
         events = events[-limit:]
     return events
@@ -305,6 +313,14 @@ def list_sessions(
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     """Group events by date and return session summaries."""
+    explicit_sessions = list_recorded_sessions(
+        context_path,
+        config=config,
+        limit=limit,
+    )
+    if explicit_sessions:
+        return explicit_sessions
+
     history_root = resolve_mount_root(context_path, MountType.HISTORY, config=config)
     events_by_date: dict[str, list[dict[str, Any]]] = {}
 
@@ -395,8 +411,45 @@ def _describe_timeline_event(event: dict[str, Any]) -> str:
     if not isinstance(metadata, dict):
         metadata = {}
 
-    if event_type == "session" and op == "bootstrap":
-        return "Session bootstrap"
+    if event_type == "session":
+        client = str(metadata.get("client", "")).strip()
+        prompt_preview = str(metadata.get("prompt_preview", "")).strip()
+        turn_id = str(metadata.get("turn_id", "")).strip()
+        task_id = str(metadata.get("task_id", "")).strip()
+        task_title = str(metadata.get("task_title", "")).strip()
+        reason = str(metadata.get("reason", "")).strip()
+        exit_code = metadata.get("exit_code")
+        summary = str(metadata.get("summary", "")).strip()
+        if op == "bootstrap":
+            return "Session bootstrap"
+        if op == "session_start":
+            return f"Session start ({client})" if client else "Session start"
+        if op == "session_end":
+            suffix = []
+            if client:
+                suffix.append(client)
+            if reason:
+                suffix.append(f"reason={reason}")
+            if exit_code is not None:
+                suffix.append(f"exit={exit_code}")
+            return f"Session end ({', '.join(suffix)})" if suffix else "Session end"
+        if op == "user_prompt_submit":
+            return f"Prompt submitted: {prompt_preview or '(empty)'}"
+        if op == "turn_started":
+            return f"Turn {turn_id or '?'} started"
+        if op == "turn_completed":
+            return f"Turn {turn_id or '?'} completed"
+        if op == "turn_failed":
+            return f"Turn {turn_id or '?'} failed"
+        if op == "task_created":
+            return f"Task {task_id or '?'} created: {task_title or summary or '(untitled)'}"
+        if op == "task_progress":
+            return f"Task {task_id or '?'} progress: {summary or task_title or '(no update)'}"
+        if op == "task_completed":
+            return f"Task {task_id or '?'} completed"
+        if op == "task_failed":
+            return f"Task {task_id or '?'} failed"
+        return f"session {op}"
     if event_type == "cli":
         argv = metadata.get("argv")
         if isinstance(argv, list):

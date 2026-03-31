@@ -180,6 +180,8 @@ or different model tiers without AFS owning the turn loop.
 ./scripts/afs events list --path ~/src/project-a --source afs.mcp
 ./scripts/afs events analytics --hours 24 --json
 ./scripts/afs events replay --session-id "$AFS_SESSION_ID"
+./scripts/afs session event user_prompt_submit --client codex --session-id "$AFS_SESSION_ID" --prompt "current task"
+./scripts/afs-session-notify task_progress --task-id bg-1 --summary "Indexing symbols"
 ./scripts/afs hivemind reap --dry-run --json
 ```
 
@@ -187,7 +189,14 @@ or different model tiers without AFS owning the turn loop.
 resolution as the rest of the CLI. `events analytics` summarizes recent tool
 usage, durations, and error rates; `events replay` reconstructs a session
 timeline from the shared `AFS_SESSION_ID` propagated by the client launch
-wrappers.
+wrappers. `session event` is the harness-facing write surface for prompt, turn,
+and task lifecycle updates that should appear in those replays.
+`afs-session-notify` is the wrapper-friendly shell helper for child scripts: it
+fills in `--client`, `--session-id`, `--payload-file`, `--cwd`, and the current
+`--turn-id` from the exported session environment. `afs-client-session` wrappers
+also accept `--prompt`, `--prompt-file`, and `--turn-id`; when present, they
+emit `user_prompt_submit`, `turn_started`, and `turn_completed` /
+`turn_failed` around the client process.
 
 ## Training
 

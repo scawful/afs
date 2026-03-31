@@ -67,6 +67,10 @@ export AFS_VENV=~/src/lab/afs/.venv
 ~/src/lab/afs/scripts/afs context discover --path ~/src
 ~/src/lab/afs/scripts/afs context ensure-all --path ~/src
 ~/src/lab/afs/scripts/afs session bootstrap --json
+~/src/lab/afs/scripts/afs session prepare-client --client codex --json
+~/src/lab/afs/scripts/afs session hook session_start --client codex --session-id "$AFS_SESSION_ID"
+~/src/lab/afs/scripts/afs session event user_prompt_submit --client codex --session-id "$AFS_SESSION_ID" --prompt "current task"
+~/src/lab/afs/scripts/afs-session-notify task_created --task-id bg-1 --task-title "Index context"
 ~/src/lab/afs/scripts/afs events tail --json
 ~/src/lab/afs/scripts/afs claude setup --path ~/src/project-a
 ~/src/lab/afs/scripts/afs claude setup --scope user
@@ -183,6 +187,8 @@ The CLI equivalent is:
 ~/src/lab/afs/scripts/afs session bootstrap
 ~/src/lab/afs/scripts/afs session bootstrap --json
 ~/src/lab/afs/scripts/afs session pack
+~/src/lab/afs/scripts/afs session prepare-client --client codex --json
+~/src/lab/afs/scripts/afs session event task_created --client codex --session-id "$AFS_SESSION_ID" --task-id bg-1 --task-title "Index context"
 ~/src/lab/afs/scripts/afs session pack "sqlite" --model gemini --workflow scan_fast --task "Shortlist the relevant SQLite files"
 ~/src/lab/afs/scripts/afs session pack "sqlite" --model gemini --pack-mode retrieval
 ~/src/lab/afs/scripts/afs session pack --model gemini --pack-mode full_slice
@@ -197,6 +203,8 @@ The CLI also refreshes:
 - `.context/scratchpad/afs_agents/session_bootstrap.md`
 - `.context/scratchpad/afs_agents/session_pack_<model>.json`
 - `.context/scratchpad/afs_agents/session_pack_<model>.md`
+- `.context/scratchpad/afs_agents/session_client_<client>.json`
+- `.context/scratchpad/afs_agents/session_skills_<client>.json`
 
 `session pack` is an explicit follow-on step, not the default startup path.
 When the bootstrap snapshot and pack inputs have not changed, repeated calls
@@ -208,6 +216,24 @@ pack, and a broader full-slice pack for long-context models. The
 `execution_profile` now also spells out that `afs.workflow.structured` is a
 prompt-only rail and includes retry guidance so the host loop stays in Gemini
 CLI or Claude Code instead of moving into core AFS.
+
+`session prepare-client` packages the same bootstrap and pack surfaces into a
+single JSON artifact for wrappers and IDE adapters. `afs-client-session`
+exports the resulting `AFS_SESSION_BOOTSTRAP_*`, `AFS_SESSION_PACK_*`,
+`AFS_SESSION_SKILLS_JSON`, `AFS_SESSION_CLIENT_PAYLOAD_JSON`, and
+`AFS_SESSION_EVENT_BIN` variables, then fires `session_start` / `session_end`
+hooks around the client run. When the wrapper is launched with `--prompt`,
+`--prompt-file`, or `--turn-id`, it also exports `AFS_SESSION_DEFAULT_TURN_ID`
+and emits `user_prompt_submit`, `turn_started`, and `turn_completed` /
+`turn_failed` around the client invocation.
+
+`session event` is the harness-side write path for prompt, turn, and task
+lifecycle. It appends durable `session` history events and updates the live
+`session_client_<client>.json` payload with `activity.current_prompt`,
+`activity.current_turn`, `activity.active_tasks`, counters, and a rolling
+`recent_events` list. `afs-session-notify` is the shell-facing helper that
+reuses the wrapper-exported client, session, payload, and default turn
+metadata so child scripts only need to provide the event-specific fields.
 
 For noisy command output, use MCP tool `operator.digest` before pasting raw
 logs back into a model turn. It can auto-detect and compress `pytest`,
@@ -398,8 +424,9 @@ Each wrapper:
 
 - prefers the nearest repo-local `afs.toml`
 - exports a shared `AFS_SESSION_ID`
-- exports the latest bootstrap artifact paths
-- refreshes the session bootstrap snapshot before launching the client
+- exports bootstrap, pack, skills, and combined session payload artifact paths
+- refreshes the prepared session payload before launching the client
+- runs `session_start` / `session_end` hooks around the client lifecycle
 - never infers workspace roots on its own
 - maps `AFS_<CLIENT>_MCP_ALLOWED_ROOTS` or `AFS_CLIENT_MCP_ALLOWED_ROOTS` into `AFS_MCP_ALLOWED_ROOTS` when you set them
 

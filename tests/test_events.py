@@ -121,3 +121,21 @@ def test_log_event_injects_env_session_id(tmp_path: Path, monkeypatch) -> None:
     events = query_events(history_root, session_id="session-env", limit=10)
     assert len(events) == 1
     assert events[0]["metadata"]["session_id"] == "session-env"
+
+
+def test_log_session_event_can_include_payload(tmp_path: Path) -> None:
+    history_root = tmp_path / "history"
+    history_root.mkdir()
+
+    append_history_event(
+        history_root,
+        "session",
+        "afs.session",
+        op="user_prompt_submit",
+        metadata={"session_id": "session-a"},
+        payload={"prompt": "Investigate monitor sidecar."},
+        include_payloads=True,
+    )
+
+    events = query_events(history_root, session_id="session-a", limit=10)
+    assert events[0]["payload"]["prompt"] == "Investigate monitor sidecar."

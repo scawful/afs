@@ -292,6 +292,16 @@ class HooksConfig:
     before_context_read: list[str] = field(default_factory=list)
     after_context_write: list[str] = field(default_factory=list)
     before_agent_dispatch: list[str] = field(default_factory=list)
+    session_start: list[str] = field(default_factory=list)
+    session_end: list[str] = field(default_factory=list)
+    user_prompt_submit: list[str] = field(default_factory=list)
+    turn_started: list[str] = field(default_factory=list)
+    turn_completed: list[str] = field(default_factory=list)
+    turn_failed: list[str] = field(default_factory=list)
+    task_created: list[str] = field(default_factory=list)
+    task_progress: list[str] = field(default_factory=list)
+    task_completed: list[str] = field(default_factory=list)
+    task_failed: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> HooksConfig:
@@ -299,6 +309,16 @@ class HooksConfig:
             before_context_read=_as_str_list(data.get("before_context_read")),
             after_context_write=_as_str_list(data.get("after_context_write")),
             before_agent_dispatch=_as_str_list(data.get("before_agent_dispatch")),
+            session_start=_as_str_list(data.get("session_start")),
+            session_end=_as_str_list(data.get("session_end")),
+            user_prompt_submit=_as_str_list(data.get("user_prompt_submit")),
+            turn_started=_as_str_list(data.get("turn_started")),
+            turn_completed=_as_str_list(data.get("turn_completed")),
+            turn_failed=_as_str_list(data.get("turn_failed")),
+            task_created=_as_str_list(data.get("task_created")),
+            task_progress=_as_str_list(data.get("task_progress")),
+            task_completed=_as_str_list(data.get("task_completed")),
+            task_failed=_as_str_list(data.get("task_failed")),
         )
 
 

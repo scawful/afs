@@ -31,6 +31,16 @@ HOOK_EVENTS = (
     "before_context_read",
     "after_context_write",
     "before_agent_dispatch",
+    "session_start",
+    "session_end",
+    "user_prompt_submit",
+    "turn_started",
+    "turn_completed",
+    "turn_failed",
+    "task_created",
+    "task_progress",
+    "task_completed",
+    "task_failed",
 )
 
 

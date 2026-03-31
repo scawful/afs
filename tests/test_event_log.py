@@ -5,6 +5,7 @@ from pathlib import Path
 from afs.event_log import (
     build_session_replay,
     build_session_timeline,
+    list_sessions,
     list_recorded_sessions,
     summarize_event_analytics,
 )
@@ -149,3 +150,56 @@ def test_build_session_timeline_filters_by_explicit_session_id_metadata(tmp_path
 
     assert timeline["event_count"] == 2
     assert all(event["id"] for event in timeline["timeline"])
+
+
+def test_build_session_timeline_describes_session_activity_events(tmp_path: Path) -> None:
+    context_path, history_root = _make_context(tmp_path)
+    append_history_event(
+        history_root,
+        "session",
+        "afs.session",
+        op="user_prompt_submit",
+        metadata={
+            "session_id": "session-a",
+            "prompt_preview": "Investigate monitor sidecar.",
+        },
+    )
+    append_history_event(
+        history_root,
+        "session",
+        "afs.session",
+        op="task_completed",
+        metadata={
+            "session_id": "session-a",
+            "task_id": "task-1",
+        },
+    )
+
+    timeline = build_session_timeline(context_path, session_id="session-a")
+
+    assert timeline["event_count"] == 2
+    assert timeline["timeline"][0]["summary"] == "Prompt submitted: Investigate monitor sidecar."
+    assert timeline["timeline"][1]["summary"] == "Task task-1 completed"
+
+
+def test_list_sessions_prefers_explicit_recorded_session_ids(tmp_path: Path) -> None:
+    context_path, history_root = _make_context(tmp_path)
+    append_history_event(
+        history_root,
+        "session",
+        "afs.session",
+        op="session_start",
+        metadata={"session_id": "session-a"},
+    )
+    append_history_event(
+        history_root,
+        "session",
+        "afs.session",
+        op="session_end",
+        metadata={"session_id": "session-a"},
+    )
+
+    sessions = list_sessions(context_path)
+
+    assert sessions[0]["session_id"] == "session-a"
+    assert sessions[0]["event_count"] == 2

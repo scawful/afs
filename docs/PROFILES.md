@@ -33,6 +33,10 @@ policies = []
 before_context_read = []
 after_context_write = []
 before_agent_dispatch = []
+session_start = []
+session_end = []
+user_prompt_submit = []
+task_completed = []
 ```
 
 ## Profile Commands
@@ -79,5 +83,10 @@ write `monorepo/active_workspace.toml`.
 Template hook:
 
 - `extensions/workspace_adapter/hooks/context-sync-active-workspace.sh`
+
+`session_start`, `session_end`, `user_prompt_submit`, `turn_*`, and `task_*`
+are the harness-facing lifecycle seams for `afs-client-session` wrappers and
+external adapters. They are the closest AFS analogue to Claude Code's
+`SessionStart`, `UserPromptSubmit`, and task lifecycle hook events.
 
 `./scripts/afs health` reports when the bridge file is stale (older than one hour).

@@ -115,6 +115,8 @@ class RunningAgent:
     started_at: str = ""
     module: str = ""
     args: list[str] = field(default_factory=list)
+    session_id: str = ""
+    launch_reason: str = ""
     last_error: str = ""
     last_event: str = ""
     last_seen_at: str = ""
@@ -130,6 +132,8 @@ class RunningAgent:
             "started_at": self.started_at,
             "module": self.module,
             "args": list(self.args),
+            "session_id": self.session_id,
+            "launch_reason": self.launch_reason,
             "last_error": self.last_error,
             "last_event": self.last_event,
             "last_seen_at": self.last_seen_at,
@@ -188,6 +192,29 @@ class AgentSupervisor:
     def _context_root_str(self) -> str:
         resolved_config = self._config or load_config_model(merge_user=True)
         return str(resolved_config.general.context_root.expanduser().resolve())
+
+    def _context_root_path(self) -> Path:
+        resolved_config = self._config or load_config_model(merge_user=True)
+        return resolved_config.general.context_root.expanduser().resolve()
+
+    def _log_lifecycle(
+        self,
+        agent_name: str,
+        op: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            from ..history import log_agent_lifecycle
+
+            log_agent_lifecycle(
+                agent_name,
+                op,
+                metadata=metadata or {},
+                context_root=self._context_root_path(),
+            )
+        except Exception:
+            pass
 
     def _resolve_task(self, name: str, module: str, agent_config: AgentConfig | None) -> str:
         from ..agent_registry import resolve_agent_task
@@ -253,6 +280,8 @@ class AgentSupervisor:
             started_at=data.get("started_at", ""),
             module=data.get("module", ""),
             args=[str(item) for item in args if isinstance(item, str)],
+            session_id=str(data.get("session_id", "") or ""),
+            launch_reason=str(data.get("launch_reason", "") or ""),
             last_error=data.get("last_error", ""),
             last_event=data.get("last_event", ""),
             last_seen_at=data.get("last_seen_at", ""),
@@ -268,8 +297,21 @@ class AgentSupervisor:
         except (OSError, ProcessLookupError):
             return False
 
+    def _is_one_shot_agent(self, name: str) -> bool:
+        """Check if an agent is a one-shot scheduled agent (exits after running)."""
+        try:
+            config = self._config or load_config_model(merge_user=True)
+            profile = resolve_active_profile(config)
+            for ac in profile.agent_configs:
+                if ac.name == name:
+                    return not ac.auto_start and bool(ac.schedule)
+        except Exception:
+            pass
+        return False
+
     def _refresh_state(self, agent: RunningAgent) -> RunningAgent:
         if agent.pid and not self._pid_alive(agent.pid):
+            previous_state = agent.state
             completion = self._registry_completion(agent)
             if completion is not None:
                 completion_status = str(completion.get("status", ""))
@@ -290,15 +332,54 @@ class AgentSupervisor:
                     if isinstance(completion.get("metadata"), dict)
                     else None,
                 )
+                if previous_state == "running":
+                    self._log_lifecycle(
+                        agent.name,
+                        "failed" if agent.state == "failed" else "completed",
+                        metadata={
+                            "session_id": agent.session_id,
+                            "launch_reason": agent.launch_reason,
+                            "state": agent.state,
+                            "error": agent.last_error,
+                        },
+                    )
                 return agent
 
-            agent.state = "failed"
+            # No completion record found — check if this was a one-shot
+            # scheduled agent (not auto_start).  One-shot agents exit after
+            # doing their work; treat that as "stopped", not "failed".
+            is_one_shot = self._is_one_shot_agent(agent.name)
+            agent.state = "stopped" if is_one_shot else "failed"
             agent.pid = None
             agent.last_seen_at = now_iso()
-            if not agent.last_error:
+            if not is_one_shot and not agent.last_error:
                 agent.last_error = "process exited"
             self._write_state(agent)
             self._update_registry(agent)
+            if previous_state == "running":
+                self._log_lifecycle(
+                    agent.name,
+                    "failed" if agent.state == "failed" else "completed",
+                    metadata={
+                        "session_id": agent.session_id,
+                        "launch_reason": agent.launch_reason,
+                        "state": agent.state,
+                        "error": agent.last_error,
+                    },
+                )
+
+        # Recovery: if a one-shot agent is stuck as "failed" with no pid
+        # (e.g. from a previous run before the one-shot fix), correct it.
+        elif (
+            agent.pid is None
+            and agent.state == "failed"
+            and self._is_one_shot_agent(agent.name)
+        ):
+            agent.state = "stopped"
+            agent.last_error = ""
+            self._write_state(agent)
+            self._update_registry(agent)
+
         return agent
 
     def _build_agent_env(
@@ -398,6 +479,7 @@ class AgentSupervisor:
         cmd = [self._python_executable(), "-m", module] + (args or [])
         launch_count = (existing.launch_count if existing else 0) + 1
         started_at = _now_utc().isoformat()
+        session_id = os.environ.get("AFS_SESSION_ID", "").strip()
         agent_env = self._build_agent_env(name, agent_config)
         try:
             proc = subprocess.Popen(
@@ -413,6 +495,8 @@ class AgentSupervisor:
                 state="failed",
                 module=module,
                 args=list(args or []),
+                session_id=session_id,
+                launch_reason=reason,
                 started_at=started_at,
                 last_error=str(exc),
                 last_event=reason,
@@ -420,10 +504,23 @@ class AgentSupervisor:
                 launch_count=launch_count,
             )
             self._write_state(agent)
+            metadata = {"launch_reason": reason}
+            if session_id:
+                metadata["session_id"] = session_id
             self._update_registry(
                 agent,
                 task=self._resolve_task(name, module, agent_config),
-                metadata={"launch_reason": reason},
+                metadata=metadata,
+            )
+            self._log_lifecycle(
+                name,
+                "spawn_failed",
+                metadata={
+                    "session_id": session_id,
+                    "launch_reason": reason,
+                    "module": module,
+                    "error": str(exc),
+                },
             )
             raise RuntimeError(f"Failed to spawn agent {name}: {exc}") from exc
 
@@ -434,15 +531,30 @@ class AgentSupervisor:
             started_at=started_at,
             module=module,
             args=list(args or []),
+            session_id=session_id,
+            launch_reason=reason,
             last_event=reason,
             last_seen_at=started_at,
             launch_count=launch_count,
         )
         self._write_state(agent)
+        metadata = {"launch_reason": reason}
+        if session_id:
+            metadata["session_id"] = session_id
         self._update_registry(
             agent,
             task=self._resolve_task(name, module, agent_config),
-            metadata={"launch_reason": reason},
+            metadata=metadata,
+        )
+        self._log_lifecycle(
+            name,
+            "spawned",
+            metadata={
+                "session_id": session_id,
+                "launch_reason": reason,
+                "module": module,
+                "pid": proc.pid,
+            },
         )
         return agent
 
@@ -461,6 +573,15 @@ class AgentSupervisor:
         agent.manually_stopped = True
         self._write_state(agent)
         self._update_registry(agent)
+        self._log_lifecycle(
+            agent.name,
+            "stopped",
+            metadata={
+                "session_id": agent.session_id,
+                "launch_reason": agent.launch_reason,
+                "pid": agent.pid,
+            },
+        )
         return True
 
     def list_agents(self) -> list[RunningAgent]:
@@ -495,6 +616,14 @@ class AgentSupervisor:
         agent.last_seen_at = now_iso()
         self._write_state(agent)
         self._update_registry(agent)
+        self._log_lifecycle(
+            agent.name,
+            "awaiting_review",
+            metadata={
+                "session_id": agent.session_id,
+                "launch_reason": agent.launch_reason,
+            },
+        )
         return True
 
     def approve_review(self, name: str) -> bool:
@@ -511,6 +640,14 @@ class AgentSupervisor:
         agent.last_seen_at = agent.stopped_at
         self._write_state(agent)
         self._update_registry(agent)
+        self._log_lifecycle(
+            agent.name,
+            "review_approved",
+            metadata={
+                "session_id": agent.session_id,
+                "launch_reason": agent.launch_reason,
+            },
+        )
         return True
 
     def reject_review(self, name: str) -> bool:
@@ -527,6 +664,14 @@ class AgentSupervisor:
         agent.last_seen_at = now_iso()
         self._write_state(agent)
         self._update_registry(agent)
+        self._log_lifecycle(
+            agent.name,
+            "review_rejected",
+            metadata={
+                "session_id": agent.session_id,
+                "launch_reason": agent.launch_reason,
+            },
+        )
         return True
 
     def auto_start(self, agent_configs: list[AgentConfig]) -> list[RunningAgent]:

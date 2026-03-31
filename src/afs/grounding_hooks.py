@@ -17,7 +17,13 @@ from .schema import AFSConfig
 
 logger = logging.getLogger(__name__)
 
-_PRE_HOOK_EVENTS = {"before_context_read", "before_agent_dispatch"}
+_PRE_HOOK_EVENTS = {
+    "before_context_read",
+    "before_agent_dispatch",
+    "session_start",
+    "user_prompt_submit",
+    "turn_started",
+}
 _ZELDA_KEYWORDS = {
     "zelda",
     "alttp",

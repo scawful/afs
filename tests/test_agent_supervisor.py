@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+from afs.event_log import read_agent_events
 from afs.agent_registry import AgentRegistry
 from afs.agents.supervisor import AgentSupervisor
 from afs.schema import (
@@ -62,6 +63,7 @@ def test_supervisor_stop_unknown(tmp_path: Path) -> None:
 
 def test_supervisor_spawn_and_status(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("AFS_SESSION_ID", "sess-123")
     state_dir = tmp_path / "state"
     supervisor = AgentSupervisor(
         state_dir=state_dir,
@@ -77,6 +79,8 @@ def test_supervisor_spawn_and_status(tmp_path: Path, monkeypatch) -> None:
     assert agent.pid == 99999
     assert agent.state == "running"
     assert agent.module == "afs.agents.context_warm"
+    assert agent.session_id == "sess-123"
+    assert agent.launch_reason == ""
 
     # State file should exist
     assert (state_dir / "test-agent.json").exists()
@@ -92,6 +96,27 @@ def test_supervisor_spawn_and_status(tmp_path: Path, monkeypatch) -> None:
     assert entries[0]["name"] == "test-agent"
     assert entries[0]["status"] == "running"
     assert entries[0]["task"].startswith("Sync workspace paths")
+    assert entries[0]["metadata"]["session_id"] == "sess-123"
+
+
+def test_supervisor_logs_lifecycle_events(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("AFS_SESSION_ID", "sess-456")
+    context_root = tmp_path / "context"
+    state_dir = tmp_path / "state"
+    supervisor = AgentSupervisor(
+        state_dir=state_dir,
+        config=AFSConfig(general=GeneralConfig(context_root=context_root)),
+    )
+
+    mock_proc = type("MockProc", (), {"pid": 12345})()
+    with patch("subprocess.Popen", return_value=mock_proc):
+        supervisor.spawn("lifecycle-agent", "afs.agents.context_warm", reason="shell_helper")
+
+    events = read_agent_events(context_root, agent_name="lifecycle-agent")
+    assert any(event["op"] == "spawned" for event in events)
+    spawned = next(event for event in events if event["op"] == "spawned")
+    assert spawned["metadata"]["session_id"] == "sess-456"
 
 
 def test_supervisor_spawn_and_stop(tmp_path: Path, monkeypatch) -> None:

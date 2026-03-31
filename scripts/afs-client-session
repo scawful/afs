@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [ "$#" -lt 3 ]; then
-  echo "usage: afs-client-session <client-label> <default-command> <env-var> [--bootstrap-only] [client-args...]" >&2
+  echo "usage: afs-client-session <client-label> <default-command> <env-var> [--bootstrap-only] [--context-query <text>] [--session-task <text>] [--skills-prompt <text>] [--session-model <model>] [--workflow <name>] [--tool-profile <name>] [--pack-mode <name>] [--session-pack|--no-session-pack] [--skills-match|--no-skills-match] [--monitor-agents|--no-monitor-agents] [--wait-for-agents|--no-wait-for-agents] [--prompt <text>] [--prompt-file <path>] [--turn-id <id>] [--] [client-args...]" >&2
   exit 2
 fi
 
@@ -12,10 +12,107 @@ COMMAND_ENV_VAR="$3"
 shift 3
 
 BOOTSTRAP_ONLY=0
-if [ "${1:-}" = "--bootstrap-only" ]; then
-  BOOTSTRAP_ONLY=1
-  shift
-fi
+WAIT_OVERRIDE=""
+MONITOR_OVERRIDE=""
+SESSION_QUERY_OVERRIDE=""
+SESSION_TASK_OVERRIDE=""
+SKILLS_PROMPT_OVERRIDE=""
+SESSION_MODEL_OVERRIDE=""
+WORKFLOW_OVERRIDE=""
+TOOL_PROFILE_OVERRIDE=""
+PACK_MODE_OVERRIDE=""
+SESSION_PACK_OVERRIDE=""
+SKILLS_MATCH_OVERRIDE=""
+PROMPT_OVERRIDE=""
+PROMPT_FILE_OVERRIDE=""
+TURN_ID_OVERRIDE=""
+while [ "$#" -gt 0 ]; do
+  case "${1:-}" in
+    --bootstrap-only)
+      BOOTSTRAP_ONLY=1
+      shift
+      ;;
+    --context-query)
+      SESSION_QUERY_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --session-task)
+      SESSION_TASK_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --skills-prompt)
+      SKILLS_PROMPT_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --session-model)
+      SESSION_MODEL_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --workflow)
+      WORKFLOW_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --tool-profile)
+      TOOL_PROFILE_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --pack-mode)
+      PACK_MODE_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --session-pack)
+      SESSION_PACK_OVERRIDE=1
+      shift
+      ;;
+    --no-session-pack)
+      SESSION_PACK_OVERRIDE=0
+      shift
+      ;;
+    --skills-match)
+      SKILLS_MATCH_OVERRIDE=1
+      shift
+      ;;
+    --no-skills-match)
+      SKILLS_MATCH_OVERRIDE=0
+      shift
+      ;;
+    --monitor-agents)
+      MONITOR_OVERRIDE=1
+      shift
+      ;;
+    --no-monitor-agents)
+      MONITOR_OVERRIDE=0
+      shift
+      ;;
+    --wait-for-agents)
+      WAIT_OVERRIDE=1
+      shift
+      ;;
+    --no-wait-for-agents)
+      WAIT_OVERRIDE=0
+      shift
+      ;;
+    --prompt)
+      PROMPT_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --prompt-file)
+      PROMPT_FILE_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --turn-id)
+      TURN_ID_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AFS_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -23,6 +120,7 @@ AFS_CLI="${AFS_ROOT}/scripts/afs"
 
 export AFS_ROOT
 export AFS_CLI
+export AFS_SESSION_EVENT_BIN="${AFS_SESSION_EVENT_BIN:-${AFS_ROOT}/scripts/afs-session-notify}"
 export AFS_SESSION_CLIENT="${CLIENT_LABEL}"
 if [ -z "${AFS_SESSION_ID:-}" ]; then
   export AFS_SESSION_ID="$(
@@ -63,27 +161,134 @@ if [ -n "${DEFAULT_CLIENT_ROOTS}" ] && [ -z "${AFS_MCP_ALLOWED_ROOTS:-}" ]; then
   export AFS_MCP_ALLOWED_ROOTS="${DEFAULT_CLIENT_ROOTS}"
 fi
 
-BOOTSTRAP_JSON_PAYLOAD="$("${AFS_CLI}" session bootstrap --json 2>/dev/null || true)"
-if [ -n "${BOOTSTRAP_JSON_PAYLOAD}" ]; then
+CLIENT_WAIT_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_WAIT_FOR_AGENTS"
+WAIT_FOR_AGENTS="${WAIT_OVERRIDE:-${!CLIENT_WAIT_ENV_VAR:-${AFS_CLIENT_WAIT_FOR_AGENTS:-1}}}"
+CLIENT_MONITOR_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_MONITOR_AGENTS"
+MONITOR_AGENTS="${MONITOR_OVERRIDE:-${!CLIENT_MONITOR_ENV_VAR:-${AFS_CLIENT_MONITOR_AGENTS:-1}}}"
+CLIENT_WAIT_TIMEOUT_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_WAIT_TIMEOUT_SECONDS"
+WAIT_TIMEOUT_SECONDS="${AFS_CLIENT_WAIT_TIMEOUT_SECONDS:-30}"
+if [ -n "${!CLIENT_WAIT_TIMEOUT_ENV_VAR:-}" ]; then
+  WAIT_TIMEOUT_SECONDS="${!CLIENT_WAIT_TIMEOUT_ENV_VAR}"
+fi
+
+DEFAULT_SESSION_MODEL="generic"
+case "${CLIENT_LABEL}" in
+  gemini|claude|codex)
+    DEFAULT_SESSION_MODEL="${CLIENT_LABEL}"
+    ;;
+esac
+CLIENT_SESSION_QUERY_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SESSION_QUERY"
+SESSION_QUERY="${SESSION_QUERY_OVERRIDE:-${!CLIENT_SESSION_QUERY_ENV_VAR:-${AFS_CLIENT_SESSION_QUERY:-}}}"
+CLIENT_SESSION_TASK_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SESSION_TASK"
+SESSION_TASK="${SESSION_TASK_OVERRIDE:-${!CLIENT_SESSION_TASK_ENV_VAR:-${AFS_CLIENT_SESSION_TASK:-}}}"
+CLIENT_SESSION_MODEL_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SESSION_MODEL"
+SESSION_MODEL="${SESSION_MODEL_OVERRIDE:-${!CLIENT_SESSION_MODEL_ENV_VAR:-${AFS_CLIENT_SESSION_MODEL:-${DEFAULT_SESSION_MODEL}}}}"
+CLIENT_SESSION_WORKFLOW_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SESSION_WORKFLOW"
+SESSION_WORKFLOW="${WORKFLOW_OVERRIDE:-${!CLIENT_SESSION_WORKFLOW_ENV_VAR:-${AFS_CLIENT_SESSION_WORKFLOW:-general}}}"
+CLIENT_SESSION_TOOL_PROFILE_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SESSION_TOOL_PROFILE"
+SESSION_TOOL_PROFILE="${TOOL_PROFILE_OVERRIDE:-${!CLIENT_SESSION_TOOL_PROFILE_ENV_VAR:-${AFS_CLIENT_SESSION_TOOL_PROFILE:-default}}}"
+CLIENT_SESSION_PACK_MODE_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SESSION_PACK_MODE"
+SESSION_PACK_MODE="${PACK_MODE_OVERRIDE:-${!CLIENT_SESSION_PACK_MODE_ENV_VAR:-${AFS_CLIENT_SESSION_PACK_MODE:-focused}}}"
+CLIENT_SKILLS_PROMPT_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SESSION_SKILLS_PROMPT"
+SKILLS_PROMPT="${SKILLS_PROMPT_OVERRIDE:-${!CLIENT_SKILLS_PROMPT_ENV_VAR:-${AFS_CLIENT_SESSION_SKILLS_PROMPT:-${SESSION_QUERY}}}}"
+CLIENT_SESSION_PACK_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SESSION_PACK"
+SESSION_PACK_ENABLED="${SESSION_PACK_OVERRIDE:-${!CLIENT_SESSION_PACK_ENV_VAR:-${AFS_CLIENT_SESSION_PACK:-1}}}"
+CLIENT_SKILLS_MATCH_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SKILLS_MATCH"
+SKILLS_MATCH_ENABLED="${SKILLS_MATCH_OVERRIDE:-${!CLIENT_SKILLS_MATCH_ENV_VAR:-${AFS_CLIENT_SKILLS_MATCH:-1}}}"
+CLIENT_SESSION_PROMPT_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SESSION_PROMPT"
+SESSION_PROMPT="${PROMPT_OVERRIDE:-${!CLIENT_SESSION_PROMPT_ENV_VAR:-${AFS_CLIENT_SESSION_PROMPT:-}}}"
+CLIENT_SESSION_PROMPT_FILE_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SESSION_PROMPT_FILE"
+SESSION_PROMPT_FILE="${PROMPT_FILE_OVERRIDE:-${!CLIENT_SESSION_PROMPT_FILE_ENV_VAR:-${AFS_CLIENT_SESSION_PROMPT_FILE:-}}}"
+CLIENT_SESSION_TURN_ID_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SESSION_TURN_ID"
+SESSION_TURN_ID="${TURN_ID_OVERRIDE:-${!CLIENT_SESSION_TURN_ID_ENV_VAR:-${AFS_CLIENT_SESSION_TURN_ID:-}}}"
+
+generate_session_token() {
+  local prefix="$1"
+  python3 - "$prefix" <<'PY'
+import sys
+import uuid
+
+print(f"{sys.argv[1]}-{uuid.uuid4().hex[:12]}")
+PY
+}
+
+if [ -n "${SESSION_PROMPT}" ] || [ -n "${SESSION_PROMPT_FILE}" ] || [ -n "${SESSION_TURN_ID}" ]; then
+  if [ -z "${SESSION_TURN_ID}" ]; then
+    SESSION_TURN_ID="$(generate_session_token turn)"
+  fi
+  export AFS_SESSION_DEFAULT_TURN_ID="${SESSION_TURN_ID}"
+else
+  unset AFS_SESSION_DEFAULT_TURN_ID 2>/dev/null || true
+fi
+
+SESSION_PREPARE_ARGS=(
+  session prepare-client
+  --client "${CLIENT_LABEL}"
+  --session-id "${AFS_SESSION_ID}"
+  --cwd "${PWD}"
+  --model "${SESSION_MODEL}"
+  --workflow "${SESSION_WORKFLOW}"
+  --tool-profile "${SESSION_TOOL_PROFILE}"
+  --pack-mode "${SESSION_PACK_MODE}"
+)
+if [ -n "${SESSION_QUERY}" ]; then
+  SESSION_PREPARE_ARGS+=(--query "${SESSION_QUERY}")
+fi
+if [ -n "${SESSION_TASK}" ]; then
+  SESSION_PREPARE_ARGS+=(--task "${SESSION_TASK}")
+fi
+if [ -n "${SKILLS_PROMPT}" ]; then
+  SESSION_PREPARE_ARGS+=(--skills-prompt "${SKILLS_PROMPT}")
+fi
+if [ "${SESSION_PACK_ENABLED}" = "0" ]; then
+  SESSION_PREPARE_ARGS+=(--no-session-pack)
+fi
+if [ "${SKILLS_MATCH_ENABLED}" = "0" ]; then
+  SESSION_PREPARE_ARGS+=(--no-skills-match)
+fi
+SESSION_PREPARE_ARGS+=(--json)
+
+SESSION_PREPARE_JSON_PAYLOAD="$("${AFS_CLI}" "${SESSION_PREPARE_ARGS[@]}" 2>/dev/null || true)"
+if [ -n "${SESSION_PREPARE_JSON_PAYLOAD}" ]; then
   readarray -t bootstrap_fields < <(
-    python3 - "${BOOTSTRAP_JSON_PAYLOAD}" <<'PY'
+    python3 - "${SESSION_PREPARE_JSON_PAYLOAD}" <<'PY'
 import json
 import sys
 
 payload = json.loads(sys.argv[1])
+bootstrap = (payload.get("bootstrap") or {}).get("artifact_paths") or {}
+pack = (payload.get("pack") or {}).get("artifact_paths") or {}
+skills = (payload.get("skills") or {}).get("artifact_paths") or {}
 artifacts = payload.get("artifact_paths") or {}
-print(artifacts.get("json", ""))
-print(artifacts.get("markdown", ""))
+print(bootstrap.get("json", ""))
+print(bootstrap.get("markdown", ""))
 print(payload.get("context_path", ""))
+print(pack.get("json", ""))
+print(pack.get("markdown", ""))
+print(skills.get("json", ""))
+print(artifacts.get("json", ""))
 PY
   )
   export AFS_SESSION_BOOTSTRAP_JSON="${bootstrap_fields[0]:-}"
   export AFS_SESSION_BOOTSTRAP_MARKDOWN="${bootstrap_fields[1]:-}"
   export AFS_ACTIVE_CONTEXT_ROOT="${bootstrap_fields[2]:-}"
+  export AFS_SESSION_PACK_JSON="${bootstrap_fields[3]:-}"
+  export AFS_SESSION_PACK_MARKDOWN="${bootstrap_fields[4]:-}"
+  export AFS_SESSION_SKILLS_JSON="${bootstrap_fields[5]:-}"
+  export AFS_SESSION_CLIENT_PAYLOAD_JSON="${bootstrap_fields[6]:-}"
 fi
 
 if [ -n "${AFS_SESSION_BOOTSTRAP_MARKDOWN:-}" ]; then
   echo "AFS bootstrap (${CLIENT_LABEL}): ${AFS_SESSION_BOOTSTRAP_MARKDOWN}" >&2
+fi
+if [ -n "${AFS_SESSION_PACK_MARKDOWN:-}" ]; then
+  echo "AFS pack (${CLIENT_LABEL}): ${AFS_SESSION_PACK_MARKDOWN}" >&2
+fi
+if [ -n "${AFS_SESSION_SKILLS_JSON:-}" ]; then
+  echo "AFS skills (${CLIENT_LABEL}): ${AFS_SESSION_SKILLS_JSON}" >&2
+fi
+if [ -n "${AFS_SESSION_CLIENT_PAYLOAD_JSON:-}" ]; then
+  echo "AFS session payload (${CLIENT_LABEL}): ${AFS_SESSION_CLIENT_PAYLOAD_JSON}" >&2
 fi
 if [ -n "${AFS_SESSION_ID:-}" ]; then
   echo "AFS session (${CLIENT_LABEL}): ${AFS_SESSION_ID}" >&2
@@ -103,4 +308,104 @@ if ! command -v "${CLIENT_COMMAND}" >/dev/null 2>&1; then
   exit 127
 fi
 
-exec "${CLIENT_COMMAND}" "$@"
+MONITOR_PID=""
+cleanup_monitor() {
+  if [ -n "${MONITOR_PID:-}" ]; then
+    kill "${MONITOR_PID}" 2>/dev/null || true
+    wait "${MONITOR_PID}" 2>/dev/null || true
+    MONITOR_PID=""
+  fi
+}
+
+run_session_hook() {
+  local event="$1"
+  shift || true
+  local hook_args=(
+    session hook "${event}"
+    --client "${CLIENT_LABEL}"
+    --session-id "${AFS_SESSION_ID}"
+    --cwd "${PWD}"
+  )
+  if [ -n "${AFS_SESSION_CLIENT_PAYLOAD_JSON:-}" ]; then
+    hook_args+=(--payload-file "${AFS_SESSION_CLIENT_PAYLOAD_JSON}")
+  fi
+  hook_args+=("$@")
+  "${AFS_CLI}" "${hook_args[@]}" >&2
+}
+
+run_session_event() {
+  local event="$1"
+  shift || true
+  if [ -x "${AFS_SESSION_EVENT_BIN}" ]; then
+    "${AFS_SESSION_EVENT_BIN}" "${event}" "$@" >&2
+    return $?
+  fi
+
+  local event_args=(
+    session event "${event}"
+    --client "${CLIENT_LABEL}"
+    --session-id "${AFS_SESSION_ID}"
+    --cwd "${PWD}"
+  )
+  if [ -n "${AFS_SESSION_CLIENT_PAYLOAD_JSON:-}" ]; then
+    event_args+=(--payload-file "${AFS_SESSION_CLIENT_PAYLOAD_JSON}")
+  fi
+  if [ -n "${AFS_SESSION_DEFAULT_TURN_ID:-}" ]; then
+    case "${event}" in
+      session_start|session_end) ;;
+      *) event_args+=(--turn-id "${AFS_SESSION_DEFAULT_TURN_ID}") ;;
+    esac
+  fi
+  event_args+=("$@")
+  "${AFS_CLI}" "${event_args[@]}" >&2
+}
+
+if [ "${MONITOR_AGENTS}" != "0" ] && [ -n "${AFS_SESSION_ID:-}" ]; then
+  "${AFS_CLI}" agents monitor --session-id "${AFS_SESSION_ID}" >&2 &
+  MONITOR_PID=$!
+fi
+
+trap cleanup_monitor EXIT
+
+run_session_hook session_start
+
+if [ -n "${SESSION_PROMPT}" ] || [ -n "${SESSION_PROMPT_FILE}" ]; then
+  prompt_event_args=()
+  if [ -n "${AFS_SESSION_DEFAULT_TURN_ID:-}" ]; then
+    prompt_event_args+=(--turn-id "${AFS_SESSION_DEFAULT_TURN_ID}")
+  fi
+  if [ -n "${SESSION_PROMPT_FILE}" ]; then
+    prompt_event_args+=(--prompt-file "${SESSION_PROMPT_FILE}")
+  else
+    prompt_event_args+=(--prompt "${SESSION_PROMPT}")
+  fi
+  run_session_event user_prompt_submit "${prompt_event_args[@]}"
+fi
+
+if [ -n "${AFS_SESSION_DEFAULT_TURN_ID:-}" ]; then
+  run_session_event turn_started --turn-id "${AFS_SESSION_DEFAULT_TURN_ID}"
+fi
+
+set +e
+"${CLIENT_COMMAND}" "$@"
+CLIENT_STATUS=$?
+set -e
+
+cleanup_monitor
+trap - EXIT
+
+if [ -n "${AFS_SESSION_DEFAULT_TURN_ID:-}" ]; then
+  if [ "${CLIENT_STATUS}" -eq 0 ]; then
+    run_session_event turn_completed --turn-id "${AFS_SESSION_DEFAULT_TURN_ID}" --exit-code "${CLIENT_STATUS}" --reason client_exit || true
+  else
+    run_session_event turn_failed --turn-id "${AFS_SESSION_DEFAULT_TURN_ID}" --exit-code "${CLIENT_STATUS}" --reason client_exit || true
+  fi
+fi
+
+if [ "${WAIT_FOR_AGENTS}" != "0" ] && [ -n "${AFS_SESSION_ID:-}" ]; then
+  "${AFS_CLI}" agents wait --all --session-id "${AFS_SESSION_ID}" --timeout "${WAIT_TIMEOUT_SECONDS}" >&2 || true
+fi
+
+run_session_hook session_end --exit-code "${CLIENT_STATUS}" --reason client_exit || true
+
+exit "${CLIENT_STATUS}"
