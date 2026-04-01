@@ -10,7 +10,11 @@ from pathlib import Path
 
 from ..config import load_config_model
 from ..profiles import resolve_active_profile
-from ..skills import discover_skills, score_skill_relevance
+from ..skills import (
+    discover_skills,
+    resolve_skill_roots,
+    score_skill_relevance,
+)
 
 
 def _print_hint(text: str) -> None:
@@ -21,37 +25,17 @@ def _print_hint(text: str) -> None:
         print(f"  {text}")
 
 
-def _merge_unique_paths(*groups: list[Path]) -> list[Path]:
-    merged: list[Path] = []
-    seen: set[str] = set()
-    for group in groups:
-        for path in group:
-            resolved = path.expanduser().resolve()
-            marker = str(resolved)
-            if marker in seen:
-                continue
-            seen.add(marker)
-            merged.append(resolved)
-    return merged
-
-
-def _bundled_skill_roots() -> list[Path]:
-    candidates: list[Path] = []
-    afs_root = os.getenv("AFS_ROOT", "").strip()
-    if afs_root:
-        candidates.append(Path(afs_root).expanduser().resolve() / "skills")
-    candidates.append(Path(__file__).resolve().parents[3] / "skills")
-    return _merge_unique_paths(
-        [candidate for candidate in candidates if candidate.exists()]
-    )
-
-
 def _resolve_skill_roots(args: argparse.Namespace, profile_roots: list[Path]) -> list[Path]:
-    if args.root:
-        return _merge_unique_paths(
-            [Path(path).expanduser().resolve() for path in args.root]
-        )
-    return _merge_unique_paths(profile_roots, _bundled_skill_roots())
+    explicit_roots = (
+        [Path(path).expanduser().resolve() for path in args.root]
+        if args.root
+        else None
+    )
+    return resolve_skill_roots(
+        profile_roots,
+        explicit_roots=explicit_roots,
+        afs_root=os.getenv("AFS_ROOT", "").strip() or None,
+    )
 
 
 def skills_list_command(args: argparse.Namespace) -> int:

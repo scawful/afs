@@ -19,6 +19,7 @@ from ..health import cli as health_cli
 from ..history import log_cli_invocation
 from ..profiles import resolve_active_profile
 from . import (
+    approvals,
     briefing,
     bundle,
     claude,
@@ -131,6 +132,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
 
     # Register core commands (init, plugins, status, services, agents, orchestrator, studio)
     core.register_parsers(subparsers)
+
+    # Register approvals commands
+    approvals.register_parsers(subparsers)
 
     # Register context commands (context, graph, workspace)
     context.register_parsers(subparsers)

@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# AFS Supervisor LaunchAgent management
+# Usage: afs-supervisor-ctl {install|uninstall|start|stop|status|logs}
+
+PLIST_NAME="com.halext.afs-supervisor"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_PLIST="${SCRIPT_DIR}/${PLIST_NAME}.plist"
+TARGET_DIR="${HOME}/Library/LaunchAgents"
+TARGET_PLIST="${TARGET_DIR}/${PLIST_NAME}.plist"
+LOG_DIR="${HOME}/.config/afs/agents"
+
+usage() {
+    echo "Usage: $(basename "$0") {install|uninstall|start|stop|status|logs|tail}"
+    echo ""
+    echo "Commands:"
+    echo "  install    Copy plist and load the LaunchAgent"
+    echo "  uninstall  Unload and remove the LaunchAgent"
+    echo "  start      Start the supervisor (must be installed)"
+    echo "  stop       Stop the supervisor"
+    echo "  status     Show supervisor status"
+    echo "  logs       Show last 50 lines of supervisor logs"
+    echo "  tail       Follow supervisor logs in real time"
+    exit 1
+}
+
+cmd_install() {
+    if [ ! -f "$SOURCE_PLIST" ]; then
+        echo "Error: plist not found at $SOURCE_PLIST" >&2
+        exit 1
+    fi
+
+    mkdir -p "$TARGET_DIR" "$LOG_DIR"
+
+    # Unload if already installed (ignore errors)
+    launchctl bootout "gui/$(id -u)/${PLIST_NAME}" 2>/dev/null || true
+
+    cp "$SOURCE_PLIST" "$TARGET_PLIST"
+    echo "Installed plist to $TARGET_PLIST"
+
+    launchctl bootstrap "gui/$(id -u)" "$TARGET_PLIST"
+    echo "Loaded $PLIST_NAME"
+
+    echo ""
+    echo "Supervisor will run every 15 minutes and on login."
+    echo "Logs: $LOG_DIR/supervisor.{stdout,stderr}.log"
+}
+
+cmd_uninstall() {
+    if [ ! -f "$TARGET_PLIST" ]; then
+        echo "Not installed."
+        return 0
+    fi
+
+    launchctl bootout "gui/$(id -u)/${PLIST_NAME}" 2>/dev/null || true
+    rm -f "$TARGET_PLIST"
+    echo "Uninstalled $PLIST_NAME"
+}
+
+cmd_start() {
+    if [ ! -f "$TARGET_PLIST" ]; then
+        echo "Not installed. Run 'install' first." >&2
+        exit 1
+    fi
+    launchctl kickstart "gui/$(id -u)/${PLIST_NAME}"
+    echo "Started $PLIST_NAME"
+}
+
+cmd_stop() {
+    launchctl kill SIGTERM "gui/$(id -u)/${PLIST_NAME}" 2>/dev/null || true
+    echo "Stopped $PLIST_NAME"
+}
+
+cmd_status() {
+    echo "=== LaunchAgent Status ==="
+    if [ -f "$TARGET_PLIST" ]; then
+        echo "Installed: yes ($TARGET_PLIST)"
+    else
+        echo "Installed: no"
+    fi
+
+    if launchctl print "gui/$(id -u)/${PLIST_NAME}" &>/dev/null; then
+        echo "Loaded: yes"
+        launchctl print "gui/$(id -u)/${PLIST_NAME}" 2>/dev/null | grep -E "(state|pid|last exit)" || true
+    else
+        echo "Loaded: no"
+    fi
+
+    echo ""
+    echo "=== Last Run ==="
+    LAST_RUN="${HOME}/src/lab/.context/scratchpad/afs_agents/supervisor_last_run.json"
+    if [ -f "$LAST_RUN" ]; then
+        python3 -c "
+import json, sys
+d = json.load(open('$LAST_RUN'))
+print(f\"Time: {d.get('finished_at', 'unknown')}\")
+m = d.get('metrics', {})
+print(f\"Running: {m.get('running_agents', '?')}, Failed: {m.get('failed_agents', '?')}, Started: {m.get('started_agents', '?')}\")
+print(f\"Status: {d.get('status', '?')}\")
+" 2>/dev/null || echo "(could not parse last run)"
+    else
+        echo "(no runs yet)"
+    fi
+
+    echo ""
+    echo "=== Quota Usage ==="
+    QUOTA_FILE="${HOME}/.config/afs/agents/quota.json"
+    if [ -f "$QUOTA_FILE" ]; then
+        python3 -c "
+import json
+d = json.load(open('$QUOTA_FILE'))
+for provider, info in d.items():
+    h = info.get('calls_this_hour', 0)
+    day = info.get('calls_today', 0)
+    cost = info.get('cost_today_usd', 0)
+    print(f'  {provider}: {h} calls/hr, {day} calls/day, \${cost:.2f} today')
+" 2>/dev/null || echo "(could not parse quota)"
+    else
+        echo "(no quota data yet)"
+    fi
+
+    echo ""
+    echo "=== Pending Approvals ==="
+    APPROVAL_FILE="${HOME}/.config/afs/agents/approvals.json"
+    if [ -f "$APPROVAL_FILE" ]; then
+        python3 -c "
+import json
+data = json.load(open('$APPROVAL_FILE'))
+pending = [r for r in data if r.get('status') == 'pending']
+if not pending:
+    print('  (none)')
+else:
+    for r in pending:
+        print(f\"  [{r['agent']}] {r['action']}: {r.get('detail', '')[:60]}\")
+" 2>/dev/null || echo "(could not parse approvals)"
+    else
+        echo "  (none)"
+    fi
+}
+
+cmd_logs() {
+    echo "=== stdout ==="
+    tail -50 "$LOG_DIR/supervisor.stdout.log" 2>/dev/null || echo "(no stdout log)"
+    echo ""
+    echo "=== stderr ==="
+    tail -50 "$LOG_DIR/supervisor.stderr.log" 2>/dev/null || echo "(no stderr log)"
+}
+
+cmd_tail() {
+    tail -f "$LOG_DIR/supervisor.stdout.log" "$LOG_DIR/supervisor.stderr.log" 2>/dev/null
+}
+
+case "${1:-}" in
+    install)   cmd_install ;;
+    uninstall) cmd_uninstall ;;
+    start)     cmd_start ;;
+    stop)      cmd_stop ;;
+    status)    cmd_status ;;
+    logs)      cmd_logs ;;
+    tail)      cmd_tail ;;
+    *)         usage ;;
+esac

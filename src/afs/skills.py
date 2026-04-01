@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,45 @@ class SkillMetadata:
 
 def _clean_token(value: str) -> str:
     return value.strip().strip('"').strip("'")
+
+
+def merge_unique_paths(*groups: list[Path]) -> list[Path]:
+    """Merge path groups while preserving order and uniqueness."""
+    merged: list[Path] = []
+    seen: set[str] = set()
+    for group in groups:
+        for path in group:
+            resolved = path.expanduser().resolve()
+            marker = str(resolved)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            merged.append(resolved)
+    return merged
+
+
+def bundled_skill_roots(*, afs_root: str | Path | None = None) -> list[Path]:
+    """Return bundled core skill roots available to the current runtime."""
+    candidates: list[Path] = []
+    root_value = afs_root or os.getenv("AFS_ROOT", "").strip()
+    if root_value:
+        candidates.append(Path(root_value).expanduser().resolve() / "skills")
+    candidates.append(Path(__file__).resolve().parents[3] / "skills")
+    return merge_unique_paths(
+        [candidate for candidate in candidates if candidate.exists()]
+    )
+
+
+def resolve_skill_roots(
+    profile_roots: list[Path],
+    *,
+    explicit_roots: list[Path] | None = None,
+    afs_root: str | Path | None = None,
+) -> list[Path]:
+    """Resolve skill roots from explicit overrides, profile config, and bundled skills."""
+    if explicit_roots:
+        return merge_unique_paths(explicit_roots)
+    return merge_unique_paths(profile_roots, bundled_skill_roots(afs_root=afs_root))
 
 
 def _normalize_list(value: str | list[str] | None) -> list[str]:

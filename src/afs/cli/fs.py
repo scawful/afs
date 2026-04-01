@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
 from ..context_fs import ContextFileSystem
+from ..context_index import ContextSQLiteIndex
 from ._utils import load_manager, parse_mount_type, resolve_context_paths
 
 
@@ -160,6 +162,152 @@ def fs_info_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def fs_delete_command(args: argparse.Namespace) -> int:
+    """Delete a file or directory from a context mount."""
+    config_path = Path(args.config) if args.config else None
+    manager = load_manager(config_path)
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+        args, manager
+    )
+    fs = ContextFileSystem(manager, context_path)
+    mount_type = parse_mount_type(args.mount_type)
+
+    try:
+        target, root = fs.resolve_path(mount_type, args.relative_path)
+    except (OSError, ValueError, PermissionError) as exc:
+        print(str(exc))
+        return 1
+
+    if target == root:
+        print("Refusing to delete an entire mount root.")
+        return 1
+    if not target.exists() and not target.is_symlink():
+        print(f"Path not found: {target}")
+        return 1
+
+    is_symlink = target.is_symlink()
+    is_dir = target.is_dir() and not is_symlink
+    relative_path = target.relative_to(root).as_posix()
+
+    try:
+        if is_symlink or target.is_file():
+            target.unlink()
+        elif is_dir:
+            if args.recursive:
+                shutil.rmtree(target)
+            else:
+                target.rmdir()
+        else:
+            raise OSError(f"Unsupported path type: {target}")
+    except (OSError, ValueError, PermissionError) as exc:
+        print(str(exc))
+        return 1
+
+    index = ContextSQLiteIndex(manager, context_path)
+    if is_dir:
+        rows_deleted = index.delete_relative_prefix(mount_type, relative_path)
+    else:
+        rows_deleted = index.delete_relative_path(mount_type, relative_path)
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "mount_type": mount_type.value,
+                    "context_path": str(fs.context_path),
+                    "path": str(target),
+                    "relative_path": relative_path,
+                    "deleted": True,
+                    "recursive": bool(args.recursive),
+                    "rows_deleted": rows_deleted,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    print(f"deleted: {target}")
+    return 0
+
+
+def fs_move_command(args: argparse.Namespace) -> int:
+    """Move or rename a path within the context filesystem."""
+    config_path = Path(args.config) if args.config else None
+    manager = load_manager(config_path)
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+        args, manager
+    )
+    fs = ContextFileSystem(manager, context_path)
+    source_mount_type = parse_mount_type(args.source_mount_type)
+    destination_mount_type = parse_mount_type(args.destination_mount_type)
+
+    try:
+        source, _source_root = fs.resolve_path(source_mount_type, args.source_relative_path)
+        destination, destination_root = fs.resolve_path(
+            destination_mount_type, args.destination_relative_path
+        )
+    except (OSError, ValueError, PermissionError) as exc:
+        print(str(exc))
+        return 1
+
+    if not source.exists() and not source.is_symlink():
+        print(f"Path not found: {source}")
+        return 1
+    if destination.exists() or destination.is_symlink():
+        print(f"Destination already exists: {destination}")
+        return 1
+    if source.is_dir() and not source.is_symlink():
+        try:
+            destination.relative_to(source)
+        except ValueError:
+            pass
+        else:
+            print("Destination cannot be inside source directory.")
+            return 1
+    if not destination.parent.exists():
+        if not args.mkdirs:
+            print(f"Parent directory missing: {destination.parent}")
+            return 1
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination == destination_root:
+        print("Destination must include a relative path inside the destination mount.")
+        return 1
+
+    try:
+        shutil.move(str(source), str(destination))
+    except (OSError, ValueError, PermissionError) as exc:
+        print(str(exc))
+        return 1
+
+    index = ContextSQLiteIndex(manager, context_path)
+    mounts_to_rebuild = list({source_mount_type, destination_mount_type})
+    summary = index.rebuild(
+        mount_types=mounts_to_rebuild,
+        include_content=manager.config.context_index.include_content,
+        max_file_size_bytes=manager.config.context_index.max_file_size_bytes,
+        max_content_chars=manager.config.context_index.max_content_chars,
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "context_path": str(fs.context_path),
+                    "source_mount_type": source_mount_type.value,
+                    "destination_mount_type": destination_mount_type.value,
+                    "source": str(source),
+                    "destination": str(destination),
+                    "index_rebuild": summary.to_dict(),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    print(f"moved: {source} -> {destination}")
+    return 0
+
+
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register filesystem command parsers."""
     from ..models import MountType
@@ -215,3 +363,29 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     fs_info.add_argument("relative_path", help="Path relative to mount root.")
     fs_info.add_argument("--json", action="store_true", help="Output JSON.")
     fs_info.set_defaults(func=fs_info_command)
+
+    fs_delete = fs_sub.add_parser("delete", help="Delete a path from context.")
+    add_context_args(fs_delete)
+    fs_delete.add_argument("mount_type", choices=mount_choices, help="Mount type.")
+    fs_delete.add_argument("relative_path", help="Path relative to mount root.")
+    fs_delete.add_argument(
+        "--recursive", action="store_true", help="Delete directories recursively."
+    )
+    fs_delete.add_argument("--json", action="store_true", help="Output JSON.")
+    fs_delete.set_defaults(func=fs_delete_command)
+
+    fs_move = fs_sub.add_parser("move", help="Move or rename a path in context.")
+    add_context_args(fs_move)
+    fs_move.add_argument(
+        "source_mount_type", choices=mount_choices, help="Source mount type."
+    )
+    fs_move.add_argument("source_relative_path", help="Source path relative to mount root.")
+    fs_move.add_argument(
+        "destination_mount_type", choices=mount_choices, help="Destination mount type."
+    )
+    fs_move.add_argument(
+        "destination_relative_path", help="Destination path relative to mount root."
+    )
+    fs_move.add_argument("--mkdirs", action="store_true", help="Create parent dirs.")
+    fs_move.add_argument("--json", action="store_true", help="Output JSON.")
+    fs_move.set_defaults(func=fs_move_command)

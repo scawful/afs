@@ -36,11 +36,15 @@ CORE_AGENT_MODULES = (
     "afs.agents.context_audit",
     "afs.agents.context_inventory",
     "afs.agents.context_warm",
+    "afs.agents.dashboard_export",
     "afs.agents.gemini_workspace_brief",
     "afs.agents.history_memory",
     "afs.agents.journal_agent",
+    "afs.agents.mission_runner",
     "afs.agents.scribe_draft",
     "afs.agents.supervisor",
+    "afs.agents.tether_bridge",
+    "afs.agents.workspace_analyst",
 )
 
 

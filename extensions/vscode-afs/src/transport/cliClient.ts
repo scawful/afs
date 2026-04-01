@@ -225,6 +225,53 @@ export class CliClient implements ITransportClient {
         await this.exec(cliArgs);
         return { path: filePath, bytes: Buffer.byteLength(content, "utf-8") };
       }
+      case "context.delete":
+      case "fs.delete": {
+        const filePath = args.path as string;
+        const parsed = this.parseMountPath(filePath);
+        if (!parsed.relativePath) {
+          throw new Error("context.delete requires a file path under .context/<mount_type>/...");
+        }
+        const cliArgs = [
+          "fs",
+          "delete",
+          parsed.mountType,
+          parsed.relativePath,
+          "--path",
+          parsed.projectPath,
+        ];
+        if (args.recursive === true) cliArgs.push("--recursive");
+        await this.exec(cliArgs);
+        return { path: filePath, deleted: true, recursive: args.recursive === true };
+      }
+      case "context.move":
+      case "fs.move": {
+        const sourcePath = args.source as string;
+        const destinationPath = args.destination as string;
+        const sourceParsed = this.parseMountPath(sourcePath);
+        const destinationParsed = this.parseMountPath(destinationPath);
+        if (!sourceParsed.relativePath || !destinationParsed.relativePath) {
+          throw new Error(
+            "context.move requires source and destination paths under .context/<mount_type>/...",
+          );
+        }
+        if (sourceParsed.projectPath !== destinationParsed.projectPath) {
+          throw new Error("CLI transport only supports context.move within the same project");
+        }
+        const cliArgs = [
+          "fs",
+          "move",
+          sourceParsed.mountType,
+          sourceParsed.relativePath,
+          destinationParsed.mountType,
+          destinationParsed.relativePath,
+          "--path",
+          sourceParsed.projectPath,
+        ];
+        if (args.mkdirs === true) cliArgs.push("--mkdirs");
+        await this.exec(cliArgs);
+        return { source: sourcePath, destination: destinationPath };
+      }
       case "context.list":
       case "fs.list": {
         const dirPath = args.path as string;
@@ -253,6 +300,8 @@ export class CliClient implements ITransportClient {
       { name: "context.unmount", description: "Unmount an alias from context", inputSchema: {} },
       { name: "context.read", description: "Read a context-scoped file", inputSchema: {} },
       { name: "context.write", description: "Write a context-scoped file", inputSchema: {} },
+      { name: "context.delete", description: "Delete a context-scoped file", inputSchema: {} },
+      { name: "context.move", description: "Move a context-scoped file", inputSchema: {} },
       { name: "context.list", description: "List context-scoped files", inputSchema: {} },
     ];
   }

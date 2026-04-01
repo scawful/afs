@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.halext.afs-supervisor</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/scawful/src/lab/afs/.venv/bin/python</string>
+        <string>-m</string>
+        <string>afs.agents.supervisor</string>
+        <string>--max-runs</string>
+        <string>1</string>
+        <string>--quiet</string>
+        <string>--output</string>
+        <string>/Users/scawful/src/lab/.context/scratchpad/afs_agents/supervisor_last_run.json</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>/Users/scawful/src/lab/afs/src</string>
+        <key>HOME</key>
+        <string>/Users/scawful</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/scawful/src/lab/afs</string>
+
+    <!-- Run every 15 minutes -->
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <!-- Also run on load -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Logging -->
+    <key>StandardOutPath</key>
+    <string>/Users/scawful/.config/afs/agents/supervisor.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/scawful/.config/afs/agents/supervisor.stderr.log</string>
+
+    <!-- Resource limits — keep it lightweight -->
+    <key>Nice</key>
+    <integer>10</integer>
+
+    <!-- Don't restart too fast on failure -->
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <!-- Keep alive only if launched -->
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>
