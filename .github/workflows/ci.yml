@@ -2,12 +2,9 @@ name: AFS CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
-  schedule:
-    # Run tests daily at 2am UTC
-    - cron: '0 2 * * *'
 
 jobs:
   test:
