@@ -698,9 +698,33 @@ class AgentSupervisor:
     def _build_agent_env(
         self, name: str, agent_config: AgentConfig | None,
     ) -> dict[str, str] | None:
-        """Build environment dict with sandbox vars if agent_config is set."""
+        """Build environment dict with sandbox vars and context snapshot."""
+        # Always build env so we can inject context snapshot
+        env = dict(os.environ)
+        env["AFS_AGENT_NAME"] = name
+
+        # Inject context snapshot so the agent starts with index/memory/event awareness
+        try:
+            from ..agent_context import (
+                build_agent_context_snapshot,
+                write_agent_context_snapshot,
+                AGENT_CONTEXT_ENV,
+            )
+
+            context_root = self._context_root_path()
+            snapshot = build_agent_context_snapshot(
+                name, context_root, config=self._config,
+            )
+            snapshot_path = write_agent_context_snapshot(
+                snapshot, self._state_dir / "context_snapshots",
+            )
+            env[AGENT_CONTEXT_ENV] = str(snapshot_path)
+        except Exception:
+            _log.debug("Failed to build context snapshot for %s", name, exc_info=True)
+
         if agent_config is None:
-            return None
+            return env
+
         has_config_sandbox = (
             agent_config.allowed_mounts
             or agent_config.allowed_tools
@@ -715,10 +739,6 @@ class AgentSupervisor:
                 has_capabilities = True
         except Exception:
             pass
-        if not has_config_sandbox and not has_capabilities:
-            return None
-        env = dict(os.environ)
-        env["AFS_AGENT_NAME"] = name
         if agent_config.allowed_mounts:
             env["AFS_ALLOWED_MOUNTS"] = ",".join(agent_config.allowed_mounts)
         if agent_config.allowed_tools:

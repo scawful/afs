@@ -220,6 +220,21 @@ def run(args) -> int:
     started_at = now_iso()
     start = time.time()
 
+    # Load context snapshot — gives us index state, memory topics, active agents
+    ctx_snapshot = None
+    try:
+        from ..agent_context import load_agent_context_snapshot
+        ctx_snapshot = load_agent_context_snapshot()
+        if ctx_snapshot:
+            logger.info(
+                "Context snapshot loaded: %d indexed entries, %d memory topics, %d active agents",
+                ctx_snapshot.index_total,
+                len(ctx_snapshot.memory_topics),
+                len(ctx_snapshot.active_agents),
+            )
+    except Exception:
+        pass
+
     guard = GuardrailedAgent(AGENT_NAME, config=GuardrailConfig(task_tier="background"))
 
     # Resolve scan roots
@@ -280,6 +295,14 @@ def run(args) -> int:
                 if r.status != "ok" or r.behind > 0
             ],
             "quota_usage": guard.usage_summary(),
+            "context_state": {
+                "index_total": ctx_snapshot.index_total if ctx_snapshot else 0,
+                "stale_mounts": [
+                    name for name, mf in (ctx_snapshot.mount_freshness if ctx_snapshot else {}).items()
+                    if mf.get("stale")
+                ],
+                "active_agents": ctx_snapshot.active_agents if ctx_snapshot else [],
+            },
         },
     )
     emit_result(

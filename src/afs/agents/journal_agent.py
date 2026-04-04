@@ -456,6 +456,19 @@ def build_parser() -> argparse.ArgumentParser:
 def run(args: argparse.Namespace) -> int:
     configure_logging(args.quiet)
 
+    # Load context snapshot for awareness of recent events and memory
+    try:
+        from ..agent_context import load_agent_context_snapshot
+        ctx = load_agent_context_snapshot()
+        if ctx and ctx.recent_events:
+            import logging as _log
+            _log.getLogger(__name__).info(
+                "Journal agent context: %d recent events, %d memory topics",
+                len(ctx.recent_events), len(ctx.memory_topics),
+            )
+    except Exception:
+        pass
+
     daily_dir = Path(args.daily_dir).expanduser()
     weekly_dir = Path(args.weekly_dir).expanduser()
     today = date.today()

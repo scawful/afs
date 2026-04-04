@@ -710,6 +710,18 @@ def run(args) -> int:
     start = time.time()
     context_root = Path(args.context_root).expanduser()
 
+    # Load context snapshot for index/memory awareness during mission execution
+    try:
+        from ..agent_context import load_agent_context_snapshot
+        ctx = load_agent_context_snapshot()
+        if ctx:
+            logger.info(
+                "Mission runner context: %d indexed, %d memory topics",
+                ctx.index_total, len(ctx.memory_topics),
+            )
+    except Exception:
+        pass
+
     missions = _discover_missions(context_root)
     if args.mission:
         missions = [(p, m) for p, m in missions if m.name == args.mission]

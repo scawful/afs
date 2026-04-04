@@ -258,6 +258,17 @@ def emit_result(
     except Exception:
         logging.getLogger(__name__).debug("failed to update agent registry", exc_info=True)
 
+    # Auto-index agent output into the context index so other agents can discover it
+    if output_path:
+        try:
+            from ..agent_context import index_agent_output
+
+            index_agent_output(output_path, result.name, payload)
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "failed to index agent output for %s", result.name, exc_info=True,
+            )
+
     if force_stdout or sys.stdout.isatty():
         print(text, end="")
 
