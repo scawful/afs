@@ -10,7 +10,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
+import time
 from collections.abc import Iterable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -152,9 +155,16 @@ def gemini_status_command(args: argparse.Namespace) -> int:
     checks: list[tuple[str, bool, str]] = []
     config = _load_cli_config(args)
 
+    # --- API key check ---
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    checks.append(("API key", bool(api_key), "GEMINI_API_KEY or GOOGLE_API_KEY"))
+    key_name = "GEMINI_API_KEY" if os.getenv("GEMINI_API_KEY") else "GOOGLE_API_KEY"
+    checks.append((
+        "API key",
+        bool(api_key),
+        f"set (via {key_name})" if api_key else "NOT SET — export GEMINI_API_KEY or GOOGLE_API_KEY",
+    ))
 
+    # --- SDK availability ---
     try:
         from google import genai  # type: ignore[import-untyped]  # noqa: F401
 
@@ -163,11 +173,13 @@ def gemini_status_command(args: argparse.Namespace) -> int:
         sdk_ok = False
     checks.append(("google-genai SDK", sdk_ok, "pip install google-genai"))
 
+    # --- settings.json ---
     settings_path = _find_gemini_settings()
     checks.append(
         ("settings.json", settings_path is not None, str(settings_path or "not found"))
     )
 
+    # --- MCP registration ---
     registrations = find_afs_mcp_registrations()
     gemini_registered = bool(registrations.get("gemini"))
     checks.append(
@@ -178,39 +190,128 @@ def gemini_status_command(args: argparse.Namespace) -> int:
         )
     )
 
+    # --- Embedding index state (doc count, age, staleness) ---
     indexed_roots = _indexed_knowledge_roots(_candidate_knowledge_roots(args, config))
     has_index = bool(indexed_roots)
+    index_detail: dict[str, Any] = {}
     if indexed_roots:
-        total_docs = sum(_index_doc_count(root) for root in indexed_roots)
+        total_docs = 0
+        oldest_index_at: str | None = None
+        any_stale = False
+        for root in indexed_roots:
+            doc_count, index_metadata = _index_doc_count_and_metadata(root)
+            total_docs += doc_count
+            indexed_at = index_metadata.get("indexed_at")
+            if indexed_at:
+                if oldest_index_at is None or indexed_at < oldest_index_at:
+                    oldest_index_at = indexed_at
+                # Check staleness: index older than 24 hours
+                try:
+                    idx_time = datetime.fromisoformat(indexed_at)
+                    if idx_time.tzinfo is None:
+                        idx_time = idx_time.replace(tzinfo=timezone.utc)
+                    age_hours = (datetime.now(timezone.utc) - idx_time).total_seconds() / 3600
+                    if age_hours > 24:
+                        any_stale = True
+                except (ValueError, TypeError):
+                    pass
+        index_detail = {
+            "roots": len(indexed_roots),
+            "total_docs": total_docs,
+            "oldest_indexed_at": oldest_index_at,
+            "stale": any_stale,
+        }
+        staleness_label = " (STALE)" if any_stale else ""
+        age_label = f", indexed {oldest_index_at}" if oldest_index_at else ""
         index_info = (
-            f"{len(indexed_roots)} index roots, {total_docs} docs "
-            f"under {indexed_roots[0]}"
+            f"{len(indexed_roots)} index roots, {total_docs} docs{age_label}{staleness_label}"
         )
     else:
         index_info = "no embedding index found"
+        index_detail = {"roots": 0, "total_docs": 0, "stale": False}
     checks.append(("Embeddings indexed", has_index, index_info))
 
+    # --- API latency test (generate a trivial completion) ---
+    api_latency: dict[str, Any] = {"tested": False}
+    if api_key and sdk_ok and not args.skip_ping:
+        try:
+            from google import genai as genai_mod  # type: ignore[import-untyped]
+
+            client = genai_mod.Client(api_key=api_key)
+            t0 = time.monotonic()
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents="Say 'ok'.",
+            )
+            latency_ms = (time.monotonic() - t0) * 1000
+            api_ok = bool(response.text)
+            api_detail = f"{latency_ms:.0f}ms"
+            api_latency = {
+                "tested": True,
+                "ok": api_ok,
+                "latency_ms": round(latency_ms, 1),
+                "model": "gemini-2.0-flash",
+            }
+        except Exception as exc:
+            api_ok = False
+            api_detail = f"failed: {exc}"
+            api_latency = {"tested": True, "ok": False, "error": str(exc)}
+    else:
+        api_ok = True
+        api_detail = "skipped"
+    checks.append(("API ping", api_ok, api_detail))
+
+    # --- Embedding ping ---
     embed_ok = True
     embed_info = "skipped"
     if api_key and sdk_ok and not args.skip_ping:
         try:
             from ..embeddings import create_gemini_embed_fn
 
+            t0 = time.monotonic()
             fn = create_gemini_embed_fn()
             result = fn("test")
+            latency_ms = (time.monotonic() - t0) * 1000
             embed_ok = True
-            embed_info = f"{len(result)}-dim vectors"
+            embed_info = f"{len(result)}-dim vectors ({latency_ms:.0f}ms)"
         except Exception as exc:  # pragma: no cover - live API path
             embed_ok = False
             embed_info = f"failed: {exc}"
     checks.append(("Embedding ping", embed_ok, embed_info))
 
+    # --- Configured Gemini models from chat_registry ---
+    gemini_models: list[dict[str, str]] = []
+    try:
+        from ..chat_registry import load_chat_registry
+
+        registry = load_chat_registry(config=config)
+        for model in registry.models.values():
+            if model.provider == "gemini" or "gemini" in model.model_id.lower():
+                gemini_models.append({
+                    "name": model.name,
+                    "provider": model.provider,
+                    "model_id": model.model_id,
+                    "role": model.role,
+                })
+    except Exception:
+        pass
+
+    if gemini_models:
+        model_names = ", ".join(m["name"] for m in gemini_models)
+        checks.append(("Configured models", True, model_names))
+    else:
+        checks.append(("Configured models", False, "none found in chat_registry"))
+
+    # --- Output ---
     if args.json:
-        payload = {
+        payload: dict[str, Any] = {
             "checks": [
                 {"name": name, "ok": ok, "detail": detail}
                 for name, ok, detail in checks
-            ]
+            ],
+            "embedding_index": index_detail,
+            "api_latency": api_latency,
+            "configured_models": gemini_models,
         }
         print(json.dumps(payload, indent=2))
         return 0
@@ -231,7 +332,15 @@ def gemini_status_command(args: argparse.Namespace) -> int:
 
 
 def gemini_context_command(args: argparse.Namespace) -> int:
-    """Generate a context document from knowledge base for Gemini sessions."""
+    """Generate a context document from knowledge base for Gemini sessions.
+
+    When --generate is passed, builds AFS context and sends it to Gemini
+    as a system instruction alongside the user query, streaming the response.
+    """
+    # Generative mode: inject AFS context into a Gemini conversation
+    if getattr(args, "generate", False):
+        return _context_generate(args)
+
     config = _load_cli_config(args)
     accessible_roots = _candidate_knowledge_roots(args, config)
     indexed_roots = _indexed_knowledge_roots(accessible_roots)
@@ -250,6 +359,180 @@ def gemini_context_command(args: argparse.Namespace) -> int:
         if (root / "INDEX.md").exists():
             return _context_full(root)
     return _context_full(accessible_roots[-1])
+
+
+def _context_generate(args: argparse.Namespace) -> int:
+    """Build AFS context, send it to Gemini as system instruction, stream response."""
+    # Accept --gen-query or fall back to the positional query argument
+    query = getattr(args, "gen_query", None) or getattr(args, "query", None)
+    if not query:
+        print(
+            "Error: a query is required for generative context mode.\n"
+            "  Use: afs gemini context --generate --gen-query 'your question'\n"
+            "    or: afs gemini context --generate 'your question'",
+            file=sys.stderr,
+        )
+        return 1
+
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        print(
+            "Error: GEMINI_API_KEY or GOOGLE_API_KEY must be set.\n"
+            "  export GEMINI_API_KEY=<your-key>",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        from google import genai  # type: ignore[import-untyped]
+    except ImportError:
+        print(
+            "Error: google-genai SDK not installed.\n"
+            "  pip install google-genai",
+            file=sys.stderr,
+        )
+        return 1
+
+    model_name = getattr(args, "model", "gemini-2.0-flash") or "gemini-2.0-flash"
+    token_budget = getattr(args, "token_budget", 4000) or 4000
+
+    # Build AFS context using session bootstrap or context pack
+    context_text = _build_afs_context_text(args, token_budget=token_budget)
+
+    # Send to Gemini with context as system instruction
+    try:
+        client = genai.Client(api_key=api_key)
+
+        system_instruction = (
+            "You are an assistant with access to the following AFS (Agent File System) "
+            "context. Use it to provide informed, context-aware responses.\n\n"
+            f"{context_text}"
+        )
+
+        response = client.models.generate_content_stream(
+            model=model_name,
+            contents=query,
+            config={
+                "system_instruction": system_instruction,
+            },
+        )
+
+        full_response = []
+        for chunk in response:
+            if chunk.text:
+                sys.stdout.write(chunk.text)
+                sys.stdout.flush()
+                full_response.append(chunk.text)
+        # Ensure trailing newline
+        if full_response and not full_response[-1].endswith("\n"):
+            sys.stdout.write("\n")
+
+    except Exception as exc:
+        print(f"\nError calling Gemini API: {exc}", file=sys.stderr)
+        return 1
+
+    # Record the interaction as a session event if possible
+    try:
+        from ..history import log_session_event
+
+        log_session_event(
+            "gemini_context_query",
+            metadata={
+                "model": model_name,
+                "query": query[:200],
+                "token_budget": token_budget,
+                "response_length": sum(len(c) for c in full_response),
+            },
+        )
+    except Exception:
+        pass
+
+    return 0
+
+
+def _build_afs_context_text(args: argparse.Namespace, *, token_budget: int) -> str:
+    """Build AFS context text from session bootstrap or context pack."""
+    config_path = getattr(args, "config", None)
+    resolved_config_path = (
+        Path(config_path).expanduser().resolve() if config_path else None
+    )
+
+    # Try context pack first (richer, model-aware), fall back to session bootstrap
+    try:
+        from ..cli._utils import load_manager, resolve_context_paths
+        from ..context_pack import build_context_pack
+
+        manager = load_manager(resolved_config_path)
+        # Build minimal args for context path resolution
+        if not hasattr(args, "path"):
+            args.path = None
+        if not hasattr(args, "context_root"):
+            args.context_root = None
+        if not hasattr(args, "context_dir"):
+            args.context_dir = None
+        _project_path, context_path, _root, _dir = resolve_context_paths(args, manager)
+
+        pack = build_context_pack(
+            manager,
+            context_path,
+            model="gemini",
+            token_budget=token_budget,
+            pack_mode="focused",
+        )
+        # Render sections into text
+        sections = pack.get("sections", [])
+        if sections:
+            parts = []
+            for section in sections:
+                title = section.get("title", "")
+                body = section.get("body", "")
+                if body.strip():
+                    parts.append(f"## {title}\n{body}")
+            if parts:
+                return "\n\n".join(parts)
+    except Exception:
+        pass
+
+    # Fall back to session bootstrap
+    try:
+        from ..cli._utils import load_manager, resolve_context_paths
+        from ..session_bootstrap import build_session_bootstrap, render_session_bootstrap
+
+        manager = load_manager(resolved_config_path)
+        if not hasattr(args, "path"):
+            args.path = None
+        if not hasattr(args, "context_root"):
+            args.context_root = None
+        if not hasattr(args, "context_dir"):
+            args.context_dir = None
+        _project_path, context_path, _root, _dir = resolve_context_paths(args, manager)
+
+        bootstrap = build_session_bootstrap(
+            manager,
+            context_path,
+            record_event=False,
+            token_budget=token_budget,
+        )
+        return render_session_bootstrap(bootstrap)
+    except Exception as exc:
+        return f"(AFS context unavailable: {exc})"
+
+
+def _index_doc_count_and_metadata(index_root: Path) -> tuple[int, dict[str, Any]]:
+    """Return (doc_count, metadata_dict) from an embedding index."""
+    try:
+        payload = json.loads(
+            (index_root / "embedding_index.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return 0, {}
+    if isinstance(payload, dict):
+        metadata = payload.get("_metadata", {})
+        doc_count = sum(1 for k in payload if k != "_metadata")
+        return doc_count, metadata if isinstance(metadata, dict) else {}
+    if isinstance(payload, list):
+        return len(payload), {}
+    return 0, {}
 
 
 def _context_search(knowledge_roots: Iterable[Path], args: argparse.Namespace) -> int:
@@ -490,7 +773,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 
     ctx = gemini_sub.add_parser(
         "context",
-        help="Generate context from knowledge base for Gemini sessions.",
+        help="Generate context from knowledge base or inject AFS context into Gemini.",
     )
     _add_knowledge_root_args(ctx)
     ctx.add_argument(
@@ -517,4 +800,26 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Include full document content (not just preview).",
     )
     ctx.add_argument("--json", action="store_true", help="JSON output.")
+    # Generative mode: inject AFS context into a Gemini conversation
+    ctx.add_argument(
+        "--generate",
+        action="store_true",
+        help="Send AFS context as system instruction to Gemini and stream a response.",
+    )
+    ctx.add_argument(
+        "--model",
+        default="gemini-2.0-flash",
+        help="Gemini model to use for generation (default: gemini-2.0-flash).",
+    )
+    ctx.add_argument(
+        "--gen-query",
+        dest="gen_query",
+        help="User query for generative context mode (required with --generate).",
+    )
+    ctx.add_argument(
+        "--token-budget",
+        type=int,
+        default=4000,
+        help="Token budget for AFS context (default: 4000).",
+    )
     ctx.set_defaults(func=gemini_context_command)

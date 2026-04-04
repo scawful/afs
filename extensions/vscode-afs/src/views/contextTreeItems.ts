@@ -24,6 +24,7 @@ export class MountTypeItem extends ContextTreeItem {
     public readonly contextPath: string,
     public readonly policy: PolicyType,
     public readonly entryCount: number,
+    public readonly freshness?: number,
   ) {
     super(
       mountType,
@@ -31,7 +32,13 @@ export class MountTypeItem extends ContextTreeItem {
         ? vscode.TreeItemCollapsibleState.Collapsed
         : vscode.TreeItemCollapsibleState.None,
     );
-    this.description = `${policy} (${entryCount})`;
+    const freshnessLabel = freshness != null
+      ? ` ${freshnessIndicator(freshness)}`
+      : "";
+    this.description = `${policy} (${entryCount})${freshnessLabel}`;
+    this.tooltip = freshness != null
+      ? `${mountType} — ${policy} — ${entryCount} entries — freshness: ${(freshness * 100).toFixed(0)}%`
+      : `${mountType} — ${policy} — ${entryCount} entries`;
     this.contextValue = "mountType";
     this.iconPath = new vscode.ThemeIcon(policyIcon(policy));
   }
@@ -73,4 +80,11 @@ function policyIcon(policy: PolicyType): string {
     default:
       return "folder";
   }
+}
+
+function freshnessIndicator(score: number): string {
+  const pct = (score * 100).toFixed(0);
+  if (score >= 0.5) return `[${pct}%]`;
+  if (score >= 0.3) return `[${pct}% !]`;
+  return `[${pct}% !!]`;
 }

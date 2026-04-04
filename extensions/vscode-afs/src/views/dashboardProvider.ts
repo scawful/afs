@@ -59,6 +59,7 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
     let contextStatus: Record<string, unknown> | null = null;
     let freshnessData: Record<string, unknown> | null = null;
     let antigravityStatus: Record<string, unknown> | null = null;
+    let memoryStatus: Record<string, unknown> | null = null;
 
     if (connected) {
       try {
@@ -90,6 +91,16 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
       } catch {
         // antigravity tool may not exist
       }
+
+      try {
+        const memResult = await this.transport.callTool("memory.status", {});
+        const parsed = extractToolPayload(memResult);
+        if (parsed) {
+          memoryStatus = parsed;
+        }
+      } catch {
+        // memory tool may not exist
+      }
     }
 
     this.view.webview.html = this.buildHtml(
@@ -98,6 +109,7 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
       contextStatus,
       freshnessData,
       antigravityStatus,
+      memoryStatus,
     );
   }
 
@@ -107,6 +119,7 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
     contextStatus: Record<string, unknown> | null,
     freshnessData: Record<string, unknown> | null,
     antigravityStatus: Record<string, unknown> | null,
+    memoryStatus: Record<string, unknown> | null,
   ): string {
     const statusIcon = connected ? "\u2713" : "\u2717";
     const statusClass = connected ? "connected" : "disconnected";
@@ -127,18 +140,37 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
         : "";
       const project = contextPath ? path.basename(path.dirname(contextPath)) : "unknown";
       const mountCounts = contextStatus.mount_counts;
-      const mounts = mountCounts && typeof mountCounts === "object" && !Array.isArray(mountCounts)
-        ? Object.keys(mountCounts as Record<string, unknown>).length
-        : 0;
+      const mountObj = mountCounts && typeof mountCounts === "object" && !Array.isArray(mountCounts)
+        ? mountCounts as Record<string, unknown>
+        : {};
+      const mountKeys = Object.keys(mountObj);
       const totalFiles = typeof contextStatus.total_files === "number"
         ? contextStatus.total_files
         : 0;
+      const indexedAt = typeof contextStatus.indexed_at === "string"
+        ? contextStatus.indexed_at
+        : null;
+
+      let mountDetails = "";
+      if (mountKeys.length > 0) {
+        const mountRows = mountKeys
+          .map((k) => {
+            const count = typeof mountObj[k] === "number" ? mountObj[k] : 0;
+            return `<div class="row sub-row"><span class="label">${this.esc(k)}</span><span class="value">${count}</span></div>`;
+          })
+          .join("");
+        mountDetails = mountRows;
+      }
+
       contextHtml = `
         <div class="section">
           <h3>Context</h3>
           <div class="row"><span class="label">Project</span><span class="value">${this.esc(project)}</span></div>
-          <div class="row"><span class="label">Mounts</span><span class="value">${mounts}</span></div>
-          <div class="row"><span class="label">Files</span><span class="value">${totalFiles}</span></div>
+          <div class="row"><span class="label">Path</span><span class="value path-value" title="${this.esc(contextPath)}">${this.esc(contextPath.replace(/^.*\//, ".../" ))}</span></div>
+          <div class="row"><span class="label">Mounts</span><span class="value">${mountKeys.length}</span></div>
+          ${mountDetails}
+          <div class="row"><span class="label">Total Files</span><span class="value">${totalFiles}</span></div>
+          ${indexedAt ? `<div class="row"><span class="label">Last Indexed</span><span class="value">${this.esc(indexedAt)}</span></div>` : ""}
         </div>`;
     }
 
@@ -172,6 +204,25 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
           <div class="row"><span class="label">Payloads</span><span class="value">${count}</span></div>
           <div class="row"><span class="label">Database</span><span class="value">${dbExists ? "Found" : "Missing"}</span></div>
           <div class="row"><span class="label">Last Sync</span><span class="value">${this.esc(String(lastSync))}</span></div>
+        </div>`;
+    }
+
+    let memoryHtml = "";
+    if (memoryStatus) {
+      const entries = typeof (memoryStatus as any).entries_count === "number"
+        ? (memoryStatus as any).entries_count
+        : 0;
+      const stale = (memoryStatus as any).stale === true;
+      const cls = stale ? "stale" : "fresh";
+      const memPath = typeof (memoryStatus as any).memory_path === "string"
+        ? (memoryStatus as any).memory_path
+        : "";
+      memoryHtml = `
+        <div class="section">
+          <h3>Memory</h3>
+          <div class="row"><span class="label">Entries</span><span class="value">${entries}</span></div>
+          <div class="row"><span class="label">Status</span><span class="value ${cls}">${stale ? "Stale" : "Fresh"}</span></div>
+          ${memPath ? `<div class="row"><span class="label">Path</span><span class="value path-value" title="${this.esc(memPath)}">${this.esc(memPath.replace(/^.*\//, ".../" ))}</span></div>` : ""}
         </div>`;
     }
 
@@ -218,6 +269,14 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
   .value.fresh { color: var(--vscode-testing-iconPassed); }
   .value.stale { color: var(--vscode-editorWarning-foreground); }
   .value.critical { color: var(--vscode-testing-iconFailed); }
+  .sub-row { padding-left: 12px; font-size: 11px; }
+  .path-value {
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+  }
   .actions {
     display: flex;
     flex-direction: column;
@@ -255,6 +314,7 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
 
   ${contextHtml}
   ${freshnessHtml}
+  ${memoryHtml}
   ${antigravityHtml}
 
   <div class="actions">

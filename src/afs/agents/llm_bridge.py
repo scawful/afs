@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Any
 
 from .guardrails import ModelRoute
@@ -28,6 +29,65 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST") or os.getenv("AFS_OLLAMA_HOST") or "http:
 
 # Default timeout for all LLM calls (seconds)
 LLM_TIMEOUT = 30
+
+
+# ---------------------------------------------------------------------------
+# Retry helper
+# ---------------------------------------------------------------------------
+
+# Substrings / status codes that indicate transient (retryable) failures.
+_TRANSIENT_MARKERS = ("timeout", "timed out", "connection", "429", "503", "502")
+
+# Substrings that indicate non-retryable failures (auth, bad request, missing SDK).
+_PERMANENT_MARKERS = ("401", "403", "400", "not installed", "not set")
+
+
+def _is_transient_error(error_str: str) -> bool:
+    """Return True if *error_str* looks like a transient failure worth retrying."""
+    lower = error_str.lower()
+    # If any permanent marker matches, don't retry.
+    if any(m in lower for m in _PERMANENT_MARKERS):
+        return False
+    # If any transient marker matches, retry.
+    return any(m in lower for m in _TRANSIENT_MARKERS)
+
+
+def _with_retries(
+    fn,
+    *args,
+    max_retries: int = 3,
+    retry_base_seconds: float = 1.0,
+    **kwargs,
+) -> str:
+    """Call *fn* up to *max_retries* times with exponential backoff.
+
+    Only retries when the result is an ``"ERROR: ..."`` string that looks
+    transient (timeouts, connection errors, 429/502/503).  Non-transient
+    errors (auth, bad request, missing SDK) are returned immediately.
+
+    Returns the successful result, or the last error string if all retries
+    are exhausted.
+    """
+    last_result = ""
+    for attempt in range(1, max_retries + 1):
+        result = fn(*args, **kwargs)
+        # Success — no ERROR prefix.
+        if not result.startswith("ERROR:"):
+            return result
+        last_result = result
+        # Non-retryable error — bail immediately.
+        if not _is_transient_error(result):
+            return result
+        # Last attempt — don't sleep, just return the error.
+        if attempt == max_retries:
+            break
+        delay = retry_base_seconds * (2 ** (attempt - 1))
+        logger.warning(
+            "LLM retry %d/%d after %.1fs — %s",
+            attempt, max_retries, delay, result,
+        )
+        time.sleep(delay)
+    return last_result
 
 
 # ---------------------------------------------------------------------------
@@ -181,12 +241,18 @@ def query_llm(
     model_route: ModelRoute,
     *,
     system_prompt: str = "",
+    max_retries: int = 3,
+    retry_base_seconds: float = 1.0,
 ) -> str:
     """Send a prompt + context to the LLM identified by *model_route*.
 
     Returns the response text on success, or a string prefixed with ``"ERROR:"``
     on failure.  Never raises — all exceptions are caught and returned as error
     strings so that callers can treat the LLM as an optional enrichment layer.
+
+    Transient failures (timeouts, connection errors, 429/502/503) are retried
+    with exponential backoff up to *max_retries* times.  Non-transient errors
+    (auth failures, bad requests, missing SDKs) are returned immediately.
 
     Args:
         prompt: The instruction / question for the LLM.
@@ -195,6 +261,8 @@ def query_llm(
         system_prompt: Optional system prompt composed by ``model_prompts.py``.
             When provided, it is passed to the provider as a system message
             instead of being concatenated into the user prompt.
+        max_retries: Maximum number of attempts for transient failures (default 3).
+        retry_base_seconds: Base delay for exponential backoff (default 1.0s).
 
     Returns:
         Response text from the LLM, or an ``"ERROR: ..."`` string.
@@ -209,11 +277,24 @@ def query_llm(
         provider, model_route.model_id, len(prompt), len(system_prompt),
     )
 
+    # Codex is a placeholder — no retries needed.
+    use_retries = provider != "codex"
+
     try:
         if system_prompt:
-            result = handler(prompt, context, model_route.model_id, system_prompt)
+            call_args = (prompt, context, model_route.model_id, system_prompt)
         else:
-            result = handler(prompt, context, model_route.model_id)
+            call_args = (prompt, context, model_route.model_id)
+
+        if use_retries:
+            result = _with_retries(
+                handler,
+                *call_args,
+                max_retries=max_retries,
+                retry_base_seconds=retry_base_seconds,
+            )
+        else:
+            result = handler(*call_args)
         return result
     except Exception as exc:
         return f"ERROR: unexpected failure in LLM bridge: {exc}"

@@ -8,6 +8,18 @@ export interface ContextInitResult {
   mounts: number;
 }
 
+export interface ContextStatus {
+  context_path: string;
+  mount_counts: Record<string, number>;
+  total_files: number;
+  [key: string]: unknown;
+}
+
+export interface FreshnessResult {
+  mount_scores: Record<string, number>;
+  [key: string]: unknown;
+}
+
 export class ContextService {
   constructor(private readonly transport: ITransportClient) {}
 
@@ -66,5 +78,31 @@ export class ContextService {
     if (contextPath) args.context_path = contextPath;
     const result = await this.transport.callTool("context.unmount", args);
     return Boolean(result.removed);
+  }
+
+  async status(contextPath?: string): Promise<ContextStatus | null> {
+    try {
+      const args: Record<string, unknown> = {};
+      if (contextPath) args.context_path = contextPath;
+      const result = await this.transport.callTool("context.status", args);
+      return result as unknown as ContextStatus;
+    } catch {
+      return null;
+    }
+  }
+
+  async freshness(
+    contextPath?: string,
+    mountType?: string,
+  ): Promise<FreshnessResult | null> {
+    try {
+      const args: Record<string, unknown> = {};
+      if (contextPath) args.context_path = contextPath;
+      if (mountType) args.mount_type = mountType;
+      const result = await this.transport.callTool("context.freshness", args);
+      return result as unknown as FreshnessResult;
+    } catch {
+      return null;
+    }
   }
 }

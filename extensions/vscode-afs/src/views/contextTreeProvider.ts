@@ -29,6 +29,7 @@ export class ContextTreeProvider implements vscode.TreeDataProvider<ContextTreeI
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
   private contexts: DiscoveredContext[] = [];
+  private freshnessCache = new Map<string, Record<string, number>>();
 
   constructor(
     private readonly contextService: ContextService,
@@ -67,6 +68,19 @@ export class ContextTreeProvider implements vscode.TreeDataProvider<ContextTreeI
       this.contexts = [];
     }
 
+    // Pre-fetch freshness for all discovered contexts
+    this.freshnessCache.clear();
+    for (const ctx of this.contexts) {
+      try {
+        const freshness = await this.contextService.freshness(ctx.path);
+        if (freshness?.mount_scores) {
+          this.freshnessCache.set(ctx.path, freshness.mount_scores);
+        }
+      } catch {
+        // freshness not available for this context
+      }
+    }
+
     const items: ContextTreeItem[] = [];
 
     // Add global ~/.context if it exists
@@ -88,17 +102,20 @@ export class ContextTreeProvider implements vscode.TreeDataProvider<ContextTreeI
 
   private async getMountTypes(contextPath: string): Promise<MountTypeItem[]> {
     const items: MountTypeItem[] = [];
+    const scores = this.freshnessCache.get(contextPath);
     for (const mt of MOUNT_TYPE_ORDER) {
       try {
         const entries = await this.fileService.list(`${contextPath}/${mt}`, 1);
         if (entries.length > 0 || this.showEmptyMounts) {
           const policy = DEFAULT_POLICIES[mt] ?? PolicyType.READ_ONLY;
-          items.push(new MountTypeItem(mt, contextPath, policy, entries.length));
+          const freshness = scores?.[mt];
+          items.push(new MountTypeItem(mt, contextPath, policy, entries.length, freshness));
         }
       } catch {
         if (this.showEmptyMounts) {
           const policy = DEFAULT_POLICIES[mt] ?? PolicyType.READ_ONLY;
-          items.push(new MountTypeItem(mt, contextPath, policy, 0));
+          const freshness = scores?.[mt];
+          items.push(new MountTypeItem(mt, contextPath, policy, 0, freshness));
         }
       }
     }

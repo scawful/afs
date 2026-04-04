@@ -182,6 +182,41 @@ export class CliClient implements ITransportClient {
         }
         return this.execJson(cliArgs);
       }
+      case "context.index.rebuild": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const cliArgs = ["index", "rebuild", "--path", projectPath, "--json"];
+        if (Array.isArray(args.mount_types)) {
+          for (const mt of args.mount_types) {
+            if (typeof mt === "string" && mt.trim()) {
+              cliArgs.push("--mount", mt.trim());
+            }
+          }
+        }
+        return this.execJson(cliArgs);
+      }
+      case "context.query": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const query = args.query as string;
+        if (!query) throw new Error("context.query requires a query string");
+        const cliArgs = ["index", "query", query, "--path", projectPath, "--json"];
+        if (Array.isArray(args.mount_types)) {
+          for (const mt of args.mount_types) {
+            if (typeof mt === "string" && mt.trim()) {
+              cliArgs.push("--mount", mt.trim());
+            }
+          }
+        }
+        if (typeof args.limit === "number") {
+          cliArgs.push("--limit", String(args.limit));
+        }
+        if (typeof args.relative_prefix === "string" && args.relative_prefix.trim()) {
+          cliArgs.push("--prefix", args.relative_prefix.trim());
+        }
+        if (args.include_content === true) {
+          cliArgs.push("--include-content");
+        }
+        return this.execJson(cliArgs);
+      }
       case "context.read":
       case "fs.read": {
         const filePath = args.path as string;
@@ -298,11 +333,18 @@ export class CliClient implements ITransportClient {
       { name: "context.init", description: "Initialize context", inputSchema: {} },
       { name: "context.mount", description: "Mount a path into context", inputSchema: {} },
       { name: "context.unmount", description: "Unmount an alias from context", inputSchema: {} },
+      { name: "context.status", description: "Get context status", inputSchema: {} },
+      { name: "context.freshness", description: "Get mount freshness scores", inputSchema: {} },
+      { name: "context.index.rebuild", description: "Rebuild context index", inputSchema: {} },
+      { name: "context.query", description: "Query context index", inputSchema: {} },
       { name: "context.read", description: "Read a context-scoped file", inputSchema: {} },
       { name: "context.write", description: "Write a context-scoped file", inputSchema: {} },
       { name: "context.delete", description: "Delete a context-scoped file", inputSchema: {} },
       { name: "context.move", description: "Move a context-scoped file", inputSchema: {} },
       { name: "context.list", description: "List context-scoped files", inputSchema: {} },
+      { name: "memory.status", description: "Get memory status", inputSchema: {} },
+      { name: "agent.capabilities", description: "List agent capabilities", inputSchema: {} },
+      { name: "training.antigravity.status", description: "Get Antigravity training status", inputSchema: {} },
     ];
   }
 
