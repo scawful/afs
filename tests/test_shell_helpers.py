@@ -48,6 +48,7 @@ def _write_fake_afs_cli(
 ) -> Path:
     afs_cli = root / "scripts" / "afs"
     afs_cli.parent.mkdir(parents=True, exist_ok=True)
+    workspace_path = context_root.parent / "workspace"
     afs_cli.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
@@ -85,6 +86,13 @@ def _write_fake_afs_cli(
         "  },\n"
         "  \"artifact_paths\": {\n"
         f"    \"json\": \"{payload_json}\"\n"
+        "  },\n"
+        "  \"cli_hints\": {\n"
+        f"    \"workspace_path\": \"{workspace_path}\",\n"
+        f"    \"query_shortcut\": \"afs query <text> --path {workspace_path}\",\n"
+        f"    \"query_canonical\": \"afs context query <text> --path {workspace_path}\",\n"
+        f"    \"index_rebuild\": \"afs index rebuild --path {workspace_path}\",\n"
+        "    \"notes\": []\n"
         "  }\n"
         "}\n"
         "JSON\n"
@@ -128,6 +136,9 @@ def _write_fake_client(path: Path, log_path: Path) -> Path:
         "    'AFS_SESSION_SYSTEM_PROMPT_JSON': os.environ.get('AFS_SESSION_SYSTEM_PROMPT_JSON'),\n"
         "    'AFS_SESSION_SYSTEM_PROMPT_TEXT': os.environ.get('AFS_SESSION_SYSTEM_PROMPT_TEXT'),\n"
         "    'AFS_SESSION_CLIENT_PAYLOAD_JSON': os.environ.get('AFS_SESSION_CLIENT_PAYLOAD_JSON'),\n"
+        "    'AFS_SESSION_QUERY_HINT': os.environ.get('AFS_SESSION_QUERY_HINT'),\n"
+        "    'AFS_SESSION_CONTEXT_QUERY_HINT': os.environ.get('AFS_SESSION_CONTEXT_QUERY_HINT'),\n"
+        "    'AFS_SESSION_INDEX_REBUILD_HINT': os.environ.get('AFS_SESSION_INDEX_REBUILD_HINT'),\n"
         "    'AFS_SESSION_EVENT_BIN': os.environ.get('AFS_SESSION_EVENT_BIN'),\n"
         "    'AFS_SESSION_DEFAULT_TURN_ID': os.environ.get('AFS_SESSION_DEFAULT_TURN_ID'),\n"
         "    'AFS_ACTIVE_CONTEXT_ROOT': os.environ.get('AFS_ACTIVE_CONTEXT_ROOT'),\n"
@@ -402,6 +413,12 @@ def test_afs_client_session_uses_client_specific_allowed_roots(tmp_path: Path) -
     assert payload["AFS_SESSION_SYSTEM_PROMPT_TEXT"].endswith("session_system_prompt_gemini.txt")
     assert payload["AFS_SESSION_CLIENT_PAYLOAD_JSON"].endswith("session_client_gemini.json")
     assert payload["AFS_ACTIVE_CONTEXT_ROOT"].endswith("context")
+    assert payload["AFS_SESSION_QUERY_HINT"] == f"afs query <text> --path {payload['_workspace']}"
+    assert (
+        payload["AFS_SESSION_CONTEXT_QUERY_HINT"]
+        == f"afs context query <text> --path {payload['_workspace']}"
+    )
+    assert payload["AFS_SESSION_INDEX_REBUILD_HINT"] == f"afs index rebuild --path {payload['_workspace']}"
     assert payload["GEMINI_SYSTEM_MD"] == payload["AFS_SESSION_SYSTEM_PROMPT_TEXT"]
 
 

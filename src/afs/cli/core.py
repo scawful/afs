@@ -1161,6 +1161,13 @@ def session_prepare_client_command(args: argparse.Namespace) -> int:
     payload_paths = payload.get("artifact_paths") or {}
     if payload_paths.get("json"):
         print(f"payload: {payload_paths['json']}")
+    cli_hints = payload.get("cli_hints") or {}
+    if cli_hints.get("query_shortcut"):
+        print(f"query_hint: {cli_hints['query_shortcut']}")
+    if cli_hints.get("query_canonical"):
+        print(f"canonical_query_hint: {cli_hints['query_canonical']}")
+    if cli_hints.get("index_rebuild"):
+        print(f"index_hint: {cli_hints['index_rebuild']}")
     return 0
 
 
@@ -1903,9 +1910,9 @@ def status_command(args: argparse.Namespace) -> int:
     if not mount_counts:
         hints.append("afs context discover --path .  # index this project")
     if not index_stats.get("available"):
-        hints.append("afs context ensure-all --path .  # build context index")
+        hints.append("afs index rebuild --path .  # build context index")
     elif index_stats.get("stale"):
-        hints.append("afs context ensure-all --path .  # refresh stale index")
+        hints.append("afs index rebuild --path .  # refresh stale index")
     if counts.get("failed", 0) > 0:
         hints.append("afs agents ps --all  # check failed agents")
     if hints:

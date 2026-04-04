@@ -15,6 +15,8 @@ from ..schema import AFSConfig, GeneralConfig
 _TOP_LEVEL_ORDER = [
     "fs",
     "context",
+    "query",
+    "index",
     "session",
     "workspace",
     "graph",
@@ -42,6 +44,8 @@ _TOP_LEVEL_ORDER = [
 _TOP_LEVEL_COLORS = {
     "fs": "1;32",
     "context": "1;32",
+    "query": "1;32",
+    "index": "1;32",
     "session": "1;32",
     "workspace": "1;32",
     "graph": "1;32",
@@ -120,6 +124,9 @@ def render_default_help(parser: argparse.ArgumentParser, config: AFSConfig | Non
                 f"{_cmd('afs fs list')} <mount> --relative <path>",
                 f"{_cmd('afs fs read')} <mount> <path>",
                 f"{_cmd('afs fs write')} <mount> <path> --content ...",
+                f"{_cmd('afs query')} <text> --path <root>",
+                f"{_cmd('afs context query')} <text> --path <root>  # canonical form",
+                f"{_cmd('afs index rebuild')} --path <root>",
                 f"{_cmd('afs context discover')} --path <root>",
                 f"{_cmd('afs context ensure-all')} --path <root>",
                 f"{_cmd('afs workspace sync')} --root <root>",
@@ -165,7 +172,8 @@ def render_default_help(parser: argparse.ArgumentParser, config: AFSConfig | Non
                     f"afs init --context-root {_format_path(context_root)} --workspace-name {workspace_label}"
                 ),
                 _cmd(f"afs context discover --path {_format_path(workspace_root)}"),
-                _cmd(f"afs context ensure-all --path {_format_path(workspace_root)}"),
+                _cmd(f"afs query startup --path {_format_path(workspace_root)}"),
+                _cmd(f"afs index rebuild --path {_format_path(workspace_root)}"),
                 _cmd("afs profile current"),
                 _cmd("afs health"),
                 _cmd(f"afs workspace sync --root {_format_path(workspace_root)}"),

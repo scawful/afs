@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -161,6 +162,39 @@ def _integration_contract() -> dict[str, Any]:
     }
 
 
+def _build_cli_hints(
+    *,
+    workspace_path: Path,
+    bootstrap_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    resolved_workspace = workspace_path.expanduser().resolve()
+    quoted_workspace = shlex.quote(str(resolved_workspace))
+    notes: list[str] = []
+    summary = bootstrap_state or {}
+    status = summary.get("status") or {}
+    index_state = status.get("index") or {}
+    stale_mounts = [str(value).strip() for value in (summary.get("stale_mounts") or []) if str(value).strip()]
+
+    if bool(index_state.get("enabled")) and (
+        bool(index_state.get("stale")) or not bool(index_state.get("has_entries"))
+    ):
+        notes.append(
+            "Indexed retrieval may be stale; run `afs index rebuild` before trusting query results."
+        )
+    if stale_mounts:
+        notes.append(
+            "Bootstrap reported low-freshness mounts; prefer recent scratchpad/history context over older summaries."
+        )
+
+    return {
+        "workspace_path": str(resolved_workspace),
+        "query_shortcut": f"afs query <text> --path {quoted_workspace}",
+        "query_canonical": f"afs context query <text> --path {quoted_workspace}",
+        "index_rebuild": f"afs index rebuild --path {quoted_workspace}",
+        "notes": notes,
+    }
+
+
 def _default_client_session_payload(
     *,
     context_path: Path,
@@ -169,17 +203,19 @@ def _default_client_session_payload(
     config_path: Path | None = None,
     cwd: Path | None = None,
 ) -> dict[str, Any]:
+    resolved_cwd = (cwd or Path.cwd()).expanduser().resolve()
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "client": client,
         "session_id": session_id,
         "context_path": str(context_path.expanduser().resolve()),
         "config_path": str(config_path) if config_path else "",
-        "cwd": str((cwd or Path.cwd()).expanduser().resolve()),
+        "cwd": str(resolved_cwd),
         "bootstrap": {"available": False, "artifact_paths": {}},
         "pack": {"available": False, "artifact_paths": {}},
         "skills": {"available": False, "artifact_paths": {}},
         "prompt": {"available": False, "artifact_paths": {}},
+        "cli_hints": _build_cli_hints(workspace_path=resolved_cwd),
         "integration": _integration_contract(),
         "activity": _initial_activity_state(),
         "artifact_paths": {},
@@ -188,6 +224,8 @@ def _default_client_session_payload(
 
 def _ensure_client_session_payload_shape(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
+    cwd_value = str(normalized.get("cwd", "")).strip()
+    resolved_cwd = Path(cwd_value).expanduser().resolve() if cwd_value else Path.cwd()
     activity = normalized.get("activity")
     if not isinstance(activity, dict):
         activity = _initial_activity_state()
@@ -216,6 +254,15 @@ def _ensure_client_session_payload_shape(payload: dict[str, Any]) -> dict[str, A
     normalized.setdefault("pack", {"available": False, "artifact_paths": {}})
     normalized.setdefault("skills", {"available": False, "artifact_paths": {}})
     normalized.setdefault("prompt", {"available": False, "artifact_paths": {}})
+    cli_hints = normalized.get("cli_hints")
+    merged_cli_hints = _build_cli_hints(workspace_path=resolved_cwd)
+    if isinstance(cli_hints, dict):
+        for key, value in cli_hints.items():
+            if key == "notes" and isinstance(value, list):
+                merged_cli_hints[key] = list(value)
+            elif value not in (None, ""):
+                merged_cli_hints[key] = value
+    normalized["cli_hints"] = merged_cli_hints
     normalized.setdefault("artifact_paths", {})
     return normalized
 
@@ -767,6 +814,7 @@ def build_client_session_payload(
 ) -> dict[str, Any]:
     """Build a client-ready session payload with reusable artifact paths."""
     resolved_context = context_path.expanduser().resolve()
+    resolved_cwd = (cwd or Path.cwd()).expanduser().resolve()
     bootstrap_state, bootstrap_payload = _bootstrap_bundle(
         manager,
         resolved_context,
@@ -779,11 +827,15 @@ def build_client_session_payload(
         "session_id": session_id,
         "context_path": str(resolved_context),
         "config_path": str(config_path) if config_path else "",
-        "cwd": str((cwd or Path.cwd()).expanduser().resolve()),
+        "cwd": str(resolved_cwd),
         "bootstrap": bootstrap_payload,
         "pack": {"available": False, "artifact_paths": {}},
         "skills": {"available": False, "artifact_paths": {}},
         "prompt": {"available": False, "artifact_paths": {}},
+        "cli_hints": _build_cli_hints(
+            workspace_path=resolved_cwd,
+            bootstrap_state=bootstrap_state,
+        ),
         "integration": _integration_contract(),
         "activity": _initial_activity_state(),
         "artifact_paths": {},

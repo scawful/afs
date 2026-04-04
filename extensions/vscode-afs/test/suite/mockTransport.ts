@@ -6,7 +6,11 @@ import type {
   McpResourceContent,
   ToolSpec,
 } from "../../src/types";
-import type { ITransportClient, ServerCapabilities } from "../../src/transport/types";
+import type {
+  ITransportClient,
+  ServerCapabilities,
+  TransportSessionInfo,
+} from "../../src/transport/types";
 
 /** Minimal event emitter for tests (no vscode dependency). */
 class SimpleEventEmitter<T> {
@@ -34,6 +38,7 @@ export class MockTransport implements ITransportClient {
   public resourceList: McpResource[] = [];
   public promptList: McpPrompt[] = [];
   public turnEvents: Array<Record<string, unknown>> = [];
+  public sessionInfo: TransportSessionInfo | undefined;
 
   async initialize(): Promise<void> {
     this.ready = true;
@@ -95,6 +100,10 @@ export class MockTransport implements ITransportClient {
       summary: summary ?? "",
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+
+  getSessionInfo(): TransportSessionInfo | undefined {
+    return this.sessionInfo;
   }
 
   dispose(): void {

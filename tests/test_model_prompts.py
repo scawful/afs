@@ -50,6 +50,8 @@ def test_build_model_system_prompt_includes_session_state_summary() -> None:
     assert "Query focus: mcp registry split" in prompt
     assert "Task focus: Wire prompt context into the harness." in prompt
     assert "Pack settings: model=codex, workflow=edit_fast, tool_profile=edit_and_verify, pack_mode=focused" in prompt
+    assert "CLI follow-up: `afs query <text> --path <workspace>`" in prompt
+    assert "CLI rebuild: `afs index rebuild --path <workspace>`" in prompt
     assert "## Relevant Skills" in prompt
     assert "- agentic-context (score=9) triggers=context, harness" in prompt
     assert "## Session Context" in prompt

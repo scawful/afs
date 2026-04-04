@@ -2,6 +2,7 @@ import * as assert from "node:assert";
 import * as path from "node:path";
 import { describe, it, beforeEach } from "node:test";
 import {
+  __setShowInformationMessage,
   __resetTestState,
   __setOpenTextDocument,
   __setShowErrorMessage,
@@ -109,5 +110,53 @@ describe("registerCommands", () => {
     assert.strictEqual(transport.turnEvents[1].summary, "Context query failed for: broken query");
     assert.strictEqual(transport.turnEvents[1].error, "query exploded");
     assert.deepStrictEqual(errorMessages, ["Query failed: Error: query exploded"]);
+  });
+
+  it("shows session hints in afs.mcp.status", async () => {
+    const transport = new MockTransport();
+    const infoMessages: string[] = [];
+    transport.sessionInfo = {
+      sessionId: "sess-vscode",
+      payloadFile: "/tmp/session_client_vscode.json",
+      contextPath: "/tmp/workspace/.context",
+      promptJson: "/tmp/session_system_prompt_vscode.json",
+      promptText: "/tmp/session_system_prompt_vscode.txt",
+      workspace: "/tmp/workspace",
+      cliHints: {
+        workspacePath: "/tmp/workspace",
+        queryShortcut: "afs query <text> --path /tmp/workspace",
+        queryCanonical: "afs context query <text> --path /tmp/workspace",
+        indexRebuild: "afs index rebuild --path /tmp/workspace",
+        notes: ["Indexed retrieval may be stale."],
+      },
+    };
+
+    __setShowInformationMessage(async (message) => {
+      infoMessages.push(String(message));
+      return undefined;
+    });
+
+    registerCommands(
+      { subscriptions: [] } as never,
+      {
+        transport,
+        contextService: new ContextService(transport),
+        fileService: new FileService(transport),
+        indexService: new IndexService(transport),
+        treeProvider: { refresh() {} } as never,
+        binaryInfo: { command: "afs", args: [], env: {} },
+        logger: { appendLine() {}, dispose() {} } as never,
+      },
+    );
+
+    await commands.executeCommand("afs.mcp.status");
+
+    assert.strictEqual(infoMessages.length, 1);
+    assert.match(infoMessages[0], /Connected: true/);
+    assert.match(infoMessages[0], /Session workspace: \/tmp\/workspace/);
+    assert.match(infoMessages[0], /Query hint: afs query <text> --path \/tmp\/workspace/);
+    assert.match(infoMessages[0], /Canonical query hint: afs context query <text> --path \/tmp\/workspace/);
+    assert.match(infoMessages[0], /Index hint: afs index rebuild --path \/tmp\/workspace/);
+    assert.match(infoMessages[0], /Note: Indexed retrieval may be stale\./);
   });
 });

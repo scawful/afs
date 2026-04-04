@@ -29,6 +29,9 @@ fs.appendFileSync(
       AFS_SESSION_CLIENT_PAYLOAD_JSON: process.env.AFS_SESSION_CLIENT_PAYLOAD_JSON || "",
       AFS_SESSION_SYSTEM_PROMPT_JSON: process.env.AFS_SESSION_SYSTEM_PROMPT_JSON || "",
       AFS_SESSION_SYSTEM_PROMPT_TEXT: process.env.AFS_SESSION_SYSTEM_PROMPT_TEXT || "",
+      AFS_SESSION_QUERY_HINT: process.env.AFS_SESSION_QUERY_HINT || "",
+      AFS_SESSION_CONTEXT_QUERY_HINT: process.env.AFS_SESSION_CONTEXT_QUERY_HINT || "",
+      AFS_SESSION_INDEX_REBUILD_HINT: process.env.AFS_SESSION_INDEX_REBUILD_HINT || "",
       AFS_SESSION_DEFAULT_TURN_ID: process.env.AFS_SESSION_DEFAULT_TURN_ID || "",
       AFS_ACTIVE_CONTEXT_ROOT: process.env.AFS_ACTIVE_CONTEXT_ROOT || "",
     },
@@ -59,6 +62,13 @@ if (args[0] === "session" && args[1] === "prepare-client") {
           text: promptText,
         },
       },
+      cli_hints: {
+        workspace_path: path.join(root, "workspace"),
+        query_shortcut: "afs query <text> --path " + path.join(root, "workspace"),
+        query_canonical: "afs context query <text> --path " + path.join(root, "workspace"),
+        index_rebuild: "afs index rebuild --path " + path.join(root, "workspace"),
+        notes: ["Index may be stale"],
+      },
       artifact_paths: {
         json: payloadJson,
       },
@@ -78,6 +88,44 @@ if (args[0] === "fs" && args[1] === "read") {
     process.exit(1);
   }
   process.stdout.write("from-context");
+  process.exit(0);
+}
+
+if (args[0] === "context" && args[1] === "query") {
+  process.stdout.write(
+    JSON.stringify({
+      count: 1,
+      entries: [
+        {
+          mount_type: "scratchpad",
+          relative_path: "note.md",
+          absolute_path: path.join(root, "workspace", ".context", "scratchpad", "note.md"),
+          is_dir: false,
+          size_bytes: 12,
+          modified_at: "2026-04-04T00:00:00+00:00",
+          indexed_at: "2026-04-04T00:00:00+00:00",
+          content_excerpt: "from query",
+        },
+      ],
+    }),
+  );
+  process.exit(0);
+}
+
+if (args[0] === "index" && args[1] === "rebuild") {
+  process.stdout.write(
+    JSON.stringify({
+      context_path: path.join(root, "workspace", ".context"),
+      db_path: path.join(root, "workspace", ".context", "global", "context_index.sqlite3"),
+      indexed_at: "2026-04-04T00:00:00+00:00",
+      rows_written: 1,
+      rows_deleted: 0,
+      by_mount_type: { scratchpad: 1 },
+      skipped_large_files: 0,
+      skipped_binary_files: 0,
+      errors: [],
+    }),
+  );
   process.exit(0);
 }
 
@@ -141,7 +189,23 @@ describe("CliClient", () => {
     assert.strictEqual(fsReadCall.env.AFS_SESSION_CLIENT_PAYLOAD_JSON, path.join(tmpDir, "session_client_vscode.json"));
     assert.strictEqual(fsReadCall.env.AFS_SESSION_SYSTEM_PROMPT_JSON, path.join(tmpDir, "session_system_prompt_vscode.json"));
     assert.strictEqual(fsReadCall.env.AFS_SESSION_SYSTEM_PROMPT_TEXT, path.join(tmpDir, "session_system_prompt_vscode.txt"));
+    assert.strictEqual(fsReadCall.env.AFS_SESSION_QUERY_HINT, `afs query <text> --path ${workspaceRoot}`);
+    assert.strictEqual(
+      fsReadCall.env.AFS_SESSION_CONTEXT_QUERY_HINT,
+      `afs context query <text> --path ${workspaceRoot}`,
+    );
+    assert.strictEqual(
+      fsReadCall.env.AFS_SESSION_INDEX_REBUILD_HINT,
+      `afs index rebuild --path ${workspaceRoot}`,
+    );
     assert.strictEqual(fsReadCall.env.AFS_ACTIVE_CONTEXT_ROOT, path.join(tmpDir, "workspace", ".context"));
+    assert.deepStrictEqual(client.getSessionInfo()?.cliHints, {
+      workspacePath: workspaceRoot,
+      queryShortcut: `afs query <text> --path ${workspaceRoot}`,
+      queryCanonical: `afs context query <text> --path ${workspaceRoot}`,
+      indexRebuild: `afs index rebuild --path ${workspaceRoot}`,
+      notes: ["Index may be stale"],
+    });
   });
 
   it("records turn events and carries the active turn into nested tool calls", async () => {
@@ -256,5 +320,61 @@ describe("CliClient", () => {
 
     const calls = readLogEntries(logPath);
     assert.ok(calls.some((entry) => entry.args[0] === "session" && entry.args[1] === "event" && entry.args[2] === "task_failed"));
+  });
+
+  it("uses the canonical context query CLI path and preserves query options", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "afs-cli-client-query-"));
+    const logPath = path.join(tmpDir, "cli.log");
+    const workspaceRoot = path.join(tmpDir, "workspace");
+    fs.mkdirSync(path.join(workspaceRoot, ".context", "scratchpad"), { recursive: true });
+    workspace.workspaceFolders = [{ uri: { fsPath: workspaceRoot } }];
+
+    const client = new CliClient(
+      writeFakeAfsBinary(tmpDir, logPath),
+      [],
+      {
+        CLI_TEST_LOG: logPath,
+        CLI_TEST_ROOT: tmpDir,
+      },
+      {
+        appendLine() {},
+        dispose() {},
+      } as never,
+      5_000,
+    );
+
+    await client.initialize();
+    const result = await client.callTool("context.query", {
+      context_path: path.join(workspaceRoot, ".context"),
+      query: "needle",
+      mount_types: ["scratchpad"],
+      relative_prefix: "notes",
+      limit: 7,
+      include_content: true,
+    });
+    client.dispose();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.strictEqual(Array.isArray(result.entries), true);
+    assert.strictEqual(result.count, 1);
+
+    const calls = readLogEntries(logPath);
+    const queryCall = calls.find((entry) => entry.args[0] === "context" && entry.args[1] === "query");
+    assert.ok(queryCall);
+    assert.deepStrictEqual(queryCall.args.slice(0, 10), [
+      "context",
+      "query",
+      "needle",
+      "--path",
+      workspaceRoot,
+      "--json",
+      "--mount",
+      "scratchpad",
+      "--limit",
+      "7",
+    ]);
+    assert.ok(queryCall.args.includes("--prefix"));
+    assert.ok(queryCall.args.includes("notes"));
+    assert.ok(queryCall.args.includes("--include-content"));
   });
 });

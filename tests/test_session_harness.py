@@ -114,6 +114,14 @@ def test_session_prepare_client_command_outputs_artifacts(
     assert Path(payload["prompt"]["artifact_paths"]["text"]).exists()
     assert payload["prompt"]["artifact_paths"]["json"].endswith("session_system_prompt_codex.json")
     assert Path(payload["prompt"]["artifact_paths"]["json"]).exists()
+    assert payload["cli_hints"]["workspace_path"] == str(tmp_path.resolve())
+    assert payload["cli_hints"]["query_shortcut"] == f"afs query <text> --path {tmp_path.resolve()}"
+    assert (
+        payload["cli_hints"]["query_canonical"]
+        == f"afs context query <text> --path {tmp_path.resolve()}"
+    )
+    assert payload["cli_hints"]["index_rebuild"] == f"afs index rebuild --path {tmp_path.resolve()}"
+    assert isinstance(payload["cli_hints"]["notes"], list)
     prompt_text = Path(payload["prompt"]["artifact_paths"]["text"]).read_text(encoding="utf-8")
     assert "## Session Context" in prompt_text
     assert "Prompt contract:" in prompt_text

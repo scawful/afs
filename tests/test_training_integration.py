@@ -364,6 +364,7 @@ class TestFreshnessGate:
         assert report.ready is False
         assert len(report.blocked_mounts) == 2
         assert "knowledge" in report.blocked_mounts
+        assert any("afs index rebuild --path <workspace>" in warning for warning in report.warnings)
 
     def test_warn_only_mode_never_blocks(self):
         from afs.models import MountType

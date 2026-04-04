@@ -99,6 +99,8 @@ def test_session_bootstrap_command_outputs_json_and_writes_artifacts(
     assert payload["artifact_paths"]["markdown"].endswith("session_bootstrap.md")
     assert Path(payload["artifact_paths"]["json"]).exists()
     assert Path(payload["artifact_paths"]["markdown"]).exists()
+    assert any("afs context query" in step for step in payload["startup_sequence"])
+    assert any("afs index rebuild" in action for action in payload["recommended_actions"])
     assert any("scratchpad state" in action.lower() for action in payload["recommended_actions"])
 
 

@@ -193,6 +193,8 @@ The CLI equivalent is:
 ~/src/lab/afs/scripts/afs session pack "sqlite" --model gemini --pack-mode retrieval
 ~/src/lab/afs/scripts/afs session pack --model gemini --pack-mode full_slice
 ~/src/lab/afs/scripts/afs session pack "sqlite" --model codex --json
+~/src/lab/afs/scripts/afs query sqlite --path ~/src/lab/afs
+~/src/lab/afs/scripts/afs index rebuild --path ~/src/lab/afs
 ~/src/lab/afs/scripts/afs events analytics --hours 24 --json
 ~/src/lab/afs/scripts/afs events replay --session-id "$AFS_SESSION_ID"
 ```
@@ -216,6 +218,9 @@ pack, and a broader full-slice pack for long-context models. The
 `execution_profile` now also spells out that `afs.workflow.structured` is a
 prompt-only rail and includes retry guidance so the host loop stays in Gemini
 CLI or Claude Code instead of moving into core AFS.
+The rendered guidance also points back at the human CLI surfaces:
+`afs query` / `afs context query` for follow-on retrieval and `afs index rebuild`
+when indexed search needs a refresh.
 
 `session prepare-client` packages the same bootstrap, pack, skill, and prompt
 surfaces into a single JSON artifact for wrappers and IDE adapters.
@@ -223,8 +228,12 @@ surfaces into a single JSON artifact for wrappers and IDE adapters.
 `AFS_SESSION_PACK_*`, `AFS_SESSION_SKILLS_JSON`,
 `AFS_SESSION_SYSTEM_PROMPT_*`, `AFS_SESSION_CLIENT_PAYLOAD_JSON`, and
 `AFS_SESSION_EVENT_BIN` variables, then fires `session_start` / `session_end`
-hooks around the client run. By default it also hands the prompt artifact to
-the native client surface when available: Codex via
+hooks around the client run. The JSON payload also carries a `cli_hints` block
+with the resolved workspace path plus `afs query`, `afs context query`, and
+`afs index rebuild` follow-up commands, and the wrapper exports the same values
+via `AFS_SESSION_QUERY_HINT`, `AFS_SESSION_CONTEXT_QUERY_HINT`, and
+`AFS_SESSION_INDEX_REBUILD_HINT`. By default it also hands the prompt artifact
+to the native client surface when available: Codex via
 `-c model_instructions_file=...`, Claude via `--append-system-prompt-file`,
 and Gemini via `GEMINI_SYSTEM_MD`. Set `AFS_CLIENT_NATIVE_PROMPT=0` or the
 client-specific `AFS_<CLIENT>_NATIVE_PROMPT=0` to disable that native handoff.

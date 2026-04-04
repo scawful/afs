@@ -342,12 +342,31 @@ export function registerCommands(
     vscode.commands.registerCommand("afs.mcp.status", async () => {
       const reg = checkRegistration();
       const caps = transport.capabilities();
+      const session = transport.getSessionInfo();
       const lines = [
         `Connected: ${transport.isReady()}`,
         `Capabilities: tools=${caps.tools}, resources=${caps.resources}, prompts=${caps.prompts}`,
         `MCP registered: ${reg.registered}`,
         `Config path: ${reg.configPath ?? "none"}`,
       ];
+      if (session) {
+        lines.push(`Session workspace: ${session.workspace || "unknown"}`);
+        lines.push(`Session payload: ${session.payloadFile || "none"}`);
+        if (session.cliHints.queryShortcut) {
+          lines.push(`Query hint: ${session.cliHints.queryShortcut}`);
+        }
+        if (session.cliHints.queryCanonical) {
+          lines.push(`Canonical query hint: ${session.cliHints.queryCanonical}`);
+        }
+        if (session.cliHints.indexRebuild) {
+          lines.push(`Index hint: ${session.cliHints.indexRebuild}`);
+        }
+        for (const note of session.cliHints.notes) {
+          if (note.trim()) {
+            lines.push(`Note: ${note.trim()}`);
+          }
+        }
+      }
       vscode.window.showInformationMessage(lines.join("\n"), { modal: true });
     }),
 

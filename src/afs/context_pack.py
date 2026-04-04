@@ -5,13 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .context_index import ContextSQLiteIndex
-from .context_paths import resolve_agent_output_root, resolve_mount_root
+from .context_paths import load_context_metadata, resolve_agent_output_root, resolve_mount_root
 from .embeddings import search_embedding_index
 from .manager import AFSManager
 from .models import MountType
@@ -481,8 +483,23 @@ def _session_pack_cache_key(
 
 def _session_pack_cache_path(manager: AFSManager, cache_key: str) -> Path:
     """Return the file path for a session pack cache entry."""
-    cache_dir = manager.config.session_pack_cache.cache_dir
+    cache_dir = _resolve_session_pack_cache_dir(manager.config)
     return cache_dir / f"{cache_key}.json"
+
+
+def _nearest_existing_parent(path: Path) -> Path:
+    current = path.expanduser().resolve()
+    while not current.exists() and current != current.parent:
+        current = current.parent
+    return current
+
+
+def _resolve_session_pack_cache_dir(config: Any) -> Path:
+    """Return a writable cache directory for session-pack entries."""
+    cache_dir = Path(config.session_pack_cache.cache_dir).expanduser().resolve()
+    if os.access(_nearest_existing_parent(cache_dir), os.W_OK):
+        return cache_dir
+    return (Path(tempfile.gettempdir()) / "afs" / "session_pack_cache").resolve()
 
 
 def _mount_fingerprint(context_path: Path, *, config: Any = None) -> str:
@@ -497,14 +514,28 @@ def _mount_fingerprint(context_path: Path, *, config: Any = None) -> str:
     """
     agent_output = resolve_agent_output_root(context_path, config=config)
     entries: list[str] = []
-    # Include metadata.json
-    meta = context_path / "metadata.json"
-    if meta.exists():
-        try:
-            st = meta.stat()
-            entries.append(f"{meta}:{st.st_mtime}:{st.st_size}")
-        except OSError:
-            pass
+    # Include stable metadata content, but ignore dynamic timestamps that can
+    # change as a side effect of bootstrap/index work.
+    metadata = load_context_metadata(context_path)
+    if metadata is not None:
+        metadata_payload = metadata.to_dict()
+        metadata_payload.pop("created_at", None)
+        metadata_payload.pop("agents", None)
+        mount_provenance = metadata_payload.get("mount_provenance")
+        if isinstance(mount_provenance, dict):
+            for entries_by_alias in mount_provenance.values():
+                if not isinstance(entries_by_alias, dict):
+                    continue
+                for payload in entries_by_alias.values():
+                    if isinstance(payload, dict):
+                        payload.pop("updated_at", None)
+        entries.append(
+            json.dumps(
+                {"metadata": metadata_payload},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
     # Include all files in searchable mount roots
     for mount_type in DEFAULT_SEARCH_MOUNTS:
         mount_root = resolve_mount_root(context_path, mount_type, config=config)
@@ -715,7 +746,7 @@ def clear_pack_cache(context_path: Path | None = None, *, config: Any = None) ->
         from .config import load_config_model
         config = load_config_model()
 
-    cache_dir = config.session_pack_cache.cache_dir
+    cache_dir = _resolve_session_pack_cache_dir(config)
     if not cache_dir.exists():
         return 0
 
@@ -793,10 +824,30 @@ def _pack_mode_summary(pack_mode: str) -> str:
 
 def _model_guidance(model: str) -> str:
     guidance = {
-        "generic": "Prefer the highest-signal sections first. Cite file paths when acting on retrieved context.",
-        "gemini": "Gemini should start with the recommendations and source-backed sections, then ask for more retrieval only if the pack leaves gaps.",
-        "claude": "Claude should translate this pack into a short execution plan before editing, keeping cited paths attached to claims.",
-        "codex": "Codex should prioritize actionable files, recent drift, and concrete next steps before writing code.",
+        "generic": (
+            "Prefer the highest-signal sections first. Cite file paths when acting on retrieved context. "
+            "For follow-on indexed retrieval, use `afs query <text> --path <workspace>` or "
+            "`afs context query <text> --path <workspace>`. If indexed search is stale or missing, "
+            "run `afs index rebuild --path <workspace>`."
+        ),
+        "gemini": (
+            "Gemini should start with the recommendations and source-backed sections, then ask for more retrieval "
+            "only if the pack leaves gaps. For follow-on indexed retrieval, use `afs query <text> --path <workspace>` "
+            "or `afs context query <text> --path <workspace>`. If indexed search is stale or missing, "
+            "run `afs index rebuild --path <workspace>`."
+        ),
+        "claude": (
+            "Claude should translate this pack into a short execution plan before editing, keeping cited paths "
+            "attached to claims. For follow-on indexed retrieval, use `afs query <text> --path <workspace>` or "
+            "`afs context query <text> --path <workspace>`. If indexed search is stale or missing, "
+            "run `afs index rebuild --path <workspace>`."
+        ),
+        "codex": (
+            "Codex should prioritize actionable files, recent drift, and concrete next steps before writing code. "
+            "For follow-on indexed retrieval, use `afs query <text> --path <workspace>` or "
+            "`afs context query <text> --path <workspace>`. If indexed search is stale or missing, "
+            "run `afs index rebuild --path <workspace>`."
+        ),
     }
     return guidance[model]
 

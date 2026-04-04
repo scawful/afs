@@ -35,6 +35,14 @@ export interface OutputChannel {
   show?(preserveFocus?: boolean): void;
 }
 
+export interface StatusBarItem {
+  text: string;
+  tooltip: string;
+  command?: string;
+  show(): void;
+  dispose(): void;
+}
+
 type CommandCallback = (...args: unknown[]) => unknown;
 
 const commandRegistry = new Map<string, CommandCallback>();
@@ -53,9 +61,16 @@ let showTextDocumentImpl: (document: unknown) => Promise<unknown> = async (docum
 let withProgressImpl: <T>(options: unknown, task: () => Promise<T>) => Promise<T> =
   async (_options, task) => task();
 let openTextDocumentImpl: (uri: { fsPath: string }) => Promise<unknown> = async (uri) => ({ uri });
+let clipboardText = "";
+let lastStatusBarItem: StatusBarItem | undefined;
 
 export const ProgressLocation = {
   Notification: 15,
+};
+
+export const StatusBarAlignment = {
+  Left: 1,
+  Right: 2,
 };
 
 export const Uri = {
@@ -101,6 +116,17 @@ export const workspace = {
 };
 
 export const window = {
+  createStatusBarItem(): StatusBarItem {
+    const item: StatusBarItem = {
+      text: "",
+      tooltip: "",
+      command: undefined,
+      show(): void {},
+      dispose(): void {},
+    };
+    lastStatusBarItem = item;
+    return item;
+  },
   createOutputChannel(): OutputChannel {
     return {
       appendLine(): void {},
@@ -137,6 +163,17 @@ export const window = {
   },
 };
 
+export const env = {
+  clipboard: {
+    async writeText(value: string): Promise<void> {
+      clipboardText = value;
+    },
+    async readText(): Promise<string> {
+      return clipboardText;
+    },
+  },
+};
+
 export function __resetTestState(): void {
   commandRegistry.clear();
   workspace.workspaceFolders = [];
@@ -152,6 +189,8 @@ export function __resetTestState(): void {
   showTextDocumentImpl = async (document) => document;
   withProgressImpl = async (_options, task) => task();
   openTextDocumentImpl = async (uri) => ({ uri });
+  clipboardText = "";
+  lastStatusBarItem = undefined;
 }
 
 export function __setShowInputBox(
@@ -206,4 +245,8 @@ export function __setOpenTextDocument(
   impl: (uri: { fsPath: string }) => Promise<unknown>,
 ): void {
   openTextDocumentImpl = impl;
+}
+
+export function __getLastStatusBarItem(): StatusBarItem | undefined {
+  return lastStatusBarItem;
 }

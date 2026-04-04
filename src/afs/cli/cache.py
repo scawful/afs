@@ -11,7 +11,7 @@ from ._utils import load_manager, resolve_context_paths
 
 def cache_clear_command(args: argparse.Namespace) -> int:
     """Clear session pack cache files."""
-    from ..context_pack import clear_pack_cache
+    from ..context_pack import clear_pack_cache, _resolve_session_pack_cache_dir
 
     config_path = Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     manager = load_manager(config_path)
@@ -28,7 +28,7 @@ def cache_clear_command(args: argparse.Namespace) -> int:
         print(json.dumps({
             "removed": removed,
             "context_path": str(context_path) if context_path else None,
-            "cache_dir": str(manager.config.session_pack_cache.cache_dir),
+            "cache_dir": str(_resolve_session_pack_cache_dir(manager.config)),
         }))
     else:
         scope = f" for {context_path}" if context_path else ""
@@ -38,11 +38,13 @@ def cache_clear_command(args: argparse.Namespace) -> int:
 
 def cache_status_command(args: argparse.Namespace) -> int:
     """Show session pack cache status."""
+    from ..context_pack import _resolve_session_pack_cache_dir
+
     config_path = Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     manager = load_manager(config_path)
 
     cache_cfg = manager.config.session_pack_cache
-    cache_dir = cache_cfg.cache_dir
+    cache_dir = _resolve_session_pack_cache_dir(manager.config)
     count = 0
     total_bytes = 0
     if cache_dir.exists():

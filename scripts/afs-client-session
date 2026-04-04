@@ -293,6 +293,10 @@ print(skills.get("json", ""))
 print(prompt.get("json", ""))
 print(prompt.get("text", ""))
 print(artifacts.get("json", ""))
+cli_hints = payload.get("cli_hints") or {}
+print(cli_hints.get("query_shortcut", ""))
+print(cli_hints.get("query_canonical", ""))
+print(cli_hints.get("index_rebuild", ""))
 PY
   )
   export AFS_SESSION_BOOTSTRAP_JSON="${bootstrap_fields[0]:-}"
@@ -304,6 +308,9 @@ PY
   export AFS_SESSION_SYSTEM_PROMPT_JSON="${bootstrap_fields[6]:-}"
   export AFS_SESSION_SYSTEM_PROMPT_TEXT="${bootstrap_fields[7]:-}"
   export AFS_SESSION_CLIENT_PAYLOAD_JSON="${bootstrap_fields[8]:-}"
+  export AFS_SESSION_QUERY_HINT="${bootstrap_fields[9]:-}"
+  export AFS_SESSION_CONTEXT_QUERY_HINT="${bootstrap_fields[10]:-}"
+  export AFS_SESSION_INDEX_REBUILD_HINT="${bootstrap_fields[11]:-}"
 fi
 
 if [ -n "${AFS_SESSION_BOOTSTRAP_MARKDOWN:-}" ]; then
@@ -320,6 +327,15 @@ if [ -n "${AFS_SESSION_SYSTEM_PROMPT_TEXT:-}" ]; then
 fi
 if [ -n "${AFS_SESSION_CLIENT_PAYLOAD_JSON:-}" ]; then
   echo "AFS session payload (${CLIENT_LABEL}): ${AFS_SESSION_CLIENT_PAYLOAD_JSON}" >&2
+fi
+if [ -n "${AFS_SESSION_QUERY_HINT:-}" ]; then
+  echo "AFS query hint (${CLIENT_LABEL}): ${AFS_SESSION_QUERY_HINT}" >&2
+fi
+if [ -n "${AFS_SESSION_CONTEXT_QUERY_HINT:-}" ]; then
+  echo "AFS canonical query hint (${CLIENT_LABEL}): ${AFS_SESSION_CONTEXT_QUERY_HINT}" >&2
+fi
+if [ -n "${AFS_SESSION_INDEX_REBUILD_HINT:-}" ]; then
+  echo "AFS index hint (${CLIENT_LABEL}): ${AFS_SESSION_INDEX_REBUILD_HINT}" >&2
 fi
 if [ -n "${AFS_SESSION_ID:-}" ]; then
   echo "AFS session (${CLIENT_LABEL}): ${AFS_SESSION_ID}" >&2

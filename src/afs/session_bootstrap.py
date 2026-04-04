@@ -239,7 +239,7 @@ def build_session_bootstrap(
             "Review context health and recent drift first.",
             "Read scratchpad state and deferred notes before editing.",
             "Check pending tasks and recent hivemind messages for handoffs.",
-            "Use context.query before asking for context that may already be in memory or knowledge.",
+            "Use `afs context query` / `context.query` before asking for context that may already be in memory or knowledge.",
             "Write updates back to scratchpad, tasks, or hivemind before handoff.",
         ],
         "status": status,
@@ -785,9 +785,9 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
     if not index_info.get("enabled", False):
         recommendations.append("Context indexing is disabled; rely on direct filesystem reads or enable the index.")
     elif not index_info.get("built", index_info.get("has_entries", False)):
-        recommendations.append("Build the SQLite index before relying on `context.query`.")
+        recommendations.append("Run `afs index rebuild --path <workspace>` before relying on `afs context query`.")
     elif index_info.get("stale", False):
-        recommendations.append("Refresh the stale SQLite index before trusting search results.")
+        recommendations.append("Refresh the stale SQLite index with `afs index rebuild --path <workspace>` before trusting `afs context query` results.")
 
     if diff.get("available") and diff.get("total_changes", 0) > 0:
         recommendations.append("Review `context.diff` before editing because the workspace has unreviewed drift.")

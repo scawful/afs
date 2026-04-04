@@ -316,6 +316,8 @@ def test_rendered_context_pack_places_task_at_end(tmp_path: Path) -> None:
     assert "## Task" in rendered
     assert "Loop policy:" in rendered
     assert "Retry contract:" in rendered
+    assert "afs query <text> --path <workspace>" in rendered
+    assert "afs index rebuild --path <workspace>" in rendered
     assert rendered.rstrip().endswith("Review the service guide and propose the smallest fix.")
 
 

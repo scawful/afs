@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
+from ..context_index import ContextSQLiteIndex
 from ._utils import load_manager, parse_mount_type, resolve_context_paths
 
 
@@ -647,9 +648,185 @@ def context_freshness_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_mount_filters(
+    raw_mounts: list[str] | None,
+) -> list["MountType"] | None:
+    from ..models import MountType
+
+    if not raw_mounts:
+        return None
+    mount_types: list[MountType] = []
+    for raw_mount in raw_mounts:
+        try:
+            mount_types.append(MountType(raw_mount))
+        except ValueError as exc:
+            raise ValueError(f"unknown mount type: {raw_mount}") from exc
+    return mount_types
+
+
+def _maybe_refresh_context_index(
+    *,
+    index: ContextSQLiteIndex,
+    manager,
+    mount_types: list["MountType"] | None,
+    auto_index: bool,
+    auto_refresh: bool,
+) -> dict | None:
+    should_rebuild = (
+        manager.config.context_index.enabled
+        and auto_index
+        and (
+            not index.has_entries()
+            or (auto_refresh and index.needs_refresh(mount_types=mount_types))
+        )
+    )
+    if not should_rebuild:
+        return None
+
+    summary = index.rebuild(
+        mount_types=mount_types,
+        include_content=manager.config.context_index.include_content,
+        max_file_size_bytes=manager.config.context_index.max_file_size_bytes,
+        max_content_chars=manager.config.context_index.max_content_chars,
+    )
+    return summary.to_dict()
+
+
+def context_query_command(args: argparse.Namespace) -> int:
+    """Query the SQLite-backed context index."""
+    config_path = Path(args.config) if args.config else None
+    manager = load_manager(config_path)
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+        args, manager
+    )
+
+    if not args.query and not args.prefix:
+        print("Provide a query string or --prefix for context query.")
+        return 1
+
+    try:
+        mount_types = _parse_mount_filters(args.mount)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+
+    index = ContextSQLiteIndex(manager, context_path)
+    rebuild_summary = _maybe_refresh_context_index(
+        index=index,
+        manager=manager,
+        mount_types=mount_types,
+        auto_index=not args.no_auto_index,
+        auto_refresh=not args.no_auto_refresh,
+    )
+    entries = index.query(
+        query=args.query,
+        mount_types=mount_types,
+        relative_prefix=args.prefix,
+        limit=args.limit,
+        include_content=args.include_content,
+    )
+
+    payload = {
+        "context_path": str(context_path),
+        "query": args.query or "",
+        "relative_prefix": args.prefix or "",
+        "count": len(entries),
+        "entries": entries,
+    }
+    if rebuild_summary:
+        payload["index_rebuild"] = rebuild_summary
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if rebuild_summary:
+        print("index refreshed before query")
+        print()
+
+    if not entries:
+        print("(no results)")
+        return 0
+
+    for entry in entries:
+        line = (
+            f"{entry['mount_type']}\t{entry['relative_path']}\t"
+            f"{entry['size_bytes']} bytes"
+        )
+        print(line)
+        excerpt = entry.get("content_excerpt")
+        if isinstance(excerpt, str) and excerpt.strip():
+            print(f"  {excerpt.strip()}")
+    return 0
+
+
+def context_index_rebuild_command(args: argparse.Namespace) -> int:
+    """Rebuild the SQLite-backed context index."""
+    config_path = Path(args.config) if args.config else None
+    manager = load_manager(config_path)
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+        args, manager
+    )
+
+    try:
+        mount_types = _parse_mount_filters(args.mount)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+
+    include_content = manager.config.context_index.include_content
+    if args.include_content:
+        include_content = True
+    if args.no_include_content:
+        include_content = False
+
+    index = ContextSQLiteIndex(manager, context_path)
+    summary = index.rebuild(
+        mount_types=mount_types,
+        include_content=include_content,
+        max_file_size_bytes=args.max_file_size_bytes
+        or manager.config.context_index.max_file_size_bytes,
+        max_content_chars=args.max_content_chars
+        or manager.config.context_index.max_content_chars,
+    )
+    payload = summary.to_dict()
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print(f"context_path: {payload['context_path']}")
+    print(f"db_path: {payload['db_path']}")
+    print(f"indexed_at: {payload['indexed_at']}")
+    print(f"rows_written: {payload['rows_written']}")
+    print(f"rows_deleted: {payload['rows_deleted']}")
+    if payload["by_mount_type"]:
+        print("by_mount_type:")
+        for mount_key, count in sorted(payload["by_mount_type"].items()):
+            print(f"- {mount_key}: {count}")
+    if payload["errors"]:
+        print("errors:")
+        for error in payload["errors"]:
+            print(f"- {error}")
+    return 0
+
+
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register context and workspace command parsers."""
     from ..models import MountType
+
+    query_epilog = (
+        "Examples:\n"
+        "  afs context query \"startup guidance\" --path ~/src/lab/afs\n"
+        "  afs context query sqlite --path ~/src/lab/afs --mount scratchpad --mount knowledge\n"
+        "  afs context query sqlite --path ~/src/lab/afs --prefix docs/sqlite --limit 10 --include-content --json\n"
+        "  afs query sqlite --path ~/src/lab/afs --mount knowledge --prefix public/\n"
+        "\n"
+        "Output fields:\n"
+        "  count          number of indexed matches returned\n"
+        "  entries[]      mount/path metadata plus content_excerpt (or content when requested)\n"
+        "  index_rebuild  present when the command auto-built or auto-refreshed the SQLite index\n"
+    )
 
     # context
     context_parser = subparsers.add_parser("context", help="Manage project contexts.")
@@ -662,6 +839,29 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         parser.add_argument("--context-root", help="Context root override.")
         parser.add_argument("--context-dir", help="Context directory name.")
         parser.add_argument("--profile", help="Profile name override.")
+
+    def add_query_args(parser: argparse.ArgumentParser) -> None:
+        add_context_args(parser)
+        parser.add_argument("query", nargs="?", help="Search string for indexed paths/content.")
+        parser.add_argument("--mount", action="append", help="Restrict to a mount type (repeatable).")
+        parser.add_argument("--prefix", help="Restrict results to a relative path prefix.")
+        parser.add_argument("--limit", type=int, default=25, help="Maximum indexed hits to return.")
+        parser.add_argument(
+            "--include-content",
+            action="store_true",
+            help="Include indexed content instead of only excerpts.",
+        )
+        parser.add_argument(
+            "--no-auto-index",
+            action="store_true",
+            help="Skip automatic index creation when the index is missing.",
+        )
+        parser.add_argument(
+            "--no-auto-refresh",
+            action="store_true",
+            help="Skip automatic refresh when the index is stale.",
+        )
+        parser.add_argument("--json", action="store_true", help="Output JSON.")
 
     # context init
     ctx_init = context_sub.add_parser("init", help="Initialize context.")
@@ -787,6 +987,74 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     ctx_freshness.add_argument("--decay-hours", type=float, help="Decay window in hours.")
     ctx_freshness.add_argument("--json", action="store_true", help="Output JSON.")
     ctx_freshness.set_defaults(func=context_freshness_command)
+
+    # context query
+    ctx_query = context_sub.add_parser(
+        "query",
+        help="Query indexed context files.",
+        description="Query the SQLite-backed context index for path/content matches.",
+        epilog=query_epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    add_query_args(ctx_query)
+    ctx_query.set_defaults(func=context_query_command)
+
+    # top-level query shortcut
+    query_parser = subparsers.add_parser(
+        "query",
+        help="Shortcut for `afs context query`.",
+        description="Shortcut for `afs context query` against the active workspace context.",
+        epilog=query_epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    add_query_args(query_parser)
+    query_parser.set_defaults(func=context_query_command)
+
+    # top-level index compatibility aliases
+    index_parser = subparsers.add_parser(
+        "index",
+        help="Indexed context search and rebuild helpers.",
+    )
+    index_sub = index_parser.add_subparsers(dest="index_command")
+
+    idx_query = index_sub.add_parser(
+        "query",
+        help="Compatibility alias for `afs context query`.",
+        description="Compatibility alias for `afs context query`.",
+        epilog=query_epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    add_query_args(idx_query)
+    idx_query.set_defaults(func=context_query_command)
+
+    idx_rebuild = index_sub.add_parser(
+        "rebuild",
+        help="Rebuild the context SQLite index.",
+    )
+    add_context_args(idx_rebuild)
+    idx_rebuild.add_argument("--mount", action="append", help="Restrict rebuild to a mount type (repeatable).")
+    idx_rebuild.add_argument(
+        "--include-content",
+        action="store_true",
+        help="Force content indexing on for this rebuild.",
+    )
+    idx_rebuild.add_argument(
+        "--no-include-content",
+        action="store_true",
+        help="Force content indexing off for this rebuild.",
+    )
+    idx_rebuild.add_argument(
+        "--max-file-size-bytes",
+        type=int,
+        help="Maximum file size to index when content indexing is enabled.",
+    )
+    idx_rebuild.add_argument(
+        "--max-content-chars",
+        type=int,
+        help="Maximum content chars to retain per indexed file.",
+    )
+    idx_rebuild.add_argument("--json", action="store_true", help="Output JSON.")
+    idx_rebuild.set_defaults(func=context_index_rebuild_command)
 
     # graph
     graph_parser = subparsers.add_parser("graph", help="Project graph operations.")

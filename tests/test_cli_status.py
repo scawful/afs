@@ -130,6 +130,37 @@ def test_context_index_rebuild_is_visible_to_fresh_connections(tmp_path: Path) -
         assert wal_path.stat().st_size == 0
 
 
+def test_status_command_prints_index_rebuild_hint_when_index_missing(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _clear_profile_env(monkeypatch)
+    context_root = tmp_path / ".context"
+    for name in AFS_DIRS:
+        (context_root / name).mkdir(parents=True, exist_ok=True)
+
+    config = AFSConfig(
+        general=GeneralConfig(
+            context_root=context_root,
+        )
+    )
+
+    monkeypatch.setattr(config_module, "load_config_model", lambda *args, **kwargs: config)
+    monkeypatch.setattr(core_module, "find_root", lambda _start_dir=None: context_root)
+    monkeypatch.setattr(
+        core_module,
+        "resolve_context_root",
+        lambda _config, linked_root: linked_root or context_root,
+    )
+
+    exit_code = status_command(Namespace(start_dir=None, json=False))
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "afs index rebuild --path .  # build context index" in out
+
+
 def test_agents_watch_command_uses_remapped_history_dir(
     tmp_path: Path,
     monkeypatch,

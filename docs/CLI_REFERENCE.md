@@ -54,8 +54,29 @@ Also supported once installed into the active environment:
 ./scripts/afs context list
 ./scripts/afs context validate
 ./scripts/afs context repair --dry-run
+./scripts/afs context query "startup guidance"
+./scripts/afs query "startup guidance"
 ./scripts/afs context mount knowledge ~/src/docs --alias docs
 ./scripts/afs context unmount knowledge docs
+./scripts/afs index rebuild --mount scratchpad
+```
+
+Indexed query usage:
+
+- `./scripts/afs query <text> --path <workspace>` is the fast top-level shortcut.
+- `./scripts/afs context query <text> --path <workspace>` is the canonical form.
+- Use `--mount` repeatedly to narrow search to specific mounts such as `scratchpad`, `knowledge`, or `tools`.
+- Use `--prefix` to keep search under a relative subtree like `docs/sqlite/` or `public/`.
+- `--include-content --json` returns full indexed content for each hit; plain text mode shows a compact excerpt.
+- JSON output includes `count`, `entries`, and `index_rebuild` when the command auto-built or auto-refreshed the SQLite index.
+
+Examples:
+
+```bash
+./scripts/afs query sqlite --path ~/src/lab/afs
+./scripts/afs context query sqlite --path ~/src/lab/afs --mount scratchpad --mount knowledge
+./scripts/afs context query sqlite --path ~/src/lab/afs --prefix docs/sqlite/ --limit 10 --include-content --json
+./scripts/afs index rebuild --path ~/src/lab/afs --mount scratchpad
 ```
 
 ## Review
@@ -165,6 +186,12 @@ artifact instead of rebuilding from scratch.
   shaping depending on whether Gemini needs a narrow query-first pack or a
   broader long-context slice
 
+The rendered pack guidance now points at the human CLI surfaces too:
+
+- `afs query <text> --path <workspace>` for cheap follow-on indexed retrieval
+- `afs context query <text> --path <workspace>` as the canonical equivalent
+- `afs index rebuild --path <workspace>` when the pack warns that indexed search may be stale
+
 Pack JSON now includes `execution_profile` metadata and `cache.prefix_hash` so
 Gemini-side adapters can distinguish a stable context prefix from a changing
 task suffix. It also records `pack_mode` and `pack_mode_summary`. The
@@ -202,6 +229,20 @@ and Gemini via `GEMINI_SYSTEM_MD`. Set `AFS_CLIENT_NATIVE_PROMPT=0` or
 `--prompt`, `--prompt-file`, and `--turn-id`; when present, they emit
 `user_prompt_submit`, `turn_started`, and `turn_completed` / `turn_failed`
 around the client process.
+
+`session prepare-client` payloads now also include a `cli_hints` block with:
+
+- `workspace_path`
+- `query_shortcut`
+- `query_canonical`
+- `index_rebuild`
+- `notes`
+
+`afs-client-session` exports the same follow-up hints as:
+
+- `AFS_SESSION_QUERY_HINT`
+- `AFS_SESSION_CONTEXT_QUERY_HINT`
+- `AFS_SESSION_INDEX_REBUILD_HINT`
 
 ## Training
 

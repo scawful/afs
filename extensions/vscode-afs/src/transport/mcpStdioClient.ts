@@ -11,7 +11,13 @@ import type {
   McpResourceContent,
   ToolSpec,
 } from "../types";
-import type { ITransportClient, JsonRpcResponse, ServerCapabilities } from "./types";
+import type {
+  ITransportClient,
+  JsonRpcResponse,
+  ServerCapabilities,
+  SessionCliHints,
+  TransportSessionInfo,
+} from "./types";
 
 interface PendingRequest {
   resolve: (value: JsonRpcResponse) => void;
@@ -36,6 +42,7 @@ export class McpStdioClient implements ITransportClient {
   private sessionPromptJson = "";
   private sessionPromptText = "";
   private sessionWorkspace = "";
+  private sessionCliHints: SessionCliHints = this.defaultCliHints("");
   private toolTaskCounter = 0;
   private turnCounter = 0;
   private activeTurnId = "";
@@ -247,6 +254,21 @@ export class McpStdioClient implements ITransportClient {
     }
   }
 
+  getSessionInfo(): TransportSessionInfo | undefined {
+    if (!this.sessionId) {
+      return undefined;
+    }
+    return {
+      sessionId: this.sessionId,
+      payloadFile: this.sessionPayloadFile,
+      contextPath: this.sessionContextPath,
+      promptJson: this.sessionPromptJson,
+      promptText: this.sessionPromptText,
+      workspace: this.sessionWorkspace || this.workspaceRoot(),
+      cliHints: { ...this.sessionCliHints, notes: [...this.sessionCliHints.notes] },
+    };
+  }
+
   dispose(): void {
     if (this.activeTurnId) {
       const turnId = this.activeTurnId;
@@ -300,6 +322,13 @@ export class McpStdioClient implements ITransportClient {
     if (this.sessionContextPath) env.AFS_ACTIVE_CONTEXT_ROOT = this.sessionContextPath;
     if (this.sessionPromptJson) env.AFS_SESSION_SYSTEM_PROMPT_JSON = this.sessionPromptJson;
     if (this.sessionPromptText) env.AFS_SESSION_SYSTEM_PROMPT_TEXT = this.sessionPromptText;
+    if (this.sessionCliHints.queryShortcut) env.AFS_SESSION_QUERY_HINT = this.sessionCliHints.queryShortcut;
+    if (this.sessionCliHints.queryCanonical) {
+      env.AFS_SESSION_CONTEXT_QUERY_HINT = this.sessionCliHints.queryCanonical;
+    }
+    if (this.sessionCliHints.indexRebuild) {
+      env.AFS_SESSION_INDEX_REBUILD_HINT = this.sessionCliHints.indexRebuild;
+    }
     if (this.activeTurnId) env.AFS_SESSION_DEFAULT_TURN_ID = this.activeTurnId;
     return env;
   }
@@ -311,6 +340,7 @@ export class McpStdioClient implements ITransportClient {
 
     this.sessionId = randomUUID().replace(/-/g, "").slice(0, 12);
     this.sessionWorkspace = this.workspaceRoot();
+    this.sessionCliHints = this.defaultCliHints(this.sessionWorkspace);
 
     try {
       const payload = await this.execCliJson(
@@ -347,6 +377,7 @@ export class McpStdioClient implements ITransportClient {
       const promptArtifacts = this.artifactPaths((payload.prompt as Record<string, unknown> | undefined) ?? {});
       this.sessionPromptJson = promptArtifacts.json ?? "";
       this.sessionPromptText = promptArtifacts.text ?? "";
+      this.sessionCliHints = this.parseCliHints(payload.cli_hints, this.sessionWorkspace);
     } catch (err) {
       this.logger.appendLine(`[mcp harness] prepare-client failed: ${err}`);
       return;
@@ -462,6 +493,50 @@ export class McpStdioClient implements ITransportClient {
 
   private stringValue(value: unknown): string {
     return typeof value === "string" ? value : "";
+  }
+
+  private parseCliHints(value: unknown, workspace: string): SessionCliHints {
+    const fallback = this.defaultCliHints(workspace);
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return fallback;
+    }
+    const raw = value as Record<string, unknown>;
+    return {
+      workspacePath: this.stringValue(raw.workspace_path).trim() || fallback.workspacePath,
+      queryShortcut: this.stringValue(raw.query_shortcut).trim() || fallback.queryShortcut,
+      queryCanonical: this.stringValue(raw.query_canonical).trim() || fallback.queryCanonical,
+      indexRebuild: this.stringValue(raw.index_rebuild).trim() || fallback.indexRebuild,
+      notes: Array.isArray(raw.notes)
+        ? raw.notes
+            .filter((entry): entry is string => typeof entry === "string")
+            .map((entry) => entry.trim())
+            .filter(Boolean)
+        : fallback.notes,
+    };
+  }
+
+  private defaultCliHints(workspace: string): SessionCliHints {
+    const resolvedWorkspace = (workspace || this.workspaceRoot()).trim();
+    const quotedWorkspace = this.shellQuote(resolvedWorkspace);
+    return {
+      workspacePath: resolvedWorkspace,
+      queryShortcut: resolvedWorkspace ? `afs query <text> --path ${quotedWorkspace}` : "",
+      queryCanonical: resolvedWorkspace
+        ? `afs context query <text> --path ${quotedWorkspace}`
+        : "",
+      indexRebuild: resolvedWorkspace ? `afs index rebuild --path ${quotedWorkspace}` : "",
+      notes: [],
+    };
+  }
+
+  private shellQuote(value: string): string {
+    if (!value) {
+      return "''";
+    }
+    if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) {
+      return value;
+    }
+    return `'${value.replace(/'/g, `'\\''`)}'`;
   }
 
   private hasArg(args: string[], flag: string): boolean {

@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import * as path from "path";
-import type { ITransportClient } from "../transport/types";
+import type { ITransportClient, TransportSessionInfo } from "../transport/types";
 import { extractToolPayload } from "../utils/toolPayload";
 
 export class AfsDashboardProvider implements vscode.WebviewViewProvider {
@@ -29,11 +29,24 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
           await vscode.commands.executeCommand("afs.index.rebuild");
           await this.updateContent();
           break;
+        case "queryIndex":
+          await vscode.commands.executeCommand("afs.index.query");
+          break;
         case "mcpStatus":
           await vscode.commands.executeCommand("afs.mcp.status");
           break;
         case "showLogs":
           await vscode.commands.executeCommand("afs.server.showLogs");
+          break;
+        case "copyText":
+          if (typeof msg.text === "string" && msg.text.trim()) {
+            await vscode.env.clipboard.writeText(msg.text);
+            const label =
+              typeof msg.label === "string" && msg.label.trim()
+                ? msg.label.trim()
+                : "command";
+            vscode.window.showInformationMessage(`Copied ${label} to clipboard.`);
+          }
           break;
         case "openCommand":
           if (msg.id) {
@@ -60,6 +73,7 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
     let freshnessData: Record<string, unknown> | null = null;
     let antigravityStatus: Record<string, unknown> | null = null;
     let memoryStatus: Record<string, unknown> | null = null;
+    const sessionInfo = this.transport.getSessionInfo();
 
     if (connected) {
       try {
@@ -110,6 +124,7 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
       freshnessData,
       antigravityStatus,
       memoryStatus,
+      sessionInfo,
     );
   }
 
@@ -120,6 +135,7 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
     freshnessData: Record<string, unknown> | null,
     antigravityStatus: Record<string, unknown> | null,
     memoryStatus: Record<string, unknown> | null,
+    sessionInfo?: TransportSessionInfo,
   ): string {
     const statusIcon = connected ? "\u2713" : "\u2717";
     const statusClass = connected ? "connected" : "disconnected";
@@ -226,6 +242,41 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
         </div>`;
     }
 
+    let sessionHtml = "";
+    if (sessionInfo) {
+      const cliHints = sessionInfo.cliHints;
+      const notes = cliHints.notes
+        .map((note) => `<li>${this.esc(note)}</li>`)
+        .join("");
+      sessionHtml = `
+        <div class="section">
+          <h3>Session Hints</h3>
+          <div class="row"><span class="label">Workspace</span><span class="value path-value" title="${this.esc(cliHints.workspacePath)}">${this.esc(cliHints.workspacePath.replace(/^.*\//, ".../"))}</span></div>
+          <div class="hint-block">
+            <div class="hint-label">Query</div>
+            <code>${this.esc(cliHints.queryShortcut)}</code>
+          </div>
+          <div class="hint-block">
+            <div class="hint-label">Canonical Query</div>
+            <code>${this.esc(cliHints.queryCanonical)}</code>
+          </div>
+          <div class="hint-block">
+            <div class="hint-label">Rebuild</div>
+            <code>${this.esc(cliHints.indexRebuild)}</code>
+          </div>
+          ${
+            notes
+              ? `<ul class="notes">${notes}</ul>`
+              : ""
+          }
+          <div class="actions inline-actions">
+            <button onclick="post('queryIndex')">Query More</button>
+            <button onclick="post('copyText', { text: ${JSON.stringify(cliHints.queryShortcut)}, label: 'query command' })">Copy Query Command</button>
+            <button onclick="post('copyText', { text: ${JSON.stringify(cliHints.indexRebuild)}, label: 'index rebuild command' })">Copy Rebuild Command</button>
+          </div>
+        </div>`;
+    }
+
     return `<!DOCTYPE html>
 <html>
 <head>
@@ -283,6 +334,37 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
     gap: 4px;
     margin-top: 12px;
   }
+  .inline-actions {
+    margin-top: 8px;
+  }
+  .hint-block {
+    margin: 6px 0;
+  }
+  .hint-label {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+    margin-bottom: 2px;
+  }
+  code {
+    display: block;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 11px;
+    line-height: 1.4;
+    padding: 6px 8px;
+    border-radius: 4px;
+    background: var(--vscode-textCodeBlock-background);
+    color: var(--vscode-textPreformat-foreground);
+  }
+  .notes {
+    margin: 8px 0 0 16px;
+    padding: 0;
+    color: var(--vscode-descriptionForeground);
+    font-size: 11px;
+  }
+  .notes li {
+    margin: 4px 0;
+  }
   button {
     background: var(--vscode-button-secondaryBackground);
     color: var(--vscode-button-secondaryForeground);
@@ -316,6 +398,7 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
   ${freshnessHtml}
   ${memoryHtml}
   ${antigravityHtml}
+  ${sessionHtml}
 
   <div class="actions">
     <button onclick="post('refresh')">Refresh</button>

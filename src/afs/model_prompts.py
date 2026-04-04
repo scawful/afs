@@ -334,6 +334,13 @@ def _pack_context_block(pack_state: dict[str, Any] | None) -> str:
         lines.append(f"Pack settings: {', '.join(summary_bits)}")
     if isinstance(estimated_tokens, int) and estimated_tokens > 0:
         lines.append(f"Pack tokens: {estimated_tokens}")
+    lines.append(
+        "CLI follow-up: `afs query <text> --path <workspace>` "
+        "(or `afs context query <text> --path <workspace>`) for indexed retrieval."
+    )
+    lines.append(
+        "CLI rebuild: `afs index rebuild --path <workspace>` if indexed search is stale or missing."
+    )
 
     return "\n".join(lines) if len(lines) > 1 else ""
 

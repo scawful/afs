@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from afs.cli import build_parser
-from afs.cli._help import render_topic_help
+from afs.cli._help import render_default_help, render_topic_help
 
 
 def _write_base_config(path: Path) -> None:
@@ -58,3 +58,48 @@ def test_render_topic_help_suggests_top_level_command_typo(
     assert "Unknown command: gmini" in captured.out
     assert "Closest matches:" in captured.out
     assert "gemini" in captured.out
+
+
+def test_render_default_help_mentions_context_query_and_index_rebuild(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    config_path = tmp_path / "afs.toml"
+    _write_base_config(config_path)
+    monkeypatch.setenv("AFS_CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("AFS_EXTENSION_DIRS", raising=False)
+    monkeypatch.delenv("AFS_ENABLED_EXTENSIONS", raising=False)
+
+    parser = build_parser()
+
+    render_default_help(parser)
+
+    out = capsys.readouterr().out
+    assert "afs query" in out
+    assert "afs context query" in out
+    assert "afs index rebuild" in out
+
+
+def test_render_topic_help_for_context_query_shows_examples_and_output_fields(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    config_path = tmp_path / "afs.toml"
+    _write_base_config(config_path)
+    monkeypatch.setenv("AFS_CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("AFS_EXTENSION_DIRS", raising=False)
+    monkeypatch.delenv("AFS_ENABLED_EXTENSIONS", raising=False)
+
+    parser = build_parser()
+
+    exit_code = render_topic_help(parser, ["context", "query"])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Examples:" in out
+    assert "afs context query" in out
+    assert "afs query sqlite" in out
+    assert "Output fields:" in out
+    assert "index_rebuild" in out

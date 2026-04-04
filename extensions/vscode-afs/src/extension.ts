@@ -53,8 +53,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const statusBar = new AfsStatusBar();
   context.subscriptions.push(statusBar);
-  transport.onConnectionStateChanged((state) => statusBar.update(state));
-  statusBar.update(transport.isReady() ? "connected" : "disconnected");
+  transport.onConnectionStateChanged((state) =>
+    statusBar.update(state, undefined, transport.getSessionInfo()),
+  );
+  statusBar.update(
+    transport.isReady() ? "connected" : "disconnected",
+    undefined,
+    transport.getSessionInfo(),
+  );
 
   // --- Context Explorer (tree view) ---
   const treeProvider = new ContextTreeProvider(
