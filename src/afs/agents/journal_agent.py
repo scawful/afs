@@ -6,10 +6,11 @@ import argparse
 import re
 import time
 from collections.abc import Sequence
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from ..agent_context import ContextAwareAgent
 from .base import (
     AgentResult,
     build_base_parser,
@@ -453,21 +454,71 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class _JournalAgent(ContextAwareAgent):
+    """Journal agent with context-aware enrichment."""
+
+    @staticmethod
+    def _event_is_within_days(event: dict[str, Any], *, days: int) -> bool:
+        raw_timestamp = str(event.get("timestamp") or event.get("ts") or "").strip()
+        if not raw_timestamp:
+            return False
+        normalized = raw_timestamp[:-1] + "+00:00" if raw_timestamp.endswith("Z") else raw_timestamp
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return False
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(days, 1))
+        return parsed >= cutoff
+
+    def get_agent_activity_summary(self, days: int = 7) -> list[str]:
+        """Get recent agent activity as bullet points for weekly reviews."""
+        events = self.get_recent_events(
+            event_types={"agent_progress"},
+            limit=50,
+        )
+        if not events:
+            return []
+        lines: list[str] = []
+        seen: set[str] = set()
+        for ev in events:
+            if not self._event_is_within_days(ev, days=days):
+                continue
+            agent = ev.get("metadata", {}).get("agent", "") or ev.get("source", "")
+            detail = ev.get("metadata", {}).get("detail", "") or ev.get("op", "")
+            key = f"{agent}:{detail}"
+            if key in seen or not agent:
+                continue
+            seen.add(key)
+            lines.append(f"- {agent}: {detail}" if detail else f"- {agent}")
+        return lines[:10]
+
+    def find_memory_for_todo(self, todo_text: str) -> str | None:
+        """Search memory for entries related to a stale TODO item."""
+        # Extract keywords from the TODO text (skip common words)
+        words = [w for w in todo_text.lower().split() if len(w) > 3]
+        if not words:
+            return None
+        query = " ".join(words[:3])
+        results = self.search_memory(query, limit=1)
+        if results:
+            return results[0].get("name", "")
+        return None
+
+
 def run(args: argparse.Namespace) -> int:
     configure_logging(args.quiet)
 
-    # Load context snapshot for awareness of recent events and memory
-    try:
-        from ..agent_context import load_agent_context_snapshot
-        ctx = load_agent_context_snapshot()
-        if ctx and ctx.recent_events:
-            import logging as _log
-            _log.getLogger(__name__).info(
-                "Journal agent context: %d recent events, %d memory topics",
-                len(ctx.recent_events), len(ctx.memory_topics),
-            )
-    except Exception:
-        pass
+    # Initialize context-aware agent
+    agent = _JournalAgent()
+    ctx = agent.load_context()
+    if ctx:
+        import logging as _log
+        _log.getLogger(__name__).info(
+            "Journal context: %d recent events, %d memory topics",
+            len(ctx.recent_events), len(ctx.memory_topics),
+        )
 
     daily_dir = Path(args.daily_dir).expanduser()
     weekly_dir = Path(args.weekly_dir).expanduser()
@@ -511,6 +562,13 @@ def run(args: argparse.Namespace) -> int:
             stale_threshold=args.stale_threshold,
             today=today,
         )
+
+        # Cross-reference stale TODOs with memory entries
+        for item in stale:
+            related_memory = agent.find_memory_for_todo(item.get("todo", ""))
+            if related_memory:
+                item["related_memory"] = related_memory
+
         payload["stale_check"] = {**sc_meta, "stale_todos": stale}
         metrics["stale_count"] = len(stale)
         if stale:
@@ -519,6 +577,9 @@ def run(args: argparse.Namespace) -> int:
                 + ", ".join(f'"{s["todo"][:40]}"' for s in stale[:3])
                 + ("…" if len(stale) > 3 else "")
             )
+            with_memory = sum(1 for s in stale if s.get("related_memory"))
+            if with_memory:
+                notes.append(f"{with_memory} stale TODO(s) have related memory entries")
 
     # weekly-review
     if task == "weekly-review":
@@ -538,6 +599,12 @@ def run(args: argparse.Namespace) -> int:
             }
         )
         notes.append(f"weekly-review: {wr_meta['action']} → {wr_path}")
+
+        # Enrich weekly review with agent activity context
+        agent_activity = agent.get_agent_activity_summary(days=7)
+        if agent_activity:
+            payload["weekly_review"]["agent_activity"] = agent_activity
+            notes.append(f"Weekly review enriched with {len(agent_activity)} agent activity entries")
 
     finished_at = now_iso()
     duration = time.monotonic() - start

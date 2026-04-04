@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..agent_context import ContextAwareAgent
 from .base import (
     AgentResult,
     build_base_parser,
@@ -19,14 +20,6 @@ from .base import (
     now_iso,
 )
 from .guardrails import GuardrailConfig, GuardrailedAgent
-
-# Late imports to avoid circular deps — resolved at call sites
-# from ..config import load_config_model
-# from ..context_index import ContextSQLiteIndex
-# from ..discovery import discover_contexts
-# from ..history import query_events
-# from ..manager import AFSManager
-# from ..models import MountType
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +174,36 @@ def _discover_missions(context_root: Path) -> list[tuple[Path, Mission]]:
 
 
 # ---------------------------------------------------------------------------
+# Context-aware mission agent
+# ---------------------------------------------------------------------------
+
+class _MissionAgent(ContextAwareAgent):
+    """Mission runner with context-aware observation and orientation."""
+
+    def find_prior_mission_results(self, mission_name: str) -> list[dict[str, Any]]:
+        """Query the context index for prior results of this mission."""
+        return self.query_context(
+            f"mission {mission_name} result status phases",
+            mount_types=["scratchpad"],
+            limit=3,
+        )
+
+    def find_mission_relevant_knowledge(self, description: str) -> list[dict[str, Any]]:
+        """Query knowledge and memory for content relevant to a mission."""
+        if not description:
+            return []
+        return self.query_context(
+            description,
+            mount_types=["knowledge", "memory"],
+            limit=10,
+        )
+
+
+# Shared agent instance — initialized once in run(), used by phase functions
+_agent: _MissionAgent | None = None
+
+
+# ---------------------------------------------------------------------------
 # Phase tool execution — real AFS operations
 # ---------------------------------------------------------------------------
 
@@ -206,7 +229,7 @@ def _run_phase_tools(
             context_path = context_path / ".context"
 
     if phase.name == "observe":
-        data = _phase_observe(phase, context_path, guard, notes)
+        data = _phase_observe(phase, mission, context_path, guard, notes)
     elif phase.name == "orient":
         data = _phase_orient(phase, context_path, guard, notes, output_dir)
     elif phase.name == "decide":
@@ -221,11 +244,12 @@ def _run_phase_tools(
 
 def _phase_observe(
     phase: MissionPhase,
+    mission: Mission,
     context_path: Path,
     guard: GuardrailedAgent,
     notes: list[str],
 ) -> dict[str, Any]:
-    """Observe phase: read-only data gathering from context, git, and index."""
+    """Observe phase: context-aware data gathering using mixin queries."""
     data: dict[str, Any] = {"context_health": {}, "index_summary": {}, "recent_events": []}
 
     # 1. Context health check
@@ -244,52 +268,95 @@ def _phase_observe(
     except Exception as exc:
         notes.append(f"Context health check failed: {exc}")
 
-    # 2. Index query — search for recently modified content
-    try:
-        from ..context_index import ContextSQLiteIndex
-        from ..manager import AFSManager
-        from ..models import MountType
-        config = load_config_model(merge_user=True)
-        manager = AFSManager(config=config)
-        index = ContextSQLiteIndex(manager, context_path)
-        if index.has_entries():
-            summary = index.summary()
-            data["index_summary"] = {
-                "total_entries": summary.rows_written,
-                "mount_types": summary.by_mount_type,
-            }
-            # Check for stale content
-            diff = index.diff()
-            data["index_diff"] = {
-                "added": len(diff.get("added", [])),
-                "modified": len(diff.get("modified", [])),
-                "deleted": len(diff.get("deleted", [])),
-            }
-            notes.append(
-                f"Index: {summary.rows_written} entries, "
-                f"{len(diff.get('modified', []))} modified since last index"
-            )
-        else:
-            notes.append("Index: empty, needs rebuild")
-    except Exception as exc:
-        notes.append(f"Index query failed: {exc}")
+    # 2. Mount freshness — quick check via mixin instead of raw index scan
+    if _agent is not None:
+        freshness = _agent.get_mount_freshness()
+        stale_mounts = [name for name, mf in freshness.items() if mf.get("stale")]
+        data["mount_freshness"] = freshness
+        if stale_mounts:
+            notes.append(f"Stale mounts: {', '.join(stale_mounts)}")
 
-    # 3. Recent history events
-    try:
-        from ..context_paths import resolve_mount_root
-        from ..history import query_events
-        from ..models import MountType
-        history_root = resolve_mount_root(context_path, MountType.HISTORY)
-        if history_root.exists():
-            events = query_events(history_root, limit=20)
-            data["recent_events"] = [
-                {"type": e.get("type", ""), "source": e.get("source", ""),
-                 "op": e.get("op", ""), "timestamp": e.get("timestamp", "")}
-                for e in events
-            ]
+    # 3. Index state via mixin snapshot (already loaded, no extra I/O)
+    if _agent is not None and _agent.context_snapshot:
+        snap = _agent.context_snapshot
+        data["index_summary"] = {
+            "total_entries": snap.index_total,
+            "mount_types": snap.index_summary,
+        }
+        notes.append(f"Index: {snap.index_total} entries from snapshot")
+    else:
+        # Fallback to direct index query
+        try:
+            from ..config import load_config_model
+            from ..context_index import ContextSQLiteIndex
+            from ..manager import AFSManager
+            config = load_config_model(merge_user=True)
+            manager = AFSManager(config=config)
+            index = ContextSQLiteIndex(manager, context_path)
+            if index.has_entries():
+                summary = index.summary()
+                data["index_summary"] = {
+                    "total_entries": summary.rows_written,
+                    "mount_types": summary.by_mount_type,
+                }
+                diff = index.diff()
+                data["index_diff"] = {
+                    "added": len(diff.get("added", [])),
+                    "modified": len(diff.get("modified", [])),
+                    "deleted": len(diff.get("deleted", [])),
+                }
+                notes.append(
+                    f"Index: {summary.rows_written} entries, "
+                    f"{len(diff.get('modified', []))} modified since last index"
+                )
+            else:
+                notes.append("Index: empty, needs rebuild")
+        except Exception as exc:
+            notes.append(f"Index query failed: {exc}")
+
+    # 4. Recent events via mixin
+    if _agent is not None:
+        events = _agent.get_recent_events(limit=20)
+        data["recent_events"] = events
+        if events:
             notes.append(f"History: {len(events)} recent events")
-    except Exception as exc:
-        notes.append(f"History query failed: {exc}")
+    else:
+        try:
+            from ..history import query_events
+            from ..context_paths import resolve_mount_root
+            from ..models import MountType
+            history_root = resolve_mount_root(context_path, MountType.HISTORY)
+            if history_root.exists():
+                events = query_events(history_root, limit=20)
+                data["recent_events"] = [
+                    {"type": e.get("type", ""), "source": e.get("source", ""),
+                     "op": e.get("op", ""), "timestamp": e.get("timestamp", "")}
+                    for e in events
+                ]
+                notes.append(f"History: {len(events)} recent events")
+        except Exception as exc:
+            notes.append(f"History query failed: {exc}")
+
+    # 5. Query for prior mission results and relevant knowledge via mixin
+    if _agent is not None:
+        prior = _agent.find_prior_mission_results(mission.name)
+        if prior:
+            data["prior_results"] = prior
+            notes.append(f"Found {len(prior)} prior result(s) for mission '{mission.name}'")
+
+        relevant = _agent.find_mission_relevant_knowledge(mission.description)
+        if relevant:
+            data["relevant_knowledge"] = [
+                {"path": r.get("relative_path", ""), "mount": r.get("mount_type", "")}
+                for r in relevant
+            ]
+            notes.append(f"Found {len(relevant)} relevant knowledge entries")
+
+        # Search memory for mission-related context
+        memory = _agent.search_memory(mission.name, limit=5)
+        if memory:
+            data["relevant_memory"] = memory
+            notes.append(f"Found {len(memory)} memory entries for '{mission.name}'")
 
     return data
 
@@ -712,22 +779,20 @@ def build_parser():
 
 
 def run(args) -> int:
+    global _agent
     configure_logging(args.quiet)
     started_at = now_iso()
     start = time.time()
     context_root = Path(args.context_root).expanduser()
 
-    # Load context snapshot for index/memory awareness during mission execution
-    try:
-        from ..agent_context import load_agent_context_snapshot
-        ctx = load_agent_context_snapshot()
-        if ctx:
-            logger.info(
-                "Mission runner context: %d indexed, %d memory topics",
-                ctx.index_total, len(ctx.memory_topics),
-            )
-    except Exception:
-        pass
+    # Initialize context-aware agent for query-driven observation
+    _agent = _MissionAgent()
+    ctx = _agent.load_context()
+    if ctx:
+        logger.info(
+            "Mission context: %d indexed, %d memory topics, %d active agents",
+            ctx.index_total, len(ctx.memory_topics), len(ctx.active_agents),
+        )
 
     missions = _discover_missions(context_root)
     if args.mission:

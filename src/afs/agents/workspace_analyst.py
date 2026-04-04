@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..agent_context import ContextAwareAgent
 from .base import (
     AgentResult,
     build_base_parser,
@@ -222,25 +223,62 @@ def build_parser():
     return parser
 
 
+class _AnalystAgent(ContextAwareAgent):
+    """Workspace analyst with context-aware decision making."""
+
+    def query_prior_health(self) -> dict[str, Any] | None:
+        """Check if a prior workspace health report exists in the context index."""
+        results = self.query_context(
+            "workspace health repos dirty stale uncommitted",
+            mount_types=["scratchpad"],
+            limit=1,
+            include_content=True,
+        )
+        if not results:
+            return None
+        content = results[0].get("content_text", "") or results[0].get("content_excerpt", "")
+        if not content:
+            return None
+        try:
+            import json as _json
+            return _json.loads(content)
+        except (ValueError, TypeError):
+            return None
+
+    def detect_drift(self, current: list[RepoHealth], prior: dict[str, Any] | None) -> list[str]:
+        """Compare current scan against prior results to detect meaningful drift."""
+        if prior is None:
+            return []
+        drift_notes: list[str] = []
+        prior_summary = prior.get("summary", {})
+        cur_dirty = sum(1 for r in current if r.status == "dirty")
+        cur_stale = sum(1 for r in current if r.status == "stale")
+        prev_dirty = prior_summary.get("dirty", 0)
+        prev_stale = prior_summary.get("stale", 0)
+        if cur_dirty > prev_dirty:
+            drift_notes.append(f"Drift: dirty repos {prev_dirty} → {cur_dirty}")
+        if cur_stale > prev_stale:
+            drift_notes.append(f"Drift: stale repos {prev_stale} → {cur_stale}")
+        cur_uncommitted = sum(r.uncommitted_files for r in current)
+        prev_uncommitted = prior_summary.get("total_uncommitted", 0)
+        if cur_uncommitted > prev_uncommitted + 5:
+            drift_notes.append(f"Drift: uncommitted files {prev_uncommitted} → {cur_uncommitted}")
+        return drift_notes
+
+
 def run(args) -> int:
     configure_logging(args.quiet)
     started_at = now_iso()
     start = time.time()
 
-    # Load context snapshot — gives us index state, memory topics, active agents
-    ctx_snapshot = None
-    try:
-        from ..agent_context import load_agent_context_snapshot
-        ctx_snapshot = load_agent_context_snapshot()
-        if ctx_snapshot:
-            logger.info(
-                "Context snapshot loaded: %d indexed entries, %d memory topics, %d active agents",
-                ctx_snapshot.index_total,
-                len(ctx_snapshot.memory_topics),
-                len(ctx_snapshot.active_agents),
-            )
-    except Exception:
-        pass
+    # Initialize context-aware agent
+    agent = _AnalystAgent()
+    ctx = agent.load_context()
+    if ctx:
+        logger.info(
+            "Context loaded: %d indexed, %d memory topics, %d active agents",
+            ctx.index_total, len(ctx.memory_topics), len(ctx.active_agents),
+        )
 
     guard = GuardrailedAgent(AGENT_NAME, config=GuardrailConfig(task_tier="background"))
 
@@ -251,6 +289,17 @@ def run(args) -> int:
         scan_roots = list(DEFAULT_SCAN_ROOTS)
 
     emit_progress(AGENT_NAME, "scan_start", f"Scanning {len(scan_roots)} roots")
+
+    # Query prior health report to detect drift after scan
+    prior_health = agent.query_prior_health()
+    if prior_health:
+        logger.info("Found prior health report for drift comparison")
+
+    # Check mount freshness — report stale mounts alongside repo health
+    mount_freshness = agent.get_mount_freshness()
+    stale_mounts = [name for name, mf in mount_freshness.items() if mf.get("stale")]
+    if stale_mounts:
+        logger.info("Stale context mounts: %s", ", ".join(stale_mounts))
 
     # Find and analyze repos
     repos = _find_repos(scan_roots, max_depth=args.max_depth)
@@ -269,6 +318,11 @@ def run(args) -> int:
     model = guard.resolve_model()
     guard.record_call(model.provider)
 
+    # Detect drift against prior report
+    drift_notes = agent.detect_drift(results, prior_health)
+    if drift_notes:
+        logger.info("Drift detected: %s", "; ".join(drift_notes))
+
     # Write report
     context_root = Path(args.context_root).expanduser()
     report_path = _write_report(results, context_root / "scratchpad" / "afs_agents")
@@ -277,6 +331,12 @@ def run(args) -> int:
 
     dirty_count = sum(1 for r in results if r.status == "dirty")
     stale_count = sum(1 for r in results if r.status == "stale")
+
+    notes = [
+        f"Scanned {len(results)} repos across {len(scan_roots)} roots",
+        f"Report written to {report_path}",
+    ]
+    notes.extend(drift_notes)
 
     result = AgentResult(
         name=AGENT_NAME,
@@ -291,10 +351,7 @@ def run(args) -> int:
             "repos_ok": len(results) - dirty_count - stale_count,
             "total_uncommitted_files": sum(r.uncommitted_files for r in results),
         },
-        notes=[
-            f"Scanned {len(results)} repos across {len(scan_roots)} roots",
-            f"Report written to {report_path}",
-        ],
+        notes=notes,
         payload={
             "report_path": str(report_path),
             "attention_needed": [
@@ -303,13 +360,12 @@ def run(args) -> int:
             ],
             "quota_usage": guard.usage_summary(),
             "context_state": {
-                "index_total": ctx_snapshot.index_total if ctx_snapshot else 0,
-                "stale_mounts": [
-                    name for name, mf in (ctx_snapshot.mount_freshness if ctx_snapshot else {}).items()
-                    if mf.get("stale")
-                ],
-                "active_agents": ctx_snapshot.active_agents if ctx_snapshot else [],
+                "index_total": ctx.index_total if ctx else 0,
+                "stale_mounts": stale_mounts,
+                "active_agents": ctx.active_agents if ctx else [],
+                "mount_freshness": mount_freshness,
             },
+            "drift": drift_notes,
         },
     )
     emit_result(

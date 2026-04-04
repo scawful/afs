@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
@@ -23,6 +25,7 @@ from ..embeddings import build_embedding_index, create_ollama_embed_fn
 from ..manager import AFSManager
 from ..models import MountType
 from ..workspace_sync import load_workspace_entries, resolve_config_output, sync_workspace_config
+from ..agent_context import ContextAwareAgent
 from .base import (
     AgentResult,
     build_base_parser,
@@ -31,6 +34,8 @@ from .base import (
     load_agent_config,
     now_iso,
 )
+
+logger = logging.getLogger(__name__)
 
 AGENT_NAME = "context-warm"
 AGENT_DESCRIPTION = "Sync workspace paths, discover contexts, and refresh embeddings."
@@ -41,6 +46,52 @@ AGENT_CAPABILITIES = {
     "tools": ["context.index.rebuild", "context.query"],
     "description": "Syncs workspace paths, discovers contexts, refreshes indexes.",
 }
+
+
+class _WarmAgent(ContextAwareAgent):
+    """Context warming agent with awareness of what's already fresh."""
+
+    @staticmethod
+    def _event_is_recent(event: dict, *, since_minutes: int) -> bool:
+        raw_timestamp = str(event.get("timestamp") or event.get("ts") or "").strip()
+        if not raw_timestamp:
+            return False
+        normalized = raw_timestamp[:-1] + "+00:00" if raw_timestamp.endswith("Z") else raw_timestamp
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return False
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(since_minutes, 1))
+        return parsed >= cutoff
+
+    def get_fresh_context_paths(self) -> set[str]:
+        """Return context paths that are already fully fresh (no stale mounts)."""
+        freshness = self.get_mount_freshness()
+        if not freshness:
+            return set()
+        # All mounts fresh = context doesn't need audit
+        all_fresh = all(not mf.get("stale") for mf in freshness.values())
+        if all_fresh and self._context_path:
+            return {str(self._context_path)}
+        return set()
+
+    def has_recent_changes(self, since_minutes: int = 30) -> bool:
+        """Check if there have been recent context-affecting events."""
+        events = self.get_recent_events(
+            event_types={"context_write", "fs_write", "agent_progress"},
+            limit=20,
+        )
+        return any(self._event_is_recent(event, since_minutes=since_minutes) for event in events)
+
+    def find_prior_warm_results(self) -> list[dict]:
+        """Check if a prior context-warm result exists in the index."""
+        return self.query_context(
+            "context-warm audit repair index rebuild",
+            mount_types=["scratchpad"],
+            limit=1,
+        )
 
 
 @dataclass
@@ -478,12 +529,22 @@ def _run_cycle(
     config,
     *,
     context_paths_override: list[Path] | None = None,
+    agent: _WarmAgent | None = None,
 ) -> AgentResult:
     started_at = now_iso()
     start = time.monotonic()
     notes: list[str] = []
     metrics: dict[str, int | float] = {}
     payload: dict[str, object] = {}
+
+    # Use context awareness to log prior state and detect changes
+    if agent is not None:
+        prior = agent.find_prior_warm_results()
+        if prior:
+            logger.info("Found prior context-warm result in index")
+        if agent.has_recent_changes():
+            logger.info("Recent context changes detected — full audit recommended")
+            notes.append("Recent context changes detected")
 
     if not args.skip_workspace_sync:
         count, sync_notes = _sync_workspace(args, config)
@@ -637,9 +698,9 @@ def _emit_agent_result(args: argparse.Namespace, result: AgentResult) -> None:
             pass
 
 
-def _run_watch_loop(args: argparse.Namespace, config) -> int:
+def _run_watch_loop(args: argparse.Namespace, config, *, agent: _WarmAgent | None = None) -> int:
     runs = 0
-    result = _run_cycle(args, config)
+    result = _run_cycle(args, config, agent=agent)
     if _watch_paths is None:
         result.notes.append("watchfiles not installed; falling back to polling")
         result.status = "warn"
@@ -653,7 +714,7 @@ def _run_watch_loop(args: argparse.Namespace, config) -> int:
         selected_contexts = _selected_context_paths_from_result(result)
         if not selected_contexts:
             time.sleep(max(args.watch_poll_seconds, 1))
-            result = _run_cycle(args, config)
+            result = _run_cycle(args, config, agent=agent)
             _emit_agent_result(args, result)
             runs += 1
             continue
@@ -681,7 +742,7 @@ def _run_watch_loop(args: argparse.Namespace, config) -> int:
             if not changed_contexts:
                 continue
 
-        result = _run_cycle(args, config, context_paths_override=changed_contexts)
+        result = _run_cycle(args, config, context_paths_override=changed_contexts, agent=agent)
         _emit_agent_result(args, result)
         runs += 1
 
@@ -690,8 +751,17 @@ def run(args: argparse.Namespace) -> int:
     configure_logging(args.quiet)
     config = load_agent_config(args.config)
 
+    # Initialize context-aware agent
+    agent = _WarmAgent()
+    ctx = agent.load_context()
+    if ctx:
+        logger.info(
+            "Context-warm loaded: %d indexed, %d memory topics",
+            ctx.index_total, len(ctx.memory_topics),
+        )
+
     if args.watch:
-        return _run_watch_loop(args, config)
+        return _run_watch_loop(args, config, agent=agent)
 
     runs = 0
 
@@ -700,7 +770,7 @@ def run(args: argparse.Namespace) -> int:
 
     while True:
         runs += 1
-        result = _run_cycle(args, config)
+        result = _run_cycle(args, config, agent=agent)
         _emit_agent_result(args, result)
 
         if args.interval <= 0:
