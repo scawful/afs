@@ -217,15 +217,21 @@ pack, and a broader full-slice pack for long-context models. The
 prompt-only rail and includes retry guidance so the host loop stays in Gemini
 CLI or Claude Code instead of moving into core AFS.
 
-`session prepare-client` packages the same bootstrap and pack surfaces into a
-single JSON artifact for wrappers and IDE adapters. `afs-client-session`
-exports the resulting `AFS_SESSION_BOOTSTRAP_*`, `AFS_SESSION_PACK_*`,
-`AFS_SESSION_SKILLS_JSON`, `AFS_SESSION_CLIENT_PAYLOAD_JSON`, and
+`session prepare-client` packages the same bootstrap, pack, skill, and prompt
+surfaces into a single JSON artifact for wrappers and IDE adapters.
+`afs-client-session` exports the resulting `AFS_SESSION_BOOTSTRAP_*`,
+`AFS_SESSION_PACK_*`, `AFS_SESSION_SKILLS_JSON`,
+`AFS_SESSION_SYSTEM_PROMPT_*`, `AFS_SESSION_CLIENT_PAYLOAD_JSON`, and
 `AFS_SESSION_EVENT_BIN` variables, then fires `session_start` / `session_end`
-hooks around the client run. When the wrapper is launched with `--prompt`,
-`--prompt-file`, or `--turn-id`, it also exports `AFS_SESSION_DEFAULT_TURN_ID`
-and emits `user_prompt_submit`, `turn_started`, and `turn_completed` /
-`turn_failed` around the client invocation.
+hooks around the client run. By default it also hands the prompt artifact to
+the native client surface when available: Codex via
+`-c model_instructions_file=...`, Claude via `--append-system-prompt-file`,
+and Gemini via `GEMINI_SYSTEM_MD`. Set `AFS_CLIENT_NATIVE_PROMPT=0` or the
+client-specific `AFS_<CLIENT>_NATIVE_PROMPT=0` to disable that native handoff.
+When the wrapper is launched with `--prompt`, `--prompt-file`, or `--turn-id`,
+it also exports `AFS_SESSION_DEFAULT_TURN_ID` and emits
+`user_prompt_submit`, `turn_started`, and `turn_completed` / `turn_failed`
+around the client invocation.
 
 `session event` is the harness-side write path for prompt, turn, and task
 lifecycle. It appends durable `session` history events and updates the live

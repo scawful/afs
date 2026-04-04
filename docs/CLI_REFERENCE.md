@@ -194,9 +194,14 @@ and task lifecycle updates that should appear in those replays.
 `afs-session-notify` is the wrapper-friendly shell helper for child scripts: it
 fills in `--client`, `--session-id`, `--payload-file`, `--cwd`, and the current
 `--turn-id` from the exported session environment. `afs-client-session` wrappers
-also accept `--prompt`, `--prompt-file`, and `--turn-id`; when present, they
-emit `user_prompt_submit`, `turn_started`, and `turn_completed` /
-`turn_failed` around the client process.
+also export `AFS_SESSION_SYSTEM_PROMPT_*` and, by default, wire the prompt
+artifact into the native client entrypoint when one exists: Codex via
+`-c model_instructions_file=...`, Claude via `--append-system-prompt-file`,
+and Gemini via `GEMINI_SYSTEM_MD`. Set `AFS_CLIENT_NATIVE_PROMPT=0` or
+`AFS_<CLIENT>_NATIVE_PROMPT=0` to disable that handoff. They also accept
+`--prompt`, `--prompt-file`, and `--turn-id`; when present, they emit
+`user_prompt_submit`, `turn_started`, and `turn_completed` / `turn_failed`
+around the client process.
 
 ## Training
 

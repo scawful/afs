@@ -132,6 +132,7 @@ def _write_fake_client(path: Path, log_path: Path) -> Path:
         "    'AFS_SESSION_DEFAULT_TURN_ID': os.environ.get('AFS_SESSION_DEFAULT_TURN_ID'),\n"
         "    'AFS_ACTIVE_CONTEXT_ROOT': os.environ.get('AFS_ACTIVE_CONTEXT_ROOT'),\n"
         "    'AFS_SESSION_ID': os.environ.get('AFS_SESSION_ID'),\n"
+        "    'GEMINI_SYSTEM_MD': os.environ.get('GEMINI_SYSTEM_MD'),\n"
         "}\n"
         f"Path({str(log_path)!r}).write_text(json.dumps(payload), encoding='utf-8')\n",
         encoding="utf-8",
@@ -197,13 +198,18 @@ def _run_client_session(
 
     bootstrap_json = tmp_path / "bootstrap.json"
     bootstrap_markdown = tmp_path / "bootstrap.md"
-    pack_json = tmp_path / "session_pack_gemini.json"
-    pack_markdown = tmp_path / "session_pack_gemini.md"
-    skills_json = tmp_path / "session_skills_gemini.json"
-    prompt_json = tmp_path / "session_system_prompt_gemini.json"
-    prompt_text = tmp_path / "session_system_prompt_gemini.txt"
-    payload_json = tmp_path / "session_client_gemini.json"
+    pack_json = tmp_path / f"session_pack_{client_label}.json"
+    pack_markdown = tmp_path / f"session_pack_{client_label}.md"
+    skills_json = tmp_path / f"session_skills_{client_label}.json"
+    prompt_json = tmp_path / f"session_system_prompt_{client_label}.json"
+    prompt_text = tmp_path / f"session_system_prompt_{client_label}.txt"
+    payload_json = tmp_path / f"session_client_{client_label}.json"
     context_root = tmp_path / "context"
+    pack_json.write_text("{}", encoding="utf-8")
+    pack_markdown.write_text("# pack\n", encoding="utf-8")
+    skills_json.write_text("{}", encoding="utf-8")
+    prompt_json.write_text("{}", encoding="utf-8")
+    prompt_text.write_text(f"# {client_label} system prompt\n\nUse AFS context.\n", encoding="utf-8")
     payload_json.write_text("{}", encoding="utf-8")
     _write_fake_afs_cli(
         root,
@@ -396,6 +402,7 @@ def test_afs_client_session_uses_client_specific_allowed_roots(tmp_path: Path) -
     assert payload["AFS_SESSION_SYSTEM_PROMPT_TEXT"].endswith("session_system_prompt_gemini.txt")
     assert payload["AFS_SESSION_CLIENT_PAYLOAD_JSON"].endswith("session_client_gemini.json")
     assert payload["AFS_ACTIVE_CONTEXT_ROOT"].endswith("context")
+    assert payload["GEMINI_SYSTEM_MD"] == payload["AFS_SESSION_SYSTEM_PROMPT_TEXT"]
 
 
 def test_afs_client_session_preserves_explicit_allowed_roots(tmp_path: Path) -> None:
@@ -464,6 +471,59 @@ def test_afs_client_session_can_disable_session_pack_and_skill_match(tmp_path: P
     )
     assert "--no-session-pack" in prepare_call
     assert "--no-skills-match" in prepare_call
+
+
+def test_afs_client_session_injects_claude_prompt_file(tmp_path: Path) -> None:
+    payload = _run_client_session(
+        tmp_path,
+        client_label="claude",
+    )
+
+    assert payload["args"][:2] == [
+        "--append-system-prompt-file",
+        payload["AFS_SESSION_SYSTEM_PROMPT_TEXT"],
+    ]
+    assert payload["args"][2:] == ["ping"]
+
+
+def test_afs_client_session_respects_explicit_claude_prompt_args(tmp_path: Path) -> None:
+    payload = _run_client_session(
+        tmp_path,
+        client_label="claude",
+        client_args=["--system-prompt", "user override", "ping"],
+    )
+
+    assert payload["args"] == ["--system-prompt", "user override", "ping"]
+
+
+def test_afs_client_session_injects_codex_model_instructions_file(tmp_path: Path) -> None:
+    payload = _run_client_session(
+        tmp_path,
+        client_label="codex",
+    )
+
+    assert payload["args"][0] == "-c"
+    assert payload["args"][1] == f'model_instructions_file="{payload["AFS_SESSION_SYSTEM_PROMPT_TEXT"]}"'
+    assert payload["args"][2:] == ["ping"]
+
+
+def test_afs_client_session_respects_explicit_codex_prompt_config(tmp_path: Path) -> None:
+    payload = _run_client_session(
+        tmp_path,
+        client_label="codex",
+        client_args=["-c", 'model_instructions_file="/tmp/custom.md"', "ping"],
+    )
+
+    assert payload["args"] == ["-c", 'model_instructions_file="/tmp/custom.md"', "ping"]
+
+
+def test_afs_client_session_respects_explicit_gemini_system_prompt_env(tmp_path: Path) -> None:
+    payload = _run_client_session(
+        tmp_path,
+        env_overrides={"GEMINI_SYSTEM_MD": "/tmp/custom-system.md"},
+    )
+
+    assert payload["GEMINI_SYSTEM_MD"] == "/tmp/custom-system.md"
 
 
 def test_afs_session_notify_uses_session_env_defaults(tmp_path: Path) -> None:

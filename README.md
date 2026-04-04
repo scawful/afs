@@ -172,8 +172,9 @@ needs a stable contract for AFS context and lifecycle events.
 ./scripts/afs-session-notify task_progress --task-id bg-1 --summary "Indexing symbols"
 ```
 
-- `session prepare-client` writes the shared session payload together with cached bootstrap, pack, and skill-match artifacts.
-- Wrappers such as `afs-codex`, `afs-claude`, and `afs-gemini` export `AFS_SESSION_BOOTSTRAP_*`, `AFS_SESSION_PACK_*`, `AFS_SESSION_SKILLS_JSON`, and `AFS_SESSION_CLIENT_PAYLOAD_JSON`.
+- `session prepare-client` writes the shared session payload together with cached bootstrap, pack, skill-match, and system-prompt artifacts.
+- Wrappers such as `afs-codex`, `afs-claude`, and `afs-gemini` export `AFS_SESSION_BOOTSTRAP_*`, `AFS_SESSION_PACK_*`, `AFS_SESSION_SKILLS_JSON`, `AFS_SESSION_SYSTEM_PROMPT_*`, and `AFS_SESSION_CLIENT_PAYLOAD_JSON`.
+- Those wrappers now also hand the prompt artifact to the native client surface when one exists: Codex via `-c model_instructions_file=...`, Claude via `--append-system-prompt-file`, and Gemini via `GEMINI_SYSTEM_MD`. Set `AFS_CLIENT_NATIVE_PROMPT=0` or `AFS_<CLIENT>_NATIVE_PROMPT=0` to keep the handoff at env/artifact level only.
 - When launched with `--prompt`, `--prompt-file`, or `--turn-id`, wrappers also export `AFS_SESSION_EVENT_BIN` / `AFS_SESSION_DEFAULT_TURN_ID` and emit `user_prompt_submit`, `turn_started`, and `turn_completed` / `turn_failed` around the client process.
 - Child scripts can call `afs-session-notify` to append `task_*` lifecycle events without rebuilding session context.
 

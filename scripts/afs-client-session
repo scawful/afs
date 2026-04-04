@@ -165,6 +165,8 @@ CLIENT_WAIT_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_WAIT_FOR_AGENTS"
 WAIT_FOR_AGENTS="${WAIT_OVERRIDE:-${!CLIENT_WAIT_ENV_VAR:-${AFS_CLIENT_WAIT_FOR_AGENTS:-1}}}"
 CLIENT_MONITOR_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_MONITOR_AGENTS"
 MONITOR_AGENTS="${MONITOR_OVERRIDE:-${!CLIENT_MONITOR_ENV_VAR:-${AFS_CLIENT_MONITOR_AGENTS:-1}}}"
+CLIENT_NATIVE_PROMPT_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_NATIVE_PROMPT"
+NATIVE_PROMPT_ENABLED="${!CLIENT_NATIVE_PROMPT_ENV_VAR:-${AFS_CLIENT_NATIVE_PROMPT:-1}}"
 CLIENT_WAIT_TIMEOUT_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_WAIT_TIMEOUT_SECONDS"
 WAIT_TIMEOUT_SECONDS="${AFS_CLIENT_WAIT_TIMEOUT_SECONDS:-30}"
 if [ -n "${!CLIENT_WAIT_TIMEOUT_ENV_VAR:-}" ]; then
@@ -337,6 +339,88 @@ if ! command -v "${CLIENT_COMMAND}" >/dev/null 2>&1; then
   exit 127
 fi
 
+CLIENT_ARGS=("$@")
+CLIENT_EXTRA_ARGS=()
+
+client_args_has_flag() {
+  local flag="$1"
+  local arg
+  for arg in "${CLIENT_ARGS[@]}"; do
+    case "${arg}" in
+      "${flag}"|"${flag}"=*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+client_args_has_config_key() {
+  local key="$1"
+  local index=0
+  local arg=""
+  local value=""
+  while [ "${index}" -lt "${#CLIENT_ARGS[@]}" ]; do
+    arg="${CLIENT_ARGS[$index]}"
+    case "${arg}" in
+      -c|--config)
+        index=$((index + 1))
+        value="${CLIENT_ARGS[$index]:-}"
+        case "${value}" in
+          "${key}"=*) return 0 ;;
+        esac
+        ;;
+      -c"${key}"=*|--config="${key}"=*)
+        return 0
+        ;;
+    esac
+    index=$((index + 1))
+  done
+  return 1
+}
+
+toml_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "${value}"
+}
+
+apply_native_prompt_handoff() {
+  local prompt_file="${AFS_SESSION_SYSTEM_PROMPT_TEXT:-}"
+  if [ "${NATIVE_PROMPT_ENABLED}" = "0" ] || [ -z "${prompt_file}" ] || [ ! -r "${prompt_file}" ]; then
+    return 0
+  fi
+
+  case "${CLIENT_LABEL}" in
+    claude)
+      if client_args_has_flag "--system-prompt" || \
+         client_args_has_flag "--append-system-prompt" || \
+         client_args_has_flag "--system-prompt-file" || \
+         client_args_has_flag "--append-system-prompt-file"; then
+        return 0
+      fi
+      CLIENT_EXTRA_ARGS+=(--append-system-prompt-file "${prompt_file}")
+      echo "AFS native prompt hook (${CLIENT_LABEL}): --append-system-prompt-file ${prompt_file}" >&2
+      ;;
+    codex)
+      if client_args_has_config_key "instructions" || \
+         client_args_has_config_key "developer_instructions" || \
+         client_args_has_config_key "model_instructions_file" || \
+         client_args_has_config_key "experimental_instructions_file"; then
+        return 0
+      fi
+      CLIENT_EXTRA_ARGS+=(-c "model_instructions_file=$(toml_quote "${prompt_file}")")
+      echo "AFS native prompt hook (${CLIENT_LABEL}): model_instructions_file=${prompt_file}" >&2
+      ;;
+    gemini)
+      if [ -n "${GEMINI_SYSTEM_MD:-}" ]; then
+        return 0
+      fi
+      export GEMINI_SYSTEM_MD="${prompt_file}"
+      echo "AFS native prompt hook (${CLIENT_LABEL}): GEMINI_SYSTEM_MD=${prompt_file}" >&2
+      ;;
+  esac
+}
+
 MONITOR_PID=""
 cleanup_monitor() {
   if [ -n "${MONITOR_PID:-}" ]; then
@@ -415,8 +499,10 @@ if [ -n "${AFS_SESSION_DEFAULT_TURN_ID:-}" ]; then
   run_session_event turn_started --turn-id "${AFS_SESSION_DEFAULT_TURN_ID}"
 fi
 
+apply_native_prompt_handoff
+
 set +e
-"${CLIENT_COMMAND}" "$@"
+"${CLIENT_COMMAND}" "${CLIENT_EXTRA_ARGS[@]}" "${CLIENT_ARGS[@]}"
 CLIENT_STATUS=$?
 set -e
 
