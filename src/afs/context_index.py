@@ -1218,8 +1218,6 @@ def _iter_mount_entries(mount_root: Path):
         return
 
     for child in children:
-        if child.name == ".keep":
-            continue
         yield child, child.relative_to(mount_root).as_posix()
 
         if not child.is_dir():
@@ -1239,8 +1237,6 @@ def _iter_mount_entries(mount_root: Path):
             continue
 
         for nested in scan_root.rglob("*"):
-            if nested.name == ".keep":
-                continue
             nested_relative = nested.relative_to(scan_root).as_posix()
             if not nested_relative:
                 continue

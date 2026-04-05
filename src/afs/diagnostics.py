@@ -143,9 +143,6 @@ def check_context_root(config_path: Path | None = None) -> DiagnosticResult:
         def _fix_mounts() -> str:
             for _mount_type, mount_dir in missing:
                 mount_dir.mkdir(parents=True, exist_ok=True)
-                keep_file = mount_dir / ".keep"
-                if not keep_file.exists():
-                    keep_file.touch()
             manager._ensure_metadata(context_root, Path.cwd().resolve())
             manager._ensure_cognitive_scaffold(context_root)
             return (

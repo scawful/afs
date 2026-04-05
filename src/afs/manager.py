@@ -286,7 +286,7 @@ class AFSManager:
 
             mount_list: list[MountPoint] = []
             for item in subdir.iterdir():
-                if item.name in {".keep", self.METADATA_FILE}:
+                if item.name in {self.METADATA_FILE}:
                     continue
                 source = item.resolve(strict=False) if item.is_symlink() else item
                 provenance = metadata.get_mount_provenance(mount_type, item.name)
@@ -753,9 +753,6 @@ class AFSManager:
         for dir_config in self._directories:
             subdir = context_path / dir_config.name
             subdir.mkdir(parents=True, exist_ok=True)
-            keep = subdir / ".keep"
-            if not keep.exists():
-                keep.touch()
 
     def _sync_context_index_mount(self, context_path: Path, mount_type: MountType) -> None:
         try:

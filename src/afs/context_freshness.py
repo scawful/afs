@@ -77,8 +77,6 @@ def mount_freshness(
             for entry in mount_root.rglob("*"):
                 if not entry.is_file():
                     continue
-                if entry.name == ".keep":
-                    continue
                 file_count += 1
                 try:
                     mtime = entry.stat().st_mtime
@@ -206,8 +204,6 @@ def save_context_snapshot(
             for entry in mount_root.rglob("*"):
                 if not entry.is_file():
                     continue
-                if entry.name == ".keep":
-                    continue
                 try:
                     st = entry.stat()
                     rel = str(entry.relative_to(context_path))
@@ -334,8 +330,6 @@ def context_diff_since_session(
         try:
             for fentry in mount_root.rglob("*"):
                 if not fentry.is_file():
-                    continue
-                if fentry.name == ".keep":
                     continue
                 try:
                     st = fentry.stat()
