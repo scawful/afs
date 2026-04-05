@@ -1204,6 +1204,28 @@ class ContextSQLiteIndex:
         return normalized
 
 
+_SKIP_DIRS = {
+    "__pycache__",
+    "node_modules",
+    ".venv",
+    "venv",
+    ".tox",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".pytest_cache",
+    ".egg-info",
+    "CMakeFiles",
+    "cmake-build-debug",
+    "cmake-build-release",
+    ".cmake",
+    ".git",
+    ".hg",
+    ".svn",
+    "dist",
+    ".DS_Store",
+}
+
+
 def _is_text_candidate(path: Path) -> bool:
     suffix = path.suffix.lower()
     if suffix in _TEXT_SUFFIXES:
@@ -1218,6 +1240,8 @@ def _iter_mount_entries(mount_root: Path):
         return
 
     for child in children:
+        if child.name in _SKIP_DIRS:
+            continue
         yield child, child.relative_to(mount_root).as_posix()
 
         if not child.is_dir():
@@ -1236,7 +1260,7 @@ def _iter_mount_entries(mount_root: Path):
         if not scan_root.exists() or not scan_root.is_dir():
             continue
 
-        for nested in scan_root.rglob("*"):
+        for nested in _walk_skipping(scan_root):
             nested_relative = nested.relative_to(scan_root).as_posix()
             if not nested_relative:
                 continue
@@ -1244,6 +1268,20 @@ def _iter_mount_entries(mount_root: Path):
                 yield nested, f"{prefix}/{nested_relative}"
             else:
                 yield nested, nested.relative_to(mount_root).as_posix()
+
+
+def _walk_skipping(root: Path):
+    """Walk directory tree, skipping known junk directories."""
+    try:
+        children = sorted(root.iterdir(), key=lambda item: item.name)
+    except OSError:
+        return
+    for child in children:
+        if child.name in _SKIP_DIRS:
+            continue
+        yield child
+        if child.is_dir() and not child.is_symlink():
+            yield from _walk_skipping(child)
 
 
 def count_mount_files(mount_root: Path) -> int:
