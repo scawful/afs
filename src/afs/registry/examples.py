@@ -167,7 +167,7 @@ def example_full_workflow() -> None:
 
     # Step 1: Register initial training
     print("Step 1: Registering initial model...")
-    v1 = registry.register_model(
+    registry.register_model(
         model_name="oracle",
         version="v1",
         base_model="Qwen2.5-Coder-7B",
@@ -197,7 +197,7 @@ def example_full_workflow() -> None:
 
     # Step 4: Fine-tune for new task
     print("Step 4: Fine-tuning for new task...")
-    v2 = registry.register_model(
+    registry.register_model(
         model_name="oracle",
         version="v2",
         base_model="oracle:v1",

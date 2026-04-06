@@ -11,7 +11,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .base import AgentResult, build_base_parser, configure_logging, emit_result, emit_progress, now_iso
+from .base import (
+    AgentResult,
+    build_base_parser,
+    configure_logging,
+    emit_progress,
+    emit_result,
+    now_iso,
+)
 from .guardrails import GuardrailConfig, GuardrailedAgent
 
 logger = logging.getLogger(__name__)
@@ -94,8 +101,8 @@ def _analyze_repo(repo_path: Path) -> RepoHealth | None:
     status_output = _run_git(repo_path, "status", "--porcelain")
     if status_output is not None:
         lines = [line for line in status_output.splitlines() if line.strip()]
-        health.uncommitted_files = sum(1 for l in lines if not l.startswith("??"))
-        health.untracked_files = sum(1 for l in lines if l.startswith("??"))
+        health.uncommitted_files = sum(1 for line in lines if not line.startswith("??"))
+        health.untracked_files = sum(1 for line in lines if line.startswith("??"))
         if health.uncommitted_files > 0:
             health.status = "dirty"
             health.notes.append(f"{health.uncommitted_files} uncommitted files")

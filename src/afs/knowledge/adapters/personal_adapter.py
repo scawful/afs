@@ -73,7 +73,7 @@ class PersonalKnowledgeGraph(KnowledgeGraph):
         # Get all fact nodes
         for node in self.find_nodes(node_type=PersonalNodeType.FACT):
             # Check for direct contradictions (simplified)
-            fact = node.properties.get("value", "")
+            node.properties.get("value", "")
             negation = node.properties.get("negation", "")
             if negation and negation.lower() in output.lower():
                 return False

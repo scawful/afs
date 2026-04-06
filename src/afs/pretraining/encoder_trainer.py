@@ -72,8 +72,8 @@ class EncoderPretrainer:
         try:
             from transformers import AutoModelForMaskedLM
             self._model = AutoModelForMaskedLM.from_pretrained(self.config.model_name)
-        except ImportError:
-            raise ImportError("transformers required for pre-training")
+        except ImportError as exc:
+            raise ImportError("transformers required for pre-training") from exc
 
         return self._model
 
@@ -134,8 +134,8 @@ class EncoderPretrainer:
         try:
             import torch
             from transformers import Trainer, TrainingArguments
-        except ImportError:
-            raise ImportError("transformers and torch required for pre-training")
+        except ImportError as exc:
+            raise ImportError("transformers and torch required for pre-training") from exc
 
         model = self._load_model()
         tokenizer = self._load_tokenizer()
@@ -210,8 +210,8 @@ class EncoderPretrainer:
         try:
             import numpy as np
             import torch
-        except ImportError:
-            raise ImportError("torch and numpy required for embeddings")
+        except ImportError as exc:
+            raise ImportError("torch and numpy required for embeddings") from exc
 
         model = self._load_model()
         tokenizer = self._load_tokenizer()

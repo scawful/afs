@@ -155,7 +155,7 @@ class ComparisonResult:
             return
 
         winner = max(scores, key=scores.get)
-        max_score = scores[winner]
+        scores[winner]
         scores_list = sorted(scores.values(), reverse=True)
 
         # Confidence = how much winner beats 2nd place

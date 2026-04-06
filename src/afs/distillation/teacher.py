@@ -160,8 +160,8 @@ class OpenAITeacher(TeacherModel):
                 from openai import AsyncOpenAI
                 api_key = self.config.api_key or os.getenv("OPENAI_API_KEY")
                 self._client = AsyncOpenAI(api_key=api_key)
-            except ImportError:
-                raise ImportError("openai package required: pip install openai")
+            except ImportError as exc:
+                raise ImportError("openai package required: pip install openai") from exc
         return self._client
 
     async def generate(
@@ -232,8 +232,8 @@ class GoogleTeacher(TeacherModel):
                 from google import genai
                 api_key = self.config.api_key or os.getenv("GEMINI_API_KEY")
                 self._client = genai.Client(api_key=api_key)
-            except ImportError:
-                raise ImportError("google-genai package required: pip install google-genai")
+            except ImportError as exc:
+                raise ImportError("google-genai package required: pip install google-genai") from exc
         return self._client
 
     async def generate(
@@ -306,8 +306,8 @@ class AnthropicTeacher(TeacherModel):
                 from anthropic import AsyncAnthropic
                 api_key = self.config.api_key or os.getenv("CLAUDE_API_KEY")
                 self._client = AsyncAnthropic(api_key=api_key)
-            except ImportError:
-                raise ImportError("anthropic package required: pip install anthropic")
+            except ImportError as exc:
+                raise ImportError("anthropic package required: pip install anthropic") from exc
         return self._client
 
     async def generate(
