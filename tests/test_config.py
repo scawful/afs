@@ -77,7 +77,7 @@ def test_load_config_model_parses_profiles_extensions_hooks(tmp_path) -> None:
         "active_profile = \"work\"\n"
         "auto_apply = true\n\n"
         "[profiles.work]\n"
-        "knowledge_mounts = [\"~/Journal/logs\"]\n"
+        "knowledge_mounts = [\"~/work/logs\"]\n"
         "skill_roots = [\"~/skills\"]\n"
         "model_registries = [\"~/registry/chat_registry.toml\"]\n"
         "enabled_extensions = [\"workspace_adapter\"]\n"

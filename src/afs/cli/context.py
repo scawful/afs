@@ -817,10 +817,10 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 
     query_epilog = (
         "Examples:\n"
-        "  afs context query \"startup guidance\" --path ~/src/lab/afs\n"
-        "  afs context query sqlite --path ~/src/lab/afs --mount scratchpad --mount knowledge\n"
-        "  afs context query sqlite --path ~/src/lab/afs --prefix docs/sqlite --limit 10 --include-content --json\n"
-        "  afs query sqlite --path ~/src/lab/afs --mount knowledge --prefix public/\n"
+        "  afs context query \"startup guidance\" --path .\n"
+        "  afs context query sqlite --path . --mount scratchpad --mount knowledge\n"
+        "  afs context query sqlite --path . --prefix docs/sqlite --limit 10 --include-content --json\n"
+        "  afs query sqlite --path . --mount knowledge --prefix public/\n"
         "\n"
         "Output fields:\n"
         "  count          number of indexed matches returned\n"

@@ -23,9 +23,9 @@ policies = []
 
 [profiles.work]
 inherits = ["default"]
-knowledge_mounts = ["~/Journal/logs"]
-skill_roots = ["~/src/lab/afs-ext/skills"]
-model_registries = ["~/src/lab/afs-ext/config/chat_registry.toml"]
+knowledge_mounts = ["~/work/logs"]
+skill_roots = ["~/work/skills"]
+model_registries = ["~/work/config/chat_registry.toml"]
 enabled_extensions = ["workspace_adapter"]
 policies = []
 

@@ -99,10 +99,12 @@ def _fetch_tasks() -> list[dict[str, Any]]:
 
 def _latest_weekly_carryover() -> list[str]:
     """Parse carry-over items from the most recent weekly review."""
-    weekly_dir = Path.home() / "Journal" / "weekly"
+    from ..agents.journal_agent import default_weekly_dir
+
+    weekly_dir = default_weekly_dir()
     if not weekly_dir.is_dir():
         return []
-    files = sorted(weekly_dir.glob("2026-W*.org"), reverse=True)
+    files = sorted(weekly_dir.glob("????-W*.org"), reverse=True)
     if not files:
         return []
     items = []

@@ -2,9 +2,9 @@ name: AFS CI/CD Pipeline
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, development, features ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, development, features ]
 
 jobs:
   test:

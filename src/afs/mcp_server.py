@@ -3232,6 +3232,33 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                 },
             ],
         },
+        {
+            "name": "afs.personal.load",
+            "description": (
+                "Load personal context for a personalized conversation. Opt-in: "
+                "requires an explicit mode declared in the manifest.toml of the "
+                "personal context root. The default root is "
+                "$AFS_PERSONAL_CONTEXT_ROOT or ~/.config/afs/personal."
+            ),
+            "arguments": [
+                {
+                    "name": "mode",
+                    "description": (
+                        "Conversation mode declared in manifest.toml (e.g. "
+                        "claudia, advice, checkin)."
+                    ),
+                    "required": True,
+                },
+                {
+                    "name": "context_root",
+                    "description": (
+                        "Override personal context root. Defaults to "
+                        "$AFS_PERSONAL_CONTEXT_ROOT or ~/.config/afs/personal."
+                    ),
+                    "required": False,
+                },
+            ],
+        },
     ]
     if registry is not None:
         prompts.extend(registry.prompt_specs())
@@ -3426,6 +3453,19 @@ def _get_prompt(
                     lines.append(f"- {name_str}")
 
         return [{"role": "user", "content": {"type": "text", "text": "\n".join(lines)}}]
+
+    if name == "afs.personal.load":
+        from .personal_context import render_personal_context
+
+        mode_arg = arguments.get("mode", "")
+        if not isinstance(mode_arg, str) or not mode_arg.strip():
+            raise ValueError("mode argument is required")
+        root_arg = arguments.get("context_root")
+        context_root = (
+            Path(str(root_arg)).expanduser() if isinstance(root_arg, str) and root_arg.strip() else None
+        )
+        text = render_personal_context(mode_arg.strip(), context_root=context_root)
+        return [{"role": "user", "content": {"type": "text", "text": text}}]
 
     if registry is not None and name in registry.prompts:
         return registry.get_prompt(name, arguments, manager)

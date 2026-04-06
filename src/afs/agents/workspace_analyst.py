@@ -26,8 +26,9 @@ logger = logging.getLogger(__name__)
 
 AGENT_NAME = "workspace-analyst"
 AGENT_DESCRIPTION = (
-    "Periodic codebase health analysis across ~/src/. Checks git drift, "
-    "stale branches, uncommitted changes, build status, and dependency freshness."
+    "Periodic codebase health analysis across configured workspace roots. "
+    "Checks git drift, stale branches, uncommitted changes, build status, "
+    "and dependency freshness."
 )
 
 AGENT_CAPABILITIES = {
@@ -37,11 +38,35 @@ AGENT_CAPABILITIES = {
     "description": "Read-only workspace health analyzer with scratchpad write access",
 }
 
-# Directories to scan — matches AFS workspace_directories config
-DEFAULT_SCAN_ROOTS = [
-    Path.home() / "src" / "lab",
-    Path.home() / "src" / "hobby",
-]
+
+def _resolve_default_scan_roots() -> list[Path]:
+    """Resolve scan roots from AFS config or env, with no hardcoded fallback.
+
+    Order of precedence:
+        1. ``AFS_WORKSPACE_ROOTS`` env var (colon-separated paths)
+        2. ``general.workspace_directories`` from the loaded AFS config
+        3. Empty list — caller must pass ``--scan-roots``
+    """
+    import os as _os
+
+    env_roots = _os.environ.get("AFS_WORKSPACE_ROOTS")
+    if env_roots:
+        return [Path(p).expanduser() for p in env_roots.split(":") if p.strip()]
+
+    try:
+        from ..config import load_config_model
+
+        model, _ = load_config_model()
+        ws_dirs = getattr(model.general, "workspace_directories", []) or []
+        roots = [getattr(ws, "path", None) for ws in ws_dirs]
+        return [Path(p).expanduser() for p in roots if p]
+    except Exception:  # noqa: BLE001 — config is best-effort
+        return []
+
+
+# Backwards-compatible alias; resolved once at import time. Prefer
+# ``_resolve_default_scan_roots()`` if you need fresh env/config lookup.
+DEFAULT_SCAN_ROOTS = _resolve_default_scan_roots()
 
 
 @dataclass
@@ -203,11 +228,17 @@ def _write_report(
 
 
 def build_parser():
-    parser = build_base_parser("Analyze workspace health across ~/src/.")
+    parser = build_base_parser(
+        "Analyze workspace health across configured workspace roots."
+    )
     parser.add_argument(
         "--scan-roots",
         nargs="*",
-        help="Directories to scan for git repos (default: ~/src/lab, ~/src/hobby).",
+        help=(
+            "Directories to scan for git repos. Defaults to "
+            "$AFS_WORKSPACE_ROOTS (colon-separated) or "
+            "general.workspace_directories from afs.toml."
+        ),
     )
     parser.add_argument(
         "--max-depth",
@@ -217,8 +248,11 @@ def build_parser():
     )
     parser.add_argument(
         "--context-root",
-        default=str(Path.home() / "src" / "lab" / ".context"),
-        help="Context root for writing reports.",
+        default=None,
+        help=(
+            "Context root for writing reports. Defaults to "
+            "general.context_root from afs.toml or ~/.context."
+        ),
     )
     return parser
 
@@ -282,11 +316,31 @@ def run(args) -> int:
 
     guard = GuardrailedAgent(AGENT_NAME, config=GuardrailConfig(task_tier="background"))
 
-    # Resolve scan roots
+    # Resolve scan roots — re-resolve from env/config each invocation so the
+    # CLI honours updated config without a process restart.
     if args.scan_roots:
         scan_roots = [Path(p).expanduser() for p in args.scan_roots]
     else:
-        scan_roots = list(DEFAULT_SCAN_ROOTS)
+        scan_roots = _resolve_default_scan_roots()
+
+    if not scan_roots:
+        logger.warning(
+            "No scan roots configured. Pass --scan-roots, set "
+            "AFS_WORKSPACE_ROOTS, or add general.workspace_directories to "
+            "afs.toml."
+        )
+        result = AgentResult(
+            name=AGENT_NAME,
+            status="warn",
+            started_at=started_at,
+            finished_at=now_iso(),
+            duration_seconds=time.time() - start,
+            metrics={},
+            notes=["no scan roots configured"],
+            payload={},
+        )
+        emit_result(result, output_path=None, force_stdout=False, pretty=False)
+        return 0
 
     emit_progress(AGENT_NAME, "scan_start", f"Scanning {len(scan_roots)} roots")
 
@@ -323,8 +377,17 @@ def run(args) -> int:
     if drift_notes:
         logger.info("Drift detected: %s", "; ".join(drift_notes))
 
-    # Write report
-    context_root = Path(args.context_root).expanduser()
+    # Write report — resolve context_root from CLI, then config, then default.
+    if args.context_root:
+        context_root = Path(args.context_root).expanduser()
+    else:
+        try:
+            from ..config import load_config_model
+
+            model, _ = load_config_model()
+            context_root = Path(model.general.context_root).expanduser()
+        except Exception:  # noqa: BLE001
+            context_root = Path.home() / ".context"
     report_path = _write_report(results, context_root / "scratchpad" / "afs_agents")
 
     emit_progress(AGENT_NAME, "scan_complete", f"Analyzed {len(results)} repos")

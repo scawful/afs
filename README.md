@@ -27,6 +27,11 @@ Use the wrapper script for reliable agent invocation (sets `AFS_ROOT` and `PYTHO
 ./scripts/afs health                  # Health check
 ```
 
+## Branching
+
+AFS uses a staged integration flow across `features`, `development`, and `main`.
+See `docs/development.md` for PR target and promotion guidance.
+
 ## Core Concepts
 
 **Context Mounting** — Structured `.context/` directories with typed mounts (knowledge, skills, scratchpad, memory, tasks) that agents can read and write.
@@ -144,7 +149,7 @@ See [docs/MCP_SERVER.md](docs/MCP_SERVER.md) for configuration and tool referenc
 | `agent-supervisor` | Lifecycle management, dependency graph, restart with backoff |
 | `context-warm` | Background context warming and embedding indexing |
 | `mission-runner` | TOML mission definitions with OODA execution phases |
-| `journal-agent` | Daily templates, stale-TODO alerting, carry-forward |
+| `journal-agent` | Draft hybrid weekly reviews from thoughts and active tasks |
 | `workspace-analyst` | Codebase health, git drift, dependency scanning |
 | `gemini-workspace-brief` | Gemini-powered workspace briefings |
 | `dashboard-export` | Data export for status bar and dashboard surfaces |

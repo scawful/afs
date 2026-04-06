@@ -33,6 +33,7 @@ from . import (
     gemini,
     gws_cli,
     mcp,
+    personal,
     profile,
     review,
     skills,
@@ -157,6 +158,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
 
     # Register profile switching commands
     profile.register_parsers(subparsers)
+
+    # Register personal context loader
+    personal.register_parsers(subparsers)
 
     # Register briefing command
     briefing.register_parsers(subparsers)

@@ -1,0 +1,41 @@
+name: Branch Policy
+
+on:
+  pull_request:
+    branches: [ main, development, features ]
+
+jobs:
+  enforce-branch-flow:
+    name: Enforce staged branch flow
+    runs-on: ubuntu-latest
+    steps:
+    - name: Validate PR base/head
+      env:
+        PR_BASE: ${{ github.event.pull_request.base.ref }}
+        PR_HEAD: ${{ github.event.pull_request.head.ref }}
+      run: |
+        echo "Validating PR flow: ${PR_HEAD} -> ${PR_BASE}"
+        case "${PR_BASE}" in
+          main)
+            if [ "${PR_HEAD}" != "development" ]; then
+              echo "Invalid branch flow: only development -> main is allowed."
+              exit 1
+            fi
+            ;;
+          development)
+            if [ "${PR_HEAD}" != "features" ]; then
+              echo "Invalid branch flow: only features -> development is allowed."
+              exit 1
+            fi
+            ;;
+          features)
+            if [ "${PR_HEAD}" = "main" ] || [ "${PR_HEAD}" = "development" ] || [ "${PR_HEAD}" = "features" ]; then
+              echo "Invalid branch flow: features must receive topic branches, not main/development/features."
+              exit 1
+            fi
+            ;;
+          *)
+            echo "Base branch ${PR_BASE} is outside enforced flow; no policy check applied."
+            ;;
+        esac
+        echo "Branch flow policy passed."
