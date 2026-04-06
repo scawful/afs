@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from .context_freshness import (
-    ContextDiffReport,
     MountFreshness,
     context_diff_since_session,
     mount_freshness,

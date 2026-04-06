@@ -10,7 +10,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .base import AgentResult, build_base_parser, configure_logging, emit_result, emit_progress, now_iso
+from .base import (
+    AgentResult,
+    build_base_parser,
+    configure_logging,
+    emit_progress,
+    emit_result,
+    now_iso,
+)
 from .guardrails import GuardrailConfig, GuardrailedAgent
 
 # Late imports to avoid circular deps — resolved at call sites
@@ -136,8 +143,8 @@ def load_mission(path: Path) -> dict[str, Any]:
     except ImportError:
         try:
             import tomli as tomllib  # type: ignore[no-redef]
-        except ImportError:
-            raise RuntimeError("No TOML parser available (need Python 3.11+ or tomli)")
+        except ImportError as exc:
+            raise RuntimeError("No TOML parser available (need Python 3.11+ or tomli)") from exc
     with path.open("rb") as f:
         return tomllib.load(f)
 
@@ -269,8 +276,8 @@ def _phase_observe(
 
     # 3. Recent history events
     try:
-        from ..history import query_events
         from ..context_paths import resolve_mount_root
+        from ..history import query_events
         from ..models import MountType
         history_root = resolve_mount_root(context_path, MountType.HISTORY)
         if history_root.exists():

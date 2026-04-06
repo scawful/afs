@@ -25,7 +25,7 @@ class LeaderboardEntry:
     version: str = "1.0"
 
     @classmethod
-    def from_result(cls, result: "BenchmarkResult") -> LeaderboardEntry:
+    def from_result(cls, result: BenchmarkResult) -> LeaderboardEntry:
         """Create from a BenchmarkResult."""
         return cls(
             model=result.model,
@@ -129,7 +129,7 @@ class LeaderboardManager:
         with open(self.history_path, "a") as f:
             f.write(json.dumps(entry.to_dict()) + "\n")
 
-    def update(self, result: "BenchmarkResult") -> bool:
+    def update(self, result: BenchmarkResult) -> bool:
         """Update leaderboard with new result.
 
         Returns True if this is a new best for the model/domain.

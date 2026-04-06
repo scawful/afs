@@ -112,8 +112,8 @@ class MLXBackend(ModelBackend):
 
             self._model, self._tokenizer = load(str(self.model_path))
             self._generate_fn = generate
-        except ImportError:
-            raise ImportError("mlx-lm not installed. Install with: pip install mlx-lm")
+        except ImportError as exc:
+            raise ImportError("mlx-lm not installed. Install with: pip install mlx-lm") from exc
 
     def generate(
         self,
@@ -163,8 +163,8 @@ class LlamaCppBackend(ModelBackend):
                 n_ctx=4096,
                 n_gpu_layers=-1,  # Use all GPU layers
             )
-        except ImportError:
-            raise ImportError("llama-cpp-python not installed. Install with: pip install llama-cpp-python")
+        except ImportError as exc:
+            raise ImportError("llama-cpp-python not installed. Install with: pip install llama-cpp-python") from exc
 
     def generate(
         self,
@@ -216,8 +216,8 @@ class HuggingFaceBackend(ModelBackend):
                 torch_dtype=torch.float16,
                 device_map="auto",
             )
-        except ImportError:
-            raise ImportError("transformers not installed. Install with: pip install transformers torch")
+        except ImportError as exc:
+            raise ImportError("transformers not installed. Install with: pip install transformers torch") from exc
 
     def generate(
         self,
@@ -505,7 +505,7 @@ class ModelGenerator(BaseGenerator):
                     return sample
 
             except Exception as e:
-                sample_metadata = {"error": str(e), "attempt": attempt + 1}
+                {"error": str(e), "attempt": attempt + 1}
                 continue
 
         return None

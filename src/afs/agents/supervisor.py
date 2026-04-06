@@ -706,9 +706,9 @@ class AgentSupervisor:
         # Inject context snapshot so the agent starts with index/memory/event awareness
         try:
             from ..agent_context import (
+                AGENT_CONTEXT_ENV,
                 build_agent_context_snapshot,
                 write_agent_context_snapshot,
-                AGENT_CONTEXT_ENV,
             )
 
             context_root = self._context_root_path()
@@ -725,18 +725,12 @@ class AgentSupervisor:
         if agent_config is None:
             return env
 
-        has_config_sandbox = (
-            agent_config.allowed_mounts
-            or agent_config.allowed_tools
-            or agent_config.workspace_isolated
-        )
-        has_capabilities = False
         agent_spec = None
         try:
             from . import get_agent
             agent_spec = get_agent(name)
             if agent_spec and agent_spec.capabilities:
-                has_capabilities = True
+                pass
         except Exception:
             pass
         if agent_config.allowed_mounts:

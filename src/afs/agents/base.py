@@ -18,7 +18,6 @@ from ..manager import AFSManager
 from ..models import ContextRoot
 from ..schema import AFSConfig
 
-
 VALID_STATUSES: frozenset[str] = frozenset({"ok", "warning", "error", "skipped", "timeout"})
 
 
