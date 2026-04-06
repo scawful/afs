@@ -5,9 +5,9 @@ generic here; refer to workspace docs for specifics.
 
 ## Source of Truth
 
-- Workspace infrastructure: `~/src/docs/NERV_INFRASTRUCTURE.md`
-- Source universe sync: `~/src/docs/SRC_UNIVERSE_NETWORK.md`
-- Windows workflow: `~/src/lab/afs-ext/docs/WINDOWS_WORKFLOW.md`
+- Workspace infrastructure: `<workspace-docs-root>/NERV_INFRASTRUCTURE.md`
+- Source universe sync: `<workspace-docs-root>/SRC_UNIVERSE_NETWORK.md`
+- Windows workflow: `<afs-ext-root>/docs/WINDOWS_WORKFLOW.md`
 
 ## Codenames (no IPs)
 

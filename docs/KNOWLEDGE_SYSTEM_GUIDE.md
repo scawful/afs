@@ -39,7 +39,7 @@ knowledge_mounts = ["$AFS_ROOT-scawful/knowledge", "~/.context/knowledge"]
    ```markdown
    # Title — Short Description
 
-   **Path**: `~/src/hobby/project/`
+   **Path**: `<workspace-root>/project/`
    **Stage**: Alpha | **Language**: 65816 ASM | **Build**: Asar
 
    Brief description paragraph.
@@ -125,15 +125,15 @@ If you add a new doc, wire it into at least path 1 (CLAUDE.md) and path 4
 | File | Location | What to update |
 |------|----------|----------------|
 | `INDEX.md` | `~/.context/knowledge/` | "By Task" + "By Directory" tables |
-| `CLAUDE.md` | `~/src/hobby/oracle-of-secrets/` | "Reference Knowledge" table |
-| `CLAUDE.md` | `~/src/hobby/yaze/` | "Reference Knowledge" table |
-| `CONTEXT_INDEX.md` | `~/src/hobby/oracle-of-secrets/.context/` | "Global Knowledge Base" + domain tables |
-| `mesen2-oos-debugging/SKILL.md` | `~/src/lab/afs-ext/skills/` | "Knowledge References" |
-| `alttp-disasm-labels/SKILL.md` | `~/src/lab/afs-ext/skills/` | "Knowledge References" |
-| `hyrule-navigator/SKILL.md` | `~/src/lab/afs-ext/skills/` | "Knowledge References" |
-| `zelda-model-manager/SKILL.md` | `~/src/lab/afs-ext/skills/` | "Knowledge References" |
-| `echo-persona/SKILL.md` | `~/src/lab/afs-ext/skills/` | "Knowledge References" |
-| `model-training-expert/SKILL.md` | `~/src/lab/afs-ext/skills/` | "Knowledge References" |
+| `CLAUDE.md` | `<oracle-root>/` | "Reference Knowledge" table |
+| `CLAUDE.md` | `<yaze-root>/` | "Reference Knowledge" table |
+| `CONTEXT_INDEX.md` | `<oracle-root>/.context/` | "Global Knowledge Base" + domain tables |
+| `mesen2-oos-debugging/SKILL.md` | `<afs-ext-root>/skills/` | "Knowledge References" |
+| `alttp-disasm-labels/SKILL.md` | `<afs-ext-root>/skills/` | "Knowledge References" |
+| `hyrule-navigator/SKILL.md` | `<afs-ext-root>/skills/` | "Knowledge References" |
+| `zelda-model-manager/SKILL.md` | `<afs-ext-root>/skills/` | "Knowledge References" |
+| `echo-persona/SKILL.md` | `<afs-ext-root>/skills/` | "Knowledge References" |
+| `model-training-expert/SKILL.md` | `<afs-ext-root>/skills/` | "Knowledge References" |
 
 ---
 
@@ -207,13 +207,13 @@ whether you're running `index` or `search`.
 ### Prerequisites
 
 - Python 3.10+
-- AFS installed: `pip install -e .` from `~/src/lab/afs/`
+- AFS installed: `pip install -e .` from `<afs-root>/`
 - Google API key with Gemini access
 
 ### Step 1: Install AFS with Gemini Support
 
 ```bash
-cd ~/src/lab/afs
+cd <afs-root>
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[gemini]"

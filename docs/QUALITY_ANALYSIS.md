@@ -12,5 +12,5 @@ Core afs now focuses on Agentic File System platform primitives:
 
 For model-training, persona, and domain-specific workflows, use:
 
-- ~/src/lab/afs-ext/docs/
+- <afs-ext-root>/docs/
 - docs/SCAWFUL_MIGRATION.md

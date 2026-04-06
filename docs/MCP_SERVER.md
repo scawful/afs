@@ -9,7 +9,7 @@ allowed-root guardrails on all file and context operations.
 ## Run
 
 ```bash
-~/src/lab/afs/scripts/afs mcp serve
+<afs-root>/scripts/afs mcp serve
 # or, from an environment where `afs` is installed
 afs mcp serve
 # or
@@ -38,7 +38,7 @@ user-level and project-level Gemini configs.
 Manual alternative:
 
 ```bash
-gemini mcp add afs $AFS_ROOT/scripts/afs mcp serve
+gemini mcp add afs <afs-root>/scripts/afs mcp serve
 ```
 
 If Gemini is running inside an environment where `afs` is already installed,
@@ -413,12 +413,12 @@ rebuilds the index.
 Gemini background brief surfaces:
 
 ```bash
-~/src/lab/afs/scripts/afs agents run gemini-workspace-brief --stdout
-~/src/lab/afs/scripts/afs agents ps --all
-~/src/lab/afs/scripts/afs services start gemini-workspace-brief
-~/src/lab/afs/scripts/afs services start agent-supervisor
-~/src/lab/afs/scripts/afs services start context-warm
-~/src/lab/afs/scripts/afs services start context-watch
+<afs-root>/scripts/afs agents run gemini-workspace-brief --stdout
+<afs-root>/scripts/afs agents ps --all
+<afs-root>/scripts/afs services start gemini-workspace-brief
+<afs-root>/scripts/afs services start agent-supervisor
+<afs-root>/scripts/afs services start context-warm
+<afs-root>/scripts/afs services start context-watch
 ```
 
 The brief agent requires `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
@@ -426,9 +426,9 @@ The brief agent requires `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
 For interactive clients, prefer the launcher wrappers:
 
 ```bash
-~/src/lab/afs/scripts/afs-gemini
-~/src/lab/afs/scripts/afs-claude
-~/src/lab/afs/scripts/afs-codex
+<afs-root>/scripts/afs-gemini
+<afs-root>/scripts/afs-claude
+<afs-root>/scripts/afs-codex
 ```
 
 They find the nearest `afs.toml`, refresh the session bootstrap artifact, and
@@ -461,8 +461,8 @@ user config, start them with `--config`. The service layer preserves that
 explicit `AFS_CONFIG_PATH` when spawning the background process:
 
 ```bash
-~/src/lab/afs/scripts/afs services start --config /path/to/afs.toml context-warm
-~/src/lab/afs/scripts/afs services start --config /path/to/afs.toml agent-supervisor
+<afs-root>/scripts/afs services start --config /path/to/afs.toml context-warm
+<afs-root>/scripts/afs services start --config /path/to/afs.toml agent-supervisor
 ```
 
 `afs health` now reports AFS MCP registration across Gemini, Claude, and Codex

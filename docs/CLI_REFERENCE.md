@@ -73,10 +73,10 @@ Indexed query usage:
 Examples:
 
 ```bash
-./scripts/afs query sqlite --path ~/src/lab/afs
-./scripts/afs context query sqlite --path ~/src/lab/afs --mount scratchpad --mount knowledge
-./scripts/afs context query sqlite --path ~/src/lab/afs --prefix docs/sqlite/ --limit 10 --include-content --json
-./scripts/afs index rebuild --path ~/src/lab/afs --mount scratchpad
+./scripts/afs query sqlite --path "<afs-root>"
+./scripts/afs context query sqlite --path "<afs-root>" --mount scratchpad --mount knowledge
+./scripts/afs context query sqlite --path "<afs-root>" --prefix docs/sqlite/ --limit 10 --include-content --json
+./scripts/afs index rebuild --path "<afs-root>" --mount scratchpad
 ```
 
 ## Review
@@ -117,20 +117,17 @@ metadata-first history events, writes durable summaries into
 ## Journal Agent
 
 ```bash
-# Daily routine: carry yesterday's TODOs into tomorrow's template + stale alert
+# Draft this week's review
 ./scripts/afs agents run journal-agent
 
-# Generate tomorrow's entry only
-./scripts/afs agents run journal-agent -- --task template-gen
+# Draft a specific week (overwrite existing AI draft section)
+./scripts/afs agents run journal-agent -- --week 2026-W11 --overwrite
 
-# Check for stuck TODOs (3+ consecutive days unchecked)
-./scripts/afs agents run journal-agent -- --task stale-check --pretty
-
-# Draft this week's review
-./scripts/afs agents run journal-agent -- --task weekly-review
-
-# Draft a specific past week (overwrite)
-./scripts/afs agents run journal-agent -- --task weekly-review --week 2026-W11 --overwrite
+# Override paths explicitly
+./scripts/afs agents run journal-agent -- \
+  --thoughts ~/notes/thoughts.org \
+  --active-tasks ~/notes/tasks/active.md \
+  --weekly-dir ~/notes/weekly
 ```
 
 See `docs/JOURNAL_AGENT.md` for full argument reference and JSON output shape.
@@ -351,7 +348,7 @@ indexing, `RETRIEVAL_QUERY` for search queries (asymmetric retrieval). Override 
 ./scripts/afs gemini status --json
 ./scripts/afs gemini status --skip-ping               # skip live embedding test
 ./scripts/afs gemini status --project afs             # inspect one project subtree
-./scripts/afs gemini status --context-root ~/src/lab/.context
+./scripts/afs gemini status --context-root "<workspace-root>/.context"
 
 # Generate context from knowledge base
 ./scripts/afs gemini context                           # dump full INDEX.md
@@ -514,7 +511,7 @@ config:
 
 ```toml
 [services.services.context-watch]
-context_filters = ["~/src/lab"]
+context_filters = ["~/workspaces"]
 ```
 
 Codex MCP config:
