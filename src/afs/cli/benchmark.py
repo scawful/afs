@@ -33,7 +33,7 @@ def benchmark_run_command(args: argparse.Namespace) -> int:
     # Generate report
     if args.report:
         report_path = output_dir / "report.md"
-        report = suite.generate_report(report_path)
+        suite.generate_report(report_path)
         print(f"\nReport saved to: {report_path}")
 
     # Save results

@@ -286,7 +286,7 @@ def _handle_check_command(args: argparse.Namespace) -> int:
             model_version = "latest"
 
         # Create appropriate gate
-        context = DeploymentContext(args.context)
+        DeploymentContext(args.context)
         if args.strict:
             gate = QualityGate.production()
         else:
@@ -501,7 +501,7 @@ def _handle_history_command(args: argparse.Namespace) -> int:
 def _handle_report_command(args: argparse.Namespace) -> int:
     """Handle report command."""
     try:
-        report_dir = Path(".quality-gates")
+        Path(".quality-gates")
         print(f"Reports for {args.model} ({args.context}):")
         # Implementation would list and display reports from report_dir
         return 0

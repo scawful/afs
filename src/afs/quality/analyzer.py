@@ -314,7 +314,7 @@ class DatasetAnalyzer:
 
         # Count unique
         unique_instructions = set(instructions)
-        unique_outputs = set(outputs)
+        set(outputs)
         stats.unique_samples = len(unique_instructions)
 
         # Instruction stats

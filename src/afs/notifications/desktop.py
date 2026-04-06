@@ -89,7 +89,6 @@ class DesktopNotifier(NotificationHandler):
         message = event.message.replace('"', '\\"')
 
         # Build notification with sound if enabled
-        sound_part = 'sound name "Glass"' if self.enable_sound else ""
 
         # Map notification level to icon
         subtitle = f"[{event.level.upper()}]"
