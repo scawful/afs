@@ -1,5 +1,6 @@
 """Knowledge graph primitives plus optional extension-owned domain knowledge."""
 
+from .adapters.personal_adapter import PersonalKnowledgeGraph
 from .graph_core import (
     EdgeType,
     GraphConstraint,
@@ -8,7 +9,6 @@ from .graph_core import (
     KnowledgeGraph,
     NodeType,
 )
-from .adapters.personal_adapter import PersonalKnowledgeGraph
 
 __all__ = [
     "NodeType",

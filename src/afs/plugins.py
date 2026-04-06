@@ -16,7 +16,11 @@ from typing import Any
 
 from .extensions import (
     discover_extension_manifests as _discover_extension_manifests,
+)
+from .extensions import (
     load_extensions as _load_extensions,
+)
+from .extensions import (
     resolve_extensions_config,
 )
 from .schema import AFSConfig, PluginsConfig

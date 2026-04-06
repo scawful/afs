@@ -383,7 +383,7 @@ def context_diff_since_session(
                 })
                 _bump(mount_type_val, "modified")
 
-    for key, old in old_entries.items():
+    for key, _old in old_entries.items():
         if key not in current_entries:
             mount_type_val, rel_path = key
             deleted.append({

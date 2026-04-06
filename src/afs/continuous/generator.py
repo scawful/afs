@@ -4,6 +4,7 @@ Converts good interactions into training samples with quality filtering,
 deduplication, and format conversion.
 """
 
+import hashlib
 import json
 import logging
 from collections.abc import Iterator
@@ -194,7 +195,7 @@ class TrainingDataGenerator:
             scores = self.quality_scorer.score_batch(training_samples, update_samples=False)
 
             # Update records
-            for (record, _), score in zip(samples, scores):
+            for (record, _), score in zip(samples, scores, strict=False):
                 record.quality_score = score.overall
                 self.logger.db.update_quality_score(record.id, score.overall)
 
@@ -242,7 +243,7 @@ class TrainingDataGenerator:
                     existing_hashes.add(
                         hashlib.sha256(content.encode()).hexdigest()
                     )
-                except:
+                except Exception:
                     continue
 
         # Filter out duplicates with existing data

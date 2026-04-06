@@ -33,10 +33,10 @@ import fnmatch
 import re
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable
-
+from typing import Any
 
 # -------------------------------------------------------------------
 # Risk classification

@@ -115,8 +115,8 @@ def build_agent_context_snapshot(
     # 1. Index summary
     try:
         from .config import load_config_model
-        from .manager import AFSManager
         from .context_index import ContextSQLiteIndex
+        from .manager import AFSManager
 
         resolved_config = config or load_config_model(merge_user=True)
         manager = AFSManager(config=resolved_config)
@@ -257,8 +257,8 @@ def index_agent_output(
 
     try:
         from .config import load_config_model
-        from .manager import AFSManager
         from .context_index import ContextSQLiteIndex
+        from .manager import AFSManager
 
         config = load_config_model(merge_user=True)
         manager = AFSManager(config=config)
@@ -361,8 +361,8 @@ class ContextAwareAgent:
             return None
         try:
             from .config import load_config_model
-            from .manager import AFSManager
             from .context_index import ContextSQLiteIndex
+            from .manager import AFSManager
 
             if self._config is None:
                 self._config = load_config_model(merge_user=True)

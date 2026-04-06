@@ -17,11 +17,10 @@ import shutil
 import sys
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .agent_scope import assert_tool_allowed, is_tool_allowed
+from .agent_scope import is_tool_allowed
 from .config import load_config_model
 from .context_index import (
     DEFAULT_MAX_CONTENT_CHARS,
@@ -35,27 +34,34 @@ from .event_log import read_agent_events
 from .manager import AFSManager
 from .mcp.registry import (
     CORE_PROMPT_NAMES as _CORE_PROMPT_NAMES_NEW,
+)
+from .mcp.registry import (
     CORE_RESOURCE_PREFIXES as _CORE_RESOURCE_PREFIXES_BASE,
-    CORE_RESOURCE_URIS as _CORE_RESOURCE_URIS,
+)
+from .mcp.registry import (
     ExtensionMCPStatus,
     MCPExtensionContribution,
     MCPPromptDefinition,
     MCPResourceDefinition,
     MCPToolDefinition,
     MCPToolRegistry,
-    PromptHandler,
-    ResourceHandler,
-    ToolHandler,
 )
 from .mcp.transport import (
-    LEGACY_PROTOCOL_VERSION,
     PROTOCOL_VERSION,
     SERVER_NAME,
     SERVER_VERSION,
     SUPPORTED_PROTOCOL_VERSIONS,
+)
+from .mcp.transport import (
     error_response as _error_response_fn,
+)
+from .mcp.transport import (
     read_message as _read_message_fn,
+)
+from .mcp.transport import (
     success_response as _success_response_fn,
+)
+from .mcp.transport import (
     write_message as _write_message_fn,
 )
 from .models import MountType
