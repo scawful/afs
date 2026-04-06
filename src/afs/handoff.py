@@ -12,7 +12,6 @@ from typing import Any
 from .context_paths import resolve_mount_root
 from .models import MountType
 
-
 HANDOFF_SCHEMA_VERSION = "2"
 
 

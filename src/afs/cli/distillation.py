@@ -181,7 +181,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     logger.info(f"Output: {args.output}")
 
     try:
-        samples = asyncio.run(
+        asyncio.run(
             generator.generate_batch(
                 count=args.count,
                 progress_callback=progress_callback,

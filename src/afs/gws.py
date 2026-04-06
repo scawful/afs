@@ -30,7 +30,6 @@ from .gws_policy import (
     GWSPolicyConfig,
     GWSPolicyEnforcer,
     PolicyDecision,
-    RiskTier,
     classify_action,
 )
 

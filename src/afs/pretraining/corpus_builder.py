@@ -50,8 +50,7 @@ class CorpusBuilder:
                 continue
 
             for pattern in self.config.file_patterns:
-                for file_path in source_dir.rglob(pattern):
-                    yield file_path
+                yield from source_dir.rglob(pattern)
 
     def process_file(self, file_path: Path) -> Iterator[str]:
         """Process a single file and yield cleaned lines."""
@@ -88,7 +87,8 @@ class CorpusBuilder:
         """Build training chunks from corpus."""
         # Simple word tokenizer if none provided
         if tokenizer is None:
-            tokenizer = lambda x: x.split()
+            def tokenizer(x):
+                return x.split()
 
         for file_path in self.collect_files():
             lines = list(self.process_file(file_path))
