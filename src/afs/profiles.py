@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from .manager import AFSManager
 
 
+MEMORY_ALIAS_PREFIX = "profile-memory-"
 KNOWLEDGE_ALIAS_PREFIX = "profile-knowledge-"
 SKILL_ALIAS_PREFIX = "profile-skill-"
 MODEL_ALIAS_PREFIX = "profile-registry-"
@@ -24,6 +25,7 @@ MODEL_ALIAS_PREFIX = "profile-registry-"
 @dataclass
 class ResolvedProfile:
     name: str
+    memory_mounts: list[Path] = field(default_factory=list)
     knowledge_mounts: list[Path] = field(default_factory=list)
     skill_roots: list[Path] = field(default_factory=list)
     model_registries: list[Path] = field(default_factory=list)
@@ -119,6 +121,7 @@ def _resolve_profile_graph(name: str, profiles: dict[str, ProfileConfig]) -> Pro
             parent_config = _visit(parent)
             merged = ProfileConfig(
                 inherits=_merge_unique_str(merged.inherits, parent_config.inherits),
+                memory_mounts=_merge_unique_paths(merged.memory_mounts, parent_config.memory_mounts),
                 knowledge_mounts=_merge_unique_paths(merged.knowledge_mounts, parent_config.knowledge_mounts),
                 skill_roots=_merge_unique_paths(merged.skill_roots, parent_config.skill_roots),
                 model_registries=_merge_unique_paths(merged.model_registries, parent_config.model_registries),
@@ -134,6 +137,7 @@ def _resolve_profile_graph(name: str, profiles: dict[str, ProfileConfig]) -> Pro
 
         return ProfileConfig(
             inherits=_merge_unique_str(merged.inherits, profile.inherits),
+            memory_mounts=_merge_unique_paths(merged.memory_mounts, profile.memory_mounts),
             knowledge_mounts=_merge_unique_paths(merged.knowledge_mounts, profile.knowledge_mounts),
             skill_roots=_merge_unique_paths(merged.skill_roots, profile.skill_roots),
             model_registries=_merge_unique_paths(merged.model_registries, profile.model_registries),
@@ -197,6 +201,10 @@ def resolve_active_profile(
 
     return ResolvedProfile(
         name=active,
+        memory_mounts=_merge_unique_paths(
+            resolved_profile.memory_mounts,
+            _as_env_paths("AFS_MEMORY_MOUNTS"),
+        ),
         knowledge_mounts=_merge_unique_paths(
             resolved_profile.knowledge_mounts,
             extension_knowledge,
@@ -242,6 +250,7 @@ def list_profile_mount_specs(profile: ResolvedProfile) -> list[ProfileMountSpec]
     """Return the mount aliases AFS expects for a resolved profile."""
     specs: list[ProfileMountSpec] = []
     spec_groups = (
+        (MountType.MEMORY, MEMORY_ALIAS_PREFIX, profile.memory_mounts),
         (MountType.KNOWLEDGE, KNOWLEDGE_ALIAS_PREFIX, profile.knowledge_mounts),
         (MountType.TOOLS, SKILL_ALIAS_PREFIX, profile.skill_roots),
         (MountType.GLOBAL, MODEL_ALIAS_PREFIX, profile.model_registries),
@@ -323,6 +332,13 @@ def apply_profile_mounts(
         KNOWLEDGE_ALIAS_PREFIX,
         [spec for spec in specs if spec.mount_type == MountType.KNOWLEDGE],
     )
+    memory_mounted, missing_memory = _mount_profile_paths(
+        manager,
+        context_path,
+        MountType.MEMORY,
+        MEMORY_ALIAS_PREFIX,
+        [spec for spec in specs if spec.mount_type == MountType.MEMORY],
+    )
     skills_mounted, missing_skills = _mount_profile_paths(
         manager,
         context_path,
@@ -341,11 +357,13 @@ def apply_profile_mounts(
     return ProfileApplyResult(
         profile_name=profile.name,
         mounted={
+            "memory": memory_mounted,
             "knowledge": knowledge_mounted,
             "skills": skills_mounted,
             "model_registries": registries_mounted,
         },
         skipped_missing=[
+            *missing_memory,
             *missing_knowledge,
             *missing_skills,
             *missing_registries,

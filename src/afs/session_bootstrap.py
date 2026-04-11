@@ -76,7 +76,7 @@ def collect_context_status(manager: AFSManager, context_path: Path) -> dict[str,
                 index_info["built"] = True
                 index_info["has_entries"] = has_entries
                 index_info["total_entries"] = index.total_entries
-                index_info["stale"] = index.needs_refresh() if has_entries else False
+                index_info["stale"] = index.needs_health_refresh() if has_entries else False
                 index_info["db_size_bytes"] = db_path.stat().st_size
                 index_info["db_path"] = str(db_path)
             except Exception:

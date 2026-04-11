@@ -161,6 +161,33 @@ def test_status_command_prints_index_rebuild_hint_when_index_missing(
     assert "afs index rebuild --path .  # build context index" in out
 
 
+def test_status_command_ignores_volatile_index_drift(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _clear_profile_env(monkeypatch)
+    config, context_root = _build_context(tmp_path)
+    (context_root / "scratchpad" / "note.md").write_text(
+        "updated after rebuild",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(config_module, "load_config_model", lambda *args, **kwargs: config)
+    monkeypatch.setattr(core_module, "find_root", lambda _start_dir=None: context_root)
+    monkeypatch.setattr(
+        core_module,
+        "resolve_context_root",
+        lambda _config, linked_root: linked_root or context_root,
+    )
+
+    exit_code = status_command(Namespace(start_dir=None, json=True))
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["index"]["stale"] is False
+
+
 def test_agents_watch_command_uses_remapped_history_dir(
     tmp_path: Path,
     monkeypatch,

@@ -77,6 +77,7 @@ def test_load_config_model_parses_profiles_extensions_hooks(tmp_path) -> None:
         "active_profile = \"work\"\n"
         "auto_apply = true\n\n"
         "[profiles.work]\n"
+        "memory_mounts = [\"~/memory\"]\n"
         "knowledge_mounts = [\"~/work/logs\"]\n"
         "skill_roots = [\"~/skills\"]\n"
         "model_registries = [\"~/registry/chat_registry.toml\"]\n"
@@ -96,6 +97,7 @@ def test_load_config_model_parses_profiles_extensions_hooks(tmp_path) -> None:
     assert model.profiles.active_profile == "work"
     assert "work" in model.profiles.profiles
     work = model.profiles.profiles["work"]
+    assert work.memory_mounts == [(Path.home() / "memory").resolve()]
     assert work.policies == ["no_zelda"]
     assert model.hooks.before_context_read == ["scripts/hooks/read.sh"]
     assert model.hooks.session_start == ["scripts/hooks/session_start.sh"]

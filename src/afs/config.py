@@ -103,7 +103,7 @@ def _expand_config_paths(config_data: dict[str, Any]) -> None:
                 continue
             if not isinstance(profile_data, dict):
                 continue
-            for key in ("knowledge_mounts", "skill_roots", "model_registries"):
+            for key in ("memory_mounts", "knowledge_mounts", "skill_roots", "model_registries"):
                 if key in profile_data and isinstance(profile_data[key], list):
                     profile_data[key] = [
                         _expand_path(p) for p in profile_data[key] if isinstance(p, (str, Path))
@@ -114,7 +114,7 @@ def _expand_config_paths(config_data: dict[str, Any]) -> None:
             for _name, profile_data in nested_profiles.items():
                 if not isinstance(profile_data, dict):
                     continue
-                for key in ("knowledge_mounts", "skill_roots", "model_registries"):
+                for key in ("memory_mounts", "knowledge_mounts", "skill_roots", "model_registries"):
                     if key in profile_data and isinstance(profile_data[key], list):
                         profile_data[key] = [
                             _expand_path(p) for p in profile_data[key] if isinstance(p, (str, Path))

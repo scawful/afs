@@ -17,6 +17,12 @@ from .sensitivity import matches_path_rules
 DEFAULT_DB_FILENAME = "context_index.sqlite3"
 DEFAULT_MAX_FILE_SIZE_BYTES = 256 * 1024
 DEFAULT_MAX_CONTENT_CHARS = 12000
+INDEX_HEALTH_MOUNT_TYPES: tuple[MountType, ...] = (
+    MountType.MEMORY,
+    MountType.KNOWLEDGE,
+    MountType.TOOLS,
+    MountType.GLOBAL,
+)
 
 _TEXT_SUFFIXES = {
     ".asm",
@@ -415,6 +421,15 @@ class ContextSQLiteIndex:
             ):
                 return True
         return False
+
+    @staticmethod
+    def health_mount_types() -> list[MountType]:
+        """Return the stable mounts used for agent-facing index health checks."""
+        return list(INDEX_HEALTH_MOUNT_TYPES)
+
+    def needs_health_refresh(self) -> bool:
+        """Return whether stable, query-relevant mounts have drifted."""
+        return self.needs_refresh(mount_types=self.health_mount_types())
 
     def summary(self) -> IndexSummary:
         """Return a lightweight summary of the current index state."""

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import os
+import shlex
 import sys
 from collections.abc import Iterable
 from contextlib import contextmanager
@@ -40,7 +42,7 @@ from . import (
     training,
     watch,
 )
-from ._help import render_default_help, render_topic_help
+from ._help import _build_command_tree, render_default_help, render_topic_help
 
 
 @contextmanager
@@ -125,6 +127,76 @@ def _extract_config_argument(argv: Iterable[str] | None) -> Path | None:
             if value:
                 return Path(value).expanduser().resolve()
     return None
+
+
+def _completion_mode() -> str | None:
+    for env_name in ("_AFS_COMPLETE", "AFS_COMPLETE"):
+        value = os.getenv(env_name)
+        if value:
+            return value.strip()
+    return None
+
+
+def _completion_array_name(path: tuple[str, ...]) -> str:
+    if not path:
+        return "_afs_cmds_root"
+    safe = "".join(ch if ch.isalnum() else "_" for ch in "_".join(path))
+    return f"_afs_cmds_{safe}"
+
+
+def _iter_completion_nodes(
+    tree: dict[str, dict[str, object]],
+    prefix: tuple[str, ...] = (),
+) -> Iterable[tuple[tuple[str, ...], dict[str, dict[str, object]]]]:
+    yield prefix, tree
+    for name, node in tree.items():
+        children = node.get("children")
+        if isinstance(children, dict) and children:
+            yield from _iter_completion_nodes(children, prefix + (name,))
+
+
+def _render_zsh_completion(parser: argparse.ArgumentParser) -> str:
+    tree = _build_command_tree(parser)
+    lines = ["#compdef afs", ""]
+
+    nodes = list(_iter_completion_nodes(tree))
+    for path, children in nodes:
+        array_name = _completion_array_name(path)
+        lines.append(f"typeset -ga {array_name}")
+        lines.append(f"{array_name}=(")
+        for name, node in children.items():
+            help_text = str(node.get("help") or "").replace(":", ";").replace("\n", " ").strip()
+            entry = f"{name}:{help_text}" if help_text else name
+            lines.append(f"  {shlex.quote(entry)}")
+        lines.append(")")
+        lines.append("")
+
+    lines.extend(
+        [
+            "_afs() {",
+            "  local path",
+            "  path=\"${(j: :)${words[@]:2:$((CURRENT-2))}}\"",
+            "  case \"$path\" in",
+        ]
+    )
+
+    for path, _children in nodes:
+        array_name = _completion_array_name(path)
+        label = "afs" if not path else f"afs {' '.join(path)}"
+        case_label = shlex.quote(" ".join(path)) if path else "''"
+        lines.append(
+            f"    {case_label}) _describe -t commands {shlex.quote(f'{label} command')} {array_name}; return ;;"
+        )
+
+    lines.extend(
+        [
+            "  esac",
+            "}",
+            "",
+            "compdef _afs afs",
+        ]
+    )
+    return "\n".join(lines) + "\n"
 
 
 def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
@@ -286,7 +358,15 @@ def _requires_subcommand(
 def main(argv: Iterable[str] | None = None) -> int:
     """Main CLI entry point."""
     argv_list = list(argv) if argv is not None else sys.argv[1:]
+    completion_mode = _completion_mode()
     parser = build_parser(argv_list)
+
+    if completion_mode:
+        if completion_mode in {"zsh_source", "source_zsh"}:
+            print(_render_zsh_completion(parser), end="")
+            return 0
+        return 1
+
     args = parser.parse_args(argv_list)
 
     if not getattr(args, "command", None):

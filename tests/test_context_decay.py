@@ -138,3 +138,52 @@ def test_stale_mounts_in_bootstrap(tmp_path, monkeypatch):
     summary = build_session_bootstrap(manager, context)
     # stale_mounts should be a list (possibly empty for fresh index)
     assert isinstance(summary.get("stale_mounts"), list)
+
+
+def test_mount_freshness_follows_symlinked_mount_directories(tmp_path, monkeypatch):
+    context = _make_index_context(tmp_path, monkeypatch)
+    from afs.context_freshness import mount_freshness
+
+    shared_knowledge = tmp_path / "shared-knowledge"
+    shared_knowledge.mkdir()
+    fresh_doc = shared_knowledge / "fresh.md"
+    fresh_doc.write_text("# Fresh", encoding="utf-8")
+
+    mounted = context / "knowledge" / "shared"
+    mounted.symlink_to(shared_knowledge, target_is_directory=True)
+
+    stale_doc = context / "knowledge" / "doc1.md"
+    old_time = time.time() - (30 * 24 * 3600)
+    os.utime(stale_doc, (old_time, old_time))
+
+    freshness = mount_freshness(context)
+
+    assert freshness["knowledge"].file_count == 3
+    assert freshness["knowledge"].stale is False
+    assert freshness["knowledge"].newest_mtime is not None
+    assert freshness["knowledge"].newest_mtime >= fresh_doc.stat().st_mtime
+
+
+def test_context_diff_since_session_tracks_symlinked_mount_files(tmp_path, monkeypatch):
+    context = _make_index_context(tmp_path, monkeypatch)
+    from afs.context_freshness import context_diff_since_session, save_context_snapshot
+
+    shared_knowledge = tmp_path / "shared-knowledge"
+    shared_knowledge.mkdir()
+    fresh_doc = shared_knowledge / "fresh.md"
+    fresh_doc.write_text("# Fresh", encoding="utf-8")
+
+    mounted = context / "knowledge" / "shared"
+    mounted.symlink_to(shared_knowledge, target_is_directory=True)
+
+    session_id = "symlink-test"
+    save_context_snapshot(context, session_id)
+
+    time.sleep(1.1)
+    fresh_doc.write_text("# Fresh\nUpdated\n", encoding="utf-8")
+
+    diff = context_diff_since_session(context, session_id)
+
+    assert diff is not None
+    modified_paths = {item["relative_path"] for item in diff.modified}
+    assert "knowledge/shared/fresh.md" in modified_paths

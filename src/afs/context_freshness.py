@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .context_index import _iter_mount_entries
 from .context_paths import resolve_agent_output_root, resolve_mount_root
 from .models import MountType
 
@@ -19,6 +20,17 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_DECAY_HOURS = 168.0  # 1 week
 _STALE_THRESHOLD = 0.3
+
+
+def _iter_mount_files(mount_root: Path):
+    """Yield file entries for a mount, following symlinked mounted directories."""
+    for entry, relative_path in _iter_mount_entries(mount_root):
+        try:
+            if not entry.is_file():
+                continue
+        except OSError:
+            continue
+        yield entry, relative_path
 
 
 @dataclass
@@ -73,19 +85,14 @@ def mount_freshness(
         file_count = 0
         newest_mtime: float | None = None
 
-        try:
-            for entry in mount_root.rglob("*"):
-                if not entry.is_file():
-                    continue
-                file_count += 1
-                try:
-                    mtime = entry.stat().st_mtime
-                    if newest_mtime is None or mtime > newest_mtime:
-                        newest_mtime = mtime
-                except OSError:
-                    continue
-        except OSError:
-            continue
+        for entry, _relative_path in _iter_mount_files(mount_root):
+            file_count += 1
+            try:
+                mtime = entry.stat().st_mtime
+                if newest_mtime is None or mtime > newest_mtime:
+                    newest_mtime = mtime
+            except OSError:
+                continue
 
         if file_count == 0:
             continue
@@ -200,23 +207,18 @@ def save_context_snapshot(
         if not mount_root.exists():
             continue
 
-        try:
-            for entry in mount_root.rglob("*"):
-                if not entry.is_file():
-                    continue
-                try:
-                    st = entry.stat()
-                    rel = str(entry.relative_to(context_path))
-                    entries.append({
-                        "path": rel,
-                        "mount_type": mount_type.value,
-                        "mtime": st.st_mtime,
-                        "size": st.st_size,
-                    })
-                except OSError:
-                    continue
-        except OSError:
-            continue
+        for entry, relative_path in _iter_mount_files(mount_root):
+            try:
+                st = entry.stat()
+                rel = f"{mount_type.value}/{relative_path}"
+                entries.append({
+                    "path": rel,
+                    "mount_type": mount_type.value,
+                    "mtime": st.st_mtime,
+                    "size": st.st_size,
+                })
+            except OSError:
+                continue
 
     payload = {
         "session_id": session_id,
@@ -327,23 +329,18 @@ def context_diff_since_session(
         if not mount_root.exists():
             continue
 
-        try:
-            for fentry in mount_root.rglob("*"):
-                if not fentry.is_file():
-                    continue
-                try:
-                    st = fentry.stat()
-                    rel = str(fentry.relative_to(context_path))
-                    current_entries[(mount_type.value, rel)] = {
-                        "path": rel,
-                        "mount_type": mount_type.value,
-                        "mtime": st.st_mtime,
-                        "size": st.st_size,
-                    }
-                except OSError:
-                    continue
-        except OSError:
-            continue
+        for fentry, relative_path in _iter_mount_files(mount_root):
+            try:
+                st = fentry.stat()
+                rel = f"{mount_type.value}/{relative_path}"
+                current_entries[(mount_type.value, rel)] = {
+                    "path": rel,
+                    "mount_type": mount_type.value,
+                    "mtime": st.st_mtime,
+                    "size": st.st_size,
+                }
+            except OSError:
+                continue
 
     # Compare
     added: list[dict[str, Any]] = []

@@ -1796,7 +1796,7 @@ def status_command(args: argparse.Namespace) -> int:
                 "db_path": str(db_path),
                 "db_size": db_path.stat().st_size,
                 "has_entries": has_entries,
-                "stale": index.needs_refresh() if has_entries else False,
+                "stale": index.needs_health_refresh() if has_entries else False,
             }
             index_stats["total_entries"] = index.total_entries
         except Exception:

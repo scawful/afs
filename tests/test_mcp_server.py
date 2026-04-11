@@ -657,6 +657,81 @@ def test_context_query_tool_auto_indexes(tmp_path: Path) -> None:
     assert "index_rebuild" in structured
 
 
+def test_context_query_tool_resolves_parent_context_from_nested_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    general = GeneralConfig(
+        context_root=tmp_path / "shared-context",
+        mcp_allowed_roots=[tmp_path],
+    )
+    manager = AFSManager(config=AFSConfig(general=general))
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path)
+    context_root = project_path / ".context"
+    nested_path = project_path / "docs" / "dev"
+    nested_path.mkdir(parents=True)
+    (nested_path / "afs.toml").write_text("[project]\nname = 'docs-dev'\n", encoding="utf-8")
+    note_path = context_root / "scratchpad" / "nested_route.md"
+    note_path.write_text("nested path route marker", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    query_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "context.query",
+                "arguments": {
+                    "path": str(nested_path),
+                    "mount_types": ["scratchpad"],
+                    "query": "route marker",
+                    "limit": 10,
+                },
+            },
+        },
+        manager,
+    )
+    assert query_response is not None
+    structured = query_response["result"]["structuredContent"]
+    assert structured["context_path"] == str(context_root)
+    assert structured["count"] >= 1
+    assert any(entry["relative_path"] == "nested_route.md" for entry in structured["entries"])
+
+
+def test_context_query_tool_errors_when_no_existing_context(tmp_path: Path) -> None:
+    general = GeneralConfig(
+        context_root=tmp_path / "shared-context",
+        mcp_allowed_roots=[tmp_path],
+    )
+    manager = AFSManager(config=AFSConfig(general=general))
+    project_path = tmp_path / "orphan-project"
+    project_path.mkdir()
+
+    query_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "context.query",
+                "arguments": {
+                    "path": str(project_path),
+                    "mount_types": ["scratchpad"],
+                    "query": "missing",
+                    "limit": 10,
+                },
+            },
+        },
+        manager,
+    )
+    assert query_response is not None
+    assert "error" in query_response
+    assert str(project_path) in query_response["error"]["message"]
+    assert "context.ensure" in query_response["error"]["message"]
+
+
 def test_context_status_and_diff_tools(tmp_path: Path, monkeypatch) -> None:
     for name in (
         "AFS_PROFILE",

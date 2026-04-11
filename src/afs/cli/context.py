@@ -42,7 +42,7 @@ def context_init_command(args: argparse.Namespace) -> int:
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
     project_path, _context_path, context_root, context_dir = resolve_context_paths(
-        args, manager
+        args, manager, prefer_existing=False
     )
     context = manager.init(
         path=project_path,
@@ -62,7 +62,7 @@ def context_ensure_command(args: argparse.Namespace) -> int:
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
     project_path, _context_path, context_root, context_dir = resolve_context_paths(
-        args, manager
+        args, manager, prefer_existing=False
     )
     context = manager.ensure(
         path=project_path,
@@ -232,6 +232,7 @@ def context_discover_command(args: argparse.Namespace) -> int:
         search_paths=search_paths,
         max_depth=args.max_depth,
         ignore_names=ignore_names,
+        include_nested=getattr(args, "include_nested", False),
         config=config,
     )
     if not projects:
@@ -272,6 +273,7 @@ def context_report_command(args: argparse.Namespace) -> int:
         search_paths=search_paths,
         max_depth=args.max_depth,
         ignore_names=ignore_names,
+        include_nested=getattr(args, "include_nested", False),
         config=config,
     )
 
@@ -342,6 +344,7 @@ def context_ensure_all_command(args: argparse.Namespace) -> int:
         search_paths=search_paths,
         max_depth=args.max_depth,
         ignore_names=ignore_names,
+        include_nested=getattr(args, "include_nested", False),
         config=config,
     )
     if not projects:
@@ -375,6 +378,7 @@ def context_profile_show_command(args: argparse.Namespace) -> int:
         "profile": profile.name,
         "extensions": profile.enabled_extensions,
         "policies": profile.policies,
+        "memory_mounts": [str(path) for path in profile.memory_mounts],
         "knowledge_mounts": [str(path) for path in profile.knowledge_mounts],
         "skill_roots": [str(path) for path in profile.skill_roots],
         "model_registries": [str(path) for path in profile.model_registries],
@@ -389,6 +393,12 @@ def context_profile_show_command(args: argparse.Namespace) -> int:
     print(f"profile: {payload['profile']}")
     print(f"extensions: {extensions}")
     print(f"policies: {policies}")
+
+    print("memory_mounts:")
+    for entry in payload["memory_mounts"]:
+        print(f"- {entry}")
+    if not payload["memory_mounts"]:
+        print("- (none)")
 
     print("knowledge_mounts:")
     for entry in payload["knowledge_mounts"]:
@@ -436,6 +446,7 @@ def context_profile_apply_command(args: argparse.Namespace) -> int:
     print(f"profile: {result.profile_name}")
     print(
         "mounted: "
+        f"memory={result.mounted.get('memory', 0)} "
         f"knowledge={result.mounted.get('knowledge', 0)} "
         f"skills={result.mounted.get('skills', 0)} "
         f"model_registries={result.mounted.get('model_registries', 0)}"
@@ -931,6 +942,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     ctx_discover.add_argument("--path", action="append", help="Search paths.")
     ctx_discover.add_argument("--max-depth", type=int, default=3, help="Max search depth.")
     ctx_discover.add_argument("--ignore", action="append", help="Directories to ignore.")
+    ctx_discover.add_argument(
+        "--include-nested",
+        action="store_true",
+        help="Continue scanning inside directories that already contain a .context root.",
+    )
     ctx_discover.add_argument("--stats", action="store_true", help="Show statistics.")
     ctx_discover.add_argument("--json", action="store_true", help="Output JSON.")
     ctx_discover.set_defaults(func=context_discover_command)
@@ -941,6 +957,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     ctx_report.add_argument("--path", action="append", help="Search paths.")
     ctx_report.add_argument("--max-depth", type=int, default=3, help="Max search depth.")
     ctx_report.add_argument("--ignore", action="append", help="Directories to ignore.")
+    ctx_report.add_argument(
+        "--include-nested",
+        action="store_true",
+        help="Continue scanning inside directories that already contain a .context root.",
+    )
     ctx_report.add_argument("--json", action="store_true", help="Output JSON.")
     ctx_report.set_defaults(func=context_report_command)
 
@@ -950,6 +971,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     ctx_ensure_all.add_argument("--path", action="append", help="Search paths.")
     ctx_ensure_all.add_argument("--max-depth", type=int, default=3, help="Max search depth.")
     ctx_ensure_all.add_argument("--ignore", action="append", help="Directories to ignore.")
+    ctx_ensure_all.add_argument(
+        "--include-nested",
+        action="store_true",
+        help="Continue scanning inside directories that already contain a .context root.",
+    )
     ctx_ensure_all.add_argument("--dry-run", action="store_true", help="Show what would be done.")
     ctx_ensure_all.add_argument("--profile", help="Profile name override.")
     ctx_ensure_all.set_defaults(func=context_ensure_all_command)

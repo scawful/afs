@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..config import load_runtime_config_model, resolve_runtime_config_path
+from ..core import find_existing_root
 
 if TYPE_CHECKING:
     from ..manager import AFSManager
@@ -175,7 +176,10 @@ def load_runtime_config_from_args(
 
 
 def resolve_context_paths(
-    args: argparse.Namespace, manager: AFSManager
+    args: argparse.Namespace,
+    manager: AFSManager,
+    *,
+    prefer_existing: bool = True,
 ) -> tuple[Path, Path, Path | None, str | None]:
     """Resolve context paths from arguments."""
     project_path = Path(args.path).expanduser().resolve() if args.path else Path.cwd()
@@ -183,6 +187,14 @@ def resolve_context_paths(
         Path(args.context_root).expanduser().resolve() if args.context_root else None
     )
     context_dir = args.context_dir if args.context_dir else None
+    if prefer_existing and context_root is None and context_dir is None:
+        existing_context = find_existing_root(project_path)
+        if existing_context is not None:
+            return project_path, existing_context.expanduser().resolve(), None, None
+        raise FileNotFoundError(
+            f"No existing AFS context found for {project_path}. "
+            "Use `afs context ensure --path <project>` to create one."
+        )
     context_path = manager.resolve_context_path(
         project_path,
         context_root=context_root,
@@ -283,6 +295,7 @@ def write_config(path: Path, config: AFSConfig) -> None:
     for name, profile in config.profiles.profiles.items():
         p_table = tomlkit.table()
         p_table["inherits"] = list(profile.inherits)
+        p_table["memory_mounts"] = [str(p) for p in profile.memory_mounts]
         p_table["knowledge_mounts"] = [str(p) for p in profile.knowledge_mounts]
         p_table["skill_roots"] = [str(p) for p in profile.skill_roots]
         p_table["model_registries"] = [str(p) for p in profile.model_registries]

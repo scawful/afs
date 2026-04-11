@@ -198,6 +198,7 @@ def _as_str_list(items: list[Any] | None) -> list[str]:
 @dataclass
 class ProfileConfig:
     inherits: list[str] = field(default_factory=list)
+    memory_mounts: list[Path] = field(default_factory=list)
     knowledge_mounts: list[Path] = field(default_factory=list)
     skill_roots: list[Path] = field(default_factory=list)
     model_registries: list[Path] = field(default_factory=list)
@@ -217,6 +218,7 @@ class ProfileConfig:
         ]
         return cls(
             inherits=_as_str_list(data.get("inherits")),
+            memory_mounts=_as_path_list(data.get("memory_mounts")),
             knowledge_mounts=_as_path_list(data.get("knowledge_mounts")),
             skill_roots=_as_path_list(data.get("skill_roots")),
             model_registries=_as_path_list(data.get("model_registries")),
@@ -230,6 +232,7 @@ class ProfileConfig:
     def to_dict(self) -> dict[str, Any]:
         return {
             "inherits": list(self.inherits),
+            "memory_mounts": [str(path) for path in self.memory_mounts],
             "knowledge_mounts": [str(path) for path in self.knowledge_mounts],
             "skill_roots": [str(path) for path in self.skill_roots],
             "model_registries": [str(path) for path in self.model_registries],

@@ -6,8 +6,10 @@ from pathlib import Path
 
 import afs.cli.core as cli_core_module
 from afs.cli.core import session_bootstrap_command
+from afs.context_index import ContextSQLiteIndex
 from afs.hivemind import HivemindBus
 from afs.manager import AFSManager
+from afs.models import MountType
 from afs.schema import AFSConfig, DirectoryConfig, GeneralConfig, default_directory_configs
 from afs.tasks import TaskQueue
 
@@ -140,3 +142,40 @@ def test_build_session_bootstrap_does_not_mutate_hivemind_or_memory(
     assert isinstance(summary["memory"]["status"].get("stale"), bool)
     assert msg_path.exists()
     assert not (context_root / "memory" / "entries.jsonl").exists()
+
+
+def test_build_session_bootstrap_ignores_volatile_index_drift(
+    tmp_path: Path,
+) -> None:
+    from afs.session_bootstrap import build_session_bootstrap
+
+    context_root = tmp_path / ".context"
+    config = AFSConfig(
+        general=GeneralConfig(
+            context_root=context_root,
+        )
+    )
+    manager = AFSManager(config=config)
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path, context_root=context_root)
+
+    knowledge_root = context_root / "knowledge"
+    scratchpad_root = context_root / "scratchpad"
+    (knowledge_root / "guide.md").write_text("# Guide\n", encoding="utf-8")
+    (scratchpad_root / "note.md").write_text("first draft\n", encoding="utf-8")
+
+    index = ContextSQLiteIndex(manager, context_root)
+    index.rebuild(
+        mount_types=[MountType.KNOWLEDGE, MountType.SCRATCHPAD],
+        include_content=True,
+    )
+
+    (scratchpad_root / "note.md").write_text("updated draft\n", encoding="utf-8")
+
+    summary = build_session_bootstrap(manager, context_root)
+
+    assert summary["status"]["index"]["stale"] is False
+    assert not any(
+        "afs index rebuild" in action for action in summary["recommended_actions"]
+    )

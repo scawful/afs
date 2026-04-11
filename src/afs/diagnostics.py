@@ -442,7 +442,7 @@ def check_context_index(config_path: Path | None = None) -> DiagnosticResult:
             _fix_fn=_fix,
         )
 
-    if index.needs_refresh():
+    if index.needs_health_refresh():
         return DiagnosticResult(
             name="context_index",
             status="warn",

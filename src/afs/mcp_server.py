@@ -22,6 +22,7 @@ from typing import Any
 
 from .agent_scope import is_tool_allowed
 from .config import load_config_model
+from .core import find_existing_root
 from .context_index import (
     DEFAULT_MAX_CONTENT_CHARS,
     DEFAULT_MAX_FILE_SIZE_BYTES,
@@ -148,8 +149,19 @@ def _resolve_context_path(arguments: dict[str, Any], manager: AFSManager) -> Pat
     raw = arguments.get("context_path")
     if isinstance(raw, str) and raw.strip():
         return _assert_allowed(Path(raw), manager)
-    default = Path.cwd() / ".context"
-    return _assert_allowed(default, manager)
+    project_raw = arguments.get("project_path", arguments.get("path"))
+    project_path = (
+        Path(project_raw).expanduser().resolve()
+        if isinstance(project_raw, str) and project_raw.strip()
+        else Path.cwd().resolve()
+    )
+    existing_context = find_existing_root(project_path)
+    if existing_context is not None:
+        return _assert_allowed(existing_context, manager)
+    raise FileNotFoundError(
+        f"No existing AFS context found for {project_path}. "
+        "Use context.init/context.ensure before context.query."
+    )
 
 
 def _resolve_project_path(arguments: dict[str, Any]) -> Path:
@@ -3045,7 +3057,7 @@ def _read_resource(
         context_path = _resolve_explicit_allowed_context_path(context_path_str, manager)
         index = ContextSQLiteIndex(manager, context_path)
         has = index.has_entries()
-        stale = index.needs_refresh() if has else False
+        stale = index.needs_health_refresh() if has else False
         data_dict: dict[str, Any] = {
             "context_path": str(context_path),
             "db_path": str(index.db_path),
