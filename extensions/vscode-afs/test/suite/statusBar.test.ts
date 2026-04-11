@@ -39,4 +39,16 @@ describe("AfsStatusBar", () => {
     assert.match(item.tooltip, /Rebuild: afs index rebuild --path \/tmp\/workspace/);
     assert.match(item.tooltip, /Note: Indexed retrieval may be stale\./);
   });
+
+  it("stays hidden when disabled", () => {
+    const statusBar = new AfsStatusBar(false);
+    statusBar.update("connected");
+
+    const item = __getLastStatusBarItem();
+    assert.ok(item);
+    assert.strictEqual(item.visible, false);
+
+    statusBar.setEnabled(true);
+    assert.strictEqual(item.visible, true);
+  });
 });

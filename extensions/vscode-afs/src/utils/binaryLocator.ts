@@ -1,8 +1,10 @@
-import { execFileSync } from "child_process";
+import { execFile } from "child_process";
 import { existsSync } from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import type { BinaryInfo } from "../transport/clientFactory";
+
+const HELP_PROBE_TIMEOUT_MS = 5000;
 
 /** Locate the AFS binary following the same resolution as scripts/afs. */
 export function locateAfsBinary(logger: vscode.OutputChannel): BinaryInfo {
@@ -46,24 +48,50 @@ export function locateAfsBinary(logger: vscode.OutputChannel): BinaryInfo {
     }
   }
 
-  // 5. afs on PATH
-  try {
-    execFileSync("afs", ["--help"], { timeout: 5000, stdio: "ignore" });
-    logger.appendLine("[binary] Found afs on PATH");
-    return { command: "afs", args: [], env: {} };
-  } catch {
-    // not found
-  }
-
-  // 6. system python3 -m afs
-  try {
-    execFileSync("python3", ["-m", "afs", "--help"], { timeout: 5000, stdio: "ignore" });
-    logger.appendLine("[binary] Using system python3 -m afs");
-    return { command: "python3", args: ["-m", "afs"], env: {} };
-  } catch {
-    // not found
-  }
-
-  logger.appendLine("[binary] No AFS binary found — extension will run in degraded mode");
+  // PATH probing is deferred to avoid blocking activation.
+  logger.appendLine("[binary] Deferring PATH probe until first backend use");
   return { command: "afs", args: [], env: {} };
+}
+
+let deferredProbe: Promise<BinaryInfo> | undefined;
+
+export async function resolveAfsBinary(
+  initial: BinaryInfo,
+  logger: vscode.OutputChannel,
+): Promise<BinaryInfo> {
+  if (!shouldProbePath(initial)) {
+    return initial;
+  }
+  if (deferredProbe) {
+    return deferredProbe;
+  }
+
+  deferredProbe = (async () => {
+    if (await commandAvailable("afs", ["--help"])) {
+      logger.appendLine("[binary] Found afs on PATH");
+      return { command: "afs", args: [], env: {} };
+    }
+    if (await commandAvailable("python3", ["-m", "afs", "--help"])) {
+      logger.appendLine("[binary] Using system python3 -m afs");
+      return { command: "python3", args: ["-m", "afs"], env: {} };
+    }
+    logger.appendLine("[binary] No AFS binary found — extension will run in degraded mode");
+    return initial;
+  })();
+
+  return deferredProbe;
+}
+
+function shouldProbePath(binaryInfo: BinaryInfo): boolean {
+  return binaryInfo.command === "afs"
+    && binaryInfo.args.length === 0
+    && Object.keys(binaryInfo.env).length === 0;
+}
+
+async function commandAvailable(command: string, args: string[]): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    execFile(command, args, { timeout: HELP_PROBE_TIMEOUT_MS }, (error) => {
+      resolve(!error);
+    });
+  });
 }

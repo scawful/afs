@@ -1,7 +1,7 @@
 {
   "name": "afs-vscode",
   "displayName": "AFS - Agentic File System",
-  "description": "Context management, training pipeline, and Antigravity integration for AFS",
+  "description": "Context management and workspace-aware chat for AFS",
   "version": "0.2.0",
   "publisher": "scawful",
   "license": "MIT",
@@ -15,13 +15,27 @@
   "categories": ["Other"],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "*",
-    "onStartupFinished",
     "workspaceContains:**/.context/metadata.json",
+    "onChatParticipant:afs.chat",
     "onView:afs.dashboard",
     "onView:afs.contextExplorer",
-    "onView:afs.training",
-    "onView:afs.commands"
+    "onView:afs.commands",
+    "onCommand:afs.context.init",
+    "onCommand:afs.context.discover",
+    "onCommand:afs.context.mount",
+    "onCommand:afs.context.unmount",
+    "onCommand:afs.index.rebuild",
+    "onCommand:afs.index.query",
+    "onCommand:afs.index.queryQuickOpen",
+    "onCommand:afs.mcp.register",
+    "onCommand:afs.mcp.unregister",
+    "onCommand:afs.mcp.status",
+    "onCommand:afs.server.restart",
+    "onCommand:afs.server.showLogs",
+    "onCommand:afs.treeView.refresh",
+    "onCommand:afs.dashboard.refresh",
+    "onCommand:afs.commands.refresh",
+    "onCommand:afs.chat.open"
   ],
   "contributes": {
     "viewsContainers": {
@@ -46,16 +60,49 @@
           "contextualTitle": "AFS Context Explorer"
         },
         {
-          "id": "afs.training",
-          "name": "Training",
-          "type": "webview"
-        },
-        {
           "id": "afs.commands",
           "name": "Commands"
         }
       ]
     },
+    "chatParticipants": [
+      {
+        "id": "afs.chat",
+        "name": "afs",
+        "fullName": "AFS",
+        "description": "Ask about workspace context, scratchpad state, and AFS health",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "status",
+            "description": "Summarize context health and freshness"
+          },
+          {
+            "name": "query",
+            "description": "Search indexed AFS context before answering"
+          },
+          {
+            "name": "scratchpad",
+            "description": "Review scratchpad state and deferred notes"
+          },
+          {
+            "name": "pack",
+            "description": "Use the current AFS session pack for context"
+          }
+        ],
+        "disambiguation": [
+          {
+            "category": "afs_context",
+            "description": "The user wants help grounded in AFS workspace context, scratchpad notes, freshness, mounts, or indexed context search.",
+            "examples": [
+              "What does my AFS scratchpad say about this repo?",
+              "Summarize the current context health for this workspace",
+              "Search the AFS context for session bootstrap changes"
+            ]
+          }
+        ]
+      }
+    ],
     "viewsWelcome": [
       {
         "view": "afs.contextExplorer",
@@ -78,12 +125,8 @@
       { "command": "afs.server.showLogs", "title": "AFS: Show Server Logs", "category": "AFS" },
       { "command": "afs.treeView.refresh", "title": "AFS: Refresh Context Explorer", "icon": "$(refresh)", "category": "AFS" },
       { "command": "afs.dashboard.refresh", "title": "AFS: Refresh Dashboard", "icon": "$(refresh)", "category": "AFS" },
-      { "command": "afs.training.refresh", "title": "AFS: Refresh Training", "icon": "$(refresh)", "category": "AFS" },
       { "command": "afs.commands.refresh", "title": "AFS: Refresh Commands", "icon": "$(refresh)", "category": "AFS" },
-      { "command": "afs.training.freshnessGate", "title": "AFS: Freshness Gate", "category": "AFS" },
-      { "command": "afs.training.extractSessions", "title": "AFS: Extract Session Data", "category": "AFS" },
-      { "command": "afs.training.generateRouter", "title": "AFS: Generate Router Dataset", "category": "AFS" },
-      { "command": "afs.training.exportAntigravity", "title": "AFS: Export Antigravity Trajectories", "category": "AFS" }
+      { "command": "afs.chat.open", "title": "AFS: Open Chat", "category": "AFS" }
     ],
     "submenus": [
       {
@@ -105,10 +148,7 @@
         { "command": "afs.index.rebuild", "group": "2_index" },
         { "command": "afs.index.query", "group": "2_index" },
         { "command": "afs.index.queryQuickOpen", "group": "2_index" },
-        { "command": "afs.training.freshnessGate", "group": "3_training" },
-        { "command": "afs.training.extractSessions", "group": "3_training" },
-        { "command": "afs.training.generateRouter", "group": "3_training" },
-        { "command": "afs.training.exportAntigravity", "group": "3_training" },
+        { "command": "afs.chat.open", "group": "3_chat" },
         { "command": "afs.mcp.register", "group": "4_server" },
         { "command": "afs.mcp.status", "group": "4_server" },
         { "command": "afs.server.restart", "group": "4_server" },
@@ -117,7 +157,6 @@
       "view/title": [
         { "command": "afs.treeView.refresh", "when": "view == afs.contextExplorer", "group": "navigation" },
         { "command": "afs.dashboard.refresh", "when": "view == afs.dashboard", "group": "navigation" },
-        { "command": "afs.training.refresh", "when": "view == afs.training", "group": "navigation" },
         { "command": "afs.commands.refresh", "when": "view == afs.commands", "group": "navigation" }
       ],
       "view/item/context": [
@@ -195,6 +234,11 @@
           "default": "",
           "description": "Override path for editor MCP config file."
         },
+        "afs.mcp.contextRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Optional editor-specific context root used when resolving MCP config candidates."
+        },
         "afs.treeView.showEmptyMounts": {
           "type": "boolean",
           "default": false,
@@ -211,15 +255,59 @@
           "default": "info",
           "description": "Log level for the AFS output channel."
         },
-        "afs.antigravity.dbPath": {
+        "afs.chat.modelProfile": {
           "type": "string",
-          "default": "",
-          "description": "Path to Antigravity state.vscdb. Defaults to ~/Library/Application Support/Antigravity/User/globalStorage/state.vscdb."
+          "enum": ["auto", "generic", "gemini", "claude", "codex"],
+          "default": "auto",
+          "description": "AFS model profile for session packs. Auto infers from the selected chat model when possible."
+        },
+        "afs.chat.workflow": {
+          "type": "string",
+          "enum": ["general", "scan_fast", "edit_fast", "review_deep", "root_cause_deep"],
+          "default": "general",
+          "description": "Default AFS workflow hint for chat context injection."
+        },
+        "afs.chat.toolProfile": {
+          "type": "string",
+          "enum": ["default", "context_readonly", "context_repair", "edit_and_verify", "handoff_only"],
+          "default": "context_readonly",
+          "description": "Default AFS tool profile hint for chat context injection."
+        },
+        "afs.chat.packMode": {
+          "type": "string",
+          "enum": ["focused", "retrieval", "full_slice"],
+          "default": "focused",
+          "description": "Default session pack mode for AFS chat requests."
+        },
+        "afs.chat.maxQueryResults": {
+          "type": "number",
+          "default": 6,
+          "description": "Maximum number of indexed AFS query hits to include in chat context."
+        },
+        "afs.chat.includeContent": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include indexed file content snippets in chat context when available."
+        },
+        "afs.chat.includeSessionPrompt": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include the prepared AFS session prompt in chat context when available."
+        },
+        "afs.chat.mountTypes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["memory", "knowledge", "tools", "scratchpad", "history", "hivemind", "global", "items", "monorepo"]
+          },
+          "default": [],
+          "description": "Optional mount filter for indexed context queries in chat. Empty means all mounts."
         },
         "afs.antigravity.contextRoot": {
           "type": "string",
           "default": "",
-          "description": "Path to Antigravity context root (~/.gemini/antigravity)."
+          "markdownDeprecationMessage": "Use `afs.mcp.contextRoot` instead.",
+          "description": "Deprecated compatibility setting for editor-specific MCP config discovery."
         }
       }
     }

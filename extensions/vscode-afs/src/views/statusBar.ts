@@ -4,21 +4,38 @@ import type { TransportSessionInfo } from "../transport/types";
 
 export class AfsStatusBar implements vscode.Disposable {
   private readonly item: vscode.StatusBarItem;
+  private enabled: boolean;
+  private state: ConnectionState = "disconnected";
+  private contextName?: string;
+  private sessionInfo?: TransportSessionInfo;
 
-  constructor() {
+  constructor(enabled = true) {
     this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
     this.item.command = "afs.mcp.status";
+    this.enabled = enabled;
     this.update("disconnected");
   }
 
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+    this.render();
+  }
+
   update(state: ConnectionState, contextName?: string, sessionInfo?: TransportSessionInfo): void {
+    this.state = state;
+    this.contextName = contextName;
+    this.sessionInfo = sessionInfo;
+    this.render();
+  }
+
+  private render(): void {
     const sessionLabel =
-      contextName?.trim() ||
-      this.labelFromWorkspace(sessionInfo?.workspace ?? "");
-    switch (state) {
+      this.contextName?.trim() ||
+      this.labelFromWorkspace(this.sessionInfo?.workspace ?? "");
+    switch (this.state) {
       case "connected":
         this.item.text = `$(check) AFS${sessionLabel ? `: ${sessionLabel}` : ""}`;
-        this.item.tooltip = this.connectedTooltip(sessionInfo);
+        this.item.tooltip = this.connectedTooltip(this.sessionInfo);
         break;
       case "disconnected":
         this.item.text = "$(circle-slash) AFS";
@@ -29,7 +46,12 @@ export class AfsStatusBar implements vscode.Disposable {
         this.item.tooltip = `AFS error${sessionLabel ? ` (${sessionLabel})` : ""} — click for details`;
         break;
     }
-    this.item.show();
+
+    if (this.enabled) {
+      this.item.show();
+    } else {
+      this.item.hide();
+    }
   }
 
   private connectedTooltip(sessionInfo?: TransportSessionInfo): string {

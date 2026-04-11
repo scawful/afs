@@ -56,9 +56,10 @@ export interface QueryEntry {
   is_dir: boolean;
   size_bytes: number;
   modified_at: string | null;
-  content_text?: string;
-  content_hash?: string;
-  rank?: number;
+  indexed_at?: string | null;
+  content_excerpt?: string;
+  content?: string;
+  relevance_score?: number;
 }
 
 export interface IndexSummary {

@@ -7,7 +7,7 @@ import {
 } from "../../src/mcp/configCandidates";
 
 describe("MCP config candidate discovery", () => {
-  it("includes workspace, Antigravity, and user-level candidates", () => {
+  it("includes workspace, host, and user-level candidates", () => {
     const candidates = buildMcpConfigCandidates({
       home: "/Users/test",
       workspaceFolders: ["/Users/test/workspace"],
@@ -15,9 +15,13 @@ describe("MCP config candidate discovery", () => {
     });
 
     assert.ok(candidates.includes("/Users/test/workspace/.cursor/mcp.json"));
+    assert.ok(candidates.includes("/Users/test/workspace/.vscode/mcp.json"));
     assert.ok(candidates.includes("/Users/test/.gemini/antigravity/mcp.json"));
     assert.ok(candidates.includes("/Users/test/.gemini/antigravity/mcp_config.json"));
     assert.ok(candidates.includes("/Users/test/.cursor/mcp.json"));
+    assert.ok(candidates.includes("/Users/test/.vscode/mcp.json"));
+    assert.ok(candidates.includes("/Users/test/Library/Application Support/Cursor/User/mcp.json"));
+    assert.ok(candidates.includes("/Users/test/Library/Application Support/Antigravity/User/mcp.json"));
   });
 
   it("picks the first existing candidate", () => {

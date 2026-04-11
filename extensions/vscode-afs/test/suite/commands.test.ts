@@ -2,6 +2,7 @@ import * as assert from "node:assert";
 import * as path from "node:path";
 import { describe, it, beforeEach } from "node:test";
 import {
+  __setActiveTextEditor,
   __setShowInformationMessage,
   __resetTestState,
   __setOpenTextDocument,
@@ -9,6 +10,7 @@ import {
   __setShowInputBox,
   __setShowQuickPick,
   __setShowTextDocument,
+  __setShowWarningMessage,
   commands,
   workspace,
 } from "vscode";
@@ -110,6 +112,83 @@ describe("registerCommands", () => {
     assert.strictEqual(transport.turnEvents[1].summary, "Context query failed for: broken query");
     assert.strictEqual(transport.turnEvents[1].error, "query exploded");
     assert.deepStrictEqual(errorMessages, ["Query failed: Error: query exploded"]);
+  });
+
+  it("prefers the active editor workspace for index.query in multi-root windows", async () => {
+    const transport = new MockTransport();
+    const workspaceA = "/tmp/afs-vscode-workspace-a";
+    const workspaceB = "/tmp/afs-vscode-workspace-b";
+
+    workspace.workspaceFolders = [
+      { name: "alpha", uri: { fsPath: workspaceA } },
+      { name: "beta", uri: { fsPath: workspaceB } },
+    ];
+    __setActiveTextEditor(path.join(workspaceB, "notes.md"));
+    __setShowInputBox(async () => "sprite state");
+    __setShowQuickPick(async (items) => (await Promise.resolve(items))[0]);
+
+    transport.toolResponses["context.query"] = {
+      entries: [],
+    };
+
+    registerCommands(
+      { subscriptions: [] } as never,
+      {
+        transport,
+        contextService: new ContextService(transport),
+        fileService: new FileService(transport),
+        indexService: new IndexService(transport),
+        treeProvider: { refresh() {} } as never,
+        binaryInfo: { command: "afs", args: [], env: {} },
+        logger: { appendLine() {}, dispose() {} } as never,
+      },
+    );
+
+    await commands.executeCommand("afs.index.query");
+
+    const queryCall = transport.toolCalls.find((call) => call.name === "context.query");
+    assert.ok(queryCall);
+    assert.strictEqual(queryCall.args.context_path, path.join(workspaceB, ".context"));
+  });
+
+  it("uses selected mount-point data for context unmount", async () => {
+    const transport = new MockTransport();
+    const infoMessages: string[] = [];
+
+    __setShowWarningMessage(async () => "Unmount");
+    __setShowInformationMessage(async (message) => {
+      infoMessages.push(String(message));
+      return undefined;
+    });
+    transport.toolResponses["context.unmount"] = { removed: true };
+
+    registerCommands(
+      { subscriptions: [] } as never,
+      {
+        transport,
+        contextService: new ContextService(transport),
+        fileService: new FileService(transport),
+        indexService: new IndexService(transport),
+        treeProvider: { refresh() {} } as never,
+        binaryInfo: { command: "afs", args: [], env: {} },
+        logger: { appendLine() {}, dispose() {} } as never,
+      },
+    );
+
+    await commands.executeCommand("afs.context.unmount", {
+      contextPath: "/tmp/workspace/.context",
+      mountType: "knowledge",
+      alias: "notes",
+    });
+
+    const unmountCall = transport.toolCalls.find((call) => call.name === "context.unmount");
+    assert.ok(unmountCall);
+    assert.deepStrictEqual(unmountCall.args, {
+      mount_type: "knowledge",
+      alias: "notes",
+      context_path: "/tmp/workspace/.context",
+    });
+    assert.deepStrictEqual(infoMessages, ["Unmounted notes from knowledge."]);
   });
 
   it("shows session hints in afs.mcp.status", async () => {

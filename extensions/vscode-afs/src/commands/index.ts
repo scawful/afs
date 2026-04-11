@@ -6,6 +6,8 @@ import type { ContextService } from "../services/contextService";
 import type { FileService } from "../services/fileService";
 import type { IndexService } from "../services/indexService";
 import { MountType } from "../types";
+import { getConfig } from "../utils/config";
+import { pickWorkspaceFolder } from "../utils/workspace";
 import type { ContextTreeProvider } from "../views/contextTreeProvider";
 import { registerAfs, unregisterAfs, checkRegistration } from "../mcp/registration";
 
@@ -20,6 +22,12 @@ interface CommandDeps {
 }
 
 type TurnAwareTransport = ITransportClient & TurnLifecycleClient;
+
+interface MountPointSelection {
+  contextPath: string;
+  mountType: string;
+  alias: string;
+}
 
 function isTurnAwareTransport(transport: ITransportClient): transport is TurnAwareTransport {
   return (
@@ -62,27 +70,11 @@ async function withRecordedTurn<T>(
   }
 }
 
-async function pickWorkspaceFolder(): Promise<vscode.WorkspaceFolder | undefined> {
-  const folders = vscode.workspace.workspaceFolders ?? [];
-  if (folders.length === 0) {
-    vscode.window.showWarningMessage("No workspace folder is open.");
-    return undefined;
-  }
-  if (folders.length === 1) {
-    return folders[0];
-  }
-  const picked = await vscode.window.showQuickPick(
-    folders.map((folder) => ({ label: folder.name, detail: folder.uri.fsPath, folder })),
-    { placeHolder: "Select workspace folder" },
-  );
-  return picked?.folder;
-}
-
 export function registerCommands(
   context: vscode.ExtensionContext,
   deps: CommandDeps,
 ): void {
-  const { transport, contextService, indexService, treeProvider, binaryInfo, logger } =
+  const { transport, contextService, fileService, indexService, treeProvider, binaryInfo, logger } =
     deps;
 
   context.subscriptions.push(
@@ -92,16 +84,23 @@ export function registerCommands(
 
     vscode.commands.registerCommand("afs.context.discover", async () => {
       try {
+        const searchPaths = getConfig<string[]>("discovery.searchPaths", [])
+          .map((value) => value.trim())
+          .filter(Boolean);
+        const maxDepth = Math.max(1, getConfig<number>("discovery.maxDepth", 3));
         const contexts = await withRecordedTurn(
           transport,
           "Discover AFS contexts for the open VS Code workspace.",
           "Discover AFS contexts",
-          async () => contextService.discover(),
+          async () => contextService.discover(
+            searchPaths.length > 0 ? searchPaths : undefined,
+            maxDepth,
+          ),
           {
             successSummary: (result) => `Discovered ${result.length} context(s)`,
           },
         );
-        treeProvider.refresh();
+        treeProvider.setManualDiscoveredContexts(contexts);
         vscode.window.showInformationMessage(`Found ${contexts.length} context(s)`);
       } catch (err) {
         vscode.window.showErrorMessage(`Discovery failed: ${err}`);
@@ -109,7 +108,7 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand("afs.context.init", async () => {
-      const folder = await pickWorkspaceFolder();
+      const folder = await pickWorkspaceFolder("Select workspace folder to initialize");
       if (!folder) return;
 
       const contextPath = path.join(folder.uri.fsPath, ".context");
@@ -148,7 +147,7 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand("afs.context.mount", async () => {
-      const folder = await pickWorkspaceFolder();
+      const folder = await pickWorkspaceFolder("Select workspace folder to mount into");
       if (!folder) return;
 
       const sourcePick = await vscode.window.showOpenDialog({
@@ -199,26 +198,51 @@ export function registerCommands(
       }
     }),
 
-    vscode.commands.registerCommand("afs.context.unmount", async () => {
-      const folder = await pickWorkspaceFolder();
-      if (!folder) return;
+    vscode.commands.registerCommand("afs.context.unmount", async (selection?: unknown) => {
+      const selectedMount = getMountPointSelection(selection);
 
-      const mountType = await vscode.window.showQuickPick(Object.values(MountType), {
-        placeHolder: "Select mount type",
-      });
-      if (!mountType) return;
+      let contextPath: string;
+      let mountType: string;
+      let alias: string;
 
-      const alias = await vscode.window.showInputBox({
-        prompt: `Alias to unmount from ${mountType}`,
-      });
-      if (!alias?.trim()) return;
+      if (selectedMount) {
+        const choice = await vscode.window.showWarningMessage(
+          `Unmount ${selectedMount.alias} from ${selectedMount.mountType}?`,
+          { modal: true },
+          "Unmount",
+          "Cancel",
+        );
+        if (choice !== "Unmount") {
+          return;
+        }
+        contextPath = selectedMount.contextPath;
+        mountType = selectedMount.mountType;
+        alias = selectedMount.alias;
+      } else {
+        const folder = await pickWorkspaceFolder("Select workspace folder to unmount from");
+        if (!folder) return;
+
+        contextPath = path.join(folder.uri.fsPath, ".context");
+        const pickedMountType = await vscode.window.showQuickPick(Object.values(MountType), {
+          placeHolder: "Select mount type",
+        });
+        if (!pickedMountType) return;
+
+        mountType = pickedMountType;
+        const pickedAlias = await pickMountAlias(
+          fileService,
+          contextPath,
+          pickedMountType as MountType,
+        );
+        if (!pickedAlias) return;
+        alias = pickedAlias;
+      }
 
       try {
-        const contextPath = path.join(folder.uri.fsPath, ".context");
         const trimmedAlias = alias.trim();
         const removed = await withRecordedTurn(
           transport,
-          `Unmount ${trimmedAlias} from ${mountType}`,
+          `Unmount ${trimmedAlias} from ${mountType} in ${contextPath}`,
           "Unmount AFS context source",
           async () =>
             contextService.unmount(
@@ -249,9 +273,9 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand("afs.index.rebuild", async () => {
-      const folders = vscode.workspace.workspaceFolders;
-      if (!folders?.length) return;
-      const contextPath = `${folders[0].uri.fsPath}/.context`;
+      const folder = await pickWorkspaceFolder("Select workspace folder to rebuild index for");
+      if (!folder) return;
+      const contextPath = path.join(folder.uri.fsPath, ".context");
       try {
         await withRecordedTurn(
           transport,
@@ -283,13 +307,14 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand("afs.index.query", async () => {
+      const folder = await pickWorkspaceFolder("Select workspace folder to query");
+      if (!folder) return;
+
       const query = await vscode.window.showInputBox({
         prompt: "Search context index",
       });
       if (!query) return;
-      const folders = vscode.workspace.workspaceFolders;
-      if (!folders?.length) return;
-      const contextPath = `${folders[0].uri.fsPath}/.context`;
+      const contextPath = path.join(folder.uri.fsPath, ".context");
       try {
         await withRecordedTurn(
           transport,
@@ -386,4 +411,60 @@ export function registerCommands(
       logger.show(true);
     }),
   );
+}
+
+function getMountPointSelection(selection: unknown): MountPointSelection | undefined {
+  if (!selection || typeof selection !== "object") {
+    return undefined;
+  }
+
+  const candidate = selection as Partial<MountPointSelection>;
+  if (
+    typeof candidate.contextPath === "string" &&
+    typeof candidate.mountType === "string" &&
+    typeof candidate.alias === "string"
+  ) {
+    return {
+      contextPath: candidate.contextPath,
+      mountType: candidate.mountType,
+      alias: candidate.alias,
+    };
+  }
+
+  return undefined;
+}
+
+async function pickMountAlias(
+  fileService: FileService,
+  contextPath: string,
+  mountType: MountType,
+): Promise<string | undefined> {
+  const mountPath = path.join(contextPath, mountType);
+
+  try {
+    const entries = await fileService.list(mountPath, 1);
+    const aliases = Array.from(
+      new Set(
+        entries
+          .filter((entry) => entry.path !== mountPath)
+          .map((entry) => path.basename(entry.path))
+          .filter(Boolean),
+      ),
+    );
+
+    if (aliases.length > 0) {
+      const picked = await vscode.window.showQuickPick(
+        aliases.map((label) => ({ label })),
+        { placeHolder: `Select mount alias to unmount from ${mountType}` },
+      );
+      return picked?.label;
+    }
+  } catch {
+    // fall back to manual entry below
+  }
+
+  const alias = await vscode.window.showInputBox({
+    prompt: `Alias to unmount from ${mountType}`,
+  });
+  return alias?.trim() || undefined;
 }

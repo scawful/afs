@@ -72,11 +72,8 @@ export class AfsCommandTreeProvider implements vscode.TreeDataProvider<TreeNode>
         new CommandItem("Query Index", "afs.index.query", "search"),
         new CommandItem("Quick Open", "afs.index.queryQuickOpen", "go-to-file"),
       ]),
-      new CommandGroupItem("Training", "beaker", [
-        new CommandItem("Freshness Gate", "afs.training.freshnessGate", "shield"),
-        new CommandItem("Extract Sessions", "afs.training.extractSessions", "history"),
-        new CommandItem("Generate Router Data", "afs.training.generateRouter", "split-horizontal"),
-        new CommandItem("Export Antigravity", "afs.training.exportAntigravity", "rocket"),
+      new CommandGroupItem("Chat", "comment-discussion", [
+        new CommandItem("Open Chat", "afs.chat.open", "comment-discussion"),
       ]),
       new CommandGroupItem("Server", "server", [
         new CommandItem("MCP Status", "afs.mcp.status", "info"),

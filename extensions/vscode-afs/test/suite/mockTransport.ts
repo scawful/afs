@@ -35,6 +35,11 @@ export class MockTransport implements ITransportClient {
 
   public toolResponses: Record<string, Record<string, unknown>> = {};
   public toolErrors: Record<string, Error> = {};
+  public toolCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  public toolHandlers: Record<
+    string,
+    (args: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>
+  > = {};
   public resourceList: McpResource[] = [];
   public promptList: McpPrompt[] = [];
   public turnEvents: Array<Record<string, unknown>> = [];
@@ -54,10 +59,14 @@ export class MockTransport implements ITransportClient {
 
   async callTool(
     name: string,
-    _args: Record<string, unknown>,
+    args: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    this.toolCalls.push({ name, args });
     if (this.toolErrors[name]) {
       throw this.toolErrors[name];
+    }
+    if (this.toolHandlers[name]) {
+      return await this.toolHandlers[name](args);
     }
     return this.toolResponses[name] ?? {};
   }

@@ -97,8 +97,8 @@ export class CliClient implements ITransportClient {
         if (typeof args.max_depth === "number") {
           cliArgs.push("--max-depth", String(args.max_depth));
         }
-        const output = await this.exec(cliArgs);
-        return JSON.parse(output);
+        const output = await this.execJson(cliArgs);
+        return normalizeDiscoverPayload(output);
       }
       case "context.init": {
         const projectPath = this.projectPathFromArgs(args.project_path);
@@ -175,7 +175,8 @@ export class CliClient implements ITransportClient {
       }
       case "context.status": {
         const projectPath = this.projectPathFromContextArg(args.context_path);
-        return this.execJson(["status", "--start-dir", projectPath, "--json"]);
+        const output = await this.execJson(["status", "--start-dir", projectPath, "--json"]);
+        return normalizeContextStatusPayload(output);
       }
       case "context.freshness": {
         const projectPath = this.projectPathFromContextArg(args.context_path);
@@ -202,21 +203,6 @@ export class CliClient implements ITransportClient {
         }
         const agents = await this.execJson(cliArgs);
         return Array.isArray(agents) ? { agents, count: agents.length } : agents;
-      }
-      case "training.antigravity.status": {
-        const cliArgs = ["training", "antigravity-status", "--json"];
-        if (typeof args.db_path === "string" && args.db_path.trim()) {
-          cliArgs.push("--db-path", args.db_path.trim());
-        }
-        const stateKeys = args.state_keys;
-        if (Array.isArray(stateKeys)) {
-          for (const key of stateKeys) {
-            if (typeof key === "string" && key.trim()) {
-              cliArgs.push("--state-key", key.trim());
-            }
-          }
-        }
-        return this.execJson(cliArgs);
       }
       case "context.index.rebuild": {
         const projectPath = this.projectPathFromContextArg(args.context_path);
@@ -250,6 +236,41 @@ export class CliClient implements ITransportClient {
         }
         if (args.include_content === true) {
           cliArgs.push("--include-content");
+        }
+        return this.execJson(cliArgs);
+      }
+      case "session.pack": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const cliArgs = ["session", "pack", "--path", projectPath, "--json", "--no-write-artifacts"];
+        if (typeof args.query === "string" && args.query.trim()) {
+          cliArgs.push(args.query.trim());
+        }
+        if (typeof args.task === "string" && args.task.trim()) {
+          cliArgs.push("--task", args.task.trim());
+        }
+        if (typeof args.model === "string" && args.model.trim()) {
+          cliArgs.push("--model", args.model.trim());
+        }
+        if (typeof args.workflow === "string" && args.workflow.trim()) {
+          cliArgs.push("--workflow", args.workflow.trim());
+        }
+        if (typeof args.tool_profile === "string" && args.tool_profile.trim()) {
+          cliArgs.push("--tool-profile", args.tool_profile.trim());
+        }
+        if (typeof args.pack_mode === "string" && args.pack_mode.trim()) {
+          cliArgs.push("--pack-mode", args.pack_mode.trim());
+        }
+        if (typeof args.token_budget === "number") {
+          cliArgs.push("--token-budget", String(args.token_budget));
+        }
+        if (args.include_content === true) {
+          cliArgs.push("--include-content");
+        }
+        if (typeof args.max_query_results === "number") {
+          cliArgs.push("--max-query-results", String(args.max_query_results));
+        }
+        if (typeof args.max_embedding_results === "number") {
+          cliArgs.push("--max-embedding-results", String(args.max_embedding_results));
         }
         return this.execJson(cliArgs);
       }
@@ -371,6 +392,7 @@ export class CliClient implements ITransportClient {
       { name: "context.unmount", description: "Unmount an alias from context", inputSchema: {} },
       { name: "context.status", description: "Get context status", inputSchema: {} },
       { name: "context.freshness", description: "Get mount freshness scores", inputSchema: {} },
+      { name: "session.pack", description: "Build a context session pack", inputSchema: {} },
       { name: "context.index.rebuild", description: "Rebuild context index", inputSchema: {} },
       { name: "context.query", description: "Query context index", inputSchema: {} },
       { name: "context.read", description: "Read a context-scoped file", inputSchema: {} },
@@ -380,7 +402,6 @@ export class CliClient implements ITransportClient {
       { name: "context.list", description: "List context-scoped files", inputSchema: {} },
       { name: "memory.status", description: "Get memory status", inputSchema: {} },
       { name: "agent.capabilities", description: "List agent capabilities", inputSchema: {} },
-      { name: "training.antigravity.status", description: "Get Antigravity training status", inputSchema: {} },
     ];
   }
 
@@ -513,7 +534,9 @@ export class CliClient implements ITransportClient {
   }
 
   private workspaceRoot(): string {
-    const folder = vscode.workspace.workspaceFolders?.[0];
+    const activeUri = vscode.window.activeTextEditor?.document?.uri;
+    const activeFolder = activeUri ? vscode.workspace.getWorkspaceFolder(activeUri) : undefined;
+    const folder = activeFolder ?? vscode.workspace.workspaceFolders?.[0];
     return folder?.uri?.fsPath ? path.resolve(folder.uri.fsPath) : process.cwd();
   }
 
@@ -810,7 +833,7 @@ export class CliClient implements ITransportClient {
 
   private projectPathFromContextArg(rawContextPath: unknown): string {
     if (typeof rawContextPath !== "string" || !rawContextPath.trim()) {
-      return process.cwd();
+      return this.workspaceRoot();
     }
     const resolved = path.resolve(rawContextPath);
     const marker = `${path.sep}.context`;
@@ -824,6 +847,111 @@ export class CliClient implements ITransportClient {
     if (typeof rawProjectPath === "string" && rawProjectPath.trim()) {
       return path.resolve(rawProjectPath);
     }
-    return process.cwd();
+    return this.workspaceRoot();
   }
+}
+
+function normalizeDiscoverPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const contexts = Array.isArray(payload.contexts)
+    ? payload.contexts
+        .map((entry) => normalizeDiscoveredContext(entry))
+        .filter((entry): entry is Record<string, unknown> => entry !== null)
+    : [];
+
+  return {
+    ...payload,
+    contexts,
+  };
+}
+
+function normalizeDiscoveredContext(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const raw = value as Record<string, unknown>;
+  const contextPath = stringValue(raw.path);
+  if (!contextPath) {
+    return null;
+  }
+
+  const project = stringValue(raw.project) || stringValue(raw.project_name) || path.basename(contextPath);
+  const valid = booleanValue(raw.valid) ?? booleanValue(raw.is_valid) ?? false;
+  const mounts = numberValue(raw.mounts) ?? numberValue(raw.total_mounts) ?? 0;
+
+  return {
+    ...raw,
+    project,
+    path: contextPath,
+    valid,
+    mounts,
+  };
+}
+
+function normalizeContextStatusPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const mountHealth = recordValue(payload.mount_health);
+  const rawIndex = recordValue(payload.index);
+
+  return {
+    ...payload,
+    context_path: stringValue(payload.context_path) || stringValue(payload.context_root),
+    profile: stringValue(payload.profile) || stringValue(payload.active_profile),
+    mount_counts: recordValue(payload.mount_counts) ?? {},
+    total_files: numberValue(payload.total_files) ?? 0,
+    mount_health: mountHealth ?? {},
+    actions: Array.from(
+      new Set([
+        ...stringArray(payload.actions),
+        ...stringArray(mountHealth?.suggested_actions),
+      ]),
+    ),
+    ...(rawIndex ? { index: normalizeStatusIndex(rawIndex) } : {}),
+  };
+}
+
+function normalizeStatusIndex(rawIndex: Record<string, unknown>): Record<string, unknown> {
+  const available = booleanValue(rawIndex.available);
+  const built = booleanValue(rawIndex.built) ?? available ?? false;
+  const totalEntries = numberValue(rawIndex.total_entries);
+  const hasEntries = booleanValue(rawIndex.has_entries)
+    ?? (totalEntries != null ? totalEntries > 0 : undefined);
+  const stale = booleanValue(rawIndex.stale);
+  const dbPath = stringValue(rawIndex.db_path);
+  const dbSizeBytes = numberValue(rawIndex.db_size_bytes) ?? numberValue(rawIndex.db_size);
+
+  return {
+    ...rawIndex,
+    enabled: booleanValue(rawIndex.enabled) ?? true,
+    built,
+    ...(hasEntries != null ? { has_entries: hasEntries } : {}),
+    ...(totalEntries != null ? { total_entries: totalEntries } : {}),
+    ...(stale != null ? { stale } : {}),
+    ...(dbPath ? { db_path: dbPath } : {}),
+    ...(dbSizeBytes != null ? { db_size_bytes: dbSizeBytes } : {}),
+  };
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function booleanValue(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
 }
