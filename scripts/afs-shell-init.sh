@@ -30,6 +30,9 @@ case ":${PATH}:" in
 esac
 
 # --- Aliases ---
+# Keep `afs` on the user's installed/default command. Use `afs-dev` when the
+# current repo wrapper should win explicitly.
+alias afs-dev="${AFS_CLI}"
 alias a='afs'
 alias as='afs status'
 alias asj='afs status --json'

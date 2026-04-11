@@ -284,6 +284,26 @@ def test_afs_shell_init_has_valid_bash_syntax() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_afs_shell_init_exposes_afs_dev_alias(tmp_path: Path) -> None:
+    fake_root = tmp_path / "afs-root"
+    (fake_root / "scripts").mkdir(parents=True)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            f"AFS_ROOT={shlex.quote(str(fake_root))} "
+            f"source {shlex.quote(str(SHELL_INIT))} && alias afs-dev",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert f"alias afs-dev='{fake_root / 'scripts' / 'afs'}'" in result.stdout.strip()
+
+
 def test_afs_client_session_has_valid_bash_syntax() -> None:
     result = subprocess.run(
         ["bash", "-n", str(AFS_CLIENT_SESSION)],
