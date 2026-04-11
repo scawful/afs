@@ -252,9 +252,10 @@ metadata so child scripts only need to provide the event-specific fields.
 
 For noisy command output, use MCP tool `operator.digest` before pasting raw
 logs back into a model turn. It can auto-detect and compress `pytest`,
-`traceback`, `grep`, and `git diff --stat` style output into a compact summary
-plus structured fields, and it is included in the default, readonly, repair,
-and edit-oriented tool bundles.
+`traceback`, `grep`, `git diff --stat`, and compiler/linter diagnostic output
+(`tsc`, ESLint, Ruff, mypy) into a compact summary plus structured fields, and
+it is included in the default, readonly, repair, and edit-oriented tool
+bundles.
 
 For schema-bound plan or verification work, use prompt `afs.workflow.structured`.
 It inlines one built-in response schema together with a normal `session.pack`

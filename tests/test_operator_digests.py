@@ -69,6 +69,54 @@ def test_digest_operator_output_auto_detects_diffstat() -> None:
     assert payload["details"]["deletions"] == 3
 
 
+def test_digest_operator_output_auto_detects_tsc_diagnostics() -> None:
+    payload = digest_operator_output(
+        """
+src/app.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.
+src/app.ts(18,1): error TS1005: ',' expected.
+Found 2 errors in the same file, starting at: src/app.ts:12
+""".strip()
+    )
+
+    assert payload["kind"] == "diagnostic"
+    assert payload["summary"] == "2 errors across 1 file"
+    assert payload["details"]["error_count"] == 2
+    assert payload["details"]["path_count"] == 1
+    assert payload["details"]["tools"] == ["tsc"]
+    assert payload["details"]["entries"][0]["code"] == "TS2322"
+
+
+def test_digest_operator_output_auto_detects_eslint_stylish_output() -> None:
+    payload = digest_operator_output(
+        """
+/Users/scawful/src/lab/afs/extensions/vscode-afs/src/extension.ts
+  10:5  error    Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  14:1  warning  Missing return type on function           @typescript-eslint/explicit-function-return-type
+
+✖ 2 problems (1 error, 1 warning)
+""".strip()
+    )
+
+    assert payload["kind"] == "diagnostic"
+    assert payload["summary"] == "1 error, 1 warning across 1 file"
+    assert payload["details"]["error_count"] == 1
+    assert payload["details"]["warning_count"] == 1
+    assert payload["details"]["tools"] == ["eslint"]
+    assert payload["details"]["entries"][0]["code"] == "@typescript-eslint/no-explicit-any"
+
+
+def test_digest_operator_output_accepts_explicit_diagnostic_kind() -> None:
+    payload = digest_operator_output(
+        "src/afs/operator_digests.py:88:9: F401 `re` imported but unused",
+        kind="diagnostic",
+    )
+
+    assert payload["kind"] == "diagnostic"
+    assert payload["summary"] == "1 error across 1 file"
+    assert payload["details"]["tools"] == ["ruff"]
+    assert payload["details"]["entries"][0]["code"] == "F401"
+
+
 def test_digest_operator_output_uses_generic_fallback() -> None:
     payload = digest_operator_output("line one\n\nline two")
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-KIND_CHOICES = ("auto", "pytest", "traceback", "grep", "diffstat", "generic")
+KIND_CHOICES = ("auto", "pytest", "traceback", "grep", "diffstat", "diagnostic", "generic")
 
 _PYTEST_COUNT_RE = re.compile(
     r"(?P<count>\d+)\s+"
@@ -23,6 +23,35 @@ _DIFFSTAT_SUMMARY_RE = re.compile(
     r"(?P<files>\d+)\s+files?\s+changed"
     r"(?:,\s*(?P<insertions>\d+)\s+insertions?\(\+\))?"
     r"(?:,\s*(?P<deletions>\d+)\s+deletions?\(-\))?"
+)
+_TSC_DIAGNOSTIC_RE = re.compile(
+    r"^(?P<path>.+)\((?P<line>\d+),(?P<column>\d+)\): "
+    r"(?P<severity>error|warning) (?P<code>TS\d+): (?P<message>.+)$"
+)
+_MYPY_DIAGNOSTIC_RE = re.compile(
+    r"^(?P<path>.+?):(?P<line>\d+): (?P<severity>error|warning|note): "
+    r"(?P<message>.+?)(?:\s+\[(?P<code>[^\]]+)\])?$"
+)
+_RUFF_DIAGNOSTIC_RE = re.compile(
+    r"^(?P<path>.+?):(?P<line>\d+):(?P<column>\d+): "
+    r"(?P<code>[A-Z]{1,6}\d{2,4})(?: \[[^\]]+\])? (?P<message>.+)$"
+)
+_ESLINT_DIAGNOSTIC_RE = re.compile(
+    r"^\s*(?P<line>\d+):(?P<column>\d+)\s+"
+    r"(?P<severity>error|warning)\s+"
+    r"(?P<message>.+?)\s{2,}(?P<code>@?[\w./-]+)\s*$"
+)
+_ESLINT_SUMMARY_RE = re.compile(
+    r"^[✖xX]\s+(?P<problems>\d+)\s+problems?"
+    r"(?:\s+\((?P<errors>\d+)\s+errors?(?:,\s*(?P<warnings>\d+)\s+warnings?)?\))?$"
+)
+_TSC_SUMMARY_RE = re.compile(
+    r"^Found (?P<errors>\d+) errors?(?: in (?P<files>\d+) files?)?",
+    re.IGNORECASE,
+)
+_MYPY_SUMMARY_RE = re.compile(
+    r"^Found (?P<errors>\d+) errors?(?: in (?P<files>\d+) files?)?",
+    re.IGNORECASE,
 )
 
 
@@ -51,6 +80,8 @@ def digest_operator_output(
         payload = _digest_grep(text, max_items=effective_max_items)
     elif detected_kind == "diffstat":
         payload = _digest_diffstat(text, max_items=effective_max_items)
+    elif detected_kind == "diagnostic":
+        payload = _digest_diagnostic(text, max_items=effective_max_items)
     else:
         payload = _digest_generic(text, max_items=effective_max_items)
 
@@ -80,6 +111,8 @@ def _detect_kind(text: str) -> str:
         return "pytest"
     if "Traceback (most recent call last):" in text:
         return "traceback"
+    if _looks_like_diagnostic(text):
+        return "diagnostic"
     if _looks_like_diffstat(text):
         return "diffstat"
     if _grep_match_count(text) >= 2:
@@ -107,6 +140,11 @@ def _looks_like_diffstat(text: str) -> bool:
     has_file_lines = any(_DIFFSTAT_FILE_RE.match(line) for line in lines)
     has_summary_line = any(_DIFFSTAT_SUMMARY_RE.search(line) for line in lines)
     return has_file_lines and has_summary_line
+
+
+def _looks_like_diagnostic(text: str) -> bool:
+    entries, summary_line = _parse_diagnostic_output(text)
+    return bool(entries or summary_line)
 
 
 def _grep_match_count(text: str) -> int:
@@ -328,6 +366,51 @@ def _digest_diffstat(text: str, *, max_items: int) -> dict[str, Any]:
     }
 
 
+def _digest_diagnostic(text: str, *, max_items: int) -> dict[str, Any]:
+    entries, summary_line = _parse_diagnostic_output(text)
+    limited_entries = entries[:max_items]
+    unique_paths = {entry["path"] for entry in entries}
+    tool_names = sorted({str(entry["tool"]) for entry in entries if entry.get("tool")})
+
+    error_count = sum(1 for entry in entries if entry["severity"] == "error")
+    warning_count = sum(1 for entry in entries if entry["severity"] == "warning")
+    note_count = sum(1 for entry in entries if entry["severity"] == "note")
+    other_count = len(entries) - error_count - warning_count - note_count
+
+    summary = _summarize_diagnostic_counts(
+        error_count=error_count,
+        warning_count=warning_count,
+        note_count=note_count,
+        other_count=other_count,
+        path_count=len(unique_paths),
+        fallback=summary_line,
+    )
+
+    highlights: list[str] = []
+    if summary_line:
+        highlights.append(summary_line)
+    highlights.extend(_format_diagnostic_highlight(entry) for entry in limited_entries)
+    if not highlights:
+        highlights = ["No diagnostic entries found."]
+
+    return {
+        "summary": summary,
+        "highlights": highlights,
+        "truncated": len(entries) > len(limited_entries),
+        "details": {
+            "entry_count": len(entries),
+            "error_count": error_count,
+            "warning_count": warning_count,
+            "note_count": note_count,
+            "other_count": other_count,
+            "path_count": len(unique_paths),
+            "tools": tool_names,
+            "summary_line": summary_line,
+            "entries": limited_entries,
+        },
+    }
+
+
 def _digest_generic(text: str, *, max_items: int) -> dict[str, Any]:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     limited_lines = lines[:max_items]
@@ -352,6 +435,140 @@ def _parse_grep_line(line: str) -> dict[str, Any] | None:
         "line": int(match.group("line")),
         "text": match.group("text").strip(),
     }
+
+
+def _parse_diagnostic_output(text: str) -> tuple[list[dict[str, Any]], str]:
+    entries: list[dict[str, Any]] = []
+    summary_line = ""
+    eslint_path: str | None = None
+
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            eslint_path = None
+            continue
+
+        tsc_match = _TSC_DIAGNOSTIC_RE.match(stripped)
+        if tsc_match:
+            entries.append(
+                {
+                    "path": tsc_match.group("path"),
+                    "line": int(tsc_match.group("line")),
+                    "column": int(tsc_match.group("column")),
+                    "severity": tsc_match.group("severity"),
+                    "code": tsc_match.group("code"),
+                    "message": tsc_match.group("message").strip(),
+                    "tool": "tsc",
+                }
+            )
+            continue
+
+        mypy_match = _MYPY_DIAGNOSTIC_RE.match(stripped)
+        if mypy_match:
+            entries.append(
+                {
+                    "path": mypy_match.group("path"),
+                    "line": int(mypy_match.group("line")),
+                    "column": None,
+                    "severity": mypy_match.group("severity"),
+                    "code": (mypy_match.group("code") or "").strip(),
+                    "message": mypy_match.group("message").strip(),
+                    "tool": "mypy",
+                }
+            )
+            continue
+
+        ruff_match = _RUFF_DIAGNOSTIC_RE.match(stripped)
+        if ruff_match:
+            entries.append(
+                {
+                    "path": ruff_match.group("path"),
+                    "line": int(ruff_match.group("line")),
+                    "column": int(ruff_match.group("column")),
+                    "severity": "error",
+                    "code": ruff_match.group("code"),
+                    "message": ruff_match.group("message").strip(),
+                    "tool": "ruff",
+                }
+            )
+            continue
+
+        if stripped.startswith(("/", "./", "../")) or re.match(r"^[A-Za-z]:[\\/]", stripped):
+            if _looks_like_path_header(stripped):
+                eslint_path = stripped
+                continue
+
+        eslint_match = _ESLINT_DIAGNOSTIC_RE.match(line)
+        if eslint_match and eslint_path:
+            entries.append(
+                {
+                    "path": eslint_path,
+                    "line": int(eslint_match.group("line")),
+                    "column": int(eslint_match.group("column")),
+                    "severity": eslint_match.group("severity"),
+                    "code": eslint_match.group("code"),
+                    "message": eslint_match.group("message").strip(),
+                    "tool": "eslint",
+                }
+            )
+            continue
+
+        if not summary_line and (
+            _ESLINT_SUMMARY_RE.match(stripped)
+            or _TSC_SUMMARY_RE.match(stripped)
+            or _MYPY_SUMMARY_RE.match(stripped)
+        ):
+            summary_line = stripped
+
+    return entries, summary_line
+
+
+def _looks_like_path_header(line: str) -> bool:
+    if line.startswith(("Found ", "Success:", "error", "warning", "note", "✖", "x ", "X ")):
+        return False
+    return bool(re.search(r"\.[A-Za-z0-9]+$", line))
+
+
+def _format_diagnostic_highlight(entry: dict[str, Any]) -> str:
+    location = f"{entry['path']}:{entry['line']}"
+    column = entry.get("column")
+    if isinstance(column, int):
+        location = f"{location}:{column}"
+    severity = str(entry.get("severity", "issue"))
+    code = str(entry.get("code", "")).strip()
+    message = str(entry.get("message", "")).strip()
+    if code:
+        return f"{location} {severity} [{code}] {message}".rstrip()
+    return f"{location} {severity} {message}".rstrip()
+
+
+def _summarize_diagnostic_counts(
+    *,
+    error_count: int,
+    warning_count: int,
+    note_count: int,
+    other_count: int,
+    path_count: int,
+    fallback: str,
+) -> str:
+    parts: list[str] = []
+    if error_count:
+        parts.append(_format_count(error_count, "error"))
+    if warning_count:
+        parts.append(_format_count(warning_count, "warning"))
+    if note_count:
+        parts.append(_format_count(note_count, "note"))
+    if other_count:
+        parts.append(_format_count(other_count, "issue"))
+    if parts:
+        return f"{', '.join(parts)} across {_format_count(path_count, 'file')}"
+    return fallback or "No diagnostic entries found"
+
+
+def _format_count(value: int, singular: str) -> str:
+    suffix = "" if value == 1 else "s"
+    return f"{value} {singular}{suffix}"
 
 
 def _trim_summary(text: str, *, max_chars: int = 160) -> str:

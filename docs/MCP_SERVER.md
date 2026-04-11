@@ -272,10 +272,11 @@ contract each time.
 
 For noisy command output, `operator.digest` provides a small compression step
 before the text goes back into model context. It accepts raw `text` plus an
-optional `kind` hint (`auto`, `pytest`, `traceback`, `grep`, `diffstat`, or
-`generic`) and returns both structured fields and a compact `digest_text`
-summary. This is intended for Gemini-style sessions where raw terminal output
-often costs more context than it is worth.
+optional `kind` hint (`auto`, `pytest`, `traceback`, `grep`, `diffstat`,
+`diagnostic`, or `generic`) and returns both structured fields and a compact
+`digest_text` summary. `diagnostic` is the compiler/linter family for `tsc`,
+ESLint, Ruff, and mypy-style output. This is intended for Gemini-style
+sessions where raw terminal output often costs more context than it is worth.
 
 Index behavior can be tuned in `afs.toml`:
 
