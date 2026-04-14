@@ -34,6 +34,7 @@ def test_snapshot_roundtrip():
         recent_events=[{"type": "agent_progress", "source": "x"}],
         active_agents=["workspace-analyst"],
         mount_freshness={"knowledge": {"file_count": 42, "freshness_score": 0.9, "stale": False}},
+        codebase_summary={"project_root": "/tmp/test", "source_roots": ["src"]},
         context_root="/tmp/test",
     )
     data = snap.to_dict()
@@ -43,6 +44,7 @@ def test_snapshot_roundtrip():
     assert restored.memory_topics == ["topic-a", "topic-b"]
     assert restored.active_agents == ["workspace-analyst"]
     assert restored.mount_freshness["knowledge"]["file_count"] == 42
+    assert restored.codebase_summary["source_roots"] == ["src"]
 
 
 def test_snapshot_write_and_load(tmp_path: Path, monkeypatch):
@@ -84,6 +86,61 @@ def test_build_snapshot_with_minimal_context(tmp_path: Path):
     assert snap.context_root == str(context)
     assert snap.memory_entry_count >= 1
     assert "test-topic" in snap.memory_topics
+
+
+def test_build_snapshot_includes_codebase_summary(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    context = project / ".context"
+    context.mkdir()
+    (context / "memory").mkdir()
+    (context / "memory" / "test-topic.md").write_text("# Test\nSome memory.", encoding="utf-8")
+    (project / "README.md").write_text("# Demo\n", encoding="utf-8")
+    (project / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
+    (project / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (project / "src").mkdir()
+    (project / "src" / "demo.py").write_text("def demo() -> int:\n    return 1\n", encoding="utf-8")
+    (project / "tests").mkdir()
+    (project / "tests" / "test_demo.py").write_text("def test_demo():\n    assert True\n", encoding="utf-8")
+    (project / "docs").mkdir()
+    (project / "docs" / "guide.md").write_text("# Guide\n", encoding="utf-8")
+
+    snap = build_agent_context_snapshot("test-agent", context)
+
+    assert snap.codebase_summary["project_root"] == str(project)
+    assert "pyproject.toml" in snap.codebase_summary["manifests"]
+    assert "src" in snap.codebase_summary["source_roots"]
+    assert "tests" in snap.codebase_summary["test_roots"]
+    assert "docs" in snap.codebase_summary["docs_roots"]
+    assert snap.codebase_summary["language_hints"]["python"] >= 2
+
+
+def test_build_snapshot_supports_training_repo_layout(tmp_path: Path):
+    project = tmp_path / "scawfulbot"
+    project.mkdir()
+    context = project / ".context"
+    context.mkdir()
+    (context / "memory").mkdir()
+    (project / "config").mkdir()
+    (project / "config" / "registry.json").write_text('{"models": []}\n', encoding="utf-8")
+    (project / "config" / "system_prompt.md").write_text("# Prompt\n", encoding="utf-8")
+    (project / "data").mkdir()
+    (project / "eval").mkdir()
+    (project / "eval" / "smoke.py").write_text("def smoke() -> bool:\n    return True\n", encoding="utf-8")
+    (project / "models").mkdir()
+    (project / "scripts").mkdir()
+    (project / "scripts" / "train.py").write_text("def train() -> None:\n    pass\n", encoding="utf-8")
+    (project / "training").mkdir()
+    (project / "training" / "dataset.py").write_text("def load_dataset() -> list[str]:\n    return []\n", encoding="utf-8")
+
+    snap = build_agent_context_snapshot("test-agent", context)
+
+    assert "config" in snap.codebase_summary["workflow_roots"]
+    assert "eval" in snap.codebase_summary["workflow_roots"]
+    assert "models" in snap.codebase_summary["workflow_roots"]
+    assert "training" in snap.codebase_summary["workflow_roots"]
+    assert "scripts" in snap.codebase_summary["script_roots"]
+    assert snap.codebase_summary["language_hints"]["python"] >= 2
 
 
 def test_build_snapshot_handles_missing_context(tmp_path: Path):
@@ -187,6 +244,22 @@ def test_mixin_get_mount_freshness_from_snapshot(tmp_path: Path, monkeypatch):
     freshness = agent.get_mount_freshness()
     assert freshness["knowledge"]["stale"] is False
     assert freshness["scratchpad"]["stale"] is True
+
+
+def test_mixin_get_codebase_summary_from_snapshot(tmp_path: Path, monkeypatch):
+    snap = AgentContextSnapshot(
+        agent_name="test",
+        context_root=str(tmp_path),
+        codebase_summary={"project_root": str(tmp_path), "source_roots": ["src"]},
+    )
+    path = write_agent_context_snapshot(snap, tmp_path / "snapshots")
+    monkeypatch.setenv(AGENT_CONTEXT_ENV, str(path))
+
+    agent = TestMixin()
+    agent.load_context()
+
+    summary = agent.get_codebase_summary()
+    assert summary["source_roots"] == ["src"]
 
 
 def test_mixin_query_context_returns_empty_without_context():

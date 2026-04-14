@@ -233,8 +233,13 @@ Gemini-facing MCP resources:
 - `afs://context/<path>/index`
 
 `afs.session.bootstrap` is the recommended first call in a new session. It
-packages health, drift, scratchpad notes, task queue state, recent hivemind
-messages, and the latest durable memory summary into one startup packet.
+packages health, cheap codebase orientation, drift, scratchpad notes, task
+queue state, recent hivemind messages, and the latest durable memory summary
+into one startup packet.
+
+`afs.context.overview` now includes both mount structure and a cheap codebase
+summary. When callers pass `path`/`project_path`, it can also summarize a raw
+project tree before `.context` exists yet.
 
 `session.pack` / `afs.session.pack` is the explicit follow-on surface for
 model-specific working context. It builds a token-budgeted pack for Gemini,

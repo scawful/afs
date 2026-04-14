@@ -1652,6 +1652,10 @@ def test_prompts_get_session_bootstrap(tmp_path: Path) -> None:
         "bootstrap state",
         encoding="utf-8",
     )
+    project_root = context_root.parent
+    (project_root / "README.md").write_text("# Demo\n", encoding="utf-8")
+    (project_root / "src").mkdir(exist_ok=True)
+    (project_root / "src" / "demo.py").write_text("def demo() -> int:\n    return 1\n", encoding="utf-8")
     response = _handle_request(
         {
             "jsonrpc": "2.0",
@@ -1669,6 +1673,93 @@ def test_prompts_get_session_bootstrap(tmp_path: Path) -> None:
     text = messages[0]["content"]["text"]
     assert "AFS Session Bootstrap" in text
     assert "bootstrap state" in text
+    assert "## Codebase" in text
+
+
+def test_prompts_get_context_overview_without_existing_context(tmp_path: Path) -> None:
+    project_path = tmp_path / "scawfulbot"
+    project_path.mkdir()
+    (project_path / "config").mkdir()
+    (project_path / "config" / "registry.json").write_text('{"models": []}\n', encoding="utf-8")
+    (project_path / "config" / "system_prompt.md").write_text("# Prompt\n", encoding="utf-8")
+    (project_path / "scripts").mkdir()
+    (project_path / "scripts" / "train.py").write_text("def train() -> None:\n    pass\n", encoding="utf-8")
+    (project_path / "training").mkdir()
+    (project_path / "training" / "dataset.py").write_text("def load_dataset() -> list[str]:\n    return []\n", encoding="utf-8")
+
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(
+                context_root=tmp_path / "context",
+                workspace_directories=[WorkspaceDirectory(path=tmp_path, description="tmp")],
+            )
+        )
+    )
+
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 126,
+            "method": "prompts/get",
+            "params": {
+                "name": "afs.context.overview",
+                "arguments": {"path": str(project_path)},
+            },
+        },
+        manager,
+    )
+
+    assert response is not None
+    text = response["result"]["messages"][0]["content"]["text"]
+    assert "Context available: no" in text
+    assert "## Codebase" in text
+    assert "workflow_roots: config, training" in text or "workflow_roots: training, config" in text
+    assert "script_roots: scripts" in text
+
+
+def test_prompts_get_context_overview_prefers_requested_project_over_ancestor_context(
+    tmp_path: Path,
+) -> None:
+    lab_path = tmp_path / "lab"
+    lab_path.mkdir()
+    project_path = lab_path / "scawfulbot"
+    project_path.mkdir()
+    (project_path / "config").mkdir()
+    (project_path / "config" / "registry.json").write_text('{"models": []}\n', encoding="utf-8")
+    (project_path / "scripts").mkdir()
+    (project_path / "scripts" / "train.py").write_text("def train() -> None:\n    pass\n", encoding="utf-8")
+    (project_path / "training").mkdir()
+    (project_path / "training" / "dataset.py").write_text("def load_dataset() -> list[str]:\n    return []\n", encoding="utf-8")
+
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(
+                context_root=tmp_path / "context",
+                workspace_directories=[WorkspaceDirectory(path=tmp_path, description="tmp")],
+            )
+        )
+    )
+    manager.ensure(path=lab_path)
+
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 127,
+            "method": "prompts/get",
+            "params": {
+                "name": "afs.context.overview",
+                "arguments": {"path": str(project_path)},
+            },
+        },
+        manager,
+    )
+
+    assert response is not None
+    text = response["result"]["messages"][0]["content"]["text"]
+    assert "Context available: yes" in text
+    assert f"Project path: {project_path}" in text
+    assert "Nearest context project: lab" in text
+    assert "workflow_roots: config, training" in text or "workflow_roots: training, config" in text
 
 
 def test_tool_session_pack(tmp_path: Path) -> None:

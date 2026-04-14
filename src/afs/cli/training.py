@@ -755,6 +755,174 @@ def _resolve_training_runtime(
     return manager, context_path
 
 
+def _resolve_run_dir(manager: AFSManager, context_path: Path, run_id: str) -> Path:
+    from ..training import run_root
+
+    candidate = Path(run_id).expanduser()
+    if candidate.exists():
+        return candidate.resolve()
+    return run_root(manager, context_path, run_id)
+
+
+def _print_run_summary(status: dict[str, object]) -> None:
+    print(f"Run: {status.get('run_id')}")
+    print(f"Status: {status.get('status')}")
+    print(f"Name: {status.get('name')}")
+    print(f"Workdir: {status.get('workdir')}")
+    print(f"Log: {status.get('log_path')}")
+    process = status.get("process")
+    if isinstance(process, dict):
+        print(f"PID: {process.get('pid')}")
+        print(f"Elapsed: {process.get('elapsed')}")
+        print(f"CPU: {process.get('cpu_percent')}")
+
+
+def training_dataset_stats_command(args: argparse.Namespace) -> int:
+    """Write dataset stats artifacts to scratchpad and stdout."""
+    from ..training import (
+        build_dataset_stats,
+        dataset_artifact_root,
+        dataset_id_for_path,
+        write_dataset_artifacts,
+    )
+
+    dataset_path = Path(args.dataset).expanduser().resolve()
+    if not dataset_path.exists():
+        print(f"Dataset not found: {dataset_path}", file=sys.stderr)
+        return 1
+
+    manager, context_path = _resolve_training_runtime(args)
+    dataset_id = dataset_id_for_path(dataset_path, explicit_name=args.name)
+    stats = build_dataset_stats(dataset_path)
+    stats["dataset_id"] = dataset_id
+    artifact_root = dataset_artifact_root(manager, context_path, dataset_id)
+    manifest = {
+        "dataset_id": dataset_id,
+        "dataset_path": str(dataset_path),
+        "artifact_root": str(artifact_root),
+        "updated_at": stats["generated_at"],
+        "available_artifacts": {
+            "stats_json": str(artifact_root / "stats.json"),
+            "stats_md": str(artifact_root / "stats.md"),
+        },
+    }
+    write_dataset_artifacts(artifact_root, manifest=manifest, stats=stats)
+
+    if args.json:
+        print(json.dumps({**stats, "artifact_root": str(artifact_root)}, indent=2))
+        return 0
+
+    print(f"Dataset: {dataset_path}")
+    print(f"Artifact root: {artifact_root}")
+    print(f"Total rows: {stats['total_rows']}")
+    print(f"Max chars: {stats['max_chars']}")
+    for split in stats["splits"]:
+        print(
+            f"  {split['split']}: {split['rows']} rows, avg_chars={split['avg_chars']}, max_chars={split['max_chars']}"
+        )
+    return 0
+
+
+def training_dataset_outliers_command(args: argparse.Namespace) -> int:
+    """Write dataset outlier artifacts to scratchpad and stdout."""
+    from ..training import (
+        build_dataset_outliers,
+        dataset_artifact_root,
+        dataset_id_for_path,
+        write_dataset_artifacts,
+    )
+
+    dataset_path = Path(args.dataset).expanduser().resolve()
+    if not dataset_path.exists():
+        print(f"Dataset not found: {dataset_path}", file=sys.stderr)
+        return 1
+
+    manager, context_path = _resolve_training_runtime(args)
+    dataset_id = dataset_id_for_path(dataset_path, explicit_name=args.name)
+    report = build_dataset_outliers(dataset_path, limit=args.limit)
+    report["dataset_id"] = dataset_id
+    artifact_root = dataset_artifact_root(manager, context_path, dataset_id)
+    manifest = {
+        "dataset_id": dataset_id,
+        "dataset_path": str(dataset_path),
+        "artifact_root": str(artifact_root),
+        "updated_at": report["generated_at"],
+        "available_artifacts": {
+            "outliers_json": str(artifact_root / "outliers.json"),
+            "outliers_md": str(artifact_root / "outliers.md"),
+        },
+    }
+    write_dataset_artifacts(artifact_root, manifest=manifest, outliers=report)
+
+    if args.json:
+        print(json.dumps({**report, "artifact_root": str(artifact_root)}, indent=2))
+        return 0
+
+    print(f"Dataset: {dataset_path}")
+    print(f"Artifact root: {artifact_root}")
+    for row in report["rows"]:
+        print(
+            f"  {row['split']}:{row['line']} total_chars={row['total_chars']} tool_calls={row['tool_call_count']} preview={row['preview']}"
+        )
+    return 0
+
+
+def training_run_start_command(args: argparse.Namespace) -> int:
+    """Start a detached training run from a JSON/TOML spec."""
+    from ..training import start_run
+
+    spec_path = Path(args.spec).expanduser().resolve()
+    if not spec_path.exists():
+        print(f"Run spec not found: {spec_path}", file=sys.stderr)
+        return 1
+
+    manager, context_path = _resolve_training_runtime(args)
+    status = start_run(manager, context_path, spec_path)
+    if args.json:
+        print(json.dumps(status, indent=2))
+        return 0
+    _print_run_summary(status)
+    return 0
+
+
+def training_run_status_command(args: argparse.Namespace) -> int:
+    """Refresh and print run status."""
+    from ..training import refresh_run_status
+
+    manager, context_path = _resolve_training_runtime(args)
+    run_dir = _resolve_run_dir(manager, context_path, args.run_id)
+    status_path = run_dir / "status.json"
+    if not status_path.exists():
+        print(f"Run status not found: {status_path}", file=sys.stderr)
+        return 1
+
+    status = refresh_run_status(run_dir)
+    if args.json:
+        print(json.dumps(status, indent=2))
+        return 0
+    _print_run_summary(status)
+    return 0
+
+
+def training_run_stop_command(args: argparse.Namespace) -> int:
+    """Stop a detached training run."""
+    from ..training import stop_run
+
+    manager, context_path = _resolve_training_runtime(args)
+    run_dir = _resolve_run_dir(manager, context_path, args.run_id)
+    status_path = run_dir / "status.json"
+    if not status_path.exists():
+        print(f"Run status not found: {status_path}", file=sys.stderr)
+        return 1
+
+    status = stop_run(run_dir, force=args.force)
+    if args.json:
+        print(json.dumps(status, indent=2))
+        return 0
+    _print_run_summary(status)
+    return 0
+
+
 def training_freshness_gate_command(args: argparse.Namespace) -> int:
     """Check context freshness before training."""
     from ..models import MountType
@@ -1636,6 +1804,67 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     training_router.add_argument("--json", action="store_true", help="Output JSON.")
     training_router.set_defaults(func=training_generate_router_command)
+
+    training_dataset = training_sub.add_parser(
+        "dataset",
+        help="Dataset lifecycle commands.",
+    )
+    training_dataset_sub = training_dataset.add_subparsers(dest="training_dataset_command")
+
+    training_dataset_stats = training_dataset_sub.add_parser(
+        "stats",
+        help="Summarize a dataset and write scratchpad artifacts.",
+    )
+    add_context_args(training_dataset_stats)
+    training_dataset_stats.add_argument("dataset", help="Dataset directory or JSONL file.")
+    training_dataset_stats.add_argument("--name", help="Dataset id override for artifact paths.")
+    training_dataset_stats.add_argument("--json", action="store_true", help="Output JSON.")
+    training_dataset_stats.set_defaults(func=training_dataset_stats_command)
+
+    training_dataset_outliers = training_dataset_sub.add_parser(
+        "outliers",
+        help="Show largest dataset rows and write scratchpad artifacts.",
+    )
+    add_context_args(training_dataset_outliers)
+    training_dataset_outliers.add_argument("dataset", help="Dataset directory or JSONL file.")
+    training_dataset_outliers.add_argument("--name", help="Dataset id override for artifact paths.")
+    training_dataset_outliers.add_argument("--limit", type=int, default=10, help="Rows to report.")
+    training_dataset_outliers.add_argument("--json", action="store_true", help="Output JSON.")
+    training_dataset_outliers.set_defaults(func=training_dataset_outliers_command)
+
+    training_run = training_sub.add_parser(
+        "run",
+        help="Detached run lifecycle commands.",
+    )
+    training_run_sub = training_run.add_subparsers(dest="training_run_command")
+
+    training_run_start = training_run_sub.add_parser(
+        "start",
+        help="Start a detached run from a JSON or TOML spec.",
+    )
+    add_context_args(training_run_start)
+    training_run_start.add_argument("spec", help="Path to a JSON or TOML run spec.")
+    training_run_start.add_argument("--json", action="store_true", help="Output JSON.")
+    training_run_start.set_defaults(func=training_run_start_command)
+
+    training_run_status = training_run_sub.add_parser(
+        "status",
+        help="Refresh and print run status.",
+    )
+    add_context_args(training_run_status)
+    training_run_status.add_argument("run_id", help="Run id or run artifact directory.")
+    training_run_status.add_argument("--json", action="store_true", help="Output JSON.")
+    training_run_status.set_defaults(func=training_run_status_command)
+
+    training_run_stop = training_run_sub.add_parser(
+        "stop",
+        help="Stop a detached run.",
+    )
+    add_context_args(training_run_stop)
+    training_run_stop.add_argument("run_id", help="Run id or run artifact directory.")
+    training_run_stop.add_argument("--force", action="store_true", help="Send SIGKILL if SIGTERM does not stop the run.")
+    training_run_stop.add_argument("--json", action="store_true", help="Output JSON.")
+    training_run_stop.set_defaults(func=training_run_stop_command)
 
     # =========================================================================
     # Discriminator

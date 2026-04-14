@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_scope import is_tool_allowed
+from .codebase_explorer import build_codebase_summary, render_codebase_summary
 from .config import load_config_model
 from .core import find_existing_root
 from .context_index import (
@@ -1488,7 +1489,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
     return [
         MCPToolDefinition(
             name="briefing",
-            description="Morning briefing — git velocity across all projects, stale project alerts, carry-over items, open tasks, and active agents. Use at the start of a session to understand current state.",
+            description="Morning briefing — calendar, gmail, open tasks, and active agents. Use at the start of a session to understand current state.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -3141,11 +3142,16 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
         },
         {
             "name": "afs.context.overview",
-            "description": "Describe the AFS context structure and available mounts",
+            "description": "Describe the AFS context structure plus a cheap project codebase summary",
             "arguments": [
                 {
                     "name": "context_path",
                     "description": "Path to .context root (uses default if omitted)",
+                    "required": False,
+                },
+                {
+                    "name": "path",
+                    "description": "Project path to summarize when no .context exists yet.",
                     "required": False,
                 },
             ],
@@ -3318,30 +3324,74 @@ def _get_prompt(
         return [{"role": "user", "content": {"type": "text", "text": text}}]
 
     if name == "afs.context.overview":
-        context_path = _resolve_prompt_context_path(arguments, manager)
-        ctx_root = manager.list_context(context_path=context_path)
+        explicit_context = isinstance(arguments.get("context_path"), str) and str(arguments.get("context_path")).strip()
+        explicit_project = any(
+            isinstance(arguments.get(key), str) and str(arguments.get(key)).strip()
+            for key in ("path", "project_path")
+        )
+        context_available = True
+        ctx_root = None
+        context_path = None
+        if explicit_context:
+            context_path = _resolve_prompt_context_path(arguments, manager)
+            ctx_root = manager.list_context(context_path=context_path)
+            project_path = Path(context_path).parent
+        elif explicit_project:
+            project_path = _assert_allowed(_resolve_project_path(arguments), manager)
+            try:
+                context_path = _resolve_context_path(arguments, manager)
+                ctx_root = manager.list_context(context_path=context_path)
+            except FileNotFoundError:
+                context_available = False
+                ctx_root = None
+                context_path = None
+        else:
+            context_path = _resolve_prompt_context_path(arguments, manager)
+            ctx_root = manager.list_context(context_path=context_path)
+            project_path = Path(context_path).parent
+        codebase_target = project_path if explicit_project or ctx_root is None else context_path
+        codebase = build_codebase_summary(codebase_target)
+        project_name = project_path.name if explicit_project or ctx_root is None else ctx_root.project_name
         lines = [
-            f"# AFS Context: {ctx_root.project_name}",
-            f"Path: {ctx_root.path}",
-            f"Valid: {ctx_root.is_valid}",
-            f"Total mounts: {ctx_root.total_mounts}",
-            "",
-            "## Mounts",
+            f"# AFS Context: {project_name}",
+            f"Context available: {'yes' if context_available else 'no'}",
+            f"Project path: {project_path}",
         ]
-        for mount_type, mount_list in ctx_root.mounts.items():
-            lines.append(f"### {mount_type.value}")
-            if mount_list:
-                for m in mount_list:
-                    lines.append(f"  - {m.name} → {m.source} (symlink={m.is_symlink})")
-            else:
-                lines.append("  (empty)")
-        if ctx_root.metadata:
+        if ctx_root is not None:
+            lines.extend(
+                [
+                    f"Path: {ctx_root.path}",
+                    f"Valid: {ctx_root.is_valid}",
+                    f"Total mounts: {ctx_root.total_mounts}",
+                    "",
+                    "## Mounts",
+                ]
+            )
+            if project_name != ctx_root.project_name:
+                lines.append(f"Nearest context project: {ctx_root.project_name}")
+            for mount_type, mount_list in ctx_root.mounts.items():
+                lines.append(f"### {mount_type.value}")
+                if mount_list:
+                    for m in mount_list:
+                        lines.append(f"  - {m.name} → {m.source} (symlink={m.is_symlink})")
+                else:
+                    lines.append("  (empty)")
+        else:
+            lines.append("Valid: false")
+            lines.append("Total mounts: 0")
+            lines.append("")
+            lines.append("## Mounts")
+            lines.append("  (no context yet)")
+        if ctx_root is not None and ctx_root.metadata:
             lines.append("")
             lines.append("## Metadata")
             lines.append(f"Description: {ctx_root.metadata.description or '(none)'}")
             lines.append(f"Agents: {', '.join(ctx_root.metadata.agents) or '(none)'}")
             if ctx_root.metadata.manual_only:
                 lines.append(f"Protected paths: {', '.join(ctx_root.metadata.manual_only)}")
+        lines.append("")
+        lines.append("## Codebase")
+        lines.extend(render_codebase_summary(codebase).splitlines())
         return [{"role": "user", "content": {"type": "text", "text": "\n".join(lines)}}]
 
     if name == "afs.workflow.structured":

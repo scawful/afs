@@ -24,6 +24,8 @@ _PROMPT_PREVIEW_CHARS = 180
 _SUMMARY_PREVIEW_CHARS = 160
 _SYSTEM_PROMPT_PREVIEW_CHARS = 320
 _DEFAULT_SYSTEM_PROMPT_TOKEN_BUDGET = 2000
+_WORKFLOW_SNAPSHOT_STEP_LIMIT = 6
+_WORKFLOW_SNAPSHOT_SKILL_LIMIT = 4
 _DEFAULT_BASE_PROMPTS = {
     "generic": (
         "You are a context-aware assistant operating inside the Agentic File System. "
@@ -357,6 +359,109 @@ def _task_map(active_tasks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         if task_id:
             tasks[task_id] = dict(entry)
     return tasks
+
+
+def _compact_event_names(entries: list[dict[str, Any]]) -> list[str]:
+    compact: list[str] = []
+    previous = ""
+    for entry in entries[-_WORKFLOW_SNAPSHOT_STEP_LIMIT:]:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("event", "")).strip()
+        if not name or name == previous:
+            continue
+        compact.append(name)
+        previous = name
+    return compact
+
+
+def build_session_activity_snapshot(
+    payload: dict[str, Any] | None,
+    *,
+    event_name: str,
+) -> dict[str, Any]:
+    """Build a compact workflow snapshot from the current session payload."""
+    if not isinstance(payload, dict):
+        return {}
+
+    activity = payload.get("activity")
+    if not isinstance(activity, dict):
+        return {}
+
+    pack = payload.get("pack") if isinstance(payload.get("pack"), dict) else {}
+    skills = payload.get("skills") if isinstance(payload.get("skills"), dict) else {}
+    current_prompt = (
+        activity.get("current_prompt")
+        if isinstance(activity.get("current_prompt"), dict)
+        else {}
+    )
+    current_turn = (
+        activity.get("current_turn")
+        if isinstance(activity.get("current_turn"), dict)
+        else {}
+    )
+    last_task = (
+        activity.get("last_task")
+        if isinstance(activity.get("last_task"), dict)
+        else {}
+    )
+    session_state = (
+        activity.get("session_state")
+        if isinstance(activity.get("session_state"), dict)
+        else {}
+    )
+    counters = activity.get("counters") if isinstance(activity.get("counters"), dict) else {}
+    recent_events = (
+        activity.get("recent_events")
+        if isinstance(activity.get("recent_events"), list)
+        else []
+    )
+
+    matched_skills: list[str] = []
+    matches = skills.get("matches") if isinstance(skills, dict) else []
+    if isinstance(matches, list):
+        for entry in matches[:_WORKFLOW_SNAPSHOT_SKILL_LIMIT]:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name", "")).strip()
+            if name:
+                matched_skills.append(name)
+
+    failed_events = int(counters.get("turn_failed", 0)) + int(counters.get("task_failed", 0))
+    completed_events = int(counters.get("turn_completed", 0)) + int(counters.get("task_completed", 0))
+    if event_name in {"turn_failed", "task_failed"}:
+        outcome = "failed"
+    elif event_name in {"turn_completed", "task_completed"}:
+        outcome = "completed"
+    elif event_name == "session_end":
+        outcome = "failed" if failed_events else "completed"
+    else:
+        outcome = ""
+
+    snapshot = {
+        "client": str(payload.get("client", "")).strip(),
+        "session_id": str(payload.get("session_id", "")).strip(),
+        "workflow": str(pack.get("workflow", "")).strip(),
+        "tool_profile": str(pack.get("tool_profile", "")).strip(),
+        "pack_mode": str(pack.get("pack_mode", "")).strip(),
+        "prompt_preview": str(current_prompt.get("preview", "")).strip(),
+        "turn_id": str(current_turn.get("turn_id", "")).strip(),
+        "turn_status": str(current_turn.get("status", "")).strip(),
+        "task_id": str(last_task.get("task_id", "")).strip(),
+        "task_title": str(last_task.get("task_title", "")).strip(),
+        "session_status": str(session_state.get("status", "")).strip(),
+        "event_name": event_name,
+        "outcome": outcome,
+        "workflow_steps": _compact_event_names(recent_events),
+        "matched_skills": matched_skills,
+        "completed_events": completed_events,
+        "failed_events": failed_events,
+    }
+    return {
+        key: value
+        for key, value in snapshot.items()
+        if value not in ("", None, [], {})
+    }
 
 
 def _estimate_tokens(text: str) -> int:

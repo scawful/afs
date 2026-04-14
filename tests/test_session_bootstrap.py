@@ -179,3 +179,36 @@ def test_build_session_bootstrap_ignores_volatile_index_drift(
     assert not any(
         "afs index rebuild" in action for action in summary["recommended_actions"]
     )
+
+
+def test_build_session_bootstrap_includes_codebase_summary(
+    tmp_path: Path,
+) -> None:
+    from afs.session_bootstrap import build_session_bootstrap, render_session_bootstrap
+
+    context_root = tmp_path / ".context"
+    config = AFSConfig(
+        general=GeneralConfig(
+            context_root=context_root,
+        )
+    )
+    manager = AFSManager(config=config)
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path)
+
+    (project_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    (project_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (project_path / "src").mkdir()
+    (project_path / "src" / "demo.py").write_text("def demo() -> int:\n    return 1\n", encoding="utf-8")
+    (project_path / "tests").mkdir()
+    (project_path / "tests" / "test_demo.py").write_text("def test_demo():\n    assert True\n", encoding="utf-8")
+
+    summary = build_session_bootstrap(manager, project_path / ".context")
+
+    assert "src" in summary["codebase"]["source_roots"]
+    assert "tests" in summary["codebase"]["test_roots"]
+    assert any("afs context overview" in step for step in summary["startup_sequence"])
+    rendered = render_session_bootstrap(summary)
+    assert "## Codebase" in rendered
+    assert "source_roots: src" in rendered

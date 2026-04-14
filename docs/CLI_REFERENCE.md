@@ -52,6 +52,7 @@ Also supported once installed into the active environment:
 ./scripts/afs context init
 ./scripts/afs context ensure
 ./scripts/afs context list
+./scripts/afs context overview --path "<afs-root>"
 ./scripts/afs context validate
 ./scripts/afs context repair --dry-run
 ./scripts/afs context query "startup guidance"
@@ -65,6 +66,8 @@ Indexed query usage:
 
 - `./scripts/afs query <text> --path <workspace>` is the fast top-level shortcut.
 - `./scripts/afs context query <text> --path <workspace>` is the canonical form.
+- `./scripts/afs context overview --path <workspace>` gives a cheap structural repo summary before deeper grep/query passes.
+- `context overview` also works on a raw project path before `.context` exists, which is useful for new repos such as training/eval workspaces.
 - Use `--mount` repeatedly to narrow search to specific mounts such as `scratchpad`, `knowledge`, or `tools`.
 - Use `--prefix` to keep search under a relative subtree like `docs/sqlite/` or `public/`.
 - `--include-content --json` returns full indexed content for each hit; plain text mode shows a compact excerpt.
@@ -149,6 +152,7 @@ See `docs/JOURNAL_AGENT.md` for full argument reference and JSON output shape.
 
 - `context.status`
 - `context.diff`
+- cheap codebase orientation from `context overview`
 - scratchpad state and deferred notes
 - queued tasks from `items/`
 - recent `hivemind/` messages
@@ -244,6 +248,12 @@ around the client process.
 ## Training
 
 ```bash
+./scripts/afs training dataset stats ./data/output/tooling
+./scripts/afs training dataset outliers ./data/output/tooling --limit 5
+./scripts/afs training run start ./training/jobs/qwen35-tools-local.toml
+./scripts/afs training run status <run-id>
+./scripts/afs training run stop <run-id>
+
 ./scripts/afs training freshness-gate --path ~/src/project-a
 ./scripts/afs training freshness-gate --path ~/src/project-a --warn-only --json
 ./scripts/afs training antigravity-status --json
@@ -251,6 +261,22 @@ around the client process.
 ./scripts/afs training generate-router-data --config ~/src/project-a/afs.toml --output ./router_from_capabilities.jsonl
 ./scripts/training_watch.sh --debounce 45
 ```
+
+`training dataset stats` writes dataset summary artifacts under the active
+context scratchpad and reports split counts, average row size, max row size,
+role counts, and tool-call counts.
+
+`training dataset outliers` writes the largest rows into scratchpad artifacts so
+operators and agents can prune disruptive samples before launching a run.
+
+`training run start` launches a detached job from a JSON/TOML spec and writes
+status, event, artifact, and log paths under `scratchpad/training/runs/<run-id>`.
+
+See `docs/examples/training_run.example.toml` for a minimal spec layout.
+
+`training run status` refreshes the stored status snapshot against the live
+process table. `training run stop` terminates the recorded process group and
+updates the run artifact.
 
 `training freshness-gate` checks per-mount context freshness before training and
 returns a blocking or warning-only readiness report.
@@ -301,6 +327,11 @@ and `AFS_PREFER_REPO_CONFIG=1` so Claude uses the repo-local AFS config.
 ```bash
 ./scripts/afs skills list --profile work
 ./scripts/afs skills match "mcp context mount" --profile work
+./scripts/afs skills mine --path ~/src/project-a
+./scripts/afs skills review --path ~/src/project-a --status pending
+./scripts/afs skills promote --path ~/src/project-a --candidate workflow-example
+./scripts/afs skills reject --path ~/src/project-a --candidate workflow-example
+./scripts/afs skills archive --path ~/src/project-a --candidate workflow-example
 ```
 
 ## Embeddings

@@ -350,3 +350,13 @@ def test_session_event_command_updates_activity_payload(
     assert updated_payload["activity"]["recent_events"][-1]["event"] == "task_completed"
     assert calls["events"][0][0] == "user_prompt_submit"
     assert calls["logs"][-1]["op"] == "task_completed"
+    assert calls["logs"][-1]["metadata"]["workflow"] == "edit_fast"
+    assert calls["logs"][-1]["metadata"]["tool_profile"] == "edit_and_verify"
+    assert calls["logs"][-1]["metadata"]["outcome"] == "completed"
+    assert calls["logs"][-1]["metadata"]["workflow_steps"] == [
+        "user_prompt_submit",
+        "task_created",
+        "task_completed",
+    ]
+    assert "workflow_snapshot" in calls["logs"][-1]["payload"]
+    assert "agentic-background" in calls["logs"][-1]["payload"]["workflow_snapshot"]["matched_skills"]

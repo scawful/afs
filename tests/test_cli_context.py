@@ -64,6 +64,11 @@ def test_context_and_index_query_parsers_register() -> None:
     assert discover_args.context_command == "discover"
     assert discover_args.include_nested is True
 
+    overview_args = parser.parse_args(["context", "overview"])
+    assert overview_args.command == "context"
+    assert overview_args.context_command == "overview"
+    assert hasattr(overview_args, "func")
+
 
 def test_context_query_auto_indexes_and_returns_entries(
     capsys, monkeypatch, tmp_path: Path
@@ -128,6 +133,129 @@ def test_context_query_resolves_parent_context_for_nested_path(
     assert payload["context_path"] == str(context_root)
     assert payload["count"] == 1
     assert payload["entries"][0]["relative_path"] == "notes.md"
+
+
+def test_context_overview_outputs_codebase_summary(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    manager, project_path, _context_path = _make_local_context_manager(tmp_path)
+    (project_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    (project_path / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
+    (project_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (project_path / "src").mkdir()
+    (project_path / "src" / "demo.py").write_text("def demo() -> int:\n    return 1\n", encoding="utf-8")
+    (project_path / "tests").mkdir()
+    (project_path / "tests" / "test_demo.py").write_text("def test_demo():\n    assert True\n", encoding="utf-8")
+    (project_path / "docs").mkdir()
+    (project_path / "docs" / "guide.md").write_text("# Guide\n", encoding="utf-8")
+
+    monkeypatch.setattr("afs.cli.context.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+    args = parser.parse_args(
+        [
+            "context",
+            "overview",
+            "--path",
+            str(project_path),
+            "--json",
+        ]
+    )
+    status = args.func(args)
+    assert status == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["project_name"] == "project"
+    assert payload["codebase"]["project_root"] == str(project_path.resolve())
+    assert "pyproject.toml" in payload["codebase"]["manifests"]
+    assert "src" in payload["codebase"]["source_roots"]
+    assert "tests" in payload["codebase"]["test_roots"]
+    assert "docs" in payload["codebase"]["docs_roots"]
+    assert payload["codebase"]["language_hints"]["python"] >= 2
+
+
+def test_context_overview_supports_raw_project_without_context(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    manager = AFSManager(config=AFSConfig(general=GeneralConfig(context_root=tmp_path / "shared-context")))
+    project_path = tmp_path / "scawfulbot"
+    project_path.mkdir()
+    (project_path / "config").mkdir()
+    (project_path / "config" / "registry.json").write_text('{"models": []}\n', encoding="utf-8")
+    (project_path / "config" / "system_prompt.md").write_text("# Prompt\n", encoding="utf-8")
+    (project_path / "data").mkdir()
+    (project_path / "eval").mkdir()
+    (project_path / "eval" / "smoke.py").write_text("def smoke() -> bool:\n    return True\n", encoding="utf-8")
+    (project_path / "models").mkdir()
+    (project_path / "scripts").mkdir()
+    (project_path / "scripts" / "train.py").write_text("def train() -> None:\n    pass\n", encoding="utf-8")
+    (project_path / "training").mkdir()
+    (project_path / "training" / "dataset.py").write_text("def load_dataset() -> list[str]:\n    return []\n", encoding="utf-8")
+
+    monkeypatch.setattr("afs.cli.context.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+    args = parser.parse_args(
+        [
+            "context",
+            "overview",
+            "--path",
+            str(project_path),
+            "--json",
+        ]
+    )
+    status = args.func(args)
+    assert status == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["context_available"] is False
+    assert payload["context_path"] is None
+    assert payload["project_name"] == "scawfulbot"
+    assert "config" in payload["codebase"]["workflow_roots"]
+    assert "eval" in payload["codebase"]["workflow_roots"]
+    assert "models" in payload["codebase"]["workflow_roots"]
+    assert "training" in payload["codebase"]["workflow_roots"]
+    assert "scripts" in payload["codebase"]["script_roots"]
+    assert "scripts/train.py" in payload["codebase"]["sample_paths"]
+
+
+def test_context_overview_prefers_requested_project_codebase_over_ancestor_context(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    manager = AFSManager(config=AFSConfig(general=GeneralConfig(context_root=tmp_path / "shared-context")))
+    lab_path = tmp_path / "lab"
+    lab_path.mkdir()
+    manager.ensure(path=lab_path)
+
+    project_path = lab_path / "scawfulbot"
+    project_path.mkdir()
+    (project_path / "config").mkdir()
+    (project_path / "config" / "registry.json").write_text('{"models": []}\n', encoding="utf-8")
+    (project_path / "scripts").mkdir()
+    (project_path / "scripts" / "train.py").write_text("def train() -> None:\n    pass\n", encoding="utf-8")
+    (project_path / "training").mkdir()
+    (project_path / "training" / "dataset.py").write_text("def load_dataset() -> list[str]:\n    return []\n", encoding="utf-8")
+
+    monkeypatch.setattr("afs.cli.context.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+    args = parser.parse_args(
+        [
+            "context",
+            "overview",
+            "--path",
+            str(project_path),
+            "--json",
+        ]
+    )
+    status = args.func(args)
+    assert status == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["context_available"] is True
+    assert payload["context_path"] == str(lab_path / ".context")
+    assert payload["project_name"] == "scawfulbot"
+    assert payload["context_project_name"] == "lab"
+    assert payload["codebase"]["project_root"] == str(project_path)
+    assert "training" in payload["codebase"]["workflow_roots"]
+    assert "scripts/train.py" in payload["codebase"]["sample_paths"]
 
 
 def test_context_ensure_still_creates_nested_child_when_requested(

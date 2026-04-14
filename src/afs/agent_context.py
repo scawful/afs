@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .codebase_explorer import build_codebase_summary
+
 logger = logging.getLogger(__name__)
 
 # Environment variable for passing context snapshot path to spawned agents
@@ -58,6 +60,9 @@ class AgentContextSnapshot:
     # Mount freshness: {mount_type: {file_count, newest_mtime, stale}}
     mount_freshness: dict[str, dict[str, Any]] = field(default_factory=dict)
 
+    # Cheap project structure summary for quick codebase orientation
+    codebase_summary: dict[str, Any] = field(default_factory=dict)
+
     # Context root path
     context_root: str = ""
 
@@ -72,6 +77,7 @@ class AgentContextSnapshot:
             "recent_events": self.recent_events,
             "active_agents": self.active_agents,
             "mount_freshness": self.mount_freshness,
+            "codebase_summary": self.codebase_summary,
             "context_root": self.context_root,
         }
 
@@ -87,6 +93,7 @@ class AgentContextSnapshot:
             recent_events=data.get("recent_events", []),
             active_agents=data.get("active_agents", []),
             mount_freshness=data.get("mount_freshness", {}),
+            codebase_summary=data.get("codebase_summary", {}),
             context_root=data.get("context_root", ""),
         )
 
@@ -176,7 +183,13 @@ def build_agent_context_snapshot(
     except Exception:
         logger.debug("Failed to read mount freshness for agent context", exc_info=True)
 
-    # 5. Active agents
+    # 5. Codebase structure
+    try:
+        snapshot.codebase_summary = build_codebase_summary(context_path)
+    except Exception:
+        logger.debug("Failed to read codebase summary for agent context", exc_info=True)
+
+    # 6. Active agents
     try:
         from .agent_registry import AgentRegistry
 
@@ -333,6 +346,7 @@ class ContextAwareAgent:
     - self.search_memory(): Find memory entries by keyword
     - self.get_recent_events(): Read recent history events
     - self.get_mount_freshness(): Check which mounts are stale
+    - self.get_codebase_summary(): Read a cheap project structure summary
 
     Usage:
         class MyAgent(ContextAwareAgent):
@@ -488,4 +502,16 @@ class ContextAwareAgent:
                 for name, mf in freshness.items()
             }
         except Exception:
+            return {}
+
+    def get_codebase_summary(self) -> dict[str, Any]:
+        """Get a cheap codebase structure summary (from snapshot or live)."""
+        if self.context_snapshot and self.context_snapshot.codebase_summary:
+            return self.context_snapshot.codebase_summary
+        if self._context_path is None:
+            return {}
+        try:
+            return build_codebase_summary(self._context_path)
+        except Exception:
+            logger.debug("Codebase summary failed", exc_info=True)
             return {}

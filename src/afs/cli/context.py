@@ -6,7 +6,9 @@ import argparse
 import json
 from pathlib import Path
 
+from ..codebase_explorer import build_codebase_summary, render_codebase_summary
 from ..context_index import ContextSQLiteIndex
+from ..core import find_existing_root
 from ._utils import load_manager, parse_mount_type, resolve_context_paths
 
 
@@ -103,6 +105,66 @@ def context_list_command(args: argparse.Namespace) -> int:
         for mount in mounts:
             suffix = " (link)" if mount.is_symlink else ""
             print(f"- {mount.name} -> {mount.source}{suffix}")
+    return 0
+
+
+def context_overview_command(args: argparse.Namespace) -> int:
+    """Show a cheap structural overview of the active project context."""
+    config_path = Path(args.config) if args.config else None
+    manager = load_manager(config_path)
+    project_path = Path(args.path).expanduser().resolve() if args.path else Path.cwd()
+    explicit_project = bool(args.path)
+    context = None
+    context_path: Path | None = None
+    if args.context_root or args.context_dir:
+        try:
+            _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+                args, manager
+            )
+            context = manager.list_context(context_path=context_path)
+        except FileNotFoundError:
+            context = None
+    else:
+        context_path = find_existing_root(project_path)
+        if context_path is not None:
+            context = manager.list_context(context_path=context_path)
+
+    codebase_target = project_path if explicit_project or context is None else context.path
+    if context is not None:
+        payload = {
+            "project_path": str(project_path),
+            "context_path": str(context.path),
+            "context_available": True,
+            "project_name": project_path.name if explicit_project else context.project_name,
+            "context_project_name": context.project_name,
+            "is_valid": context.is_valid,
+            "total_mounts": context.total_mounts,
+            "codebase": build_codebase_summary(codebase_target),
+        }
+    else:
+        payload = {
+            "project_path": str(project_path),
+            "context_path": None,
+            "context_available": False,
+            "project_name": project_path.name,
+            "context_project_name": "",
+            "is_valid": False,
+            "total_mounts": 0,
+            "codebase": build_codebase_summary(codebase_target),
+        }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print(f"project_path: {payload['project_path']}")
+    print(f"context_path: {payload['context_path'] or '(none)'}")
+    print(f"context_available: {str(bool(payload['context_available'])).lower()}")
+    print(f"project: {payload['project_name']}")
+    if payload.get("context_project_name") and payload["context_project_name"] != payload["project_name"]:
+        print(f"context_project: {payload['context_project_name']}")
+    print(f"valid: {str(payload['is_valid']).lower()}")
+    print(f"total_mounts: {payload['total_mounts']}")
+    print(render_codebase_summary(payload["codebase"]))
     return 0
 
 
@@ -892,6 +954,15 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     add_context_args(ctx_list)
     ctx_list.add_argument("--json", action="store_true", help="Output JSON.")
     ctx_list.set_defaults(func=context_list_command)
+
+    # context overview
+    ctx_overview = context_sub.add_parser(
+        "overview",
+        help="Summarize project structure and likely exploration entrypoints.",
+    )
+    add_context_args(ctx_overview)
+    ctx_overview.add_argument("--json", action="store_true", help="Output JSON.")
+    ctx_overview.set_defaults(func=context_overview_command)
 
     # context mount
     ctx_mount = context_sub.add_parser("mount", help="Mount resource to context.")

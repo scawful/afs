@@ -67,6 +67,11 @@ export AFS_VENV=<afs-root>/.venv
 <afs-root>/scripts/afs context discover --path ~/src
 <afs-root>/scripts/afs context ensure-all --path ~/src
 <afs-root>/scripts/afs session bootstrap --json
+<afs-root>/scripts/afs training dataset stats ./data/output/tooling
+<afs-root>/scripts/afs training dataset outliers ./data/output/tooling --limit 5
+<afs-root>/scripts/afs training run start ./training/jobs/local.toml
+<afs-root>/scripts/afs training run status <run-id>
+<afs-root>/scripts/afs training run stop <run-id>
 <afs-root>/scripts/afs session prepare-client --client codex --json
 <afs-root>/scripts/afs session hook session_start --client codex --session-id "$AFS_SESSION_ID"
 <afs-root>/scripts/afs session event user_prompt_submit --client codex --session-id "$AFS_SESSION_ID" --prompt "current task"

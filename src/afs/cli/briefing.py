@@ -155,38 +155,8 @@ def _build_briefing(days: int = 7, include_gws: bool = True) -> dict[str, Any]:
     """Assemble the full briefing data structure."""
     now = datetime.now()
 
-    # Git velocity
-    velocity: dict[str, Any] = {}
-    stale: list[str] = []
-    total_commits = 0
-
-    for name, meta in PROJECTS.items():
-        repo = Path(meta["path"]).expanduser()
-        if not repo.is_dir():
-            continue
-        commits = _git_commits_since(repo, days=days)
-        count = len(commits)
-        total_commits += count
-        last_date = _git_last_commit_date(repo)
-        days_since = (now - last_date).days if last_date else None
-
-        velocity[name] = {
-            "commits": count,
-            "category": meta["category"],
-            "last_commit": last_date.isoformat() if last_date else None,
-            "days_since": days_since,
-            "top_subjects": [c["subject"] for c in commits[:3]],
-        }
-
-        if days_since is not None and days_since >= STALE_THRESHOLD_DAYS:
-            stale.append(f"{name} ({days_since}d)")
-
-    # Sort by commit count descending
-    velocity = dict(sorted(velocity.items(), key=lambda x: x[1]["commits"], reverse=True))
-
     # Tasks
     tasks = _fetch_tasks()
-    carry = _latest_weekly_carryover()
     agents = _read_agent_registry()
 
     # Google Workspace (optional)
@@ -202,11 +172,7 @@ def _build_briefing(days: int = 7, include_gws: bool = True) -> dict[str, Any]:
 
     return {
         "date": now.strftime("%Y-%m-%d %A"),
-        "total_commits_7d": total_commits,
-        "velocity": velocity,
-        "stale_projects": stale,
         "open_tasks": tasks,
-        "carry_over": carry,
         "active_agents": agents,
         "gws_available": gws_available,
         "calendar_agenda": calendar_agenda,
@@ -224,10 +190,9 @@ def _render_text(briefing: dict[str, Any], short: bool = False) -> str:
     lines.append(f"=== AFS Morning Briefing — {briefing['date']} ===")
     lines.append("")
 
-    lines.append(f"  Total commits (7d): {briefing['total_commits_7d']}")
     if briefing.get("gws_available"):
         lines.append("  Google Workspace: connected")
-    lines.append("")
+        lines.append("")
 
     # Calendar agenda
     if briefing.get("calendar_agenda"):
@@ -256,36 +221,6 @@ def _render_text(briefing: dict[str, Any], short: bool = False) -> str:
                 lines.append(f"  {thread_id}  {snippet}")
             else:
                 lines.append(f"  {thread_id}")
-        lines.append("")
-
-    # Velocity
-    lines.append("--- Project Velocity (7d) ---")
-    for name, v in briefing["velocity"].items():
-        if v["commits"] == 0 and short:
-            continue
-        marker = ""
-        if v["days_since"] is not None and v["days_since"] >= STALE_THRESHOLD_DAYS:
-            marker = " ⚠ STALE"
-        commits_str = f"{v['commits']:>3} commits"
-        days_str = f"(last: {v['days_since']}d ago)" if v["days_since"] is not None else "(no commits)"
-        lines.append(f"  {name:<22} {commits_str}  {days_str}{marker}")
-        if not short and v["top_subjects"]:
-            for subj in v["top_subjects"]:
-                lines.append(f"    · {subj[:72]}")
-    lines.append("")
-
-    # Stale alerts
-    if briefing["stale_projects"]:
-        lines.append("--- Stale Projects ---")
-        for s in briefing["stale_projects"]:
-            lines.append(f"  ⚠ {s}")
-        lines.append("")
-
-    # Carry-over
-    if briefing["carry_over"]:
-        lines.append("--- Carry Over (from latest weekly) ---")
-        for item in briefing["carry_over"]:
-            lines.append(f"  {item}")
         lines.append("")
 
     # Open tasks
@@ -317,9 +252,6 @@ def _render_org(briefing: dict[str, Any]) -> str:
     lines.append(f"#+TITLE: Morning Briefing — {briefing['date']}")
     lines.append("")
 
-    lines.append(f"Total commits (7d): {briefing['total_commits_7d']}")
-    lines.append("")
-
     if briefing.get("calendar_agenda"):
         lines.append("* Today's Calendar")
         for event in briefing["calendar_agenda"]:
@@ -341,27 +273,6 @@ def _render_org(briefing: dict[str, Any]) -> str:
             snippet = msg.get("snippet", msg.get("id", ""))[:80]
             lines.append(f"- {snippet}")
         lines.append("")
-
-    lines.append("* Project Velocity")
-    for name, v in briefing["velocity"].items():
-        if v["commits"] == 0:
-            continue
-        lines.append(f"** {name} — {v['commits']} commits")
-        if v["top_subjects"]:
-            for subj in v["top_subjects"]:
-                lines.append(f"- {subj[:80]}")
-
-    if briefing["stale_projects"]:
-        lines.append("")
-        lines.append("* Stale Projects")
-        for s in briefing["stale_projects"]:
-            lines.append(f"- {s}")
-
-    if briefing["carry_over"]:
-        lines.append("")
-        lines.append("* Carry Over")
-        for item in briefing["carry_over"]:
-            lines.append(item)
 
     if briefing["active_agents"]:
         lines.append("")

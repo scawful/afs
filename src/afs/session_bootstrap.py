@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .codebase_explorer import build_codebase_summary, render_codebase_summary
 from .context_freshness import (
     MountFreshness,
     context_diff_since_session,
@@ -40,6 +41,7 @@ _SECTION_PRIORITY = [
     "handoff",          # critical: what happened last session
     "scratchpad",       # high: current working state
     "tasks",            # high: pending work items
+    "codebase",         # high: quick repo orientation
     "session_changes",  # medium-high: what changed since last session
     "diff",             # medium: recent index drift
     "mount_freshness",  # medium: per-mount freshness scores
@@ -185,6 +187,7 @@ def build_session_bootstrap(
     hivemind = _collect_hivemind(context_path, limit=message_limit)
     memory = _collect_memory(manager, context_path)
     reports = _collect_agent_reports(manager, context_path)
+    codebase = build_codebase_summary(context_path)
 
     handoff = _collect_latest_handoff(context_path, config=manager.config)
 
@@ -239,6 +242,7 @@ def build_session_bootstrap(
             "Review context health and recent drift first.",
             "Read scratchpad state and deferred notes before editing.",
             "Check pending tasks and recent hivemind messages for handoffs.",
+            "Use `afs context overview` / `afs.context.overview` for a fast repo map before deeper grep/query passes.",
             "Use `afs context query` / `context.query` before asking for context that may already be in memory or knowledge.",
             "Write updates back to scratchpad, tasks, or hivemind before handoff.",
         ],
@@ -246,6 +250,7 @@ def build_session_bootstrap(
         "diff": diff,
         "scratchpad": scratchpad,
         "tasks": tasks,
+        "codebase": codebase,
         "hivemind": hivemind,
         "memory": memory,
         "agent_reports": reports,
@@ -391,6 +396,11 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
                 parts = [f"{k}={v}" for k, v in sorted(counts.items()) if v > 0]
                 if parts:
                     lines.append(f"  - {mt_name}: {', '.join(parts)}")
+
+    codebase = summary.get("codebase", {})
+    if isinstance(codebase, dict) and codebase:
+        lines.extend(["", "## Codebase"])
+        lines.extend(_indent_block(render_codebase_summary(codebase)))
 
     lines.extend(["", "## Recent Drift"])
     if diff["available"]:

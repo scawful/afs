@@ -27,6 +27,8 @@ it belongs in `afs-ext`.
 - Skills metadata and discovery
 - Embeddings indexing/search interfaces
 - Health and diagnostics primitives
+- Generic dataset/run/eval/feedback orchestration primitives
+- Shared schemas, metrics, and status artifacts for training workflows
 
 ## Recommended Layout
 

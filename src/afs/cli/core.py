@@ -1209,7 +1209,10 @@ def _emit_session_event(
 ) -> dict[str, Any]:
     from ..grounding_hooks import run_grounding_hooks
     from ..history import log_session_event
-    from ..session_harness import record_client_session_activity
+    from ..session_harness import (
+        build_session_activity_snapshot,
+        record_client_session_activity,
+    )
 
     payload = dict(seed_payload or {})
     payload["context_path"] = str(context_path)
@@ -1240,6 +1243,26 @@ def _emit_session_event(
         config=manager.config,
     )
 
+    updated_payload = None
+    if update_activity and client:
+        updated_payload = record_client_session_activity(
+            manager,
+            context_path,
+            client=client,
+            event_name=event_name,
+            event_payload=payload,
+            payload_file=payload_file,
+            session_id=session_id,
+            config_path=config_path,
+            cwd=cwd,
+        )
+    activity_snapshot = build_session_activity_snapshot(
+        updated_payload,
+        event_name=event_name,
+    )
+    if activity_snapshot:
+        payload["workflow_snapshot"] = activity_snapshot
+
     metadata: dict[str, Any] = {
         "client": client,
         "turn_id": turn_id,
@@ -1251,7 +1274,22 @@ def _emit_session_event(
         "summary": summary[:160] if summary else "",
         "prompt_preview": prompt[:180] if prompt else "",
     }
-    metadata = {key: value for key, value in metadata.items() if value not in ("", None)}
+    if activity_snapshot:
+        metadata.update(
+            {
+                "workflow": activity_snapshot.get("workflow", ""),
+                "tool_profile": activity_snapshot.get("tool_profile", ""),
+                "pack_mode": activity_snapshot.get("pack_mode", ""),
+                "workflow_steps": activity_snapshot.get("workflow_steps", []),
+                "matched_skills": activity_snapshot.get("matched_skills", []),
+                "outcome": activity_snapshot.get("outcome", ""),
+                "completed_events": activity_snapshot.get("completed_events", 0),
+                "failed_events": activity_snapshot.get("failed_events", 0),
+            }
+        )
+        if not metadata.get("prompt_preview"):
+            metadata["prompt_preview"] = str(activity_snapshot.get("prompt_preview", "")).strip()
+    metadata = {key: value for key, value in metadata.items() if value not in ("", None, [], {})}
     log_session_event(
         event_name,
         session_id=session_id or None,
@@ -1268,20 +1306,6 @@ def _emit_session_event(
         },
         context_root=context_path,
     )
-
-    updated_payload = None
-    if update_activity and client:
-        updated_payload = record_client_session_activity(
-            manager,
-            context_path,
-            client=client,
-            event_name=event_name,
-            event_payload=payload,
-            payload_file=payload_file,
-            session_id=session_id,
-            config_path=config_path,
-            cwd=cwd,
-        )
     payload_file_value = str(payload_file) if payload_file else ""
     if isinstance(updated_payload, dict):
         artifact_paths = updated_payload.get("artifact_paths")
