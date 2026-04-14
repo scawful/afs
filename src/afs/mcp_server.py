@@ -1397,6 +1397,290 @@ def _tool_session_replay(arguments: dict[str, Any], manager: AFSManager) -> dict
     return build_session_timeline(context_path, session_id=session_id, since=since, limit=limit, config=manager.config)
 
 
+def _resolve_codebase_index_dir(context_path: Path, manager: AFSManager) -> Path:
+    """Return the codebase symbol index directory for *context_path*."""
+    from .codebase_index import codebase_index_dir
+    return codebase_index_dir(context_path)
+
+
+def _resolve_embedding_index_dir(context_path: Path, manager: AFSManager) -> Path | None:
+    """Return the embedding index dir if it exists, else None."""
+    from .context_paths import resolve_mount_root
+    from .models import MountType
+    try:
+        knowledge = resolve_mount_root(context_path, MountType.KNOWLEDGE)
+        candidate = knowledge / "embeddings"
+        if (candidate / "embedding_index.json").exists():
+            return candidate
+    except Exception:
+        pass
+    # Fallback: look in scratchpad
+    try:
+        scratchpad = resolve_mount_root(context_path, MountType.SCRATCHPAD)
+        candidate = scratchpad / "embeddings"
+        if (candidate / "embedding_index.json").exists():
+            return candidate
+    except Exception:
+        pass
+    return None
+
+
+def _fuse_search_results(
+    fts: list[dict[str, Any]],
+    emb: list[dict[str, Any]],
+    sym: list[dict[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Normalize, merge, deduplicate by source_path, and re-rank results."""
+    # Normalize FTS relevance_score to [0,1]: BM25 from SQLite is a positive
+    # float where higher is better (the index uses -bm25() internally).
+    fts_scores = [float(e.get("relevance_score") or 0) for e in fts]
+    fts_max = max(fts_scores, default=1.0) or 1.0
+    # Normalize embedding scores (already [0,1] cosine or keyword [0,1])
+    emb_scores = [float(e.get("score", 0)) for e in emb]
+    emb_max = max(emb_scores, default=1.0) or 1.0
+    sym_scores = [float(e.get("score", 1)) for e in sym]
+    sym_max = max(sym_scores, default=1.0) or 1.0
+
+    # key: absolute source_path, value: best merged entry
+    merged: dict[str, dict[str, Any]] = {}
+
+    def _update(entry: dict[str, Any], norm_score: float, source_tag: str) -> None:
+        path = str(entry.get("source_path") or entry.get("absolute_path", ""))
+        if not path:
+            return
+        if path not in merged:
+            merged[path] = {
+                "source_path": path,
+                "relative_path": str(entry.get("relative_path") or ""),
+                "fused_score": norm_score,
+                "sources": [source_tag],
+                "mount_type": entry.get("mount_type", ""),
+                "size_bytes": entry.get("size_bytes", 0),
+                "content_excerpt": entry.get("content_excerpt") or entry.get("text_preview", ""),
+                "symbol_name": entry.get("symbol_name"),
+                "symbol_kind": entry.get("kind"),
+                "line_start": entry.get("line_start"),
+                "chunk_index": entry.get("chunk_index"),
+                "chunk_line_start": entry.get("line_start") if entry.get("chunk_index") is not None else None,
+                "chunk_line_end": entry.get("line_end") if entry.get("chunk_index") is not None else None,
+            }
+        else:
+            existing = merged[path]
+            existing["fused_score"] = max(existing["fused_score"], norm_score)
+            if source_tag not in existing["sources"]:
+                existing["sources"].append(source_tag)
+            if not existing.get("symbol_name") and entry.get("symbol_name"):
+                existing["symbol_name"] = entry["symbol_name"]
+                existing["symbol_kind"] = entry.get("kind")
+                existing["line_start"] = entry.get("line_start")
+
+    for i, entry in enumerate(fts):
+        raw = fts_scores[i]
+        norm = raw / fts_max if fts_max else (1.0 / (i + 1))
+        _update(entry, norm * 0.85, "fts")  # slight weight discount vs embedding
+
+    for i, entry in enumerate(emb):
+        raw = emb_scores[i]
+        norm = raw / emb_max if emb_max else (1.0 / (i + 1))
+        _update({"source_path": entry.get("source_path", ""),
+                  "text_preview": entry.get("text_preview", ""),
+                  "score": raw,
+                  "chunk_index": entry.get("chunk_index"),
+                  "line_start": entry.get("line_start"),
+                  "line_end": entry.get("line_end")}, norm, "embedding")
+
+    for i, entry in enumerate(sym):
+        raw = sym_scores[i]
+        norm = raw / sym_max if sym_max else (1.0 / (i + 1))
+        _update({"source_path": entry.get("source_path", ""),
+                  "symbol_name": entry.get("symbol_name"),
+                  "kind": entry.get("kind"),
+                  "line_start": entry.get("line_start")}, norm * 0.9, "symbol")
+
+    ranked = sorted(merged.values(), key=lambda r: r["fused_score"], reverse=True)
+    return ranked[:limit]
+
+
+def _tool_afs_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    """Unified search: FTS + embedding + symbol index, fused and ranked."""
+    query = str(arguments.get("query", "")).strip()
+    if not query:
+        raise ValueError("query is required")
+
+    try:
+        context_path = _resolve_context_path(arguments, manager)
+    except FileNotFoundError as exc:
+        return {"error": str(exc), "results": [], "sources_used": [], "query": query}
+
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    include_fts = bool(arguments.get("include_fts", True))
+    include_embeddings = bool(arguments.get("include_embeddings", True))
+    include_symbols = bool(arguments.get("include_symbols", True))
+    mount_types = _parse_mount_types(arguments.get("mount_types"))
+
+    fts_entries: list[dict[str, Any]] = []
+    emb_entries: list[dict[str, Any]] = []
+    sym_entries: list[dict[str, Any]] = []
+    sources_used: list[str] = []
+
+    # FTS leg
+    if include_fts:
+        try:
+            payload = _query_context_index(
+                context_path=context_path,
+                manager=manager,
+                query=query,
+                mount_types=mount_types,
+                limit=min(limit * 2, 40),
+                include_content=False,
+            )
+            fts_entries = payload.get("entries", [])
+            if fts_entries:
+                sources_used.append("fts")
+        except Exception:
+            pass
+
+    # Embedding leg
+    if include_embeddings:
+        emb_dir = _resolve_embedding_index_dir(context_path, manager)
+        if emb_dir is not None:
+            provider = arguments.get("provider")
+            model = arguments.get("model")
+            try:
+                from .embeddings import create_embed_fn, search_embedding_index
+                embed_fn = None
+                if isinstance(provider, str) and provider.strip():
+                    kwargs: dict[str, Any] = {}
+                    if isinstance(model, str) and model.strip():
+                        kwargs["model"] = model.strip()
+                    embed_fn = create_embed_fn(provider.strip(), **kwargs)
+                emb_results = search_embedding_index(
+                    emb_dir, query, embed_fn=embed_fn, top_k=min(limit, 15), min_score=0.2
+                )
+                emb_entries = [r.to_dict() for r in emb_results]
+                if emb_entries:
+                    sources_used.append("embedding")
+            except Exception:
+                pass
+
+    # Symbol leg
+    if include_symbols:
+        idx_dir = _resolve_codebase_index_dir(context_path, manager)
+        if (idx_dir / "index.json").exists():
+            try:
+                from .codebase_index import search_codebase_index
+                sym_results = search_codebase_index(idx_dir, query, limit=min(limit, 15))
+                sym_entries = [r.to_dict() for r in sym_results]
+                if sym_entries:
+                    sources_used.append("symbol")
+            except Exception:
+                pass
+
+    results = _fuse_search_results(fts_entries, emb_entries, sym_entries, limit)
+
+    return {
+        "query": query,
+        "context_path": str(context_path),
+        "sources_used": sources_used,
+        "total": len(results),
+        "results": results,
+    }
+
+
+def _tool_afs_codebase_symbols(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    """Look up symbol definitions from the AST codebase index."""
+    from .codebase_index import search_codebase_index
+
+    query = str(arguments.get("query", "")).strip()
+    if not query:
+        raise ValueError("query is required")
+
+    try:
+        context_path = _resolve_context_path(arguments, manager)
+    except FileNotFoundError as exc:
+        return {"error": str(exc), "symbols": [], "query": query}
+
+    idx_dir = _resolve_codebase_index_dir(context_path, manager)
+    if not (idx_dir / "index.json").exists():
+        return {
+            "query": query,
+            "symbols": [],
+            "total": 0,
+            "error": f"No codebase index found at {idx_dir}. Run afs.codebase.index first.",
+        }
+
+    kind = arguments.get("kind")
+    language = arguments.get("language")
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=200)
+    exact = bool(arguments.get("exact", False))
+
+    results = search_codebase_index(
+        idx_dir,
+        query,
+        kind=kind if isinstance(kind, str) else None,
+        language=language if isinstance(language, str) else None,
+        limit=limit,
+        exact=exact,
+    )
+
+    return {
+        "query": query,
+        "kind": kind,
+        "language": language,
+        "total": len(results),
+        "symbols": [r.to_dict() for r in results],
+    }
+
+
+def _tool_afs_codebase_index(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    """Build or update the AST codebase symbol index for a project."""
+    from .codebase_index import build_codebase_index, codebase_index_dir, infer_project_root
+
+    try:
+        context_path = _resolve_context_path(arguments, manager)
+    except FileNotFoundError as exc:
+        return {"error": str(exc)}
+
+    project_root_raw = arguments.get("project_path") or arguments.get("path")
+    if isinstance(project_root_raw, str) and project_root_raw.strip():
+        project_root = Path(project_root_raw).expanduser().resolve()
+    else:
+        from .codebase_explorer import infer_project_root as _infer
+        project_root = _infer(context_path)
+
+    output_dir = codebase_index_dir(context_path)
+    max_files = _coerce_int(arguments.get("max_files"), default=5000, minimum=1, maximum=50000)
+    incremental = bool(arguments.get("incremental", True))
+    languages_raw = arguments.get("languages")
+    languages = (
+        [str(lang) for lang in languages_raw if isinstance(lang, str)]
+        if isinstance(languages_raw, list)
+        else None
+    )
+
+    result = build_codebase_index(
+        project_root,
+        output_dir,
+        max_files=max_files,
+        incremental=incremental,
+        languages=languages,
+    )
+
+    return {
+        "summary": result.summary(),
+        "project_root": str(project_root),
+        "output_dir": str(output_dir),
+        "total_files": result.total_files,
+        "indexed": result.indexed,
+        "skipped": result.skipped,
+        "reused": result.reused,
+        "removed": result.removed,
+        "errors": result.errors[:10],
+        "mode": result.mode,
+    }
+
+
 def _tool_alias_definition(
     tool: MCPToolDefinition,
     *,
@@ -2082,6 +2366,89 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_embeddings_index,
+        ),
+        MCPToolDefinition(
+            name="afs.search",
+            description=(
+                "Unified search across the FTS context index, embedding index, and AST symbol index. "
+                "Returns fused, ranked results from whichever sources are available. "
+                "Use this before grep/glob when looking for code, docs, or context files."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query."},
+                    "context_path": {"type": "string", "description": "Context path (uses default if omitted)."},
+                    "mount_types": {
+                        "type": "string",
+                        "description": "Comma-separated mount types for the FTS leg (e.g. 'scratchpad,knowledge').",
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Embedding provider (ollama, openai, gemini, hf). Omit to skip embedding leg.",
+                    },
+                    "model": {"type": "string", "description": "Embedding model name."},
+                    "limit": {"type": "integer", "default": 20, "description": "Max results to return."},
+                    "include_symbols": {"type": "boolean", "default": True, "description": "Include AST symbol index results."},
+                    "include_embeddings": {"type": "boolean", "default": True, "description": "Include embedding index results."},
+                    "include_fts": {"type": "boolean", "default": True, "description": "Include FTS context index results."},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            handler=_tool_afs_search,
+        ),
+        MCPToolDefinition(
+            name="afs.codebase.symbols",
+            description=(
+                "Look up function, class, and import definitions from the AST codebase index. "
+                "Faster and more precise than grep for finding where something is defined."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Symbol name or substring to search."},
+                    "context_path": {"type": "string", "description": "Context path (uses default if omitted)."},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["functions", "classes", "imports", "exports"],
+                        "description": "Filter by symbol kind.",
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Filter by language (python, typescript, javascript, rust, go).",
+                    },
+                    "limit": {"type": "integer", "default": 20},
+                    "exact": {"type": "boolean", "default": False, "description": "Require exact (case-insensitive) name match."},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            handler=_tool_afs_codebase_symbols,
+        ),
+        MCPToolDefinition(
+            name="afs.codebase.index",
+            description=(
+                "Build or update the AST symbol index for a project. "
+                "Run this once after checkout or when files change. "
+                "Results are used by afs.codebase.symbols and the symbol leg of afs.search."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string", "description": "Context path (uses default if omitted)."},
+                    "path": {"type": "string", "description": "Project root to index (inferred from context if omitted)."},
+                    "max_files": {"type": "integer", "default": 5000, "description": "Max files to index."},
+                    "incremental": {"type": "boolean", "default": True, "description": "Skip unchanged files."},
+                    "languages": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Limit to specific languages (python, typescript, javascript, rust, go). All supported languages if omitted.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_afs_codebase_index,
         ),
         MCPToolDefinition(
             name="handoff.create",
