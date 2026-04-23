@@ -172,6 +172,8 @@ WAIT_TIMEOUT_SECONDS="${AFS_CLIENT_WAIT_TIMEOUT_SECONDS:-30}"
 if [ -n "${!CLIENT_WAIT_TIMEOUT_ENV_VAR:-}" ]; then
   WAIT_TIMEOUT_SECONDS="${!CLIENT_WAIT_TIMEOUT_ENV_VAR}"
 fi
+CLIENT_VERIFICATION_MODE_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SESSION_VERIFICATION_MODE"
+SESSION_VERIFICATION_MODE="${!CLIENT_VERIFICATION_MODE_ENV_VAR:-${AFS_CLIENT_SESSION_VERIFICATION_MODE:-warn}}"
 
 DEFAULT_SESSION_MODEL="generic"
 case "${CLIENT_LABEL}" in
@@ -537,6 +539,14 @@ if [ "${WAIT_FOR_AGENTS}" != "0" ] && [ -n "${AFS_SESSION_ID:-}" ]; then
   "${AFS_CLI}" agents wait --all --session-id "${AFS_SESSION_ID}" --timeout "${WAIT_TIMEOUT_SECONDS}" >&2 || true
 fi
 
-run_session_hook session_end --exit-code "${CLIENT_STATUS}" --reason client_exit || true
+SESSION_HOOK_STATUS=0
+run_session_hook session_end \
+  --verification-mode "${SESSION_VERIFICATION_MODE}" \
+  --exit-code "${CLIENT_STATUS}" \
+  --reason client_exit || SESSION_HOOK_STATUS=$?
+
+if [ "${CLIENT_STATUS}" -eq 0 ] && [ "${SESSION_VERIFICATION_MODE}" = "error" ] && [ "${SESSION_HOOK_STATUS}" -ne 0 ]; then
+  exit "${SESSION_HOOK_STATUS}"
+fi
 
 exit "${CLIENT_STATUS}"

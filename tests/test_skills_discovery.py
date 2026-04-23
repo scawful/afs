@@ -33,6 +33,8 @@ def test_parse_skill_frontmatter(tmp_path: Path) -> None:
     assert meta.triggers == ["test", "debug"]
     assert meta.profiles == ["general"]
     assert meta.requires == ["afs"]
+    assert meta.enforcement == []
+    assert meta.verification == []
 
 
 def test_discover_skills_from_roots(tmp_path: Path) -> None:
@@ -87,7 +89,32 @@ def test_discover_bundled_skills() -> None:
     assert "context-setup" in names
     assert "agent-ops" in names
     assert "task-queue" in names
-    assert len(skills) >= 6
+    assert "code-review" in names
+    assert "cpp-quality" in names
+    assert "python-quality" in names
+    assert "typescript-quality" in names
+    assert "software-design" in names
+    assert "implementation-planning" in names
+    assert len(skills) >= 12
+
+
+def test_quality_skills_match_engineering_prompts() -> None:
+    skills_dir = Path(__file__).parent.parent / "skills"
+    if not skills_dir.exists():
+        return
+
+    skills = {skill.name: skill for skill in discover_skills([skills_dir])}
+    prompt = (
+        "Review a python refactor for anti-patterns, plan a TypeScript migration, "
+        "check the C++ ownership design, and call out architecture risks."
+    )
+
+    assert score_skill_relevance(prompt, skills["code-review"]) >= 2
+    assert score_skill_relevance(prompt, skills["python-quality"]) >= 1
+    assert score_skill_relevance(prompt, skills["typescript-quality"]) >= 1
+    assert score_skill_relevance(prompt, skills["cpp-quality"]) >= 1
+    assert score_skill_relevance(prompt, skills["software-design"]) >= 1
+    assert score_skill_relevance(prompt, skills["implementation-planning"]) >= 1
 
 
 def test_skills_list_includes_bundled_afs_root_skills(

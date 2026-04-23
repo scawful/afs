@@ -38,7 +38,18 @@ def test_build_model_system_prompt_includes_session_state_summary() -> None:
         skills_state={
             "available": True,
             "matches": [
-                {"name": "agentic-context", "score": 9, "triggers": ["context", "harness"]},
+                {
+                    "name": "agentic-context",
+                    "score": 9,
+                    "triggers": ["context", "harness"],
+                    "enforcement": [
+                        "Use the indexed context before asking for repeated repo state.",
+                        "Keep the scratchpad current for handoff.",
+                    ],
+                    "verification": [
+                        "Write the updated handoff note before ending the session.",
+                    ],
+                },
                 {"name": "github:github", "score": 4, "triggers": ["repo"]},
             ],
         },
@@ -54,6 +65,10 @@ def test_build_model_system_prompt_includes_session_state_summary() -> None:
     assert "CLI rebuild: `afs index rebuild --path <workspace>`" in prompt
     assert "## Relevant Skills" in prompt
     assert "- agentic-context (score=9) triggers=context, harness" in prompt
+    assert "## Skill Enforcement" in prompt
+    assert "- agentic-context: Use the indexed context before asking for repeated repo state." in prompt
+    assert "## Skill Verification" in prompt
+    assert "- agentic-context: Write the updated handoff note before ending the session." in prompt
     assert "## Session Context" in prompt
     assert "Project: afs (profile: default)" in prompt
     assert "Scratchpad state: Investigating MCP registry split." in prompt

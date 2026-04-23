@@ -1204,6 +1204,8 @@ def _emit_session_event(
     status: str = "",
     reason: str = "",
     exit_code: int | None = None,
+    verification_status: str = "",
+    verification_command: str = "",
     seed_payload: dict[str, Any] | None = None,
     update_activity: bool = True,
 ) -> dict[str, Any]:
@@ -1236,6 +1238,10 @@ def _emit_session_event(
         payload["reason"] = reason
     if exit_code is not None:
         payload["exit_code"] = exit_code
+    if verification_status:
+        payload["verification_status"] = verification_status
+    if verification_command:
+        payload["verification_command"] = verification_command
 
     run_grounding_hooks(
         event=event_name,
@@ -1285,6 +1291,9 @@ def _emit_session_event(
                 "outcome": activity_snapshot.get("outcome", ""),
                 "completed_events": activity_snapshot.get("completed_events", 0),
                 "failed_events": activity_snapshot.get("failed_events", 0),
+                "verification_status": activity_snapshot.get("verification_status", ""),
+                "verification_required": activity_snapshot.get("verification_required", False),
+                "verification_record_count": activity_snapshot.get("verification_record_count", 0),
             }
         )
         if not metadata.get("prompt_preview"):
@@ -1355,7 +1364,43 @@ def session_hook_command(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
+    updated_payload = result.get("updated_payload") or {}
+    activity = updated_payload.get("activity") if isinstance(updated_payload, dict) else {}
+    verification = activity.get("verification") if isinstance(activity, dict) else {}
+    verification = verification if isinstance(verification, dict) else {}
+    verification_mode = str(
+        getattr(args, "verification_mode", None)
+        or os.getenv("AFS_SESSION_VERIFICATION_MODE", "warn")
+    ).strip().lower()
+    if verification_mode not in {"off", "warn", "error"}:
+        verification_mode = "warn"
+    verification = dict(verification)
+    if verification_mode != "off":
+        verification["mode"] = verification_mode
+
+    gate_warning = (
+        args.event == "session_end"
+        and verification_mode != "off"
+        and bool(verification.get("required"))
+        and str(verification.get("status", "")).strip() in {"missing", "failed", "skipped"}
+    )
+    gate_error = (
+        args.event == "session_end"
+        and verification_mode == "error"
+        and bool(verification.get("required"))
+        and str(verification.get("status", "")).strip() in {"missing", "failed"}
+    )
+
+    if gate_warning:
+        message = str(verification.get("message", "")).strip() or "Verification gate warning."
+        print(f"verification gate: {message}", file=sys.stderr)
+
     if args.json:
+        response_status = "ok"
+        if gate_warning:
+            response_status = "warning"
+        if gate_error:
+            response_status = "error"
         print(
             json.dumps(
                 {
@@ -1363,17 +1408,19 @@ def session_hook_command(args: argparse.Namespace) -> int:
                     "client": result["client"],
                     "session_id": result["session_id"],
                     "payload_file": result["payload_file"],
-                    "status": "ok",
+                    "status": response_status,
+                    "verification": verification,
+                    "verification_mode": verification_mode,
                 },
                 indent=2,
             )
         )
-        return 0
+        return 2 if gate_error else 0
 
     print(
         f"{result['event']}: client={result['client']} session={result['session_id']}"
     )
-    return 0
+    return 2 if gate_error else 0
 
 
 def session_event_command(args: argparse.Namespace) -> int:
@@ -1396,6 +1443,8 @@ def session_event_command(args: argparse.Namespace) -> int:
     summary = str(args.summary or "").strip()
     status = str(args.status or "").strip()
     reason = str(args.reason or "").strip()
+    verification_status = str(getattr(args, "verification_status", "") or "").strip()
+    verification_command = str(getattr(args, "verification_command", "") or "").strip()
 
     try:
         result = _emit_session_event(
@@ -1415,6 +1464,8 @@ def session_event_command(args: argparse.Namespace) -> int:
             status=status,
             reason=reason,
             exit_code=args.exit_code,
+            verification_status=verification_status,
+            verification_command=verification_command,
             seed_payload=payload,
         )
     except Exception as exc:
@@ -1433,6 +1484,7 @@ def session_event_command(args: argparse.Namespace) -> int:
                     "payload_file": result["payload_file"],
                     "last_event": activity.get("last_event", {}),
                     "active_tasks": activity.get("active_tasks", []),
+                    "verification": activity.get("verification", {}),
                     "status": "ok",
                 },
                 indent=2,
@@ -2376,6 +2428,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     session_hook.add_argument("--exit-code", type=int, help="Client exit code for session_end.")
     session_hook.add_argument("--reason", help="Optional end-of-session reason.")
+    session_hook.add_argument(
+        "--verification-mode",
+        choices=["off", "warn", "error"],
+        help="Session-end verification gate mode. Defaults to AFS_SESSION_VERIFICATION_MODE or warn.",
+    )
     session_hook.add_argument("--json", action="store_true", help="Output JSON.")
     session_hook.set_defaults(func=session_hook_command)
 
@@ -2397,6 +2454,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
             "task_progress",
             "task_completed",
             "task_failed",
+            "verification_recorded",
         ],
         help="Event name.",
     )
@@ -2413,6 +2471,15 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     session_event.add_argument("--summary", help="Short event summary or progress text.")
     session_event.add_argument("--status", help="Explicit status override.")
     session_event.add_argument("--reason", help="Optional failure/end reason.")
+    session_event.add_argument(
+        "--verification-status",
+        choices=["passed", "failed", "skipped"],
+        help="Structured verification result associated with this event.",
+    )
+    session_event.add_argument(
+        "--verification-command",
+        help="Verification command or check description associated with this event.",
+    )
     session_event.add_argument("--prompt", help="Prompt text for user_prompt_submit.")
     session_event.add_argument(
         "--prompt-file",

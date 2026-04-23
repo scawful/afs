@@ -17,6 +17,7 @@ from .manager import AFSManager
 from .model_prompts import build_model_system_prompt
 from .profiles import resolve_active_profile
 from .session_bootstrap import build_session_bootstrap, write_session_bootstrap_artifacts
+from .session_workflows import build_session_execution_profile
 from .skills import discover_skills, resolve_skill_roots, score_skill_relevance
 
 _RECENT_ACTIVITY_LIMIT = 20
@@ -26,6 +27,7 @@ _SYSTEM_PROMPT_PREVIEW_CHARS = 320
 _DEFAULT_SYSTEM_PROMPT_TOKEN_BUDGET = 2000
 _WORKFLOW_SNAPSHOT_STEP_LIMIT = 6
 _WORKFLOW_SNAPSHOT_SKILL_LIMIT = 4
+_VERIFICATION_RECORD_LIMIT = 10
 _DEFAULT_BASE_PROMPTS = {
     "generic": (
         "You are a context-aware assistant operating inside the Agentic File System. "
@@ -105,6 +107,11 @@ _SESSION_ACTIVITY_EVENT_SPECS: tuple[dict[str, str], ...] = (
         "phase": "task",
         "description": "A tracked task failed.",
     },
+    {
+        "name": "verification_recorded",
+        "phase": "verification",
+        "description": "A verification command or result was recorded for the session.",
+    },
 )
 
 
@@ -151,6 +158,7 @@ def _initial_activity_state() -> dict[str, Any]:
         "counters": {},
         "last_event": {},
         "last_task": {},
+        "verification": _initial_verification_state(),
     }
 
 
@@ -240,6 +248,7 @@ def _ensure_client_session_payload_shape(payload: dict[str, Any]) -> dict[str, A
     activity.setdefault("counters", {})
     activity.setdefault("last_event", {})
     activity.setdefault("last_task", {})
+    activity.setdefault("verification", _initial_verification_state())
     normalized["activity"] = activity
 
     integration = normalized.get("integration")
@@ -347,6 +356,8 @@ def _activity_event_summary(event_name: str, event_payload: dict[str, Any]) -> s
         return f"Task {task_id or '?'} completed"
     if event_name == "task_failed":
         return f"Task {task_id or '?'} failed"
+    if event_name == "verification_recorded":
+        return f"Verification recorded: {summary or '(no summary)'}"
     return summary or event_name
 
 
@@ -373,6 +384,203 @@ def _compact_event_names(entries: list[dict[str, Any]]) -> list[str]:
         compact.append(name)
         previous = name
     return compact
+
+
+def _initial_verification_state() -> dict[str, Any]:
+    return {
+        "required": False,
+        "status": "not_required",
+        "expected": [],
+        "records": [],
+        "record_count": 0,
+        "commands": [],
+        "last_record": {},
+        "message": "",
+        "updated_at": "",
+        "mode": "",
+    }
+
+
+def _normalize_verification_status(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"passed", "pass", "verified", "ok", "success"}:
+        return "passed"
+    if text in {"failed", "fail", "error"}:
+        return "failed"
+    if text in {"skipped", "skip"}:
+        return "skipped"
+    if text in {"missing", "pending", "not_required"}:
+        return text
+    if text.startswith("verification_"):
+        return _normalize_verification_status(text.removeprefix("verification_"))
+    return ""
+
+
+def _verification_requirements(payload: dict[str, Any]) -> dict[str, Any]:
+    pack = payload.get("pack") if isinstance(payload.get("pack"), dict) else {}
+    prompt = payload.get("prompt") if isinstance(payload.get("prompt"), dict) else {}
+    skills = payload.get("skills") if isinstance(payload.get("skills"), dict) else {}
+
+    workflow = str(pack.get("workflow") or prompt.get("workflow") or "").strip()
+    tool_profile = str(pack.get("tool_profile") or prompt.get("tool_profile") or "").strip()
+    model_family = str(prompt.get("model_family") or payload.get("client") or "generic").strip()
+
+    workflow_contract: list[str] = []
+    if workflow:
+        try:
+            execution_profile = build_session_execution_profile(
+                model=model_family or "generic",
+                workflow=workflow,
+                tool_profile=tool_profile or None,
+            )
+        except Exception:
+            execution_profile = {}
+        workflow_contract = [
+            str(item).strip()
+            for item in (execution_profile.get("verification_contract") or [])
+            if str(item).strip()
+        ]
+
+    skill_contract: list[str] = []
+    matches = skills.get("matches") if isinstance(skills, dict) else []
+    if isinstance(matches, list):
+        for match in matches[:_WORKFLOW_SNAPSHOT_SKILL_LIMIT + 2]:
+            if not isinstance(match, dict):
+                continue
+            name = str(match.get("name", "")).strip()
+            verification = match.get("verification")
+            if not isinstance(verification, list):
+                continue
+            for item in verification[:2]:
+                text = str(item).strip()
+                if not text:
+                    continue
+                skill_contract.append(f"{name}: {text}" if name else text)
+
+    required = bool(skill_contract) or tool_profile == "edit_and_verify" or workflow in {
+        "edit_fast",
+        "root_cause_deep",
+    }
+
+    expected: list[str] = []
+    seen: set[str] = set()
+    for item in workflow_contract + skill_contract:
+        marker = item.lower()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        expected.append(item)
+
+    return {
+        "required": required,
+        "workflow": workflow,
+        "tool_profile": tool_profile,
+        "expected": expected,
+    }
+
+
+def _verification_record_from_event(
+    *,
+    event_name: str,
+    event_payload: dict[str, Any],
+    timestamp: str,
+) -> dict[str, Any]:
+    status = _normalize_verification_status(event_payload.get("verification_status"))
+    command = str(event_payload.get("verification_command", "")).strip()
+    summary = str(event_payload.get("summary", "")).strip()
+
+    if not status:
+        status = _normalize_verification_status(event_payload.get("status"))
+
+    if not status and command:
+        if event_name in {"turn_failed", "task_failed"}:
+            status = "failed"
+        else:
+            status = "passed"
+
+    if not status:
+        return {}
+
+    record = {
+        "timestamp": timestamp,
+        "event": event_name,
+        "status": status,
+        "command": command,
+        "summary": _truncate_text(summary, limit=_SUMMARY_PREVIEW_CHARS) if summary else "",
+        "turn_id": str(event_payload.get("turn_id", "")).strip(),
+        "task_id": str(event_payload.get("task_id", "")).strip(),
+        "task_title": str(event_payload.get("task_title", "")).strip(),
+    }
+    return {key: value for key, value in record.items() if value not in ("", None, [], {})}
+
+
+def _build_session_verification_state(
+    payload: dict[str, Any],
+    *,
+    final: bool,
+    updated_at: str = "",
+) -> dict[str, Any]:
+    activity = payload.get("activity") if isinstance(payload.get("activity"), dict) else {}
+    current = activity.get("verification") if isinstance(activity, dict) else {}
+    current = current if isinstance(current, dict) else {}
+    records = current.get("records") if isinstance(current.get("records"), list) else []
+
+    requirements = _verification_requirements(payload)
+    required = bool(requirements.get("required"))
+    expected = list(requirements.get("expected") or [])
+
+    normalized_records: list[dict[str, Any]] = []
+    commands: list[str] = []
+    command_seen: set[str] = set()
+    for entry in records[-_VERIFICATION_RECORD_LIMIT:]:
+        if not isinstance(entry, dict):
+            continue
+        status = _normalize_verification_status(entry.get("status"))
+        if not status:
+            continue
+        record = dict(entry)
+        record["status"] = status
+        normalized_records.append(record)
+        command = str(record.get("command", "")).strip()
+        if command and command not in command_seen:
+            command_seen.add(command)
+            commands.append(command)
+
+    statuses = [str(entry.get("status", "")).strip() for entry in normalized_records]
+    if not required:
+        status = "not_required"
+        message = "Verification not required for this workflow."
+    elif "failed" in statuses:
+        status = "failed"
+        message = "Recorded verification failed."
+    elif "passed" in statuses:
+        status = "passed"
+        message = "Verification recorded."
+    elif "skipped" in statuses:
+        status = "skipped"
+        message = "Verification was explicitly skipped."
+    elif final:
+        status = "missing"
+        message = "Required verification was not recorded before session end."
+    else:
+        status = "pending"
+        message = "Verification still pending."
+
+    last_record = normalized_records[-1] if normalized_records else {}
+    state = {
+        "required": required,
+        "status": status,
+        "expected": expected,
+        "records": normalized_records,
+        "record_count": len(normalized_records),
+        "commands": commands,
+        "last_record": last_record,
+        "message": message,
+        "updated_at": updated_at or str(current.get("updated_at", "")).strip(),
+        "workflow": str(requirements.get("workflow", "")).strip(),
+        "tool_profile": str(requirements.get("tool_profile", "")).strip(),
+    }
+    return {key: value for key, value in state.items() if value not in ("", None, [], {})}
 
 
 def build_session_activity_snapshot(
@@ -408,6 +616,11 @@ def build_session_activity_snapshot(
     session_state = (
         activity.get("session_state")
         if isinstance(activity.get("session_state"), dict)
+        else {}
+    )
+    verification = (
+        activity.get("verification")
+        if isinstance(activity.get("verification"), dict)
         else {}
     )
     counters = activity.get("counters") if isinstance(activity.get("counters"), dict) else {}
@@ -456,6 +669,9 @@ def build_session_activity_snapshot(
         "matched_skills": matched_skills,
         "completed_events": completed_events,
         "failed_events": failed_events,
+        "verification_status": str(verification.get("status", "")).strip(),
+        "verification_required": bool(verification.get("required")),
+        "verification_record_count": int(verification.get("record_count", 0) or 0),
     }
     return {
         key: value
@@ -600,6 +816,8 @@ def _skills_summary(
                 "path": str(skill.path),
                 "triggers": skill.triggers,
                 "requires": skill.requires,
+                "enforcement": skill.enforcement,
+                "verification": skill.verification,
             }
             for score, skill in ranked[: max(top_k, 0)]
         ],
@@ -842,6 +1060,25 @@ def record_client_session_activity(
             current_turn["started_at"] = now
         activity["current_turn"] = current_turn
 
+    verification_state = (
+        activity.get("verification")
+        if isinstance(activity.get("verification"), dict)
+        else _initial_verification_state()
+    )
+    verification_records = list(verification_state.get("records", []))
+    verification_record = _verification_record_from_event(
+        event_name=event_name,
+        event_payload=event_payload,
+        timestamp=now,
+    )
+    if verification_record:
+        verification_records.append(verification_record)
+        verification_records = verification_records[-_VERIFICATION_RECORD_LIMIT:]
+    verification_state = dict(verification_state)
+    verification_state["records"] = verification_records
+    verification_state["updated_at"] = now
+    activity["verification"] = verification_state
+
     tasks = _task_map(list(activity.get("active_tasks", [])))
     if event_name in {"task_created", "task_progress", "task_completed", "task_failed"} and task_id:
         task = tasks.get(
@@ -880,6 +1117,12 @@ def record_client_session_activity(
         tasks.values(),
         key=lambda entry: str(entry.get("updated_at", entry.get("created_at", ""))),
         reverse=True,
+    )
+    payload["activity"] = activity
+    activity["verification"] = _build_session_verification_state(
+        payload,
+        final=event_name == "session_end",
+        updated_at=now,
     )
     payload["activity"] = activity
     payload["updated_at"] = now

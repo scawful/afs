@@ -248,6 +248,11 @@ print(f"  sent: {msg.id}")
 PY
 }
 
+# Run a verification command and record the result against the active session.
+afs-verify() {
+  "${AFS_ROOT}/scripts/afs-session-verify" "$@"
+}
+
 # --- Completions (zsh) ---
 if [ -n "${ZSH_VERSION-}" ]; then
   _afs_commands() {

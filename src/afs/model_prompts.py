@@ -354,6 +354,8 @@ def _skills_context_block(skills_state: dict[str, Any] | None) -> str:
         return ""
 
     lines = ["## Relevant Skills"]
+    enforcement_lines: list[str] = []
+    verification_lines: list[str] = []
     for match in matches[:5]:
         if not isinstance(match, dict):
             continue
@@ -375,7 +377,46 @@ def _skills_context_block(skills_state: dict[str, Any] | None) -> str:
                 line += f" triggers={', '.join(trigger_values[:4])}"
         lines.append(f"- {line}")
 
+        enforcement = _skill_guidance_lines(match.get("enforcement"), limit=3)
+        verification = _skill_guidance_lines(match.get("verification"), limit=2)
+        enforcement_lines.extend(f"- {name}: {item}" for item in enforcement)
+        verification_lines.extend(f"- {name}: {item}" for item in verification)
+
+    if enforcement_lines:
+        lines.append("")
+        lines.append("## Skill Enforcement")
+        lines.append("Apply the matched skill rules automatically for this task:")
+        lines.extend(enforcement_lines[:10])
+
+    if verification_lines:
+        lines.append("")
+        lines.append("## Skill Verification")
+        lines.append("Verification expected for the touched scope:")
+        lines.extend(verification_lines[:8])
+
     return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _skill_guidance_lines(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    for raw_item in value:
+        if not isinstance(raw_item, str):
+            continue
+        item = " ".join(raw_item.split()).strip()
+        if not item:
+            continue
+        marker = item.lower()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        lines.append(item)
+        if len(lines) >= limit:
+            break
+    return lines
 
 
 def _apply_budget(sections: list[PromptSection], budget: int) -> list[PromptSection]:

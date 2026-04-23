@@ -13,11 +13,11 @@ from ..config import load_config_model
 from ..manager import AFSManager
 from ..profiles import resolve_active_profile
 from ..skill_mining import (
-    record_skill_candidate_review_state,
     mine_skill_candidates,
     normalize_promoted_skill_name,
-    render_skill_candidate_review,
+    record_skill_candidate_review_state,
     render_promoted_skill_markdown,
+    render_skill_candidate_review,
     review_skill_candidates,
     write_promoted_skill,
     write_skill_candidate_artifacts,
@@ -69,6 +69,8 @@ def skills_list_command(args: argparse.Namespace) -> int:
                     "triggers": skill.triggers,
                     "requires": skill.requires,
                     "profiles": skill.profiles,
+                    "enforcement": skill.enforcement,
+                    "verification": skill.verification,
                 }
                 for skill in skills
             ],
@@ -116,6 +118,8 @@ def skills_match_command(args: argparse.Namespace) -> int:
                     "path": str(skill.path),
                     "triggers": skill.triggers,
                     "requires": skill.requires,
+                    "enforcement": skill.enforcement,
+                    "verification": skill.verification,
                 }
                 for score, skill in ranked[: args.top_k]
             ],

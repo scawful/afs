@@ -13,6 +13,13 @@ def test_parse_skill_frontmatter() -> None:
     assert metadata.triggers == ["gemini-cli", "agent studio"]
     assert metadata.requires == ["knowledge/work", "gemini mcp"]
     assert metadata.profiles == ["work", "general"]
+    assert metadata.enforcement == [
+        "Keep the Gemini workspace flow deterministic.",
+        "Prefer MCP-backed context over ad hoc summaries.",
+    ]
+    assert metadata.verification == [
+        "Run the workspace health checks before handoff.",
+    ]
 
 
 def test_discover_skills_profile_filter(tmp_path: Path) -> None:

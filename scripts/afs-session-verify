@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -lt 1 ]; then
+  echo "usage: afs-session-verify [--summary <text>] [--task-id <id>] [--task-title <title>] -- <command...>" >&2
+  echo "   or: afs-session-verify [--summary <text>] [--task-id <id>] [--task-title <title>] <command...>" >&2
+  exit 2
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AFS_ROOT="${AFS_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+AFS_SESSION_NOTIFY="${AFS_SESSION_NOTIFY:-${AFS_ROOT}/scripts/afs-session-notify}"
+
+SUMMARY_OVERRIDE=""
+TASK_ID=""
+TASK_TITLE=""
+
+while [ "$#" -gt 0 ]; do
+  case "${1:-}" in
+    --summary)
+      SUMMARY_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --task-id)
+      TASK_ID="${2:-}"
+      shift 2
+      ;;
+    --task-title)
+      TASK_TITLE="${2:-}"
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [ "$#" -lt 1 ]; then
+  echo "usage: afs-session-verify [--summary <text>] [--task-id <id>] [--task-title <title>] -- <command...>" >&2
+  exit 2
+fi
+
+COMMAND_ARGS=("$@")
+COMMAND_STRING=""
+for arg in "${COMMAND_ARGS[@]}"; do
+  if [ -n "${COMMAND_STRING}" ]; then
+    COMMAND_STRING+=" "
+  fi
+  COMMAND_STRING+="$(printf '%q' "${arg}")"
+done
+
+set +e
+"${COMMAND_ARGS[@]}"
+COMMAND_STATUS=$?
+set -e
+
+VERIFY_STATUS="passed"
+VERIFY_REASON=""
+if [ "${COMMAND_STATUS}" -ne 0 ]; then
+  VERIFY_STATUS="failed"
+  VERIFY_REASON="verification_failed"
+fi
+
+SUMMARY="${SUMMARY_OVERRIDE}"
+if [ -z "${SUMMARY}" ]; then
+  if [ "${VERIFY_STATUS}" = "passed" ]; then
+    SUMMARY="Verification passed: ${COMMAND_STRING}"
+  else
+    SUMMARY="Verification failed (${COMMAND_STATUS}): ${COMMAND_STRING}"
+  fi
+fi
+
+EVENT_ARGS=(
+  verification_recorded
+  --verification-status "${VERIFY_STATUS}"
+  --verification-command "${COMMAND_STRING}"
+  --summary "${SUMMARY}"
+)
+if [ -n "${TASK_ID}" ]; then
+  EVENT_ARGS+=(--task-id "${TASK_ID}")
+fi
+if [ -n "${TASK_TITLE}" ]; then
+  EVENT_ARGS+=(--task-title "${TASK_TITLE}")
+fi
+if [ -n "${VERIFY_REASON}" ]; then
+  EVENT_ARGS+=(--reason "${VERIFY_REASON}")
+fi
+
+"${AFS_SESSION_NOTIFY}" "${EVENT_ARGS[@]}" >&2 || true
+
+exit "${COMMAND_STATUS}"
