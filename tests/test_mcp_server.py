@@ -1435,6 +1435,7 @@ def test_resources_list_returns_contexts_resource(tmp_path: Path) -> None:
     uris = [r["uri"] for r in resources]
     assert "afs://contexts" in uris
     assert "afs://schemas/plan" in uris
+    assert "afs://schemas/design-brief" in uris
     assert "afs://schemas/verification-summary" in uris
     assert f"afs://context/{manager.config.general.context_root}/bootstrap" in uris
 
@@ -1880,6 +1881,14 @@ def test_prompts_get_session_pack(tmp_path: Path) -> None:
 def test_prompts_get_workflow_structured(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     context_root = manager.config.general.context_root
+    (tmp_path / ".afs").mkdir()
+    (tmp_path / ".afs" / "policy.toml").write_text(
+        "[review]\n"
+        "focus = [\"order findings by severity\"]\n\n"
+        "[design]\n"
+        "constraints = [\"preserve compatibility\"]\n",
+        encoding="utf-8",
+    )
     (context_root / "knowledge").mkdir(exist_ok=True)
     (context_root / "knowledge" / "guide.md").write_text(
         "gemini planning guide",
@@ -1918,6 +1927,8 @@ def test_prompts_get_workflow_structured(tmp_path: Path) -> None:
     assert '"completion_signal"' in text
     assert "Pack mode: retrieval" in text
     assert "Plan the guide update." in text
+    assert "## Repo Policy" in text
+    assert "- order findings by severity" in text
 
 
 def test_prompts_get_workflow_structured_rejects_unknown_schema(tmp_path: Path) -> None:

@@ -33,6 +33,9 @@ def build_model_system_prompt(
     session_state: dict[str, Any] | None = None,
     pack_state: dict[str, Any] | None = None,
     skills_state: dict[str, Any] | None = None,
+    verification_state: dict[str, Any] | None = None,
+    policy_state: dict[str, Any] | None = None,
+    structured_guidance: dict[str, Any] | None = None,
     workflow: str | None = None,
     tool_profile: str | None = None,
     token_budget: int = 0,
@@ -47,6 +50,9 @@ def build_model_system_prompt(
         session_state: Pre-built bootstrap summary (if already available).
         pack_state: Prepared AFS session-pack metadata.
         skills_state: Prepared AFS skill-match metadata.
+        verification_state: Prepared verification-plan metadata.
+        policy_state: Repo-local policy summary for review/design/planning.
+        structured_guidance: Structured schema and repair-loop guidance.
         workflow: AFS workflow name for model hints.
         tool_profile: AFS tool profile for capability hints.
         token_budget: If > 0, truncate dynamic sections to fit.
@@ -103,6 +109,33 @@ def build_model_system_prompt(
             cacheable=False,
             priority=55,
             label="skills_context",
+        ))
+
+    verification_block = _verification_context_block(verification_state)
+    if verification_block:
+        sections.append(PromptSection(
+            content=verification_block,
+            cacheable=False,
+            priority=54,
+            label="verification_context",
+        ))
+
+    policy_block = _repo_policy_block(policy_state)
+    if policy_block:
+        sections.append(PromptSection(
+            content=policy_block,
+            cacheable=False,
+            priority=53,
+            label="repo_policy",
+        ))
+
+    structured_block = _structured_guidance_block(structured_guidance)
+    if structured_block:
+        sections.append(PromptSection(
+            content=structured_block,
+            cacheable=False,
+            priority=52,
+            label="structured_guidance",
         ))
 
     # --- Dynamic section: session context (scratchpad, diff, memory) ---
@@ -395,6 +428,127 @@ def _skills_context_block(skills_state: dict[str, Any] | None) -> str:
         lines.extend(verification_lines[:8])
 
     return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _verification_context_block(verification_state: dict[str, Any] | None) -> str:
+    if not isinstance(verification_state, dict) or not verification_state.get("available"):
+        return ""
+
+    lines = ["## Verification Plan"]
+    repo_root = str(verification_state.get("repo_root", "") or "").strip()
+    profile = str(verification_state.get("profile", "") or "").strip()
+    changed_paths = verification_state.get("changed_paths")
+    checks = verification_state.get("selected_checks")
+
+    if repo_root:
+        lines.append(f"Repo root: {repo_root}")
+    if profile:
+        lines.append(f"Verification profile: {profile}")
+    if isinstance(changed_paths, list) and changed_paths:
+        preview = ", ".join(str(path).strip() for path in changed_paths[:6] if str(path).strip())
+        if preview:
+            lines.append(f"Changed paths: {preview}")
+    if isinstance(checks, list) and checks:
+        lines.append("Required checks:")
+        for check in checks[:6]:
+            if not isinstance(check, dict):
+                continue
+            name = str(check.get("name", "") or "").strip()
+            commands = check.get("commands") if isinstance(check.get("commands"), list) else []
+            if commands:
+                for command in commands[:3]:
+                    text = str(command).strip()
+                    if text:
+                        lines.append(f"- {name}: {text}" if name else f"- {text}")
+            elif name:
+                lines.append(f"- {name}: review the changed scope explicitly")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _repo_policy_block(policy_state: dict[str, Any] | None) -> str:
+    if not isinstance(policy_state, dict) or not policy_state.get("available"):
+        return ""
+
+    lines = ["## Repo Policy"]
+    review_focus = policy_state.get("review_focus") if isinstance(policy_state.get("review_focus"), list) else []
+    design_constraints = (
+        policy_state.get("design_constraints")
+        if isinstance(policy_state.get("design_constraints"), list)
+        else []
+    )
+    planning_principles = (
+        policy_state.get("planning_principles")
+        if isinstance(policy_state.get("planning_principles"), list)
+        else []
+    )
+    matched_risks = policy_state.get("matched_risks") if isinstance(policy_state.get("matched_risks"), list) else []
+    anti_pattern_hits = (
+        policy_state.get("anti_pattern_hits")
+        if isinstance(policy_state.get("anti_pattern_hits"), list)
+        else []
+    )
+
+    if review_focus:
+        lines.append("Review focus:")
+        for item in review_focus[:6]:
+            lines.append(f"- {item}")
+    if design_constraints:
+        lines.append("Design constraints:")
+        for item in design_constraints[:6]:
+            lines.append(f"- {item}")
+    if planning_principles:
+        lines.append("Planning principles:")
+        for item in planning_principles[:6]:
+            lines.append(f"- {item}")
+    if matched_risks:
+        lines.append("Matched repo risks:")
+        for item in matched_risks[:6]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "") or item.get("risk", "")).strip()
+            paths = item.get("paths") if isinstance(item.get("paths"), list) else []
+            preview = ", ".join(str(path).strip() for path in paths[:4] if str(path).strip())
+            if name and preview:
+                lines.append(f"- {name}: {preview}")
+            elif name:
+                lines.append(f"- {name}")
+    if anti_pattern_hits:
+        lines.append("Anti-pattern hits in changed scope:")
+        for item in anti_pattern_hits[:6]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            path = str(item.get("path", "")).strip()
+            if name and path:
+                lines.append(f"- {name}: {path}")
+            elif path:
+                lines.append(f"- {path}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _structured_guidance_block(structured_guidance: dict[str, Any] | None) -> str:
+    if not isinstance(structured_guidance, dict):
+        return ""
+
+    recommended_schema = str(structured_guidance.get("recommended_schema", "") or "").strip()
+    followup_schema = str(structured_guidance.get("followup_schema", "") or "").strip()
+    repair_loop = structured_guidance.get("repair_loop") if isinstance(structured_guidance.get("repair_loop"), list) else []
+
+    if not any([recommended_schema, followup_schema, repair_loop]):
+        return ""
+
+    lines = ["## Structured Workflow"]
+    if recommended_schema:
+        lines.append(f"Recommended schema: {recommended_schema}")
+    if followup_schema:
+        lines.append(f"Follow-up schema: {followup_schema}")
+    if repair_loop:
+        lines.append("Repair loop:")
+        for item in repair_loop[:5]:
+            text = str(item).strip()
+            if text:
+                lines.append(f"- {text}")
+    return "\n".join(lines)
 
 
 def _skill_guidance_lines(value: Any, *, limit: int) -> list[str]:

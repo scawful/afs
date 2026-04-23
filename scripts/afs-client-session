@@ -276,7 +276,7 @@ SESSION_PREPARE_ARGS+=(--json)
 SESSION_PREPARE_JSON_PAYLOAD="$("${AFS_CLI}" "${SESSION_PREPARE_ARGS[@]}" 2>/dev/null || true)"
 if [ -n "${SESSION_PREPARE_JSON_PAYLOAD}" ]; then
   readarray -t bootstrap_fields < <(
-    python3 - "${SESSION_PREPARE_JSON_PAYLOAD}" <<'PY'
+    python3 -c '
 import json
 import sys
 
@@ -299,7 +299,14 @@ cli_hints = payload.get("cli_hints") or {}
 print(cli_hints.get("query_shortcut", ""))
 print(cli_hints.get("query_canonical", ""))
 print(cli_hints.get("index_rebuild", ""))
-PY
+print(cli_hints.get("verify_plan", ""))
+print(cli_hints.get("verify_run", ""))
+structured = payload.get("structured_guidance") or {}
+print(structured.get("recommended_schema", ""))
+print(structured.get("followup_schema", ""))
+repair_loop = structured.get("repair_loop") or []
+print(" | ".join(str(item) for item in repair_loop if str(item).strip()))
+' "${SESSION_PREPARE_JSON_PAYLOAD}"
   )
   export AFS_SESSION_BOOTSTRAP_JSON="${bootstrap_fields[0]:-}"
   export AFS_SESSION_BOOTSTRAP_MARKDOWN="${bootstrap_fields[1]:-}"
@@ -313,6 +320,11 @@ PY
   export AFS_SESSION_QUERY_HINT="${bootstrap_fields[9]:-}"
   export AFS_SESSION_CONTEXT_QUERY_HINT="${bootstrap_fields[10]:-}"
   export AFS_SESSION_INDEX_REBUILD_HINT="${bootstrap_fields[11]:-}"
+  export AFS_SESSION_VERIFY_PLAN_HINT="${bootstrap_fields[12]:-}"
+  export AFS_SESSION_VERIFY_RUN_HINT="${bootstrap_fields[13]:-}"
+  export AFS_SESSION_RECOMMENDED_SCHEMA="${bootstrap_fields[14]:-}"
+  export AFS_SESSION_FOLLOWUP_SCHEMA="${bootstrap_fields[15]:-}"
+  export AFS_SESSION_REPAIR_LOOP_HINT="${bootstrap_fields[16]:-}"
 fi
 
 if [ -n "${AFS_SESSION_BOOTSTRAP_MARKDOWN:-}" ]; then
@@ -338,6 +350,18 @@ if [ -n "${AFS_SESSION_CONTEXT_QUERY_HINT:-}" ]; then
 fi
 if [ -n "${AFS_SESSION_INDEX_REBUILD_HINT:-}" ]; then
   echo "AFS index hint (${CLIENT_LABEL}): ${AFS_SESSION_INDEX_REBUILD_HINT}" >&2
+fi
+if [ -n "${AFS_SESSION_VERIFY_PLAN_HINT:-}" ]; then
+  echo "AFS verify plan hint (${CLIENT_LABEL}): ${AFS_SESSION_VERIFY_PLAN_HINT}" >&2
+fi
+if [ -n "${AFS_SESSION_VERIFY_RUN_HINT:-}" ]; then
+  echo "AFS verify run hint (${CLIENT_LABEL}): ${AFS_SESSION_VERIFY_RUN_HINT}" >&2
+fi
+if [ -n "${AFS_SESSION_RECOMMENDED_SCHEMA:-}" ]; then
+  echo "AFS structured schema (${CLIENT_LABEL}): ${AFS_SESSION_RECOMMENDED_SCHEMA}" >&2
+fi
+if [ -n "${AFS_SESSION_REPAIR_LOOP_HINT:-}" ]; then
+  echo "AFS repair loop (${CLIENT_LABEL}): ${AFS_SESSION_REPAIR_LOOP_HINT}" >&2
 fi
 if [ -n "${AFS_SESSION_ID:-}" ]; then
   echo "AFS session (${CLIENT_LABEL}): ${AFS_SESSION_ID}" >&2

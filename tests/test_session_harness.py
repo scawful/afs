@@ -12,7 +12,15 @@ from afs.cli.core import (
 )
 from afs.manager import AFSManager
 from afs.models import MountType
-from afs.schema import AFSConfig, GeneralConfig, ProfileConfig, ProfilesConfig
+from afs.schema import (
+    AFSConfig,
+    GeneralConfig,
+    ProfileConfig,
+    ProfilesConfig,
+    VerificationCheckConfig,
+    VerificationConfig,
+    VerificationProfileConfig,
+)
 
 
 def _make_manager(tmp_path: Path) -> tuple[AFSManager, Path]:
@@ -41,6 +49,22 @@ def _make_manager(tmp_path: Path) -> tuple[AFSManager, Path]:
                 "default": ProfileConfig(skill_roots=[skill_root]),
             },
         ),
+        verification=VerificationConfig(
+            default_profile="repo",
+            profiles={
+                "repo": VerificationProfileConfig(
+                    name="repo",
+                    checks=[
+                        VerificationCheckConfig(
+                            name="harness-artifacts",
+                            skills=["agentic-background"],
+                            workflows=["edit_fast"],
+                            commands=["pytest -q tests/test_session_harness.py"],
+                        )
+                    ],
+                )
+            },
+        ),
     )
     manager = AFSManager(config=config)
     project_path = tmp_path / "project"
@@ -57,6 +81,17 @@ def _make_manager(tmp_path: Path) -> tuple[AFSManager, Path]:
     knowledge_root.mkdir(parents=True, exist_ok=True)
     (knowledge_root / "agents.md").write_text(
         "Background agents should stream state to the harness.",
+        encoding="utf-8",
+    )
+    policy_dir = tmp_path / ".afs"
+    policy_dir.mkdir(exist_ok=True)
+    (policy_dir / "policy.toml").write_text(
+        "[review]\n"
+        "focus = [\"order findings by severity\", \"call out missing tests\"]\n\n"
+        "[design]\n"
+        "constraints = [\"preserve artifact compatibility\"]\n\n"
+        "[planning]\n"
+        "principles = [\"keep plans reversible\"]\n",
         encoding="utf-8",
     )
     return manager, context_root
@@ -133,11 +168,32 @@ def test_session_prepare_client_command_outputs_artifacts(
         == f"afs context query <text> --path {tmp_path.resolve()}"
     )
     assert payload["cli_hints"]["index_rebuild"] == f"afs index rebuild --path {tmp_path.resolve()}"
+    assert payload["cli_hints"]["verify_plan"].startswith("afs verify plan --payload-file ")
+    assert payload["cli_hints"]["verify_run"].startswith("afs verify run --payload-file ")
     assert isinstance(payload["cli_hints"]["notes"], list)
+    assert payload["verification_plan"]["profile"] == "repo"
+    assert payload["verification_plan"]["selected_checks"][0]["name"] == "harness-artifacts"
+    assert payload["verification_plan"]["selected_checks"][0]["commands"] == [
+        "pytest -q tests/test_session_harness.py"
+    ]
+    assert payload["structured_guidance"]["recommended_schema"] == "design-brief"
+    assert payload["structured_guidance"]["followup_schema"] == "verification-summary"
+    assert payload["repo_policy"]["review_focus"] == [
+        "order findings by severity",
+        "call out missing tests",
+    ]
+    assert payload["repo_policy"]["design_constraints"] == ["preserve artifact compatibility"]
+    assert payload["repo_policy"]["planning_principles"] == ["keep plans reversible"]
     prompt_text = Path(payload["prompt"]["artifact_paths"]["text"]).read_text(encoding="utf-8")
     assert "## Skill Enforcement" in prompt_text
     assert "- agentic-background: Stream background progress instead of hiding state." in prompt_text
     assert "## Skill Verification" in prompt_text
+    assert "## Verification Plan" in prompt_text
+    assert "- harness-artifacts: pytest -q tests/test_session_harness.py" in prompt_text
+    assert "## Repo Policy" in prompt_text
+    assert "- order findings by severity" in prompt_text
+    assert "## Structured Workflow" in prompt_text
+    assert "Recommended schema: design-brief" in prompt_text
     assert "## Session Context" in prompt_text
     assert "Prompt contract:" in prompt_text
     assert payload["artifact_paths"]["json"].endswith("session_client_codex.json")

@@ -1,19 +1,6 @@
 # Claude Workspace Bootstrap
 
-Use AFS (Agent File System) for context management in this project.
-
-## Session Startup
-
-Before major work:
-1. Run `afs session bootstrap --json` or use the MCP prompt `afs.session.bootstrap`.
-2. Read scratchpad state/deferred notes.
-3. Check queued tasks and recent hivemind messages.
-4. Use `context.query` before asking for already-known context.
-
-## Context
-
-- Project: afs
-- Context path: $AFS_ROOT/.context
+See `AGENTS.md` for startup workflow and working rules.
 
 ## Session Recovery
 

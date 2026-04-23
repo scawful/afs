@@ -155,6 +155,69 @@ _SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
         },
         "additionalProperties": False,
     },
+    "design-brief": {
+        "$schema": _BASE_SCHEMA,
+        "$id": f"{SCHEMA_URI_PREFIX}design-brief",
+        "title": "AFS Design Brief",
+        "description": "Design framing for larger or riskier changes before editing.",
+        "type": "object",
+        "required": ["problem", "constraints", "invariants", "acceptance_criteria"],
+        "properties": {
+            "problem": {"type": "string", "description": "Problem statement or change driver."},
+            "constraints": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 8,
+            },
+            "invariants": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 8,
+            },
+            "acceptance_criteria": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 8,
+            },
+            "rollback_plan": {
+                "type": "string",
+                "description": "How to back out safely if the change misbehaves.",
+            },
+        },
+        "additionalProperties": False,
+    },
+    "implementation-plan": {
+        "$schema": _BASE_SCHEMA,
+        "$id": f"{SCHEMA_URI_PREFIX}implementation-plan",
+        "title": "AFS Implementation Plan",
+        "description": "Execution plan with risks and verification for software changes.",
+        "type": "object",
+        "required": ["summary", "steps", "verification", "risks"],
+        "properties": {
+            "summary": {"type": "string", "description": "One-line implementation summary."},
+            "steps": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 8,
+            },
+            "verification": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 8,
+            },
+            "risks": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 8,
+            },
+            "rollback_plan": {
+                "type": "string",
+                "description": "Fallback or rollback path if the plan fails.",
+            },
+        },
+        "additionalProperties": False,
+    },
     "handoff-summary": {
         "$schema": _BASE_SCHEMA,
         "$id": f"{SCHEMA_URI_PREFIX}handoff-summary",

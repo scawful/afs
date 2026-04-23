@@ -53,6 +53,34 @@ def test_build_model_system_prompt_includes_session_state_summary() -> None:
                 {"name": "github:github", "score": 4, "triggers": ["repo"]},
             ],
         },
+        verification_state={
+            "available": True,
+            "repo_root": "/tmp/afs",
+            "profile": "repo",
+            "changed_paths": ["src/afs/mcp_server.py", "tests/test_model_prompts.py"],
+            "selected_checks": [
+                {
+                    "name": "python",
+                    "commands": ["ruff check src/afs tests", "pytest -q tests/test_model_prompts.py"],
+                }
+            ],
+        },
+        policy_state={
+            "available": True,
+            "review_focus": ["order findings by severity"],
+            "design_constraints": ["preserve compatibility"],
+            "planning_principles": ["keep plans reversible"],
+            "matched_risks": [{"name": "public-api", "paths": ["src/afs/mcp_server.py"]}],
+            "anti_pattern_hits": [],
+        },
+        structured_guidance={
+            "recommended_schema": "edit-intent",
+            "followup_schema": "verification-summary",
+            "repair_loop": [
+                "Run one verification command at a time.",
+                "Compress noisy output before retrying.",
+            ],
+        },
     )
 
     assert "Base behavior." in prompt
@@ -69,6 +97,14 @@ def test_build_model_system_prompt_includes_session_state_summary() -> None:
     assert "- agentic-context: Use the indexed context before asking for repeated repo state." in prompt
     assert "## Skill Verification" in prompt
     assert "- agentic-context: Write the updated handoff note before ending the session." in prompt
+    assert "## Verification Plan" in prompt
+    assert "Verification profile: repo" in prompt
+    assert "- python: ruff check src/afs tests" in prompt
+    assert "## Repo Policy" in prompt
+    assert "- order findings by severity" in prompt
+    assert "- public-api: src/afs/mcp_server.py" in prompt
+    assert "## Structured Workflow" in prompt
+    assert "Recommended schema: edit-intent" in prompt
     assert "## Session Context" in prompt
     assert "Project: afs (profile: default)" in prompt
     assert "Scratchpad state: Investigating MCP registry split." in prompt

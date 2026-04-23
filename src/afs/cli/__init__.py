@@ -40,6 +40,7 @@ from . import (
     review,
     skills,
     training,
+    verify,
     watch,
 )
 from ._help import _build_command_tree, render_default_help, render_topic_help
@@ -263,6 +264,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
 
     # Register training pipeline commands
     training.register_parsers(subparsers)
+
+    # Register verification planning and execution commands
+    verify.register_parsers(subparsers)
 
     # Register watch command
     watch.register_parsers(subparsers)

@@ -1111,6 +1111,7 @@ def session_prepare_client_command(args: argparse.Namespace) -> int:
     from ..session_harness import build_client_session_payload
 
     manager, context_path, config_path = _load_manager_context_and_config_path(args)
+    changed_paths_arg = vars(args).get("changed_path")
     skills_prompt = args.skills_prompt
     if skills_prompt is None:
         skills_prompt = args.query or ""
@@ -1136,6 +1137,8 @@ def session_prepare_client_command(args: argparse.Namespace) -> int:
         skills_prompt=skills_prompt,
         include_skills=not args.no_skills_match,
         skills_top_k=args.skills_top_k,
+        changed_paths=list(changed_paths_arg) if changed_paths_arg else None,
+        verification_profile=str(getattr(args, "verification_profile", "") or "").strip(),
         write_artifacts=not args.no_write_artifacts,
     )
 
@@ -1168,6 +1171,10 @@ def session_prepare_client_command(args: argparse.Namespace) -> int:
         print(f"canonical_query_hint: {cli_hints['query_canonical']}")
     if cli_hints.get("index_rebuild"):
         print(f"index_hint: {cli_hints['index_rebuild']}")
+    if cli_hints.get("verify_plan"):
+        print(f"verify_plan_hint: {cli_hints['verify_plan']}")
+    if cli_hints.get("verify_run"):
+        print(f"verify_run_hint: {cli_hints['verify_run']}")
     return 0
 
 
@@ -2390,6 +2397,16 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         type=int,
         default=10,
         help="Maximum skill matches to retain.",
+    )
+    session_prepare.add_argument(
+        "--changed-path",
+        action="append",
+        default=[],
+        help="Explicit changed path relative to repo root. Repeat to override git auto-detection.",
+    )
+    session_prepare.add_argument(
+        "--verification-profile",
+        help="Verification profile name from afs.toml.",
     )
     session_prepare.add_argument(
         "--no-session-pack",

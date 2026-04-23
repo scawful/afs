@@ -197,20 +197,16 @@ function updateModelsTable(models) {
         const row = document.createElement('tr');
         row.innerHTML = `
             <td><strong>${model.name}</strong></td>
+            <td>${model.backend || '—'}</td>
             <td>
                 <span class="status-badge ${model.status}">
                     ${model.status}
                 </span>
+                ${model.progress_text ? `<small>${model.progress_text}</small>` : ''}
             </td>
-            <td>
-                <div class="progress-bar">
-                    <div class="progress-fill" style="width: ${model.progress}%"></div>
-                </div>
-                <small>${model.progress}%</small>
-            </td>
-            <td>${model.gpu_hours}h</td>
-            <td>$${model.total_cost.toFixed(4)}</td>
-            <td>${model.training_samples || 'N/A'}</td>
+            <td>${model.gpu || '—'}</td>
+            <td>$${model.total_cost.toFixed(4)}${model.cost_per_hour ? ` <small>@ $${model.cost_per_hour.toFixed(3)}/hr</small>` : ''}</td>
+            <td>${model.note || model.detail || '—'}</td>
         `;
         tbody.appendChild(row);
     });
@@ -228,7 +224,7 @@ function updateModelsGrid(models) {
         card.className = 'model-card';
         card.innerHTML = `
             <h3>${model.name}</h3>
-            <p>${model.description}</p>
+            <p>${model.description || 'Live training run'}</p>
             <div class="model-stats">
                 <div class="model-stat">
                     <div class="model-stat-label">Status</div>
@@ -237,16 +233,24 @@ function updateModelsGrid(models) {
                     </div>
                 </div>
                 <div class="model-stat">
-                    <div class="model-stat-label">Progress</div>
-                    <div class="model-stat-value">${model.progress}%</div>
+                    <div class="model-stat-label">Backend</div>
+                    <div class="model-stat-value">${model.backend || '—'}</div>
                 </div>
                 <div class="model-stat">
-                    <div class="model-stat-label">GPU Hours</div>
-                    <div class="model-stat-value">${model.gpu_hours}</div>
+                    <div class="model-stat-label">Host</div>
+                    <div class="model-stat-value">${model.host || '—'}</div>
                 </div>
                 <div class="model-stat">
-                    <div class="model-stat-label">Total Cost</div>
+                    <div class="model-stat-label">Accrued Cost</div>
                     <div class="model-stat-value">$${model.total_cost.toFixed(4)}</div>
+                </div>
+                <div class="model-stat">
+                    <div class="model-stat-label">GPU</div>
+                    <div class="model-stat-value">${model.gpu || '—'}</div>
+                </div>
+                <div class="model-stat">
+                    <div class="model-stat-label">Detail</div>
+                    <div class="model-stat-value">${model.detail || model.note || '—'}</div>
                 </div>
             </div>
         `;
@@ -266,7 +270,7 @@ function updateCostsTable(breakdown) {
         const row = document.createElement('tr');
         row.innerHTML = `
             <td><strong>${data.model_name}</strong></td>
-            <td>${data.gpu_hours}</td>
+            <td>${data.gpu_hours != null ? data.gpu_hours : '—'}</td>
             <td>$${data.cost_per_hour.toFixed(4)}</td>
             <td>$${data.total_cost.toFixed(4)}</td>
         `;
@@ -618,7 +622,7 @@ function updateRegistryGrid(models) {
             <h3>${model.name}</h3>
             <div class="registry-info">
                 <div class="registry-info-row">
-                    <span class="registry-info-label">Version</span>
+                    <span class="registry-info-label">Source</span>
                     <span class="registry-info-value">${model.version}</span>
                 </div>
                 <div class="registry-info-row">
@@ -626,31 +630,25 @@ function updateRegistryGrid(models) {
                     <span class="registry-info-value">${model.status}</span>
                 </div>
                 <div class="registry-info-row">
-                    <span class="registry-info-label">Samples</span>
-                    <span class="registry-info-value">${model.training_samples}</span>
+                    <span class="registry-info-label">Backend</span>
+                    <span class="registry-info-value">${model.backend || '—'}</span>
                 </div>
                 <div class="registry-info-row">
-                    <span class="registry-info-label">Size</span>
-                    <span class="registry-info-value">${model.file_size_mb.toFixed(1)} MB</span>
+                    <span class="registry-info-label">Host</span>
+                    <span class="registry-info-value">${model.host || '—'}</span>
                 </div>
                 <div class="registry-info-row">
-                    <span class="registry-info-label">Deployment</span>
+                    <span class="registry-info-label">View</span>
                     <span class="registry-info-value">${model.deployment_status}</span>
                 </div>
-                ${model.evaluation_score ? `
                 <div class="registry-info-row">
-                    <span class="registry-info-label">Eval Score</span>
-                    <span class="registry-info-value">${(model.evaluation_score * 100).toFixed(1)}%</span>
+                    <span class="registry-info-label">Cost</span>
+                    <span class="registry-info-value">$${(model.total_cost || 0).toFixed(4)}</span>
                 </div>
-                ` : ''}
             </div>
             <div class="registry-actions">
                 <button class="btn-small" onclick="copyToClipboard('${model.key}')">Copy Key</button>
-                ${model.deployment_status === 'ready' ? `
-                <button class="btn-small" onclick="downloadModel('${model.download_url}')">Download</button>
-                ` : `
-                <button class="btn-small" disabled>Not Ready</button>
-                `}
+                <button class="btn-small" disabled>${model.detail || 'Live status'}</button>
             </div>
         `;
         grid.appendChild(card);

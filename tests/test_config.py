@@ -130,6 +130,38 @@ def test_load_config_model_parses_context_index_settings(tmp_path) -> None:
     assert model.context_index.max_content_chars == 1024
 
 
+def test_load_config_model_parses_verification_profiles(tmp_path) -> None:
+    config_path = tmp_path / "verification.toml"
+    config_path.write_text(
+        "[verification]\n"
+        "default_profile = \"repo\"\n\n"
+        "[verification.profiles.repo]\n"
+        "description = \"Repo checks\"\n\n"
+        "[[verification.profiles.repo.checks]]\n"
+        "name = \"python\"\n"
+        "paths = [\"**/*.py\", \"pyproject.toml\"]\n"
+        "commands = [\"ruff check .\", \"pytest -q\"]\n"
+        "skills = [\"python-quality\"]\n"
+        "workflows = [\"edit_fast\"]\n"
+        "tool_profiles = [\"edit_and_verify\"]\n",
+        encoding="utf-8",
+    )
+
+    model = load_config_model(config_path=config_path, merge_user=False)
+    assert model.verification.default_profile == "repo"
+    assert "repo" in model.verification.profiles
+    profile = model.verification.profiles["repo"]
+    assert profile.description == "Repo checks"
+    assert len(profile.checks) == 1
+    check = profile.checks[0]
+    assert check.name == "python"
+    assert check.paths == ["**/*.py", "pyproject.toml"]
+    assert check.commands == ["ruff check .", "pytest -q"]
+    assert check.skills == ["python-quality"]
+    assert check.workflows == ["edit_fast"]
+    assert check.tool_profiles == ["edit_and_verify"]
+
+
 def test_load_config_model_parses_mcp_allowed_roots(tmp_path) -> None:
     config_path = tmp_path / "mcp.toml"
     allowed = tmp_path / "workspace-root"

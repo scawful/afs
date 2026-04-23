@@ -814,6 +814,112 @@ class SessionPackCacheConfig:
 
 
 @dataclass
+class VerificationCheckConfig:
+    name: str
+    description: str = ""
+    paths: list[str] = field(default_factory=list)
+    commands: list[str] = field(default_factory=list)
+    skills: list[str] = field(default_factory=list)
+    workflows: list[str] = field(default_factory=list)
+    tool_profiles: list[str] = field(default_factory=list)
+    required: bool = True
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> VerificationCheckConfig:
+        return cls(
+            name=str(data.get("name", "")).strip(),
+            description=str(data.get("description", "")).strip(),
+            paths=_as_str_list(data.get("paths")),
+            commands=_as_str_list(data.get("commands")),
+            skills=_as_str_list(data.get("skills")),
+            workflows=_as_str_list(data.get("workflows")),
+            tool_profiles=_as_str_list(data.get("tool_profiles")),
+            required=bool(data.get("required", True)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "paths": list(self.paths),
+            "commands": list(self.commands),
+            "skills": list(self.skills),
+            "workflows": list(self.workflows),
+            "tool_profiles": list(self.tool_profiles),
+            "required": self.required,
+        }
+
+
+@dataclass
+class VerificationProfileConfig:
+    name: str
+    description: str = ""
+    include_profiles: list[str] = field(default_factory=list)
+    checks: list[VerificationCheckConfig] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(
+        cls,
+        name: str,
+        data: dict[str, Any],
+    ) -> VerificationProfileConfig:
+        checks_raw = data.get("checks", [])
+        checks = [
+            VerificationCheckConfig.from_dict(item)
+            for item in checks_raw
+            if isinstance(item, dict)
+        ]
+        return cls(
+            name=str(name).strip(),
+            description=str(data.get("description", "")).strip(),
+            include_profiles=_as_str_list(data.get("include_profiles")),
+            checks=checks,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "description": self.description,
+            "include_profiles": list(self.include_profiles),
+            "checks": [check.to_dict() for check in self.checks],
+        }
+
+
+@dataclass
+class VerificationConfig:
+    enabled: bool = True
+    default_profile: str = ""
+    fallback_to_builtin: bool = True
+    profiles: dict[str, VerificationProfileConfig] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> VerificationConfig:
+        raw_profiles = data.get("profiles", {})
+        profiles: dict[str, VerificationProfileConfig] = {}
+        if isinstance(raw_profiles, dict):
+            for name, payload in raw_profiles.items():
+                if not isinstance(payload, dict):
+                    continue
+                profiles[str(name)] = VerificationProfileConfig.from_dict(str(name), payload)
+        return cls(
+            enabled=bool(data.get("enabled", True)),
+            default_profile=str(data.get("default_profile", "")).strip(),
+            fallback_to_builtin=bool(data.get("fallback_to_builtin", True)),
+            profiles=profiles,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "default_profile": self.default_profile,
+            "fallback_to_builtin": self.fallback_to_builtin,
+            "profiles": {
+                name: profile.to_dict()
+                for name, profile in sorted(self.profiles.items())
+            },
+        }
+
+
+@dataclass
 class AFSConfig:
     general: GeneralConfig = field(default_factory=GeneralConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
@@ -833,6 +939,7 @@ class AFSConfig:
     sensitivity: SensitivityConfig = field(default_factory=SensitivityConfig)
     hivemind: HivemindConfig = field(default_factory=HivemindConfig)
     session_pack_cache: SessionPackCacheConfig = field(default_factory=SessionPackCacheConfig)
+    verification: VerificationConfig = field(default_factory=VerificationConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> AFSConfig:
@@ -858,6 +965,7 @@ class AFSConfig:
         sensitivity = SensitivityConfig.from_dict(data.get("sensitivity", {}))
         hivemind = HivemindConfig.from_dict(data.get("hivemind", {}))
         session_pack_cache = SessionPackCacheConfig.from_dict(data.get("session_pack_cache", {}))
+        verification = VerificationConfig.from_dict(data.get("verification", {}))
         return cls(
             general=general,
             plugins=plugins,
@@ -875,6 +983,7 @@ class AFSConfig:
             sensitivity=sensitivity,
             hivemind=hivemind,
             session_pack_cache=session_pack_cache,
+            verification=verification,
         )
 
 

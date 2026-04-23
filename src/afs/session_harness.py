@@ -16,9 +16,11 @@ from .context_paths import resolve_agent_output_root
 from .manager import AFSManager
 from .model_prompts import build_model_system_prompt
 from .profiles import resolve_active_profile
+from .repo_policy import evaluate_repo_policy, load_repo_policy
 from .session_bootstrap import build_session_bootstrap, write_session_bootstrap_artifacts
 from .session_workflows import build_session_execution_profile
 from .skills import discover_skills, resolve_skill_roots, score_skill_relevance
+from .verification import build_structured_guidance, build_verification_plan
 
 _RECENT_ACTIVITY_LIMIT = 20
 _PROMPT_PREVIEW_CHARS = 180
@@ -159,6 +161,7 @@ def _initial_activity_state() -> dict[str, Any]:
         "last_event": {},
         "last_task": {},
         "verification": _initial_verification_state(),
+        "feedback": _initial_feedback_state(),
     }
 
 
@@ -225,6 +228,9 @@ def _default_client_session_payload(
         "pack": {"available": False, "artifact_paths": {}},
         "skills": {"available": False, "artifact_paths": {}},
         "prompt": {"available": False, "artifact_paths": {}},
+        "repo_policy": {"available": False},
+        "verification_plan": {"available": False},
+        "structured_guidance": {},
         "cli_hints": _build_cli_hints(workspace_path=resolved_cwd),
         "integration": _integration_contract(),
         "activity": _initial_activity_state(),
@@ -249,6 +255,7 @@ def _ensure_client_session_payload_shape(payload: dict[str, Any]) -> dict[str, A
     activity.setdefault("last_event", {})
     activity.setdefault("last_task", {})
     activity.setdefault("verification", _initial_verification_state())
+    activity.setdefault("feedback", _initial_feedback_state())
     normalized["activity"] = activity
 
     integration = normalized.get("integration")
@@ -265,6 +272,9 @@ def _ensure_client_session_payload_shape(payload: dict[str, Any]) -> dict[str, A
     normalized.setdefault("pack", {"available": False, "artifact_paths": {}})
     normalized.setdefault("skills", {"available": False, "artifact_paths": {}})
     normalized.setdefault("prompt", {"available": False, "artifact_paths": {}})
+    normalized.setdefault("repo_policy", {"available": False})
+    normalized.setdefault("verification_plan", {"available": False})
+    normalized.setdefault("structured_guidance", {})
     cli_hints = normalized.get("cli_hints")
     merged_cli_hints = _build_cli_hints(workspace_path=resolved_cwd)
     if isinstance(cli_hints, dict):
@@ -401,6 +411,15 @@ def _initial_verification_state() -> dict[str, Any]:
     }
 
 
+def _initial_feedback_state() -> dict[str, Any]:
+    return {
+        "signals": [],
+        "counts": {},
+        "message": "",
+        "updated_at": "",
+    }
+
+
 def _normalize_verification_status(value: Any) -> str:
     text = str(value or "").strip().lower()
     if text in {"passed", "pass", "verified", "ok", "success"}:
@@ -417,6 +436,40 @@ def _normalize_verification_status(value: Any) -> str:
 
 
 def _verification_requirements(payload: dict[str, Any]) -> dict[str, Any]:
+    verification_plan = (
+        payload.get("verification_plan")
+        if isinstance(payload.get("verification_plan"), dict)
+        else {}
+    )
+    selected_checks = (
+        verification_plan.get("selected_checks")
+        if isinstance(verification_plan.get("selected_checks"), list)
+        else []
+    )
+    if selected_checks:
+        expected: list[str] = []
+        required = False
+        for check in selected_checks:
+            if not isinstance(check, dict):
+                continue
+            name = str(check.get("name", "")).strip()
+            required = required or bool(check.get("required"))
+            commands = check.get("commands") if isinstance(check.get("commands"), list) else []
+            if commands:
+                for command in commands:
+                    text = str(command).strip()
+                    if not text:
+                        continue
+                    expected.append(f"{name}: {text}" if name else text)
+            elif name:
+                expected.append(f"{name}: review changed scope")
+        return {
+            "required": required,
+            "workflow": str(verification_plan.get("workflow", "")).strip(),
+            "tool_profile": str(verification_plan.get("tool_profile", "")).strip(),
+            "expected": expected,
+        }
+
     pack = payload.get("pack") if isinstance(payload.get("pack"), dict) else {}
     prompt = payload.get("prompt") if isinstance(payload.get("prompt"), dict) else {}
     skills = payload.get("skills") if isinstance(payload.get("skills"), dict) else {}
@@ -583,6 +636,56 @@ def _build_session_verification_state(
     return {key: value for key, value in state.items() if value not in ("", None, [], {})}
 
 
+def _build_session_feedback_state(
+    payload: dict[str, Any],
+    *,
+    updated_at: str = "",
+) -> dict[str, Any]:
+    activity = payload.get("activity") if isinstance(payload.get("activity"), dict) else {}
+    verification = (
+        activity.get("verification")
+        if isinstance(activity.get("verification"), dict)
+        else {}
+    )
+    policy = payload.get("repo_policy") if isinstance(payload.get("repo_policy"), dict) else {}
+
+    counts: dict[str, int] = {}
+    signals: list[str] = []
+
+    matched_risks = policy.get("matched_risks") if isinstance(policy.get("matched_risks"), list) else []
+    anti_pattern_hits = (
+        policy.get("anti_pattern_hits")
+        if isinstance(policy.get("anti_pattern_hits"), list)
+        else []
+    )
+    if matched_risks:
+        counts["review_risk"] = len(matched_risks)
+        signals.append("review_risk")
+    if anti_pattern_hits:
+        counts["policy_violation"] = len(anti_pattern_hits)
+        signals.append("policy_violation")
+
+    verification_status = str(verification.get("status", "")).strip()
+    if verification_status in {"failed", "missing", "skipped"}:
+        counts[f"verification_{verification_status}"] = 1
+        signals.append(f"verification_{verification_status}")
+
+    message_parts: list[str] = []
+    if counts.get("review_risk"):
+        message_parts.append(f"{counts['review_risk']} repo risk alerts")
+    if counts.get("policy_violation"):
+        message_parts.append(f"{counts['policy_violation']} policy violations")
+    if verification_status in {"failed", "missing", "skipped"}:
+        message_parts.append(f"verification {verification_status}")
+
+    return {
+        "signals": signals,
+        "counts": counts,
+        "message": "; ".join(message_parts),
+        "updated_at": updated_at,
+    }
+
+
 def build_session_activity_snapshot(
     payload: dict[str, Any] | None,
     *,
@@ -621,6 +724,11 @@ def build_session_activity_snapshot(
     verification = (
         activity.get("verification")
         if isinstance(activity.get("verification"), dict)
+        else {}
+    )
+    feedback = (
+        activity.get("feedback")
+        if isinstance(activity.get("feedback"), dict)
         else {}
     )
     counters = activity.get("counters") if isinstance(activity.get("counters"), dict) else {}
@@ -672,6 +780,7 @@ def build_session_activity_snapshot(
         "verification_status": str(verification.get("status", "")).strip(),
         "verification_required": bool(verification.get("required")),
         "verification_record_count": int(verification.get("record_count", 0) or 0),
+        "feedback_signals": list(feedback.get("signals") or []),
     }
     return {
         key: value
@@ -869,6 +978,9 @@ def _prompt_summary(
     session_state: dict[str, Any],
     pack_state: dict[str, Any],
     skills_state: dict[str, Any],
+    verification_state: dict[str, Any],
+    policy_state: dict[str, Any],
+    structured_guidance: dict[str, Any],
     write_artifacts: bool,
 ) -> dict[str, Any]:
     base_prompt, base_prompt_source = _resolve_client_base_prompt(
@@ -885,6 +997,9 @@ def _prompt_summary(
         session_state=session_state,
         pack_state=pack_state,
         skills_state=skills_state,
+        verification_state=verification_state,
+        policy_state=policy_state,
+        structured_guidance=structured_guidance,
         workflow=workflow,
         tool_profile=tool_profile,
         token_budget=budget,
@@ -905,6 +1020,7 @@ def _prompt_summary(
             "base_prompt_source": base_prompt_source,
             "estimated_tokens": estimated_tokens,
             "preview": preview,
+            "recommended_schema": str(structured_guidance.get("recommended_schema", "")).strip(),
             "text": prompt_text,
         }
         paths["prompt_text"].write_text(prompt_text + "\n", encoding="utf-8")
@@ -955,6 +1071,10 @@ def write_client_session_payload_artifact(
     resolved_payload["artifact_paths"] = {"json": str(resolved_path)}
     resolved_payload["integration"]["payload_file"] = str(resolved_path)
     resolved_payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    cli_hints = resolved_payload.get("cli_hints")
+    if isinstance(cli_hints, dict):
+        cli_hints["verify_run"] = f"afs verify run --payload-file {shlex.quote(str(resolved_path))} --json"
+        cli_hints["verify_plan"] = f"afs verify plan --payload-file {shlex.quote(str(resolved_path))} --json"
     resolved_path.write_text(json.dumps(resolved_payload, indent=2) + "\n", encoding="utf-8")
     payload.clear()
     payload.update(resolved_payload)
@@ -1124,6 +1244,10 @@ def record_client_session_activity(
         final=event_name == "session_end",
         updated_at=now,
     )
+    activity["feedback"] = _build_session_feedback_state(
+        payload,
+        updated_at=now,
+    )
     payload["activity"] = activity
     payload["updated_at"] = now
     write_client_session_payload_artifact(
@@ -1158,6 +1282,8 @@ def build_client_session_payload(
     skills_prompt: str = "",
     include_skills: bool = True,
     skills_top_k: int = 10,
+    changed_paths: list[str] | None = None,
+    verification_profile: str = "",
     write_artifacts: bool = True,
 ) -> dict[str, Any]:
     """Build a client-ready session payload with reusable artifact paths."""
@@ -1180,6 +1306,9 @@ def build_client_session_payload(
         "pack": {"available": False, "artifact_paths": {}},
         "skills": {"available": False, "artifact_paths": {}},
         "prompt": {"available": False, "artifact_paths": {}},
+        "repo_policy": {"available": False},
+        "verification_plan": {"available": False},
+        "structured_guidance": {},
         "cli_hints": _build_cli_hints(
             workspace_path=resolved_cwd,
             bootstrap_state=bootstrap_state,
@@ -1216,6 +1345,41 @@ def build_client_session_payload(
             write_artifacts=write_artifacts,
         )
 
+    repo_policy = load_repo_policy(start_dir=resolved_cwd)
+    payload["verification_plan"] = build_verification_plan(
+        config=manager.config,
+        cwd=resolved_cwd,
+        workflow=workflow,
+        tool_profile=tool_profile,
+        matched_skills=((payload.get("skills") or {}) if isinstance(payload.get("skills"), dict) else {}).get("matches"),
+        changed_paths=changed_paths,
+        verification_profile=verification_profile,
+        policy_summary=None,
+    )
+    repo_root = Path(
+        str((payload.get("verification_plan") or {}).get("repo_root", resolved_cwd))
+    ).expanduser().resolve()
+    payload["repo_policy"] = evaluate_repo_policy(
+        repo_policy,
+        repo_root=repo_root,
+        changed_paths=list((payload.get("verification_plan") or {}).get("changed_paths") or []),
+    )
+    payload["verification_plan"] = build_verification_plan(
+        config=manager.config,
+        cwd=repo_root,
+        workflow=workflow,
+        tool_profile=tool_profile,
+        matched_skills=((payload.get("skills") or {}) if isinstance(payload.get("skills"), dict) else {}).get("matches"),
+        changed_paths=list((payload.get("verification_plan") or {}).get("changed_paths") or []),
+        verification_profile=verification_profile,
+        policy_summary=payload["repo_policy"],
+    )
+    payload["structured_guidance"] = build_structured_guidance(
+        model=model,
+        workflow=workflow,
+        policy_summary=payload["repo_policy"],
+    )
+
     payload["prompt"] = _prompt_summary(
         manager,
         resolved_context,
@@ -1228,6 +1392,9 @@ def build_client_session_payload(
         session_state=bootstrap_state,
         pack_state=dict(payload.get("pack") or {}),
         skills_state=dict(payload.get("skills") or {}),
+        verification_state=dict(payload.get("verification_plan") or {}),
+        policy_state=dict(payload.get("repo_policy") or {}),
+        structured_guidance=dict(payload.get("structured_guidance") or {}),
         write_artifacts=write_artifacts,
     )
 

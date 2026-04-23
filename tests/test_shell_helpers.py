@@ -50,6 +50,56 @@ def _write_fake_afs_cli(
     afs_cli = root / "scripts" / "afs"
     afs_cli.parent.mkdir(parents=True, exist_ok=True)
     workspace_path = context_root.parent / "workspace"
+    prepare_payload = json.dumps(
+        {
+            "client": "fake-client",
+            "session_id": "sess-from-prepare",
+            "context_path": str(context_root),
+            "bootstrap": {
+                "artifact_paths": {
+                    "json": str(bootstrap_json),
+                    "markdown": str(bootstrap_markdown),
+                }
+            },
+            "pack": {
+                "artifact_paths": {
+                    "json": str(pack_json),
+                    "markdown": str(pack_markdown),
+                }
+            },
+            "skills": {
+                "artifact_paths": {
+                    "json": str(skills_json),
+                }
+            },
+            "prompt": {
+                "artifact_paths": {
+                    "json": str(prompt_json),
+                    "text": str(prompt_text),
+                }
+            },
+            "artifact_paths": {
+                "json": str(payload_json),
+            },
+            "cli_hints": {
+                "workspace_path": str(workspace_path),
+                "query_shortcut": f"afs query <text> --path {workspace_path}",
+                "query_canonical": f"afs context query <text> --path {workspace_path}",
+                "index_rebuild": f"afs index rebuild --path {workspace_path}",
+                "verify_plan": f"afs verify plan --payload-file {payload_json} --json",
+                "verify_run": f"afs verify run --payload-file {payload_json} --json",
+                "notes": [],
+            },
+            "structured_guidance": {
+                "recommended_schema": "edit-intent",
+                "followup_schema": "verification-summary",
+                "repair_loop": [
+                    "Run one check at a time.",
+                    "Compress noisy output before retrying.",
+                ],
+            },
+        }
+    )
     afs_cli.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
@@ -57,46 +107,7 @@ def _write_fake_afs_cli(
         "  printf '%s\\n' \"$*\" >> \"$FAKE_AFS_LOG\"\n"
         "fi\n"
         "if [ \"$#\" -ge 3 ] && [ \"$1\" = \"session\" ] && [ \"$2\" = \"prepare-client\" ]; then\n"
-        f"  cat <<'JSON'\n"
-        "{\n"
-        f"  \"client\": \"fake-client\",\n"
-        "  \"session_id\": \"sess-from-prepare\",\n"
-        f"  \"context_path\": \"{context_root}\",\n"
-        "  \"bootstrap\": {\n"
-        "    \"artifact_paths\": {\n"
-        f"      \"json\": \"{bootstrap_json}\",\n"
-        f"      \"markdown\": \"{bootstrap_markdown}\"\n"
-        "    }\n"
-        "  },\n"
-        "  \"pack\": {\n"
-        "    \"artifact_paths\": {\n"
-        f"      \"json\": \"{pack_json}\",\n"
-        f"      \"markdown\": \"{pack_markdown}\"\n"
-        "    }\n"
-        "  },\n"
-        "  \"skills\": {\n"
-        "    \"artifact_paths\": {\n"
-        f"      \"json\": \"{skills_json}\"\n"
-        "    }\n"
-        "  },\n"
-        "  \"prompt\": {\n"
-        "    \"artifact_paths\": {\n"
-        f"      \"json\": \"{prompt_json}\",\n"
-        f"      \"text\": \"{prompt_text}\"\n"
-        "    }\n"
-        "  },\n"
-        "  \"artifact_paths\": {\n"
-        f"    \"json\": \"{payload_json}\"\n"
-        "  },\n"
-        "  \"cli_hints\": {\n"
-        f"    \"workspace_path\": \"{workspace_path}\",\n"
-        f"    \"query_shortcut\": \"afs query <text> --path {workspace_path}\",\n"
-        f"    \"query_canonical\": \"afs context query <text> --path {workspace_path}\",\n"
-        f"    \"index_rebuild\": \"afs index rebuild --path {workspace_path}\",\n"
-        "    \"notes\": []\n"
-        "  }\n"
-        "}\n"
-        "JSON\n"
+        f"  printf '%s\\n' {shlex.quote(prepare_payload)}\n"
         "  exit 0\n"
         "fi\n"
         "if [ \"$#\" -ge 3 ] && [ \"$1\" = \"session\" ] && [ \"$2\" = \"hook\" ]; then\n"
@@ -143,6 +154,11 @@ def _write_fake_client(path: Path, log_path: Path) -> Path:
         "    'AFS_SESSION_QUERY_HINT': os.environ.get('AFS_SESSION_QUERY_HINT'),\n"
         "    'AFS_SESSION_CONTEXT_QUERY_HINT': os.environ.get('AFS_SESSION_CONTEXT_QUERY_HINT'),\n"
         "    'AFS_SESSION_INDEX_REBUILD_HINT': os.environ.get('AFS_SESSION_INDEX_REBUILD_HINT'),\n"
+        "    'AFS_SESSION_VERIFY_PLAN_HINT': os.environ.get('AFS_SESSION_VERIFY_PLAN_HINT'),\n"
+        "    'AFS_SESSION_VERIFY_RUN_HINT': os.environ.get('AFS_SESSION_VERIFY_RUN_HINT'),\n"
+        "    'AFS_SESSION_RECOMMENDED_SCHEMA': os.environ.get('AFS_SESSION_RECOMMENDED_SCHEMA'),\n"
+        "    'AFS_SESSION_FOLLOWUP_SCHEMA': os.environ.get('AFS_SESSION_FOLLOWUP_SCHEMA'),\n"
+        "    'AFS_SESSION_REPAIR_LOOP_HINT': os.environ.get('AFS_SESSION_REPAIR_LOOP_HINT'),\n"
         "    'AFS_SESSION_EVENT_BIN': os.environ.get('AFS_SESSION_EVENT_BIN'),\n"
         "    'AFS_SESSION_DEFAULT_TURN_ID': os.environ.get('AFS_SESSION_DEFAULT_TURN_ID'),\n"
         "    'AFS_ACTIVE_CONTEXT_ROOT': os.environ.get('AFS_ACTIVE_CONTEXT_ROOT'),\n"
@@ -627,6 +643,17 @@ def test_afs_client_session_uses_client_specific_allowed_roots(tmp_path: Path) -
         == f"afs context query <text> --path {payload['_workspace']}"
     )
     assert payload["AFS_SESSION_INDEX_REBUILD_HINT"] == f"afs index rebuild --path {payload['_workspace']}"
+    assert (
+        payload["AFS_SESSION_VERIFY_PLAN_HINT"]
+        == f"afs verify plan --payload-file {payload['AFS_SESSION_CLIENT_PAYLOAD_JSON']} --json"
+    )
+    assert (
+        payload["AFS_SESSION_VERIFY_RUN_HINT"]
+        == f"afs verify run --payload-file {payload['AFS_SESSION_CLIENT_PAYLOAD_JSON']} --json"
+    )
+    assert payload["AFS_SESSION_RECOMMENDED_SCHEMA"] == "edit-intent"
+    assert payload["AFS_SESSION_FOLLOWUP_SCHEMA"] == "verification-summary"
+    assert "Compress noisy output before retrying." in payload["AFS_SESSION_REPAIR_LOOP_HINT"]
     assert payload["GEMINI_SYSTEM_MD"] == payload["AFS_SESSION_SYSTEM_PROMPT_TEXT"]
 
 

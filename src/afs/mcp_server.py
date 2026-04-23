@@ -23,7 +23,6 @@ from typing import Any
 from .agent_scope import is_tool_allowed
 from .codebase_explorer import build_codebase_summary, render_codebase_summary
 from .config import load_config_model
-from .core import find_existing_root
 from .context_index import (
     DEFAULT_MAX_CONTENT_CHARS,
     DEFAULT_MAX_FILE_SIZE_BYTES,
@@ -31,6 +30,7 @@ from .context_index import (
 )
 from .context_pack import build_context_pack, render_context_pack
 from .context_paths import resolve_mount_root
+from .core import find_existing_root
 from .discovery import discover_contexts
 from .event_log import read_agent_events
 from .manager import AFSManager
@@ -70,6 +70,7 @@ from .models import MountType
 from .operator_digests import KIND_CHOICES, digest_operator_output
 from .plugins import load_enabled_extensions
 from .profiles import resolve_active_profile
+from .repo_policy import evaluate_repo_policy, load_repo_policy
 from .response_schemas import (
     SCHEMA_MIME_TYPE,
     SCHEMA_URI_PREFIX,
@@ -1635,7 +1636,7 @@ def _tool_afs_codebase_symbols(arguments: dict[str, Any], manager: AFSManager) -
 
 def _tool_afs_codebase_index(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     """Build or update the AST codebase symbol index for a project."""
-    from .codebase_index import build_codebase_index, codebase_index_dir, infer_project_root
+    from .codebase_index import build_codebase_index, codebase_index_dir
 
     try:
         context_path = _resolve_context_path(arguments, manager)
@@ -3790,6 +3791,12 @@ def _get_prompt(
             or None,
         )
         schema = get_response_schema(schema_name)
+        policy = load_repo_policy(start_dir=Path(context_path).parent)
+        policy_summary = evaluate_repo_policy(
+            policy,
+            repo_root=Path(context_path).parent,
+            changed_paths=[],
+        )
         lines = [
             "# AFS Structured Workflow Prompt",
             "",
@@ -3807,6 +3814,34 @@ def _get_prompt(
             "## Working Context",
             render_context_pack(payload),
         ]
+        if policy_summary.get("available"):
+            review_focus = (
+                policy_summary.get("review_focus")
+                if isinstance(policy_summary.get("review_focus"), list)
+                else []
+            )
+            design_constraints = (
+                policy_summary.get("design_constraints")
+                if isinstance(policy_summary.get("design_constraints"), list)
+                else []
+            )
+            planning_principles = (
+                policy_summary.get("planning_principles")
+                if isinstance(policy_summary.get("planning_principles"), list)
+                else []
+            )
+            if review_focus or design_constraints or planning_principles:
+                policy_lines = ["", "## Repo Policy"]
+                if review_focus:
+                    policy_lines.append("Review focus:")
+                    policy_lines.extend(f"- {item}" for item in review_focus[:6])
+                if design_constraints:
+                    policy_lines.append("Design constraints:")
+                    policy_lines.extend(f"- {item}" for item in design_constraints[:6])
+                if planning_principles:
+                    policy_lines.append("Planning principles:")
+                    policy_lines.extend(f"- {item}" for item in planning_principles[:6])
+                lines.extend(policy_lines)
         return [{"role": "user", "content": {"type": "text", "text": "\n".join(lines)}}]
 
     if name == "afs.query.search":
