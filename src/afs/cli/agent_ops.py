@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
+from ..agent_job_worker import run_agent_job_worker
 from ..agent_jobs import AgentJobQueue, JOB_STATES
 from ..agent_manifest import (
     default_manifest_path,
@@ -16,6 +19,7 @@ from ..agent_manifest import (
     summarize_manifest,
     validate_manifest,
 )
+from ..agent_manifest_sync import sync_manifest
 from ..agent_runs import AgentRunStore
 from ._utils import load_manager, resolve_context_paths
 
@@ -87,6 +91,34 @@ def manifest_export_command(args: argparse.Namespace) -> int:
     payload = export_for_harness(data, args.harness)
     print(json.dumps(payload, indent=2))
     return 0
+
+
+def manifest_sync_command(args: argparse.Namespace) -> int:
+    path = Path(args.file).expanduser() if args.file else default_manifest_path()
+    data = load_manifest(path)
+    selected = set(args.harness or []) or None
+    actions = sync_manifest(
+        data,
+        apply=args.apply,
+        harnesses=selected,
+        sync_skills=not args.no_skills,
+        sync_exports=not args.no_exports,
+    )
+    payload = {
+        "path": str(path),
+        "applied": bool(args.apply),
+        "actions": [action.to_dict() for action in actions],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        mode = "apply" if args.apply else "dry-run"
+        print(f"mode: {mode}")
+        for action in actions:
+            print(
+                f"{action.status}\t{action.action}\t{action.harness}\t{action.target}"
+            )
+    return 1 if any(action.status == "error" for action in actions) else 0
 
 
 def runs_start_command(args: argparse.Namespace) -> int:
@@ -212,6 +244,44 @@ def jobs_move_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def jobs_work_command(args: argparse.Namespace) -> int:
+    context_path = _resolve_context(args)
+    command = args.job_command or ""
+    if not command:
+        command = os.getenv(args.command_env or "AFS_AGENT_JOB_COMMAND", "")
+    if not command and not args.dry_run:
+        raise ValueError("provide --command, set AFS_AGENT_JOB_COMMAND, or use --dry-run")
+
+    all_results: list[dict[str, object]] = []
+    while True:
+        results = run_agent_job_worker(
+            context_path,
+            agent_name=args.agent,
+            command=command,
+            workspace=Path(args.workspace).expanduser() if args.workspace else Path.cwd(),
+            limit=args.limit,
+            timeout=args.timeout,
+            dry_run=args.dry_run,
+        )
+        all_results.extend(result.to_dict() for result in results)
+        if args.once or args.dry_run or not args.loop:
+            break
+        if not results:
+            time.sleep(args.poll_seconds)
+            continue
+
+    if args.json:
+        print(json.dumps(all_results, indent=2))
+    else:
+        for result in all_results:
+            print(
+                f"{result['status']}\t{result['job_id']}\t{result['title']}"
+            )
+        if not all_results:
+            print("no queued jobs")
+    return 1 if any(result["status"] == "failed" for result in all_results) else 0
+
+
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     manifest = subparsers.add_parser("agent-manifest", help="Inspect the agent harness manifest.")
     manifest_sub = manifest.add_subparsers(dest="agent_manifest_command")
@@ -232,6 +302,15 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     export.add_argument("harness", help="Harness name, e.g. codex, claude, gemini.")
     export.add_argument("--file", help="Manifest TOML path.")
     export.set_defaults(func=manifest_export_command)
+
+    sync = manifest_sub.add_parser("sync", help="Copy shared skills and write harness manifest exports.")
+    sync.add_argument("--file", help="Manifest TOML path.")
+    sync.add_argument("--harness", action="append", help="Limit sync to one harness; repeatable.")
+    sync.add_argument("--apply", action="store_true", help="Apply changes. Default is dry-run.")
+    sync.add_argument("--no-skills", action="store_true", help="Skip skill directory copies.")
+    sync.add_argument("--no-exports", action="store_true", help="Skip per-harness manifest exports.")
+    sync.add_argument("--json", action="store_true", help="Output JSON.")
+    sync.set_defaults(func=manifest_sync_command)
 
     runs = subparsers.add_parser("agent-runs", help="Record and inspect agent run records.")
     runs_sub = runs.add_subparsers(dest="agent_runs_command")
@@ -320,3 +399,22 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     move.add_argument("--result-file")
     move.add_argument("--json", action="store_true")
     move.set_defaults(func=jobs_move_command)
+
+    work = jobs_sub.add_parser("work", help="Claim queued jobs and run a local command.")
+    _add_context_args(work)
+    work.add_argument("--agent", required=True, help="Worker or harness name.")
+    work.add_argument("--command", dest="job_command", help="Shell command to run for each job.")
+    work.add_argument(
+        "--command-env",
+        default="AFS_AGENT_JOB_COMMAND",
+        help="Environment variable used when --command is omitted.",
+    )
+    work.add_argument("--workspace", help="Working directory for the command.")
+    work.add_argument("--limit", type=int, default=1, help="Maximum jobs to process per pass.")
+    work.add_argument("--timeout", type=int, help="Per-job timeout in seconds.")
+    work.add_argument("--dry-run", action="store_true", help="Show queued work without claiming jobs.")
+    work.add_argument("--once", action="store_true", help="Run one pass and exit.")
+    work.add_argument("--loop", action="store_true", help="Poll for jobs until interrupted.")
+    work.add_argument("--poll-seconds", type=float, default=5.0)
+    work.add_argument("--json", action="store_true")
+    work.set_defaults(func=jobs_work_command)

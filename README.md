@@ -87,8 +87,10 @@ afs agents ps                         # Running agents
 afs agents run <name> [--prompt ...]  # Run an agent
 afs agents capabilities               # Agent capability matrix
 afs agent-manifest validate           # Validate harness/skill/MCP manifest
+afs agent-manifest sync --apply       # Copy shared skills and write harness exports
 afs agent-runs start "task"           # Record a replayable agent run
 afs agent-jobs create "task"          # Queue a markdown background job
+afs agent-jobs work --agent codex --command '...'  # Claim and execute queued jobs
 ```
 
 `session bootstrap` includes manifest, run, and job state; MCP clients can use

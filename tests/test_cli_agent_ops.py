@@ -28,9 +28,21 @@ def test_agent_ops_parsers_register() -> None:
     assert job.command == "agent-jobs"
     assert hasattr(job, "func")
 
+    work = parser.parse_args(["agent-jobs", "work", "--agent", "worker", "--dry-run"])
+    assert work.command == "agent-jobs"
+    assert work.agent == "worker"
+    assert work.job_command is None
+    assert work.dry_run is True
+    assert hasattr(work, "func")
+
 
 def test_build_parser_includes_agent_ops_commands() -> None:
     parser = build_parser()
     args = parser.parse_args(["agent-manifest", "export", "codex"])
     assert args.command == "agent-manifest"
     assert hasattr(args, "func")
+
+    sync = parser.parse_args(["agent-manifest", "sync", "--apply", "--harness", "claude"])
+    assert sync.command == "agent-manifest"
+    assert sync.apply is True
+    assert sync.harness == ["claude"]

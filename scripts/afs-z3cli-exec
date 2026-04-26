@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+Z3CLI_SCRIPT="${Z3CLI_SCRIPT:-${HOME}/src/hobby/z3cli/z3cli.py}"
+Z3CLI_PYTHON="${Z3CLI_PYTHON:-python3}"
+exec "${Z3CLI_PYTHON}" "${Z3CLI_SCRIPT}" "$@"

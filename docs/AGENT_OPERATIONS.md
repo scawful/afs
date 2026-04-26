@@ -17,9 +17,14 @@ These surfaces are visible in:
 ./scripts/afs agent-manifest show
 ./scripts/afs agent-manifest validate
 ./scripts/afs agent-manifest export codex
+./scripts/afs agent-manifest sync --apply
 ```
 
 Use this before editing Codex, Claude, Gemini, hcode, or z3cli-specific config. Harness-specific files can still exist, but they should point back to this manifest or derive their local view from it.
+
+`sync` copies manifest-declared shared skill directories into harness skill
+roots and writes per-harness JSON export files. It deliberately uses copied
+directories rather than symlinks.
 
 MCP:
 
@@ -62,9 +67,23 @@ job_id="$(./scripts/afs agent-jobs create "Review stale instructions" --prompt "
 ./scripts/afs agent-jobs claim "$job_id" --agent reviewer
 ./scripts/afs agent-jobs move "$job_id" done --result "No stale aliases found."
 ./scripts/afs agent-jobs list
+./scripts/afs agent-jobs work --agent local-worker --command 'codex exec < "$AFS_AGENT_JOB_PROMPT_FILE"'
 ```
 
 Use jobs for background work whose output is independently useful. Each job should include a concrete prompt, scope, and expected output.
+
+The worker command claims queued jobs, writes the prompt to
+`scratchpad/agent_job_prompts/`, runs the configured local command with
+`AFS_AGENT_JOB_ID`, `AFS_AGENT_JOB_PROMPT_FILE`, and `AFS_AGENT_RUN_ID` in the
+environment, then records both job status and an agent run.
+
+Harness wrappers:
+
+- `scripts/afs-codex`
+- `scripts/afs-claude`
+- `scripts/afs-gemini`
+- `scripts/afs-hcode`
+- `scripts/afs-z3cli`
 
 MCP:
 

@@ -15,6 +15,7 @@ instructions = ["~/src/AGENTS.md"]
 skill_roots = ["~/.codex/skills"]
 mcp_servers = ["afs", "hyrule-historian", "book-of-mudora", "yaze-mcp"]
 startup = ["afs session bootstrap --json", "agent-doctor ~/src"]
+manifest_exports = ["~/.codex/afs-agent-manifest.json"]
 
 [[harnesses]]
 name = "claude"
@@ -23,6 +24,7 @@ instructions = ["~/src/AGENTS.md", "~/src/CLAUDE.md"]
 skill_roots = ["~/.claude/skills"]
 mcp_servers = ["afs", "filesystem"]
 startup = ["source ~/src/scripts/agent-harness-env"]
+manifest_exports = ["~/.claude/afs-agent-manifest.json"]
 
 [[harnesses]]
 name = "gemini"
@@ -31,6 +33,7 @@ instructions = ["~/src/AGENTS.md", "~/src/GEMINI.md"]
 skill_roots = ["~/.gemini/skills"]
 mcp_servers = ["afs", "hyrule-historian", "book-of-mudora", "yaze-mcp"]
 startup = ["source ~/src/scripts/agent-harness-env"]
+manifest_exports = ["~/.gemini/afs-agent-manifest.json"]
 
 [[harnesses]]
 name = "hcode"
@@ -38,7 +41,8 @@ kind = "cli"
 instructions = ["~/src/lab/halext-code/AGENTS.md", "~/src/docs/guides/ai-coder/AGENT_HARNESS_CONTRACT.md"]
 skill_roots = []
 mcp_servers = ["afs"]
-startup = ["~/bin/hcode"]
+startup = ["~/src/lab/afs/scripts/afs-hcode"]
+manifest_exports = ["~/.config/hcode/afs-agent-manifest.json"]
 
 [[harnesses]]
 name = "z3cli"
@@ -46,7 +50,8 @@ kind = "local_app"
 instructions = ["~/src/hobby/z3cli/README.md", "~/src/docs/guides/ai-coder/AGENT_HARNESS_CONTRACT.md"]
 skill_roots = []
 mcp_servers = ["afs", "hyrule-historian", "book-of-mudora", "yaze-debugger", "yaze-editor"]
-startup = ["python ~/src/hobby/z3cli/z3cli.py"]
+startup = ["~/src/lab/afs/scripts/afs-z3cli"]
+manifest_exports = ["~/.config/z3cli/afs-agent-manifest.json"]
 
 [[skills]]
 name = "focused-verification"

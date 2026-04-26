@@ -52,6 +52,7 @@ Also supported once installed into the active environment:
 ./scripts/afs agent-manifest show
 ./scripts/afs agent-manifest validate
 ./scripts/afs agent-manifest export codex
+./scripts/afs agent-manifest sync --apply
 
 run_id="$(./scripts/afs agent-runs start "Fix settings drift" --harness codex)"
 ./scripts/afs agent-runs event "$run_id" verification --summary "pytest passed"
@@ -60,13 +61,20 @@ run_id="$(./scripts/afs agent-runs start "Fix settings drift" --harness codex)"
 job_id="$(./scripts/afs agent-jobs create "Review stale instructions" --prompt "Scan docs and report stale model aliases.")"
 ./scripts/afs agent-jobs claim "$job_id" --agent reviewer
 ./scripts/afs agent-jobs move "$job_id" done --result "No stale aliases found."
+./scripts/afs agent-jobs work --agent local-worker --command 'codex exec < "$AFS_AGENT_JOB_PROMPT_FILE"'
 ```
 
 `agent-manifest` reads `configs/agent_manifest.toml`, the repo-owned source of
 truth for harnesses, shared skills, MCP servers, and startup hints.
+`agent-manifest sync` copies manifest-declared shared skills into harness skill
+roots and writes per-harness export JSON. It uses real copied directories, not
+symlinks.
 `agent-runs` writes replayable run records under `scratchpad/agent_runs/`.
 `agent-jobs` writes markdown prompt jobs under
 `items/agent_jobs/{queue,running,done,failed}/`.
+`agent-jobs work` claims queued jobs, runs a local command with
+`AFS_AGENT_JOB_*` environment variables, moves jobs to `done` or `failed`, and
+records an `agent-runs` entry.
 
 `session bootstrap` includes the manifest summary, open agent jobs, and recent
 run records. AFS client wrappers start and finish run records automatically

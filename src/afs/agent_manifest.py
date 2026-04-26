@@ -103,6 +103,7 @@ def validate_manifest(data: dict[str, Any], *, check_paths: bool = False) -> lis
             if isinstance(harness, dict):
                 path_values.extend(str(p) for p in _as_list(harness.get("instructions")))
                 path_values.extend(str(p) for p in _as_list(harness.get("skill_roots")))
+                path_values.extend(str(p) for p in _as_list(harness.get("manifest_exports")))
         for skill in skills:
             if isinstance(skill, dict) and isinstance(skill.get("canonical_path"), str):
                 path_values.append(str(skill["canonical_path"]))
