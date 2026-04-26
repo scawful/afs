@@ -43,6 +43,12 @@ def test_agent_ops_parsers_register() -> None:
     assert status.stale_after == 60
     assert hasattr(status, "func")
 
+    seed = parser.parse_args(["agent-jobs", "seed", "--profile", "repo-maintenance", "--dry-run"])
+    assert seed.command == "agent-jobs"
+    assert seed.profile == "repo-maintenance"
+    assert seed.dry_run is True
+    assert hasattr(seed, "func")
+
 
 def test_build_parser_includes_agent_ops_commands() -> None:
     parser = build_parser()

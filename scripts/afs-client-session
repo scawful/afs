@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [ "$#" -lt 3 ]; then
-  echo "usage: afs-client-session <client-label> <default-command> <env-var> [--bootstrap-only] [--context-query <text>] [--session-task <text>] [--skills-prompt <text>] [--session-model <model>] [--workflow <name>] [--tool-profile <name>] [--pack-mode <name>] [--session-pack|--no-session-pack] [--skills-match|--no-skills-match] [--monitor-agents|--no-monitor-agents] [--wait-for-agents|--no-wait-for-agents] [--prompt <text>] [--prompt-file <path>] [--turn-id <id>] [--] [client-args...]" >&2
+  echo "usage: afs-client-session <client-label> <default-command> <env-var> [--bootstrap-only] [--context-query <text>] [--session-task <text>] [--skills-prompt <text>] [--session-model <model>] [--workflow <name>] [--tool-profile <name>] [--pack-mode <name>] [--session-pack|--no-session-pack] [--skills-match|--no-skills-match] [--monitor-agents|--no-monitor-agents] [--seed-jobs|--no-seed-jobs] [--seed-profile <name>] [--seed-cadence <name>] [--wait-for-agents|--no-wait-for-agents] [--prompt <text>] [--prompt-file <path>] [--turn-id <id>] [--] [client-args...]" >&2
   exit 2
 fi
 
@@ -23,6 +23,9 @@ TOOL_PROFILE_OVERRIDE=""
 PACK_MODE_OVERRIDE=""
 SESSION_PACK_OVERRIDE=""
 SKILLS_MATCH_OVERRIDE=""
+SEED_JOBS_OVERRIDE=""
+SEED_PROFILE_OVERRIDE=""
+SEED_CADENCE_OVERRIDE=""
 PROMPT_OVERRIDE=""
 PROMPT_FILE_OVERRIDE=""
 TURN_ID_OVERRIDE=""
@@ -75,6 +78,22 @@ while [ "$#" -gt 0 ]; do
     --no-skills-match)
       SKILLS_MATCH_OVERRIDE=0
       shift
+      ;;
+    --seed-jobs)
+      SEED_JOBS_OVERRIDE=1
+      shift
+      ;;
+    --no-seed-jobs)
+      SEED_JOBS_OVERRIDE=0
+      shift
+      ;;
+    --seed-profile)
+      SEED_PROFILE_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --seed-cadence)
+      SEED_CADENCE_OVERRIDE="${2:-}"
+      shift 2
       ;;
     --monitor-agents)
       MONITOR_OVERRIDE=1
@@ -176,6 +195,12 @@ CLIENT_VERIFICATION_MODE_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SESSION_VERIFICATION_
 SESSION_VERIFICATION_MODE="${!CLIENT_VERIFICATION_MODE_ENV_VAR:-${AFS_CLIENT_SESSION_VERIFICATION_MODE:-warn}}"
 CLIENT_RECORD_RUNS_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_RECORD_RUNS"
 RECORD_AGENT_RUNS="${!CLIENT_RECORD_RUNS_ENV_VAR:-${AFS_CLIENT_RECORD_RUNS:-1}}"
+CLIENT_SEED_JOBS_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SEED_JOBS"
+SEED_AGENT_JOBS="${SEED_JOBS_OVERRIDE:-${!CLIENT_SEED_JOBS_ENV_VAR:-${AFS_CLIENT_SEED_JOBS:-1}}}"
+CLIENT_SEED_PROFILE_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SEED_PROFILE"
+SEED_AGENT_JOB_PROFILE="${SEED_PROFILE_OVERRIDE:-${!CLIENT_SEED_PROFILE_ENV_VAR:-${AFS_CLIENT_SEED_PROFILE:-repo-maintenance}}}"
+CLIENT_SEED_CADENCE_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SEED_CADENCE"
+SEED_AGENT_JOB_CADENCE="${SEED_CADENCE_OVERRIDE:-${!CLIENT_SEED_CADENCE_ENV_VAR:-${AFS_CLIENT_SEED_CADENCE:-daily}}}"
 
 DEFAULT_SESSION_MODEL="generic"
 case "${CLIENT_LABEL}" in
@@ -491,6 +516,24 @@ start_agent_run_record() {
   fi
 }
 
+seed_agent_jobs() {
+  if [ "${SEED_AGENT_JOBS}" = "0" ]; then
+    return 0
+  fi
+  local seed_args=(
+    agent-jobs seed
+    --path "${PWD}"
+    --profile "${SEED_AGENT_JOB_PROFILE}"
+    --cadence "${SEED_AGENT_JOB_CADENCE}"
+    --created-by "afs-client-session:${CLIENT_LABEL}"
+    --quiet
+  )
+  if [ -n "${AFS_ACTIVE_CONTEXT_ROOT:-}" ]; then
+    seed_args+=(--context-root "${AFS_ACTIVE_CONTEXT_ROOT}")
+  fi
+  "${AFS_CLI}" "${seed_args[@]}" >&2 || true
+}
+
 finish_agent_run_record() {
   local run_status="$1"
   local summary="$2"
@@ -573,6 +616,7 @@ fi
 trap cleanup_monitor EXIT
 
 run_session_hook session_start
+seed_agent_jobs
 
 if [ -n "${SESSION_PROMPT}" ] || [ -n "${SESSION_PROMPT_FILE}" ]; then
   prompt_event_args=()

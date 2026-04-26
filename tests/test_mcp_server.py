@@ -2596,6 +2596,7 @@ def test_tools_list_includes_agent_tools(tmp_path: Path) -> None:
     assert "agent.ps" in names
     assert "agent.stop" in names
     assert "agent.job.status" in names
+    assert "agent.job.seed" in names
 
 
 def test_agent_ps_returns_empty_list(tmp_path: Path) -> None:
@@ -2841,6 +2842,27 @@ def test_hivemind_task_and_agent_logs_tools_use_context_path(tmp_path: Path) -> 
     job_status_payload = job_status_response["result"]["structuredContent"]
     assert job_status_payload["counts"]["queue"] == 1
     assert "watchdog" in job_status_payload
+
+    seed_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 743,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.seed",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "profile": "repo-maintenance",
+                    "dry_run": True,
+                },
+            },
+        },
+        manager,
+    )
+    assert seed_response is not None
+    seed_payload = seed_response["result"]["structuredContent"]
+    assert seed_payload["profile"] == "repo-maintenance"
+    assert seed_payload["would_create"] == 6
 
     show_job_response = _handle_request(
         {

@@ -1177,6 +1177,23 @@ def _tool_agent_job_status(arguments: dict[str, Any], manager: AFSManager) -> di
     )
 
 
+def _tool_agent_job_seed(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_job_seeds import seed_agent_jobs
+
+    context_path = _resolve_context_path(arguments, manager)
+    profile = str(arguments.get("profile", "") or "repo-maintenance").strip()
+    cadence = str(arguments.get("cadence", "") or "daily").strip()
+    created_by = str(arguments.get("created_by", "") or "agent.job.seed").strip()
+    return seed_agent_jobs(
+        context_path,
+        profile=profile,
+        cadence=cadence,
+        created_by=created_by,
+        dry_run=bool(arguments.get("dry_run", False)),
+        force=bool(arguments.get("force", False)),
+    )
+
+
 def _tool_agent_job_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     from .agent_jobs import AgentJobQueue
 
@@ -2544,6 +2561,23 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_agent_job_status,
+        ),
+        MCPToolDefinition(
+            name="agent.job.seed",
+            description="Idempotently queue safe report-only background maintenance jobs.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "profile": {"type": "string", "default": "repo-maintenance"},
+                    "cadence": {"type": "string", "default": "daily"},
+                    "created_by": {"type": "string"},
+                    "dry_run": {"type": "boolean", "default": False},
+                    "force": {"type": "boolean", "default": False},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_seed,
         ),
         MCPToolDefinition(
             name="agent.job.list",

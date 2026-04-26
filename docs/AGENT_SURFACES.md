@@ -448,8 +448,14 @@ Each wrapper:
 - exports bootstrap, pack, skills, and combined session payload artifact paths
 - refreshes the prepared session payload before launching the client
 - runs `session_start` / `session_end` hooks around the client lifecycle
+- seeds safe report-only `agent-jobs` maintenance work by default, deduped by profile and cadence
 - never infers workspace roots on its own
 - maps `AFS_<CLIENT>_MCP_ALLOWED_ROOTS` or `AFS_CLIENT_MCP_ALLOWED_ROOTS` into `AFS_MCP_ALLOWED_ROOTS` when you set them
+
+Set `AFS_CLIENT_SEED_JOBS=0` or pass `--no-seed-jobs` to disable automatic
+maintenance job seeding. Use `AFS_CLIENT_SEED_PROFILE` and
+`AFS_CLIENT_SEED_CADENCE` to tune the default `repo-maintenance` / `daily`
+behavior.
 
 Gemini registration helper:
 

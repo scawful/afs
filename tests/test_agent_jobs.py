@@ -19,10 +19,12 @@ def test_agent_job_markdown_queue_lifecycle(tmp_path: Path) -> None:
         scope="docs/",
         expected_output="findings with paths",
         allow_destructive=True,
+        dedupe_key="seed:repo-maintenance:docs:once",
         priority=2,
     )
     assert job.status == "queue"
     assert job.allow_destructive is True
+    assert job.dedupe_key == "seed:repo-maintenance:docs:once"
     assert (ctx / "items" / "agent_jobs" / "queue" / f"{job.id}.md").exists()
 
     claimed = queue.claim(job.id, "reviewer")
@@ -34,6 +36,7 @@ def test_agent_job_markdown_queue_lifecycle(tmp_path: Path) -> None:
     done = queue.move(job.id, "done", result="no findings")
     assert done.status == "done"
     assert done.allow_destructive is True
+    assert done.dedupe_key == "seed:repo-maintenance:docs:once"
     assert done.result == "no findings"
     assert queue.get(job.id).status == "done"  # type: ignore[union-attr]
 

@@ -41,6 +41,7 @@ class AgentJob:
     scope: str = ""
     expected_output: str = ""
     allow_destructive: bool = False
+    dedupe_key: str = ""
     result: str = ""
     created_at: str = ""
     updated_at: str = ""
@@ -56,6 +57,7 @@ class AgentJob:
             "scope": self.scope,
             "expected_output": self.expected_output,
             "allow_destructive": self.allow_destructive,
+            "dedupe_key": self.dedupe_key,
             "result": self.result,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -128,6 +130,7 @@ class AgentJobQueue:
             scope=metadata.get("scope", ""),
             expected_output=metadata.get("expected_output", ""),
             allow_destructive=_parse_bool(metadata.get("allow_destructive", "")),
+            dedupe_key=metadata.get("dedupe_key", ""),
             result=metadata.get("result", ""),
             created_at=metadata.get("created_at", ""),
             updated_at=metadata.get("updated_at", ""),
@@ -143,6 +146,7 @@ class AgentJobQueue:
         scope: str = "",
         expected_output: str = "",
         allow_destructive: bool = False,
+        dedupe_key: str = "",
     ) -> AgentJob:
         now = _now_iso()
         job = AgentJob(
@@ -155,6 +159,7 @@ class AgentJobQueue:
             scope=scope,
             expected_output=expected_output,
             allow_destructive=allow_destructive,
+            dedupe_key=dedupe_key,
             created_at=now,
             updated_at=now,
         )

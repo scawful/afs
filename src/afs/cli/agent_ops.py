@@ -21,6 +21,7 @@ from ..agent_hooks import (
     worker_launchd_installed,
 )
 from ..agent_job_worker import run_agent_job_worker
+from ..agent_job_seeds import SEED_CADENCES, SEED_PROFILES, seed_agent_jobs
 from ..agent_job_status import build_agent_job_status, format_agent_job_status
 from ..agent_jobs import AgentJobQueue, JOB_STATES
 from ..agent_manifest import (
@@ -342,6 +343,34 @@ def jobs_status_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def jobs_seed_command(args: argparse.Namespace) -> int:
+    context_path = _resolve_context(args)
+    payload = seed_agent_jobs(
+        context_path,
+        profile=args.profile,
+        cadence=args.cadence,
+        created_by=args.created_by or "agent-job-seed",
+        dry_run=args.dry_run,
+        force=args.force,
+    )
+    if args.quiet:
+        return 0
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(
+            f"profile: {payload['profile']} cadence: {payload['cadence']} "
+            f"created={payload['created']} skipped={payload['skipped']} "
+            f"would_create={payload['would_create']}"
+        )
+        for result in payload["results"]:
+            suffix = f"\t{result['reason']}" if result.get("reason") else ""
+            print(
+                f"{result['status']}\t{result['key']}\t{result.get('job_id') or '-'}{suffix}"
+            )
+    return 0
+
+
 def jobs_claim_command(args: argparse.Namespace) -> int:
     context_path = _resolve_context(args)
     job = AgentJobQueue(context_path).claim(args.job_id, args.agent)
@@ -558,6 +587,17 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=jobs_status_command)
+
+    seed = jobs_sub.add_parser("seed", help="Idempotently queue safe background maintenance jobs.")
+    _add_context_args(seed)
+    seed.add_argument("--profile", choices=sorted(SEED_PROFILES), default="repo-maintenance")
+    seed.add_argument("--cadence", choices=SEED_CADENCES, default="daily")
+    seed.add_argument("--created-by", default="agent-job-seed")
+    seed.add_argument("--dry-run", action="store_true", help="Show jobs that would be queued.")
+    seed.add_argument("--force", action="store_true", help="Create jobs even when a dedupe match exists.")
+    seed.add_argument("--quiet", action="store_true", help="Suppress normal output.")
+    seed.add_argument("--json", action="store_true")
+    seed.set_defaults(func=jobs_seed_command)
 
     claim = jobs_sub.add_parser("claim", help="Move a queued job to running.")
     _add_context_args(claim)

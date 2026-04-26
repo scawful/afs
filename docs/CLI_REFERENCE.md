@@ -66,6 +66,7 @@ job_id="$(./scripts/afs agent-jobs create "Review stale instructions" --prompt "
 ./scripts/afs agent-jobs claim "$job_id" --agent reviewer
 ./scripts/afs agent-jobs move "$job_id" done --result "No stale aliases found."
 ./scripts/afs agent-jobs status
+./scripts/afs agent-jobs seed --profile repo-maintenance
 ./scripts/afs agent-jobs work --agent local-worker --command 'codex exec < "$AFS_AGENT_JOB_PROMPT_FILE"'
 ```
 
@@ -90,6 +91,11 @@ runnable jobs, destructive opt-in blockers, stale running jobs, recent run
 failures, and LaunchAgent state. It exits successfully by default so it can be
 used for visibility without blocking agents; use `--strict` for scripts that
 should fail when watchdog checks need attention.
+`agent-jobs seed` idempotently queues safe report-only background jobs. The
+`repo-maintenance` profile creates daily-deduped stale docs/reference, skill
+drift, MCP/tool drift, TODO/FIXME, verification suggestion, and uncommitted
+change review jobs. Client-session wrappers call this automatically by default;
+set `AFS_CLIENT_SEED_JOBS=0` or pass `--no-seed-jobs` to disable.
 `agent-jobs work` claims queued jobs, runs a local command with
 `AFS_AGENT_JOB_*` environment variables, moves jobs to `done` or `failed`, and
 records an `agent-runs` entry.
@@ -98,7 +104,8 @@ records an `agent-runs` entry.
 run records. AFS client wrappers start and finish run records automatically
 unless `AFS_CLIENT_RECORD_RUNS=0` is set. MCP exposes the same surfaces through
 `agent.manifest.show`, `agent.run.*`, and `agent.job.*` tools, including
-`agent.job.status` for the watchdog payload.
+`agent.job.status` for the watchdog payload and `agent.job.seed` for safe
+maintenance job seeding.
 
 ## Context
 
@@ -298,6 +305,11 @@ around the client process.
 - `AFS_SESSION_QUERY_HINT`
 - `AFS_SESSION_CONTEXT_QUERY_HINT`
 - `AFS_SESSION_INDEX_REBUILD_HINT`
+
+Client-session wrappers also call `agent-jobs seed --profile repo-maintenance`
+by default. This queues report-only maintenance jobs with daily dedupe keys and
+skips existing open jobs. Set `AFS_CLIENT_SEED_JOBS=0`, a client-specific
+`AFS_<CLIENT>_SEED_JOBS=0`, or pass `--no-seed-jobs` to disable it.
 
 ## Training
 

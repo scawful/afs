@@ -84,6 +84,7 @@ job_id="$(./scripts/afs agent-jobs create "Review stale instructions" --prompt "
 ./scripts/afs agent-jobs move "$job_id" done --result "No stale aliases found."
 ./scripts/afs agent-jobs list
 ./scripts/afs agent-jobs status
+./scripts/afs agent-jobs seed --profile repo-maintenance
 ./scripts/afs agent-jobs work --agent local-worker --command 'codex exec < "$AFS_AGENT_JOB_PROMPT_FILE"'
 ```
 
@@ -95,6 +96,15 @@ recent run failures, and LaunchAgent state. The default command reports issues
 without blocking automation; add `--strict` when a script should fail on
 watchdog warnings.
 
+Use `agent-jobs seed` to queue safe report-only maintenance jobs. The
+`repo-maintenance` profile covers stale docs/reference scans, skill drift, MCP
+tool-name drift, TODO/FIXME summaries, focused verification suggestions, and
+uncommitted-change review. Seeded jobs use daily dedupe keys and skip existing
+open jobs, so shell/session hooks can call the command without creating
+duplicates. Use `--dry-run` to preview, `--force` to intentionally reseed, and
+`AFS_CLIENT_SEED_JOBS=0` or wrapper `--no-seed-jobs` to disable automatic
+client-session seeding.
+
 The worker command claims queued jobs, writes the prompt to
 `scratchpad/agent_job_prompts/`, runs the configured local command with
 `AFS_AGENT_JOB_ID`, `AFS_AGENT_JOB_PROMPT_FILE`, and `AFS_AGENT_RUN_ID` in the
@@ -104,6 +114,7 @@ MCP:
 
 - `agent.job.create`
 - `agent.job.status`
+- `agent.job.seed`
 - `agent.job.list`
 - `agent.job.show`
 - `agent.job.claim`
@@ -116,11 +127,3 @@ Harness wrappers:
 - `scripts/afs-gemini`
 - `scripts/afs-hcode`
 - `scripts/afs-z3cli`
-
-MCP:
-
-- `agent.job.create`
-- `agent.job.list`
-- `agent.job.show`
-- `agent.job.claim`
-- `agent.job.move`

@@ -127,6 +127,9 @@ def _write_fake_afs_cli(
         "if [ \"$#\" -ge 3 ] && [ \"$1\" = \"agent-runs\" ]; then\n"
         "  exit 0\n"
         "fi\n"
+        "if [ \"$#\" -ge 2 ] && [ \"$1\" = \"agent-jobs\" ] && [ \"$2\" = \"seed\" ]; then\n"
+        "  exit 0\n"
+        "fi\n"
         "if [ \"$#\" -ge 2 ] && [ \"$1\" = \"agents\" ] && [ \"$2\" = \"wait\" ]; then\n"
         "  exit 0\n"
         "fi\n"
@@ -790,6 +793,7 @@ def test_afs_client_session_waits_for_session_agents_by_default(tmp_path: Path) 
     assert payload["AFS_SESSION_ID"]
     assert any(call.startswith("session prepare-client --client gemini ") for call in payload["_afs_calls"])
     assert any(call.startswith("session hook session_start --client gemini ") for call in payload["_afs_calls"])
+    assert any(call.startswith("agent-jobs seed --path ") for call in payload["_afs_calls"])
     assert not any(call.startswith("session event ") for call in payload["_afs_calls"])
     assert any(
         call == f"agents monitor --session-id {payload['AFS_SESSION_ID']}"
@@ -821,6 +825,28 @@ def test_afs_client_session_can_disable_live_monitor(tmp_path: Path) -> None:
 
     assert not any(call.startswith("agents monitor ") for call in payload["_afs_calls"])
     assert any(call.startswith("agents wait ") for call in payload["_afs_calls"])
+
+
+def test_afs_client_session_can_disable_safe_job_seeding(tmp_path: Path) -> None:
+    payload = _run_client_session(
+        tmp_path,
+        env_overrides={"AFS_CLIENT_SEED_JOBS": "0"},
+    )
+
+    assert not any(call.startswith("agent-jobs seed ") for call in payload["_afs_calls"])
+
+
+def test_afs_client_session_passes_seed_profile_and_cadence(tmp_path: Path) -> None:
+    payload = _run_client_session(
+        tmp_path,
+        wrapper_args=["--seed-profile", "repo-maintenance", "--seed-cadence", "weekly"],
+    )
+
+    seed_call = next(call for call in payload["_afs_calls"] if call.startswith("agent-jobs seed "))
+    assert "--profile repo-maintenance" in seed_call
+    assert "--cadence weekly" in seed_call
+    assert "--created-by afs-client-session:gemini" in seed_call
+    assert "--quiet" in seed_call
 
 
 def test_afs_client_session_can_disable_session_pack_and_skill_match(tmp_path: Path) -> None:
