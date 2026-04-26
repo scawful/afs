@@ -39,6 +39,7 @@ It provides filesystem-native primitives for:
 ## Core Docs
 
 - [Agent Surfaces](AGENT_SURFACES.md)
+- [Agent Operations](AGENT_OPERATIONS.md)
 - [Architecture](ARCHITECTURE.md)
 - [Profiles and Hooks](PROFILES.md)
 - [Extensions](PLUGINS.md)

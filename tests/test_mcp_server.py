@@ -2724,6 +2724,137 @@ def test_hivemind_task_and_agent_logs_tools_use_context_path(tmp_path: Path) -> 
     assert list_response is not None
     assert len(list_response["result"]["structuredContent"]["tasks"]) == 1
 
+    manifest_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 71,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.manifest.show",
+                "arguments": {"harness": "codex", "validate": True},
+            },
+        },
+        manager,
+    )
+    assert manifest_response is not None
+    manifest_payload = manifest_response["result"]["structuredContent"]
+    assert manifest_payload["harness"]["name"] == "codex"
+
+    run_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 72,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.run.start",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "task": "Record MCP run",
+                    "harness": "codex",
+                },
+            },
+        },
+        manager,
+    )
+    assert run_response is not None
+    run_payload = run_response["result"]["structuredContent"]
+    assert run_payload["status"] == "running"
+
+    show_run_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 721,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.run.show",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "run_id": run_payload["id"],
+                },
+            },
+        },
+        manager,
+    )
+    assert show_run_response is not None
+    assert show_run_response["result"]["structuredContent"]["task"] == "Record MCP run"
+
+    finish_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 73,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.run.finish",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "run_id": run_payload["id"],
+                    "summary": "done",
+                    "verification": [{"command": "smoke", "status": "passed"}],
+                },
+            },
+        },
+        manager,
+    )
+    assert finish_response is not None
+    assert finish_response["result"]["structuredContent"]["status"] == "done"
+
+    job_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 74,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.create",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "title": "MCP queued job",
+                    "prompt": "Do it.",
+                },
+            },
+        },
+        manager,
+    )
+    assert job_response is not None
+    job_payload = job_response["result"]["structuredContent"]
+    assert job_payload["status"] == "queue"
+
+    show_job_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 741,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.show",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "job_id": job_payload["id"],
+                },
+            },
+        },
+        manager,
+    )
+    assert show_job_response is not None
+    assert show_job_response["result"]["structuredContent"]["title"] == "MCP queued job"
+
+    claim_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 75,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.claim",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "job_id": job_payload["id"],
+                    "agent_name": "worker",
+                },
+            },
+        },
+        manager,
+    )
+    assert claim_response is not None
+    assert claim_response["result"]["structuredContent"]["status"] == "running"
+
     logs_response = _handle_request(
         {
             "jsonrpc": "2.0",

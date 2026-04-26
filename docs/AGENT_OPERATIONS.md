@@ -1,0 +1,75 @@
+# Agent Operations
+
+AFS owns three repo-native surfaces for cross-harness agent coordination.
+
+These surfaces are visible in:
+
+- `afs session bootstrap`
+- AFS MCP tools
+- `scripts/afs-client-session` wrappers for Codex, Claude, and Gemini
+- `afs doctor`
+
+## Manifest
+
+`configs/agent_manifest.toml` is the single source of truth for harnesses, shared skills, MCP servers, startup hints, and shared instruction files.
+
+```bash
+./scripts/afs agent-manifest show
+./scripts/afs agent-manifest validate
+./scripts/afs agent-manifest export codex
+```
+
+Use this before editing Codex, Claude, Gemini, hcode, or z3cli-specific config. Harness-specific files can still exist, but they should point back to this manifest or derive their local view from it.
+
+MCP:
+
+- `agent.manifest.show`
+
+Doctor:
+
+- `afs doctor` validates the manifest, checks declared paths, compares copied skills against canonical skills, and confirms declared MCP server names appear in known harness/client config.
+
+## Run Recorder
+
+Agent runs are stored under `scratchpad/agent_runs/` in the active context.
+
+```bash
+run_id="$(./scripts/afs agent-runs start "Fix settings drift" --harness codex)"
+./scripts/afs agent-runs event "$run_id" verification --summary "pytest passed"
+./scripts/afs agent-runs finish "$run_id" --summary "patched and verified" --verify "pytest=passed"
+./scripts/afs agent-runs list
+```
+
+Each record captures task, harness, workspace, prompt, changed files, commands, verification, handoff path, and timestamped events.
+
+The AFS client wrapper starts and finishes these records automatically unless
+`AFS_CLIENT_RECORD_RUNS=0` is set.
+
+MCP:
+
+- `agent.run.start`
+- `agent.run.list`
+- `agent.run.show`
+- `agent.run.event`
+- `agent.run.finish`
+
+## Background Jobs
+
+Markdown jobs live under `items/agent_jobs/{queue,running,done,failed}/`.
+
+```bash
+job_id="$(./scripts/afs agent-jobs create "Review stale instructions" --prompt "Scan docs and report stale model aliases.")"
+./scripts/afs agent-jobs claim "$job_id" --agent reviewer
+./scripts/afs agent-jobs move "$job_id" done --result "No stale aliases found."
+./scripts/afs agent-jobs list
+```
+
+Use jobs for background work whose output is independently useful. Each job should include a concrete prompt, scope, and expected output.
+
+MCP:
+
+- `agent.job.create`
+- `agent.job.list`
+- `agent.job.show`
+- `agent.job.claim`
+- `agent.job.move`

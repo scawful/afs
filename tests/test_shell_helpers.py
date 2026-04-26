@@ -119,6 +119,13 @@ def _write_fake_afs_cli(
         "if [ \"$#\" -ge 3 ] && [ \"$1\" = \"session\" ] && [ \"$2\" = \"event\" ]; then\n"
         "  exit 0\n"
         "fi\n"
+        "if [ \"$#\" -ge 3 ] && [ \"$1\" = \"agent-runs\" ] && [ \"$2\" = \"start\" ]; then\n"
+        "  printf '%s\\n' fake-run-id\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$#\" -ge 3 ] && [ \"$1\" = \"agent-runs\" ]; then\n"
+        "  exit 0\n"
+        "fi\n"
         "if [ \"$#\" -ge 2 ] && [ \"$1\" = \"agents\" ] && [ \"$2\" = \"wait\" ]; then\n"
         "  exit 0\n"
         "fi\n"
@@ -884,11 +891,20 @@ def test_afs_client_session_emits_prompt_and_turn_events(tmp_path: Path) -> None
     session_end_index = next(
         index for index, call in enumerate(calls) if call.startswith("session hook session_end ")
     )
+    run_start_index = next(
+        index for index, call in enumerate(calls) if call.startswith("agent-runs start ")
+    )
+    run_finish_index = next(
+        index for index, call in enumerate(calls) if call.startswith("agent-runs finish ")
+    )
 
     assert f"--query {prompt}" in prepare_call
     assert f"--task {prompt}" in prepare_call
     assert f"--skills-prompt {prompt}" in prepare_call
-    assert session_start_index < prompt_index < turn_started_index < turn_completed_index < session_end_index
+    assert session_start_index < prompt_index < turn_started_index < run_start_index < turn_completed_index < session_end_index < run_finish_index
+    assert "--harness gemini" in calls[run_start_index]
+    assert "agent-runs finish fake-run-id" in calls[run_finish_index]
+    assert "--status done" in calls[run_finish_index]
     assert any(
         call.startswith(
             "session event user_prompt_submit "

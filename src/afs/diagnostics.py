@@ -14,6 +14,7 @@ Usage::
 
 from __future__ import annotations
 
+import filecmp
 import importlib
 import json
 import sys
@@ -610,6 +611,108 @@ def check_mcp_server(config_path: Path | None = None) -> DiagnosticResult:
     )
 
 
+def check_agent_manifest() -> DiagnosticResult:
+    """Validate the shared agent harness manifest and local sync state."""
+    try:
+        from .agent_manifest import default_manifest_path, load_manifest, validate_manifest
+
+        path = default_manifest_path().expanduser()
+        data = load_manifest(path)
+        issues = validate_manifest(data, check_paths=True)
+    except Exception as exc:
+        return DiagnosticResult(
+            name="agent_manifest",
+            status="error",
+            message=f"Agent manifest failed to load: {exc}",
+        )
+
+    errors = [issue.message for issue in issues if issue.level == "error"]
+    warnings = [issue.message for issue in issues if issue.level == "warning"]
+
+    harness_roots: dict[str, list[Path]] = {}
+    for harness in data.get("harnesses", []):
+        if not isinstance(harness, dict):
+            continue
+        name = str(harness.get("name", "")).strip()
+        roots = [
+            Path(str(root)).expanduser()
+            for root in harness.get("skill_roots", [])
+            if str(root).strip()
+        ]
+        if name:
+            harness_roots[name] = roots
+
+    for skill in data.get("skills", []):
+        if not isinstance(skill, dict):
+            continue
+        name = str(skill.get("name", "")).strip()
+        canonical = Path(str(skill.get("canonical_path", ""))).expanduser()
+        canonical_skill = canonical / "SKILL.md"
+        if not name:
+            continue
+        if not canonical_skill.exists():
+            errors.append(f"canonical skill missing: {canonical_skill}")
+            continue
+        for target in skill.get("targets", []):
+            for root in harness_roots.get(str(target), []):
+                copied = root / name
+                copied_skill = copied / "SKILL.md"
+                if copied.is_symlink():
+                    warnings.append(f"skill copy is symlink: {copied}")
+                if not copied_skill.exists():
+                    warnings.append(f"skill copy missing: {copied_skill}")
+                elif not filecmp.cmp(canonical_skill, copied_skill, shallow=False):
+                    warnings.append(f"skill copy drift: {copied_skill}")
+
+    configured_text = _read_known_mcp_config_text()
+    for server in data.get("mcp_servers", []):
+        if not isinstance(server, dict):
+            continue
+        name = str(server.get("name", "")).strip()
+        if name and name not in configured_text:
+            warnings.append(f"MCP server not found in known client configs: {name}")
+
+    if errors:
+        return DiagnosticResult(
+            name="agent_manifest",
+            status="error",
+            message="Agent manifest errors: " + "; ".join(errors[:5]),
+        )
+    if warnings:
+        return DiagnosticResult(
+            name="agent_manifest",
+            status="warn",
+            message="Agent manifest warnings: " + "; ".join(warnings[:5]),
+        )
+    return DiagnosticResult(
+        name="agent_manifest",
+        status="ok",
+        message=f"Agent manifest OK: {path}",
+    )
+
+
+def _read_known_mcp_config_text() -> str:
+    home = Path.home()
+    candidates = [
+        home / ".codex" / "config.toml",
+        home / ".gemini" / "settings.json",
+        home / "src" / ".gemini" / "settings.json",
+        home / ".claude" / "settings.json",
+        home / "src" / "hobby" / "z3cli" / "src" / "core" / "config.py",
+        home / "src" / "hobby" / "z3cli" / "src" / "protocol" / "mcp_bridge.py",
+        Path.cwd() / ".mcp.json",
+    ]
+    chunks: list[str] = []
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return "\n".join(chunks)
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -662,6 +765,7 @@ def run_all_checks(
         ("services", lambda: check_services(config_path)),
         ("dependencies", lambda: check_dependencies()),
         ("mcp_registration", lambda: check_mcp_registration()),
+        ("agent_manifest", lambda: check_agent_manifest()),
         ("embeddings", lambda: check_embedding_indexes(config_path)),
         ("extensions", lambda: check_extensions(config_path)),
         ("context_index", lambda: check_context_index(config_path)),
@@ -678,6 +782,7 @@ def run_startup_checks(config_path: Path | None = None) -> list[DiagnosticResult
         ("context_root", lambda: check_context_root(config_path)),
         ("context_health", lambda: check_context_health(config_path)),
         ("dependencies", lambda: check_dependencies()),
+        ("agent_manifest", lambda: check_agent_manifest()),
         ("extensions", lambda: check_extensions(config_path)),
         ("context_index", lambda: check_context_index(config_path)),
         ("mcp_server", lambda: check_mcp_server(config_path)),

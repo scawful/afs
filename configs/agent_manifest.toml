@@ -1,0 +1,119 @@
+version = 1
+last_reviewed = "2026-04-26"
+description = "Single source of truth for local AI harness routing, shared skills, and AFS-native agent operations."
+
+[paths]
+workspace_root = "~/src"
+afs_root = "~/src/lab/afs"
+shared_contract = "~/src/docs/guides/ai-coder/AGENT_HARNESS_CONTRACT.md"
+automation_playbook = "~/src/docs/guides/ai-coder/AGENT_AUTOMATION_PLAYBOOK.md"
+
+[[harnesses]]
+name = "codex"
+kind = "cli"
+instructions = ["~/src/AGENTS.md"]
+skill_roots = ["~/.codex/skills"]
+mcp_servers = ["afs", "hyrule-historian", "book-of-mudora", "yaze-mcp"]
+startup = ["afs session bootstrap --json", "agent-doctor ~/src"]
+
+[[harnesses]]
+name = "claude"
+kind = "cli"
+instructions = ["~/src/AGENTS.md", "~/src/CLAUDE.md"]
+skill_roots = ["~/.claude/skills"]
+mcp_servers = ["afs", "filesystem"]
+startup = ["source ~/src/scripts/agent-harness-env"]
+
+[[harnesses]]
+name = "gemini"
+kind = "cli"
+instructions = ["~/src/AGENTS.md", "~/src/GEMINI.md"]
+skill_roots = ["~/.gemini/skills"]
+mcp_servers = ["afs", "hyrule-historian", "book-of-mudora", "yaze-mcp"]
+startup = ["source ~/src/scripts/agent-harness-env"]
+
+[[harnesses]]
+name = "hcode"
+kind = "cli"
+instructions = ["~/src/lab/halext-code/AGENTS.md", "~/src/docs/guides/ai-coder/AGENT_HARNESS_CONTRACT.md"]
+skill_roots = []
+mcp_servers = ["afs"]
+startup = ["~/bin/hcode"]
+
+[[harnesses]]
+name = "z3cli"
+kind = "local_app"
+instructions = ["~/src/hobby/z3cli/README.md", "~/src/docs/guides/ai-coder/AGENT_HARNESS_CONTRACT.md"]
+skill_roots = []
+mcp_servers = ["afs", "hyrule-historian", "book-of-mudora", "yaze-debugger", "yaze-editor"]
+startup = ["python ~/src/hobby/z3cli/z3cli.py"]
+
+[[skills]]
+name = "focused-verification"
+canonical_path = "~/.codex/skills/focused-verification"
+targets = ["codex", "claude", "gemini"]
+
+[[skills]]
+name = "handoff-writer"
+canonical_path = "~/.codex/skills/handoff-writer"
+targets = ["codex", "claude", "gemini"]
+
+[[skills]]
+name = "stale-knowledge-auditor"
+canonical_path = "~/.codex/skills/stale-knowledge-auditor"
+targets = ["codex", "claude", "gemini"]
+
+[[skills]]
+name = "skill-maintainer"
+canonical_path = "~/.codex/skills/skill-maintainer"
+targets = ["codex", "claude", "gemini"]
+
+[[skills]]
+name = "code-review-findings"
+canonical_path = "~/.codex/skills/code-review-findings"
+targets = ["codex", "claude", "gemini"]
+
+[[skills]]
+name = "config-change-safety"
+canonical_path = "~/.codex/skills/config-change-safety"
+targets = ["codex", "claude", "gemini"]
+
+[[skills]]
+name = "device-deploy-operator"
+canonical_path = "~/.codex/skills/device-deploy-operator"
+targets = ["codex", "claude", "gemini"]
+
+[[mcp_servers]]
+name = "afs"
+role = "context, scratchpad, sessions, tasks, hivemind"
+mutability = "stateful"
+
+[[mcp_servers]]
+name = "hyrule-historian"
+role = "ALTTP labels, disassembly, reference lookups"
+mutability = "read_only"
+
+[[mcp_servers]]
+name = "book-of-mudora"
+role = "patch and ROM-hacking reference material"
+mutability = "read_only"
+
+[[mcp_servers]]
+name = "yaze-mcp"
+role = "Yaze automation and Zelda ROM editing"
+mutability = "stateful"
+
+[[mcp_servers]]
+name = "yaze-debugger"
+role = "emulator and runtime debugging"
+mutability = "stateful"
+
+[[mcp_servers]]
+name = "yaze-editor"
+role = "ROM and editor operations"
+mutability = "stateful"
+
+[[mcp_servers]]
+name = "filesystem"
+role = "scoped local filesystem access"
+mutability = "stateful"

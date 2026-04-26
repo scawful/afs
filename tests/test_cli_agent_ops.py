@@ -1,0 +1,36 @@
+from __future__ import annotations
+
+import argparse
+
+from afs.cli import build_parser
+from afs.cli.agent_ops import register_parsers
+
+
+def test_agent_ops_parsers_register() -> None:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    register_parsers(subparsers)
+
+    manifest = parser.parse_args(["agent-manifest", "validate"])
+    assert manifest.command == "agent-manifest"
+    assert hasattr(manifest, "func")
+
+    run = parser.parse_args(["agent-runs", "start", "Fix issue"])
+    assert run.command == "agent-runs"
+    assert hasattr(run, "func")
+
+    finish = parser.parse_args(["agent-runs", "finish", "run-1", "--command", "pytest"])
+    assert finish.command == "agent-runs"
+    assert finish.ran_command == ["pytest"]
+    assert hasattr(finish, "func")
+
+    job = parser.parse_args(["agent-jobs", "create", "Review docs", "--prompt", "scan"])
+    assert job.command == "agent-jobs"
+    assert hasattr(job, "func")
+
+
+def test_build_parser_includes_agent_ops_commands() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["agent-manifest", "export", "codex"])
+    assert args.command == "agent-manifest"
+    assert hasattr(args, "func")

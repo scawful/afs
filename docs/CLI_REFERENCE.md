@@ -46,6 +46,33 @@ Also supported once installed into the active environment:
 - generated MCP/agent shims when the bundled profile defines `mcp_tools` or `agent_configs`
 - `profile-snippet.toml` you can merge into `afs.toml` to re-enable the bundled profile semantics safely
 
+## Agent Operations
+
+```bash
+./scripts/afs agent-manifest show
+./scripts/afs agent-manifest validate
+./scripts/afs agent-manifest export codex
+
+run_id="$(./scripts/afs agent-runs start "Fix settings drift" --harness codex)"
+./scripts/afs agent-runs event "$run_id" verification --summary "pytest passed"
+./scripts/afs agent-runs finish "$run_id" --summary "patched" --verify "pytest=passed"
+
+job_id="$(./scripts/afs agent-jobs create "Review stale instructions" --prompt "Scan docs and report stale model aliases.")"
+./scripts/afs agent-jobs claim "$job_id" --agent reviewer
+./scripts/afs agent-jobs move "$job_id" done --result "No stale aliases found."
+```
+
+`agent-manifest` reads `configs/agent_manifest.toml`, the repo-owned source of
+truth for harnesses, shared skills, MCP servers, and startup hints.
+`agent-runs` writes replayable run records under `scratchpad/agent_runs/`.
+`agent-jobs` writes markdown prompt jobs under
+`items/agent_jobs/{queue,running,done,failed}/`.
+
+`session bootstrap` includes the manifest summary, open agent jobs, and recent
+run records. AFS client wrappers start and finish run records automatically
+unless `AFS_CLIENT_RECORD_RUNS=0` is set. MCP exposes the same surfaces through
+`agent.manifest.show`, `agent.run.*`, and `agent.job.*` tools.
+
 ## Context
 
 ```bash

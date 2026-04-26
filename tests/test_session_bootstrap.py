@@ -11,6 +11,8 @@ from afs.hivemind import HivemindBus
 from afs.manager import AFSManager
 from afs.models import MountType
 from afs.schema import AFSConfig, DirectoryConfig, GeneralConfig, default_directory_configs
+from afs.agent_jobs import AgentJobQueue
+from afs.agent_runs import AgentRunStore
 from afs.tasks import TaskQueue
 
 
@@ -63,6 +65,18 @@ def test_session_bootstrap_command_outputs_json_and_writes_artifacts(
     queue = TaskQueue(context_root)
     queue.create("bootstrap task", created_by="tester", priority=2)
 
+    AgentJobQueue(context_root).create(
+        "bootstrap background job",
+        "Check background state.",
+        created_by="tester",
+        priority=1,
+    )
+    AgentRunStore(context_root).start(
+        "bootstrap recorded run",
+        harness="codex",
+        workspace=str(project_path),
+    )
+
     bus = HivemindBus(context_root)
     bus.send("tester", "status", {"detail": "handoff ready"})
 
@@ -95,6 +109,9 @@ def test_session_bootstrap_command_outputs_json_and_writes_artifacts(
     assert payload["context_path"] == str(context_root)
     assert payload["scratchpad"]["path"].endswith("/notes")
     assert payload["tasks"]["total"] == 1
+    assert payload["agent_manifest"]["available"] is True
+    assert payload["agent_jobs"]["total"] == 1
+    assert payload["agent_runs"]["recent_count"] == 1
     assert payload["hivemind"]["recent_count"] == 1
     assert payload["memory"]["entries_count"] == 1
     assert payload["artifact_paths"]["json"].endswith("session_bootstrap.json")

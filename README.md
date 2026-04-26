@@ -86,7 +86,13 @@ afs agents list                       # Available agents
 afs agents ps                         # Running agents
 afs agents run <name> [--prompt ...]  # Run an agent
 afs agents capabilities               # Agent capability matrix
+afs agent-manifest validate           # Validate harness/skill/MCP manifest
+afs agent-runs start "task"           # Record a replayable agent run
+afs agent-jobs create "task"          # Queue a markdown background job
 ```
+
+`session bootstrap` includes manifest, run, and job state; MCP clients can use
+`agent.manifest.show`, `agent.run.*`, and `agent.job.*` directly.
 
 ### Session
 

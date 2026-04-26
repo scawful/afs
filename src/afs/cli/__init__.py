@@ -22,6 +22,7 @@ from ..history import log_cli_invocation
 from ..profiles import resolve_active_profile
 from . import (
     approvals,
+    agent_ops,
     briefing,
     bundle,
     cache,
@@ -210,6 +211,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
 
     # Register approvals commands
     approvals.register_parsers(subparsers)
+
+    # Register agent operations commands
+    agent_ops.register_parsers(subparsers)
 
     # Register cache management commands
     cache.register_parsers(subparsers)

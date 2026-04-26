@@ -40,12 +40,15 @@ def _estimate_tokens(text: str) -> int:
 _SECTION_PRIORITY = [
     "handoff",          # critical: what happened last session
     "scratchpad",       # high: current working state
+    "agent_manifest",   # high: shared harness/source-of-truth state
+    "agent_jobs",       # high: file-backed background work queue
     "tasks",            # high: pending work items
     "codebase",         # high: quick repo orientation
     "session_changes",  # medium-high: what changed since last session
     "diff",             # medium: recent index drift
     "mount_freshness",  # medium: per-mount freshness scores
     "memory",           # medium: durable context
+    "agent_runs",       # medium-low: recent recorded agent activity
     "hivemind",         # low: cross-agent messages
     "agent_reports",    # low: background agent status
 ]
@@ -184,6 +187,9 @@ def build_session_bootstrap(
     diff = collect_context_diff(manager, context_path)
     scratchpad = _collect_scratchpad(manager, context_path)
     tasks = _collect_tasks(context_path, limit=task_limit)
+    agent_jobs = _collect_agent_jobs(context_path, limit=task_limit)
+    agent_runs = _collect_agent_runs(context_path, limit=task_limit)
+    agent_manifest = _collect_agent_manifest()
     hivemind = _collect_hivemind(context_path, limit=message_limit)
     memory = _collect_memory(manager, context_path)
     reports = _collect_agent_reports(manager, context_path)
@@ -240,8 +246,9 @@ def build_session_bootstrap(
         "profile": status["profile"],
         "startup_sequence": [
             "Review context health and recent drift first.",
+            "Check the agent manifest for shared harness, skill, and MCP routing before editing harness config.",
             "Read scratchpad state and deferred notes before editing.",
-            "Check pending tasks and recent hivemind messages for handoffs.",
+            "Check pending tasks, agent jobs, recent run records, and hivemind messages for handoffs.",
             "Use `afs context overview` / `afs.context.overview` for a fast repo map before deeper grep/query passes.",
             "Use `afs context query` / `context.query` before asking for context that may already be in memory or knowledge.",
             "Write updates back to scratchpad, tasks, or hivemind before handoff.",
@@ -250,6 +257,9 @@ def build_session_bootstrap(
         "diff": diff,
         "scratchpad": scratchpad,
         "tasks": tasks,
+        "agent_manifest": agent_manifest,
+        "agent_jobs": agent_jobs,
+        "agent_runs": agent_runs,
         "codebase": codebase,
         "hivemind": hivemind,
         "memory": memory,
@@ -334,6 +344,9 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
     diff = summary["diff"]
     scratchpad = summary["scratchpad"]
     tasks = summary["tasks"]
+    agent_manifest = summary.get("agent_manifest", {})
+    agent_jobs = summary.get("agent_jobs", {})
+    agent_runs = summary.get("agent_runs", {})
     hivemind = summary["hivemind"]
     memory = summary["memory"]
     reports = summary["agent_reports"]
@@ -449,6 +462,43 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
             assigned = f" -> {item['assigned_to']}" if item.get("assigned_to") else ""
             lines.append(
                 f"  - [{item['status']}] p{item['priority']} {item['title']}{assigned}"
+            )
+
+    lines.extend(["", "## Agent Manifest"])
+    if agent_manifest.get("available"):
+        lines.append(f"- path: {agent_manifest.get('path', '')}")
+        lines.append(f"- harnesses: {', '.join(agent_manifest.get('harnesses', []))}")
+        lines.append(f"- skills: {', '.join(agent_manifest.get('skills', []))}")
+        lines.append(f"- mcp_servers: {', '.join(agent_manifest.get('mcp_servers', []))}")
+        if agent_manifest.get("issues"):
+            lines.append("- issues:")
+            for issue in agent_manifest["issues"]:
+                lines.append(f"  - [{issue.get('level')}] {issue.get('message')}")
+    else:
+        lines.append(f"- unavailable: {agent_manifest.get('error', 'not found')}")
+
+    lines.extend(["", "## Agent Jobs"])
+    lines.append(f"- total: {agent_jobs.get('total', 0)}")
+    if agent_jobs.get("counts"):
+        counts_line = ", ".join(
+            f"{name}={count}" for name, count in sorted(agent_jobs["counts"].items())
+        )
+        lines.append(f"- counts: {counts_line}")
+    if agent_jobs.get("items"):
+        lines.append("- top_jobs:")
+        for item in agent_jobs["items"]:
+            assigned = f" -> {item['assigned_to']}" if item.get("assigned_to") else ""
+            lines.append(
+                f"  - [{item['status']}] p{item['priority']} {item['title']}{assigned}"
+            )
+
+    lines.extend(["", "## Agent Runs"])
+    lines.append(f"- recent_count: {agent_runs.get('recent_count', 0)}")
+    if agent_runs.get("items"):
+        lines.append("- recent:")
+        for item in agent_runs["items"]:
+            lines.append(
+                f"  - [{item['status']}] {item.get('harness') or '-'} {item['task']} ({item['id']})"
             )
 
     lines.extend(["", "## Hivemind"])
@@ -608,6 +658,61 @@ def _collect_tasks(context_path: Path, *, limit: int) -> dict[str, Any]:
         "total": len(tasks),
         "counts": counts,
         "items": [task.to_dict() for task in tasks[: max(1, limit)]],
+    }
+
+
+def _collect_agent_manifest() -> dict[str, Any]:
+    try:
+        from .agent_manifest import default_manifest_path, load_manifest, summarize_manifest, validate_manifest
+
+        path = default_manifest_path().expanduser()
+        data = load_manifest(path)
+        issues = validate_manifest(data)
+        summary = summarize_manifest(data)
+        return {
+            "available": True,
+            "path": str(path),
+            "issues": [issue.to_dict() for issue in issues],
+            **summary,
+        }
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "issues": []}
+
+
+def _collect_agent_jobs(context_path: Path, *, limit: int) -> dict[str, Any]:
+    try:
+        from .agent_jobs import AgentJobQueue
+
+        queue = AgentJobQueue(context_path)
+        jobs = [
+            job
+            for job in queue.list()
+            if job.status in {"queue", "running", "failed"}
+        ]
+    except Exception as exc:
+        return {"total": 0, "counts": {}, "items": [], "error": str(exc)}
+
+    counts: dict[str, int] = {}
+    for job in jobs:
+        counts[job.status] = counts.get(job.status, 0) + 1
+    return {
+        "total": len(jobs),
+        "counts": counts,
+        "items": [job.to_dict() for job in jobs[: max(1, limit)]],
+    }
+
+
+def _collect_agent_runs(context_path: Path, *, limit: int) -> dict[str, Any]:
+    try:
+        from .agent_runs import AgentRunStore
+
+        runs = AgentRunStore(context_path).list(limit=max(1, limit))
+    except Exception as exc:
+        return {"recent_count": 0, "items": [], "error": str(exc)}
+
+    return {
+        "recent_count": len(runs),
+        "items": [run.to_dict() for run in runs],
     }
 
 
@@ -784,6 +889,9 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
     diff = summary["diff"]
     scratchpad = summary["scratchpad"]
     tasks = summary["tasks"]
+    agent_manifest = summary.get("agent_manifest", {})
+    agent_jobs = summary.get("agent_jobs", {})
+    agent_runs = summary.get("agent_runs", {})
     hivemind = summary["hivemind"]
     memory = summary["memory"]
 
@@ -813,6 +921,15 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
 
     if tasks.get("total", 0) > 0:
         recommendations.append("Check pending items tasks before creating parallel work.")
+
+    if agent_manifest.get("issues"):
+        recommendations.append("Run `afs agent-manifest validate --check-paths` before editing harness config.")
+
+    if agent_jobs.get("total", 0) > 0:
+        recommendations.append("Review `afs agent-jobs list` before spawning background work.")
+
+    if agent_runs.get("recent_count", 0) > 0:
+        recommendations.append("Review recent `afs agent-runs list` output for replayable prior agent state.")
 
     if hivemind.get("recent_count", 0) > 0:
         recommendations.append("Review recent hivemind messages for cross-agent handoffs.")

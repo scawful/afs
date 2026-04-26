@@ -1028,6 +1028,186 @@ def _tool_task_complete(arguments: dict[str, Any], manager: AFSManager) -> dict[
     return task.to_dict()
 
 
+def _tool_agent_manifest_show(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_manifest import (
+        default_manifest_path,
+        export_for_harness,
+        load_manifest,
+        summarize_manifest,
+        validate_manifest,
+    )
+
+    raw_path = arguments.get("file")
+    path = Path(str(raw_path)).expanduser() if raw_path else default_manifest_path()
+    data = load_manifest(path)
+    harness = str(arguments.get("harness", "") or "").strip()
+    payload = export_for_harness(data, harness) if harness else summarize_manifest(data)
+    if bool(arguments.get("validate", False)):
+        payload["issues"] = [
+            issue.to_dict()
+            for issue in validate_manifest(
+                data,
+                check_paths=bool(arguments.get("check_paths", False)),
+            )
+        ]
+    payload["path"] = str(path)
+    return payload
+
+
+def _tool_agent_run_start(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_runs import AgentRunStore
+
+    task = str(arguments.get("task", "") or "").strip()
+    if not task:
+        raise ValueError("task is required")
+    context_path = _resolve_context_path(arguments, manager)
+    run = AgentRunStore(context_path).start(
+        task,
+        harness=str(arguments.get("harness", "") or "").strip(),
+        workspace=str(arguments.get("workspace", "") or "").strip(),
+        prompt=str(arguments.get("prompt", "") or ""),
+    )
+    return run.to_dict()
+
+
+def _tool_agent_run_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_runs import AgentRunStore
+
+    context_path = _resolve_context_path(arguments, manager)
+    status = arguments.get("status")
+    if isinstance(status, str):
+        status = status.strip() or None
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    runs = AgentRunStore(context_path).list(status=status, limit=limit)
+    return {"runs": [run.to_dict() for run in runs]}
+
+
+def _tool_agent_run_show(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_runs import AgentRunStore
+
+    run_id = str(arguments.get("run_id", "") or "").strip()
+    if not run_id:
+        raise ValueError("run_id is required")
+    context_path = _resolve_context_path(arguments, manager)
+    run = AgentRunStore(context_path).get(run_id)
+    if run is None:
+        raise FileNotFoundError(f"Agent run not found: {run_id}")
+    return run.to_dict()
+
+
+def _tool_agent_run_event(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_runs import AgentRunStore
+
+    run_id = str(arguments.get("run_id", "") or "").strip()
+    event_type = str(arguments.get("event_type", "") or "").strip()
+    if not run_id or not event_type:
+        raise ValueError("run_id and event_type are required")
+    context_path = _resolve_context_path(arguments, manager)
+    run = AgentRunStore(context_path).record_event(
+        run_id,
+        event_type,
+        summary=str(arguments.get("summary", "") or ""),
+        data=arguments.get("data") if isinstance(arguments.get("data"), dict) else {},
+    )
+    return run.to_dict()
+
+
+def _tool_agent_run_finish(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_runs import AgentRunStore
+
+    run_id = str(arguments.get("run_id", "") or "").strip()
+    if not run_id:
+        raise ValueError("run_id is required")
+    context_path = _resolve_context_path(arguments, manager)
+    files_changed = arguments.get("files_changed")
+    commands = arguments.get("commands")
+    verification = arguments.get("verification")
+    run = AgentRunStore(context_path).finish(
+        run_id,
+        status=str(arguments.get("status", "") or "done"),
+        summary=str(arguments.get("summary", "") or ""),
+        files_changed=[str(item) for item in files_changed] if isinstance(files_changed, list) else [],
+        commands=[str(item) for item in commands] if isinstance(commands, list) else [],
+        verification=[item for item in verification if isinstance(item, dict)]
+        if isinstance(verification, list)
+        else [],
+        handoff_path=str(arguments.get("handoff_path", "") or ""),
+    )
+    return run.to_dict()
+
+
+def _tool_agent_job_create(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_jobs import AgentJobQueue
+
+    title = str(arguments.get("title", "") or "").strip()
+    if not title:
+        raise ValueError("title is required")
+    prompt = str(arguments.get("prompt", "") or title)
+    context_path = _resolve_context_path(arguments, manager)
+    priority = _coerce_int(arguments.get("priority"), default=5, minimum=1, maximum=10)
+    job = AgentJobQueue(context_path).create(
+        title,
+        prompt,
+        priority=priority,
+        created_by=str(arguments.get("created_by", "") or "").strip(),
+        scope=str(arguments.get("scope", "") or "").strip(),
+        expected_output=str(arguments.get("expected_output", "") or "").strip(),
+    )
+    return job.to_dict()
+
+
+def _tool_agent_job_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_jobs import AgentJobQueue
+
+    status = arguments.get("status")
+    if isinstance(status, str):
+        status = status.strip() or None
+    context_path = _resolve_context_path(arguments, manager)
+    jobs = AgentJobQueue(context_path).list(status=status)
+    return {"jobs": [job.to_dict() for job in jobs]}
+
+
+def _tool_agent_job_show(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_jobs import AgentJobQueue
+
+    job_id = str(arguments.get("job_id", "") or "").strip()
+    if not job_id:
+        raise ValueError("job_id is required")
+    context_path = _resolve_context_path(arguments, manager)
+    job = AgentJobQueue(context_path).get(job_id)
+    if job is None:
+        raise FileNotFoundError(f"Agent job not found: {job_id}")
+    return job.to_dict()
+
+
+def _tool_agent_job_claim(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_jobs import AgentJobQueue
+
+    job_id = str(arguments.get("job_id", "") or "").strip()
+    agent_name = str(arguments.get("agent_name", "") or "").strip()
+    if not job_id or not agent_name:
+        raise ValueError("job_id and agent_name are required")
+    context_path = _resolve_context_path(arguments, manager)
+    job = AgentJobQueue(context_path).claim(job_id, agent_name)
+    return job.to_dict()
+
+
+def _tool_agent_job_move(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_jobs import AgentJobQueue
+
+    job_id = str(arguments.get("job_id", "") or "").strip()
+    status = str(arguments.get("status", "") or "").strip()
+    if not job_id or not status:
+        raise ValueError("job_id and status are required")
+    context_path = _resolve_context_path(arguments, manager)
+    job = AgentJobQueue(context_path).move(
+        job_id,
+        status,
+        result=str(arguments.get("result", "") or ""),
+    )
+    return job.to_dict()
+
+
 def _tool_agent_logs(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     agent_name = arguments.get("name", "")
     if not isinstance(agent_name, str) or not agent_name.strip():
@@ -2211,6 +2391,180 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_task_complete,
+        ),
+        MCPToolDefinition(
+            name="agent.manifest.show",
+            description="Show or export the repo-owned agent harness manifest.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file": {"type": "string", "description": "Optional manifest TOML path."},
+                    "harness": {"type": "string", "description": "Optional harness name to export."},
+                    "validate": {"type": "boolean", "default": False},
+                    "check_paths": {"type": "boolean", "default": False},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_manifest_show,
+        ),
+        MCPToolDefinition(
+            name="agent.run.start",
+            description="Start a replayable agent run record in scratchpad/agent_runs.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "task": {"type": "string"},
+                    "harness": {"type": "string"},
+                    "workspace": {"type": "string"},
+                    "prompt": {"type": "string"},
+                },
+                "required": ["task"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_run_start,
+        ),
+        MCPToolDefinition(
+            name="agent.run.list",
+            description="List replayable agent run records from scratchpad/agent_runs.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "status": {"type": "string", "description": "Optional status filter."},
+                    "limit": {"type": "integer", "default": 20},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_run_list,
+        ),
+        MCPToolDefinition(
+            name="agent.run.show",
+            description="Show one replayable agent run record.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "run_id": {"type": "string"},
+                },
+                "required": ["run_id"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_run_show,
+        ),
+        MCPToolDefinition(
+            name="agent.run.event",
+            description="Append an event to a replayable agent run record.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "run_id": {"type": "string"},
+                    "event_type": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "data": {"type": "object"},
+                },
+                "required": ["run_id", "event_type"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_run_event,
+        ),
+        MCPToolDefinition(
+            name="agent.run.finish",
+            description="Finish a replayable agent run record with summary, commands, and verification.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "run_id": {"type": "string"},
+                    "status": {"type": "string", "default": "done"},
+                    "summary": {"type": "string"},
+                    "files_changed": {"type": "array", "items": {"type": "string"}},
+                    "commands": {"type": "array", "items": {"type": "string"}},
+                    "verification": {"type": "array", "items": {"type": "object"}},
+                    "handoff_path": {"type": "string"},
+                },
+                "required": ["run_id"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_run_finish,
+        ),
+        MCPToolDefinition(
+            name="agent.job.create",
+            description="Create a markdown background agent job in items/agent_jobs/queue.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "title": {"type": "string"},
+                    "prompt": {"type": "string"},
+                    "priority": {"type": "integer", "default": 5},
+                    "created_by": {"type": "string"},
+                    "scope": {"type": "string"},
+                    "expected_output": {"type": "string"},
+                },
+                "required": ["title"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_create,
+        ),
+        MCPToolDefinition(
+            name="agent.job.list",
+            description="List markdown background agent jobs.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "status": {"type": "string", "description": "queue, running, done, or failed."},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_list,
+        ),
+        MCPToolDefinition(
+            name="agent.job.show",
+            description="Show one markdown background agent job.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "job_id": {"type": "string"},
+                },
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_show,
+        ),
+        MCPToolDefinition(
+            name="agent.job.claim",
+            description="Claim a queued markdown background agent job.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "job_id": {"type": "string"},
+                    "agent_name": {"type": "string"},
+                },
+                "required": ["job_id", "agent_name"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_claim,
+        ),
+        MCPToolDefinition(
+            name="agent.job.move",
+            description="Move a markdown background agent job to queue, running, done, or failed.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "job_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "result": {"type": "string"},
+                },
+                "required": ["job_id", "status"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_move,
         ),
         MCPToolDefinition(
             name="review.list",
