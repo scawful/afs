@@ -426,6 +426,30 @@ def test_afs_agent_hooks_override_existing_aliases(tmp_path: Path) -> None:
     assert log.read_text(encoding="utf-8").strip() == "routed"
 
 
+def test_afs_agent_hooks_expose_raw_bypass_functions(tmp_path: Path) -> None:
+    fake_root = tmp_path / "afs-root"
+    (fake_root / "scripts").mkdir(parents=True)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            (
+                f"export AFS_ROOT={shlex.quote(str(fake_root))}; "
+                f"source {shlex.quote(str(AFS_AGENT_HOOKS))} && "
+                "type codex-raw && type claude-raw && type gemini-raw && type hcode-raw && type z3cli-raw"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert "codex-raw is a function" in result.stdout
+    assert "claude-raw is a function" in result.stdout
+
+
 def test_afs_session_notify_has_valid_bash_syntax() -> None:
     result = subprocess.run(
         ["bash", "-n", str(AFS_SESSION_NOTIFY)],

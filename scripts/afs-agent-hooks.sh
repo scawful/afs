@@ -26,6 +26,12 @@ gemini() { "${AFS_ROOT}/scripts/afs-gemini" "$@"; }
 hcode() { "${AFS_ROOT}/scripts/afs-hcode" "$@"; }
 z3cli() { "${AFS_ROOT}/scripts/afs-z3cli" "$@"; }
 
+codex-raw() { command codex "$@"; }
+claude-raw() { command claude "$@"; }
+gemini-raw() { command gemini "$@"; }
+hcode-raw() { command hcode "$@"; }
+z3cli-raw() { command z3cli "$@"; }
+
 afs-agent-hooks-status() {
   printf '%s\n' "AFS agent hooks: enabled"
   printf '  codex -> %s\n' "${AFS_ROOT}/scripts/afs-codex"
@@ -33,9 +39,10 @@ afs-agent-hooks-status() {
   printf '  gemini -> %s\n' "${AFS_ROOT}/scripts/afs-gemini"
   printf '  hcode -> %s\n' "${AFS_ROOT}/scripts/afs-hcode"
   printf '  z3cli -> %s\n' "${AFS_ROOT}/scripts/afs-z3cli"
+  printf '%s\n' "Raw bypasses: codex-raw claude-raw gemini-raw hcode-raw z3cli-raw"
 }
 
 afs-agent-hooks-off() {
-  unset -f codex claude gemini hcode z3cli afs-agent-hooks-status afs-agent-hooks-off 2>/dev/null || true
+  unset -f codex claude gemini hcode z3cli codex-raw claude-raw gemini-raw hcode-raw z3cli-raw afs-agent-hooks-status afs-agent-hooks-off 2>/dev/null || true
   printf '%s\n' "AFS agent hooks disabled for this shell"
 }

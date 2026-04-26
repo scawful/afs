@@ -76,8 +76,11 @@ symlinks.
 `agent-hooks install-shell` adds an idempotent block to the shell profile that
 sources `afs-shell-init.sh` and `afs-agent-hooks.sh`, making normal `codex`,
 `claude`, `gemini`, `hcode`, and `z3cli` commands route through AFS wrappers.
+Raw bypass functions are also exposed: `codex-raw`, `claude-raw`,
+`gemini-raw`, `hcode-raw`, and `z3cli-raw`.
 `agent-hooks install-worker` writes a user LaunchAgent that runs
-`agent-jobs work --loop` for automatic queued-job execution.
+`agent-jobs work --loop` for automatic queued-job execution. The worker skips
+obvious destructive prompts unless the job or worker uses `--allow-destructive`.
 `agent-runs` writes replayable run records under `scratchpad/agent_runs/`.
 `agent-jobs` writes markdown prompt jobs under
 `items/agent_jobs/{queue,running,done,failed}/`.

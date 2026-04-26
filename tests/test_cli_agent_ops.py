@@ -24,15 +24,17 @@ def test_agent_ops_parsers_register() -> None:
     assert finish.ran_command == ["pytest"]
     assert hasattr(finish, "func")
 
-    job = parser.parse_args(["agent-jobs", "create", "Review docs", "--prompt", "scan"])
+    job = parser.parse_args(["agent-jobs", "create", "Review docs", "--prompt", "scan", "--allow-destructive"])
     assert job.command == "agent-jobs"
+    assert job.allow_destructive is True
     assert hasattr(job, "func")
 
-    work = parser.parse_args(["agent-jobs", "work", "--agent", "worker", "--dry-run"])
+    work = parser.parse_args(["agent-jobs", "work", "--agent", "worker", "--dry-run", "--allow-destructive"])
     assert work.command == "agent-jobs"
     assert work.agent == "worker"
     assert work.job_command is None
     assert work.dry_run is True
+    assert work.allow_destructive is True
     assert hasattr(work, "func")
 
 

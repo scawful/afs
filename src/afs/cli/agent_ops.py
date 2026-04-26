@@ -296,6 +296,7 @@ def jobs_create_command(args: argparse.Namespace) -> int:
         created_by=args.created_by or "",
         scope=args.scope or "",
         expected_output=args.expected_output or "",
+        allow_destructive=args.allow_destructive,
     )
     print(json.dumps(job.to_dict(), indent=2) if args.json else job.id)
     return 0
@@ -356,11 +357,12 @@ def jobs_work_command(args: argparse.Namespace) -> int:
             limit=args.limit,
             timeout=args.timeout,
             dry_run=args.dry_run,
+            allow_destructive=args.allow_destructive,
         )
         all_results.extend(result.to_dict() for result in results)
         if args.once or args.dry_run or not args.loop:
             break
-        if not results:
+        if not results or all(result.status == "skipped_destructive" for result in results):
             time.sleep(args.poll_seconds)
             continue
 
@@ -500,6 +502,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     create.add_argument("--prompt-file")
     create.add_argument("--scope")
     create.add_argument("--expected-output")
+    create.add_argument(
+        "--allow-destructive",
+        action="store_true",
+        help="Allow the background worker to run obvious destructive operations for this job.",
+    )
     create.add_argument("--created-by")
     create.add_argument("--priority", type=int, default=5)
     create.add_argument("--json", action="store_true")
@@ -544,6 +551,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     work.add_argument("--workspace", help="Working directory for the command.")
     work.add_argument("--limit", type=int, default=1, help="Maximum jobs to process per pass.")
     work.add_argument("--timeout", type=int, help="Per-job timeout in seconds.")
+    work.add_argument(
+        "--allow-destructive",
+        action="store_true",
+        help="Let this worker run jobs that look explicitly destructive.",
+    )
     work.add_argument("--dry-run", action="store_true", help="Show queued work without claiming jobs.")
     work.add_argument("--once", action="store_true", help="Run one pass and exit.")
     work.add_argument("--loop", action="store_true", help="Poll for jobs until interrupted.")

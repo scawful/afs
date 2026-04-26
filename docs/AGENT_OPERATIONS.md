@@ -32,11 +32,15 @@ directories rather than symlinks.
 that sources `afs-shell-init.sh` and `afs-agent-hooks.sh`. After a new shell,
 normal `codex`, `claude`, `gemini`, `hcode`, and `z3cli` commands route through
 the AFS wrappers. Run `afs-agent-hooks-off` inside a shell to disable the
-functions for that shell.
+functions for that shell. Use `codex-raw`, `claude-raw`, `gemini-raw`,
+`hcode-raw`, or `z3cli-raw` when you want the underlying command directly.
 
 `agent-hooks install-worker` installs a user LaunchAgent for
 `agent-jobs work --loop`, so queued background jobs are claimed and executed
-without a manual worker command.
+without a manual worker command. The worker is intentionally permissive for
+normal repo work, but it skips obvious destructive prompts such as broad deletes,
+history rewrites, force pushes, or data wipes unless the job or worker is
+created with `--allow-destructive`.
 
 MCP:
 

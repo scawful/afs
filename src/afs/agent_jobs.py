@@ -40,6 +40,7 @@ class AgentJob:
     assigned_to: str = ""
     scope: str = ""
     expected_output: str = ""
+    allow_destructive: bool = False
     result: str = ""
     created_at: str = ""
     updated_at: str = ""
@@ -54,6 +55,7 @@ class AgentJob:
             "assigned_to": self.assigned_to,
             "scope": self.scope,
             "expected_output": self.expected_output,
+            "allow_destructive": self.allow_destructive,
             "result": self.result,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -125,6 +127,7 @@ class AgentJobQueue:
             assigned_to=metadata.get("assigned_to", ""),
             scope=metadata.get("scope", ""),
             expected_output=metadata.get("expected_output", ""),
+            allow_destructive=_parse_bool(metadata.get("allow_destructive", "")),
             result=metadata.get("result", ""),
             created_at=metadata.get("created_at", ""),
             updated_at=metadata.get("updated_at", ""),
@@ -139,6 +142,7 @@ class AgentJobQueue:
         created_by: str = "",
         scope: str = "",
         expected_output: str = "",
+        allow_destructive: bool = False,
     ) -> AgentJob:
         now = _now_iso()
         job = AgentJob(
@@ -150,6 +154,7 @@ class AgentJobQueue:
             created_by=created_by,
             scope=scope,
             expected_output=expected_output,
+            allow_destructive=allow_destructive,
             created_at=now,
             updated_at=now,
         )
@@ -209,3 +214,7 @@ class AgentJobQueue:
         if job.status != "queue":
             raise ValueError(f"Cannot claim job in state: {job.status}")
         return self.move(job_id, "running", assigned_to=agent_name)
+
+
+def _parse_bool(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
