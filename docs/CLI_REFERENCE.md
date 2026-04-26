@@ -57,6 +57,7 @@ Also supported once installed into the active environment:
 ./scripts/afs agent-hooks show
 ./scripts/afs agent-hooks install-shell --apply
 ./scripts/afs agent-hooks install-worker --apply --load
+./scripts/afs agent-hooks status --path "$PWD"
 
 run_id="$(./scripts/afs agent-runs start "Fix settings drift" --harness codex)"
 ./scripts/afs agent-runs event "$run_id" verification --summary "pytest passed"
@@ -66,6 +67,10 @@ job_id="$(./scripts/afs agent-jobs create "Review stale instructions" --prompt "
 ./scripts/afs agent-jobs claim "$job_id" --agent reviewer
 ./scripts/afs agent-jobs move "$job_id" done --result "No stale aliases found."
 ./scripts/afs agent-jobs status
+./scripts/afs agent-jobs inbox
+./scripts/afs agent-jobs review "$job_id"
+./scripts/afs agent-jobs promote "$job_id" --to-handoff
+./scripts/afs agent-jobs archive "$job_id"
 ./scripts/afs agent-jobs seed --profile repo-maintenance
 ./scripts/afs agent-jobs work --agent local-worker --command 'codex exec < "$AFS_AGENT_JOB_PROMPT_FILE"'
 ```
@@ -83,14 +88,21 @@ Raw bypass functions are also exposed: `codex-raw`, `claude-raw`,
 `agent-hooks install-worker` writes a user LaunchAgent that runs
 `agent-jobs work --loop` for automatic queued-job execution. The worker skips
 obvious destructive prompts unless the job or worker uses `--allow-destructive`.
+`agent-hooks status --path <workspace>` prints exact next commands for missing
+hook setup, watchdog status, and the agent job review inbox.
 `agent-runs` writes replayable run records under `scratchpad/agent_runs/`.
 `agent-jobs` writes markdown prompt jobs under
-`items/agent_jobs/{queue,running,done,failed}/`.
+`items/agent_jobs/{queue,running,done,failed,archived}/`.
 `agent-jobs status` provides a read-only watchdog summary of queue counts,
 runnable jobs, destructive opt-in blockers, stale running jobs, recent run
 failures, and LaunchAgent state. It exits successfully by default so it can be
 used for visibility without blocking agents; use `--strict` for scripts that
 should fail when watchdog checks need attention.
+`agent-jobs inbox` is the review surface for completed reports, failed jobs,
+stale running jobs, and destructive opt-in blockers. Use `agent-jobs review
+<job-id>` to inspect a job with its linked run record, `agent-jobs promote
+<job-id> --to-handoff` to save a useful result under `scratchpad/handoffs/`, and
+`agent-jobs archive <job-id>` after handling it.
 `agent-jobs seed` idempotently queues safe report-only background jobs. The
 `repo-maintenance` profile creates daily-deduped stale docs/reference, skill
 drift, MCP/tool drift, TODO/FIXME, verification suggestion, and uncommitted
@@ -104,8 +116,8 @@ records an `agent-runs` entry.
 run records. AFS client wrappers start and finish run records automatically
 unless `AFS_CLIENT_RECORD_RUNS=0` is set. MCP exposes the same surfaces through
 `agent.manifest.show`, `agent.run.*`, and `agent.job.*` tools, including
-`agent.job.status` for the watchdog payload and `agent.job.seed` for safe
-maintenance job seeding.
+`agent.job.status` for the watchdog payload, `agent.job.inbox/review/promote/archive`
+for review handling, and `agent.job.seed` for safe maintenance job seeding.
 
 ## Context
 
@@ -305,11 +317,14 @@ around the client process.
 - `AFS_SESSION_QUERY_HINT`
 - `AFS_SESSION_CONTEXT_QUERY_HINT`
 - `AFS_SESSION_INDEX_REBUILD_HINT`
+- `AFS_SESSION_AGENT_JOBS_INBOX_HINT`
 
 Client-session wrappers also call `agent-jobs seed --profile repo-maintenance`
 by default. This queues report-only maintenance jobs with daily dedupe keys and
 skips existing open jobs. Set `AFS_CLIENT_SEED_JOBS=0`, a client-specific
 `AFS_<CLIENT>_SEED_JOBS=0`, or pass `--no-seed-jobs` to disable it.
+They also print the agent job inbox command at startup so completed background
+output has an obvious review path.
 
 ## Training
 

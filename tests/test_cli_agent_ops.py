@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 
 from afs.cli import build_parser
-from afs.cli.agent_ops import register_parsers
+from afs.cli.agent_ops import hooks_status_command, register_parsers
 
 
 def test_agent_ops_parsers_register() -> None:
@@ -71,6 +71,11 @@ def test_agent_ops_parsers_register() -> None:
     assert seed.dry_run is True
     assert hasattr(seed, "func")
 
+    hooks_status = parser.parse_args(["agent-hooks", "status", "--path", "/tmp/repo"])
+    assert hooks_status.command == "agent-hooks"
+    assert hooks_status.path == "/tmp/repo"
+    assert hasattr(hooks_status, "func")
+
 
 def test_build_parser_includes_agent_ops_commands() -> None:
     parser = build_parser()
@@ -92,3 +97,26 @@ def test_build_parser_includes_agent_ops_commands() -> None:
     assert worker.command == "agent-hooks"
     assert worker.apply is True
     assert worker.load is True
+
+
+def test_agent_hooks_status_prints_next_commands(tmp_path, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    profile = tmp_path / ".zshrc"
+
+    rc = hooks_status_command(
+        argparse.Namespace(
+            profile=str(profile),
+            path=str(workspace),
+            label="com.afs.test-missing-worker",
+            json=False,
+        )
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "next_commands:" in output
+    assert "afs agent-hooks install-shell --apply" in output
+    assert f"afs agent-hooks install-worker --path {workspace.resolve()} --apply --load" in output
+    assert f"afs agent-jobs status --path {workspace.resolve()}" in output
+    assert f"afs agent-jobs inbox --path {workspace.resolve()}" in output

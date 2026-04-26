@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -209,11 +210,30 @@ def hooks_install_worker_command(args: argparse.Namespace) -> int:
 
 def hooks_status_command(args: argparse.Namespace) -> int:
     profile = Path(args.profile).expanduser() if args.profile else default_shell_profile()
+    workspace_path = Path(args.path).expanduser().resolve() if args.path else Path.cwd().resolve()
+    quoted_workspace = shlex.quote(str(workspace_path))
+    shell_installed = shell_hooks_installed(profile)
+    worker_installed = worker_launchd_installed(args.label)
+    commands = {
+        "install_shell_hooks": "afs agent-hooks install-shell --apply",
+        "install_worker": f"afs agent-hooks install-worker --path {quoted_workspace} --apply --load",
+        "agent_jobs_status": f"afs agent-jobs status --path {quoted_workspace}",
+        "agent_jobs_inbox": f"afs agent-jobs inbox --path {quoted_workspace}",
+    }
+    next_commands: list[str] = []
+    if not shell_installed:
+        next_commands.append(commands["install_shell_hooks"])
+    if not worker_installed:
+        next_commands.append(commands["install_worker"])
+    next_commands.extend([commands["agent_jobs_status"], commands["agent_jobs_inbox"]])
     payload = {
         "shell_profile": str(profile),
-        "shell_hooks_installed": shell_hooks_installed(profile),
+        "shell_hooks_installed": shell_installed,
         "launchd_label": args.label,
-        "worker_launchd_installed": worker_launchd_installed(args.label),
+        "worker_launchd_installed": worker_installed,
+        "workspace_path": str(workspace_path),
+        "commands": commands,
+        "next_commands": next_commands,
     }
     if args.json:
         print(json.dumps(payload, indent=2))
@@ -222,6 +242,10 @@ def hooks_status_command(args: argparse.Namespace) -> int:
         print(f"shell_hooks_installed: {str(payload['shell_hooks_installed']).lower()}")
         print(f"launchd_label: {payload['launchd_label']}")
         print(f"worker_launchd_installed: {str(payload['worker_launchd_installed']).lower()}")
+        print(f"workspace_path: {payload['workspace_path']}")
+        print("next_commands:")
+        for command in next_commands:
+            print(f"  {command}")
     return 0
 
 
@@ -550,6 +574,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 
     hooks_status = hooks_sub.add_parser("status", help="Show installed hook status.")
     hooks_status.add_argument("--profile", help="Shell profile path. Defaults to ~/.zshrc.")
+    hooks_status.add_argument("--path", help="Workspace path to use in suggested commands.")
     hooks_status.add_argument("--label", default=DEFAULT_WORKER_LABEL)
     hooks_status.add_argument("--json", action="store_true")
     hooks_status.set_defaults(func=hooks_status_command)
