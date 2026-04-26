@@ -926,7 +926,7 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
         recommendations.append("Run `afs agent-manifest validate --check-paths` before editing harness config.")
 
     if agent_jobs.get("total", 0) > 0:
-        recommendations.append("Review `afs agent-jobs list` before spawning background work.")
+        recommendations.append("Review `afs agent-jobs status` before spawning background work.")
 
     if agent_runs.get("recent_count", 0) > 0:
         recommendations.append("Review recent `afs agent-runs list` output for replayable prior agent state.")

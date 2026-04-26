@@ -37,6 +37,12 @@ def test_agent_ops_parsers_register() -> None:
     assert work.allow_destructive is True
     assert hasattr(work, "func")
 
+    status = parser.parse_args(["agent-jobs", "status", "--strict", "--stale-after", "60"])
+    assert status.command == "agent-jobs"
+    assert status.strict is True
+    assert status.stale_after == 60
+    assert hasattr(status, "func")
+
 
 def test_build_parser_includes_agent_ops_commands() -> None:
     parser = build_parser()

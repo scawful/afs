@@ -2595,6 +2595,7 @@ def test_tools_list_includes_agent_tools(tmp_path: Path) -> None:
     assert "agent.spawn" in names
     assert "agent.ps" in names
     assert "agent.stop" in names
+    assert "agent.job.status" in names
 
 
 def test_agent_ps_returns_empty_list(tmp_path: Path) -> None:
@@ -2809,6 +2810,7 @@ def test_hivemind_task_and_agent_logs_tools_use_context_path(tmp_path: Path) -> 
                     "context_path": str(context_path),
                     "title": "MCP queued job",
                     "prompt": "Do it.",
+                    "allow_destructive": True,
                 },
             },
         },
@@ -2817,6 +2819,28 @@ def test_hivemind_task_and_agent_logs_tools_use_context_path(tmp_path: Path) -> 
     assert job_response is not None
     job_payload = job_response["result"]["structuredContent"]
     assert job_payload["status"] == "queue"
+    assert job_payload["allow_destructive"] is True
+
+    job_status_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 742,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.status",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "stale_after_seconds": 60,
+                    "recent_runs": 3,
+                },
+            },
+        },
+        manager,
+    )
+    assert job_status_response is not None
+    job_status_payload = job_status_response["result"]["structuredContent"]
+    assert job_status_payload["counts"]["queue"] == 1
+    assert "watchdog" in job_status_payload
 
     show_job_response = _handle_request(
         {

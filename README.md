@@ -92,6 +92,7 @@ afs agent-hooks install-shell --apply # Route harness commands through AFS wrapp
 afs agent-hooks install-worker --apply --load  # Run queued jobs automatically
 afs agent-runs start "task"           # Record a replayable agent run
 afs agent-jobs create "task"          # Queue a markdown background job
+afs agent-jobs status                 # Queue, worker, run, and watchdog status
 afs agent-jobs work --agent codex --command '...'  # Claim and execute queued jobs
 ```
 

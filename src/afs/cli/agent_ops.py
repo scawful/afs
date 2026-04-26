@@ -21,6 +21,7 @@ from ..agent_hooks import (
     worker_launchd_installed,
 )
 from ..agent_job_worker import run_agent_job_worker
+from ..agent_job_status import build_agent_job_status, format_agent_job_status
 from ..agent_jobs import AgentJobQueue, JOB_STATES
 from ..agent_manifest import (
     default_manifest_path,
@@ -324,6 +325,23 @@ def jobs_show_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def jobs_status_command(args: argparse.Namespace) -> int:
+    context_path = _resolve_context(args)
+    payload = build_agent_job_status(
+        context_path,
+        label=args.label,
+        stale_after_seconds=args.stale_after,
+        recent_runs_limit=args.recent_runs,
+    )
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(format_agent_job_status(payload))
+    if args.strict and not payload["watchdog"]["healthy"]:
+        return 1
+    return 0
+
+
 def jobs_claim_command(args: argparse.Namespace) -> int:
     context_path = _resolve_context(args)
     job = AgentJobQueue(context_path).claim(args.job_id, args.agent)
@@ -522,6 +540,24 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     _add_context_args(show_job)
     show_job.add_argument("job_id")
     show_job.set_defaults(func=jobs_show_command)
+
+    status = jobs_sub.add_parser("status", help="Show queue, worker, run, and watchdog status.")
+    _add_context_args(status)
+    status.add_argument("--label", default=DEFAULT_WORKER_LABEL, help="LaunchAgent label to inspect.")
+    status.add_argument(
+        "--stale-after",
+        type=float,
+        default=3600.0,
+        help="Seconds before a running job is reported as stale.",
+    )
+    status.add_argument("--recent-runs", type=int, default=5, help="Recent run records to include.")
+    status.add_argument(
+        "--strict",
+        action="store_true",
+        help="Return non-zero when watchdog checks need attention.",
+    )
+    status.add_argument("--json", action="store_true")
+    status.set_defaults(func=jobs_status_command)
 
     claim = jobs_sub.add_parser("claim", help="Move a queued job to running.")
     _add_context_args(claim)

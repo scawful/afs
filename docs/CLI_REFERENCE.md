@@ -65,6 +65,7 @@ run_id="$(./scripts/afs agent-runs start "Fix settings drift" --harness codex)"
 job_id="$(./scripts/afs agent-jobs create "Review stale instructions" --prompt "Scan docs and report stale model aliases.")"
 ./scripts/afs agent-jobs claim "$job_id" --agent reviewer
 ./scripts/afs agent-jobs move "$job_id" done --result "No stale aliases found."
+./scripts/afs agent-jobs status
 ./scripts/afs agent-jobs work --agent local-worker --command 'codex exec < "$AFS_AGENT_JOB_PROMPT_FILE"'
 ```
 
@@ -84,6 +85,11 @@ obvious destructive prompts unless the job or worker uses `--allow-destructive`.
 `agent-runs` writes replayable run records under `scratchpad/agent_runs/`.
 `agent-jobs` writes markdown prompt jobs under
 `items/agent_jobs/{queue,running,done,failed}/`.
+`agent-jobs status` provides a read-only watchdog summary of queue counts,
+runnable jobs, destructive opt-in blockers, stale running jobs, recent run
+failures, and LaunchAgent state. It exits successfully by default so it can be
+used for visibility without blocking agents; use `--strict` for scripts that
+should fail when watchdog checks need attention.
 `agent-jobs work` claims queued jobs, runs a local command with
 `AFS_AGENT_JOB_*` environment variables, moves jobs to `done` or `failed`, and
 records an `agent-runs` entry.
@@ -91,7 +97,8 @@ records an `agent-runs` entry.
 `session bootstrap` includes the manifest summary, open agent jobs, and recent
 run records. AFS client wrappers start and finish run records automatically
 unless `AFS_CLIENT_RECORD_RUNS=0` is set. MCP exposes the same surfaces through
-`agent.manifest.show`, `agent.run.*`, and `agent.job.*` tools.
+`agent.manifest.show`, `agent.run.*`, and `agent.job.*` tools, including
+`agent.job.status` for the watchdog payload.
 
 ## Context
 

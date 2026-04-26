@@ -83,15 +83,31 @@ job_id="$(./scripts/afs agent-jobs create "Review stale instructions" --prompt "
 ./scripts/afs agent-jobs claim "$job_id" --agent reviewer
 ./scripts/afs agent-jobs move "$job_id" done --result "No stale aliases found."
 ./scripts/afs agent-jobs list
+./scripts/afs agent-jobs status
 ./scripts/afs agent-jobs work --agent local-worker --command 'codex exec < "$AFS_AGENT_JOB_PROMPT_FILE"'
 ```
 
 Use jobs for background work whose output is independently useful. Each job should include a concrete prompt, scope, and expected output.
 
+Use `agent-jobs status` for a read-only queue and worker watchdog view. It shows
+queue counts, runnable jobs, destructive opt-in blockers, stale running jobs,
+recent run failures, and LaunchAgent state. The default command reports issues
+without blocking automation; add `--strict` when a script should fail on
+watchdog warnings.
+
 The worker command claims queued jobs, writes the prompt to
 `scratchpad/agent_job_prompts/`, runs the configured local command with
 `AFS_AGENT_JOB_ID`, `AFS_AGENT_JOB_PROMPT_FILE`, and `AFS_AGENT_RUN_ID` in the
 environment, then records both job status and an agent run.
+
+MCP:
+
+- `agent.job.create`
+- `agent.job.status`
+- `agent.job.list`
+- `agent.job.show`
+- `agent.job.claim`
+- `agent.job.move`
 
 Harness wrappers:
 

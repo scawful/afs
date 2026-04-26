@@ -1152,8 +1152,29 @@ def _tool_agent_job_create(arguments: dict[str, Any], manager: AFSManager) -> di
         created_by=str(arguments.get("created_by", "") or "").strip(),
         scope=str(arguments.get("scope", "") or "").strip(),
         expected_output=str(arguments.get("expected_output", "") or "").strip(),
+        allow_destructive=bool(arguments.get("allow_destructive", False)),
     )
     return job.to_dict()
+
+
+def _tool_agent_job_status(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_job_status import build_agent_job_status
+
+    context_path = _resolve_context_path(arguments, manager)
+    stale_after_raw = arguments.get("stale_after_seconds", 3600.0)
+    stale_after = (
+        float(stale_after_raw)
+        if isinstance(stale_after_raw, (int, float))
+        else 3600.0
+    )
+    recent_runs = _coerce_int(arguments.get("recent_runs"), default=5, minimum=0, maximum=50)
+    label = str(arguments.get("label", "") or "").strip() or "com.afs.agent-jobs"
+    return build_agent_job_status(
+        context_path,
+        label=label,
+        stale_after_seconds=stale_after,
+        recent_runs_limit=recent_runs,
+    )
 
 
 def _tool_agent_job_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
@@ -2502,11 +2523,27 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                     "created_by": {"type": "string"},
                     "scope": {"type": "string"},
                     "expected_output": {"type": "string"},
+                    "allow_destructive": {"type": "boolean", "default": False},
                 },
                 "required": ["title"],
                 "additionalProperties": False,
             },
             handler=_tool_agent_job_create,
+        ),
+        MCPToolDefinition(
+            name="agent.job.status",
+            description="Show background job queue, worker, recent run, and watchdog status.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "label": {"type": "string", "default": "com.afs.agent-jobs"},
+                    "stale_after_seconds": {"type": "number", "default": 3600},
+                    "recent_runs": {"type": "integer", "default": 5},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_status,
         ),
         MCPToolDefinition(
             name="agent.job.list",
