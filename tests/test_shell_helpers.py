@@ -10,6 +10,7 @@ from pathlib import Path
 SHELL_INIT = Path(__file__).parent.parent / "scripts" / "afs-shell-init.sh"
 AFS_CHECK = Path(__file__).parent.parent / "scripts" / "afs-check"
 AFS_CLIENT_SESSION = Path(__file__).parent.parent / "scripts" / "afs-client-session"
+AFS_AGENT_HOOKS = Path(__file__).parent.parent / "scripts" / "afs-agent-hooks.sh"
 AFS_SESSION_NOTIFY = Path(__file__).parent.parent / "scripts" / "afs-session-notify"
 AFS_SESSION_VERIFY = Path(__file__).parent.parent / "scripts" / "afs-session-verify"
 
@@ -341,6 +342,88 @@ def test_afs_client_session_has_valid_bash_syntax() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_afs_agent_hooks_has_valid_bash_syntax() -> None:
+    result = subprocess.run(
+        ["bash", "-n", str(AFS_AGENT_HOOKS)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_afs_agent_hooks_route_harness_commands(tmp_path: Path) -> None:
+    fake_root = tmp_path / "afs-root"
+    scripts = fake_root / "scripts"
+    scripts.mkdir(parents=True)
+    log = tmp_path / "hook-log.txt"
+    for name in ("afs-codex", "afs-claude", "afs-gemini", "afs-hcode", "afs-z3cli"):
+        target = scripts / name
+        target.write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf '%s %s\\n' {shlex.quote(name)} \"$*\" >> {shlex.quote(str(log))}\n",
+            encoding="utf-8",
+        )
+        target.chmod(target.stat().st_mode | stat.S_IXUSR)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            (
+                f"export AFS_ROOT={shlex.quote(str(fake_root))}; "
+                f"source {shlex.quote(str(AFS_AGENT_HOOKS))} && "
+                "codex one && claude two && gemini three && hcode four && z3cli five"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "afs-codex one",
+        "afs-claude two",
+        "afs-gemini three",
+        "afs-hcode four",
+        "afs-z3cli five",
+    ]
+
+
+def test_afs_agent_hooks_override_existing_aliases(tmp_path: Path) -> None:
+    fake_root = tmp_path / "afs-root"
+    scripts = fake_root / "scripts"
+    scripts.mkdir(parents=True)
+    log = tmp_path / "hook-log.txt"
+    target = scripts / "afs-claude"
+    target.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' \"$*\" > {shlex.quote(str(log))}\n",
+        encoding="utf-8",
+    )
+    target.chmod(target.stat().st_mode | stat.S_IXUSR)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            (
+                "alias claude=claude-smart; "
+                f"export AFS_ROOT={shlex.quote(str(fake_root))}; "
+                f"source {shlex.quote(str(AFS_AGENT_HOOKS))} && "
+                "claude routed"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert log.read_text(encoding="utf-8").strip() == "routed"
 
 
 def test_afs_session_notify_has_valid_bash_syntax() -> None:

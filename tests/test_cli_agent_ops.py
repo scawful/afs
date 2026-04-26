@@ -46,3 +46,13 @@ def test_build_parser_includes_agent_ops_commands() -> None:
     assert sync.command == "agent-manifest"
     assert sync.apply is True
     assert sync.harness == ["claude"]
+
+    hooks = parser.parse_args(["agent-hooks", "install-shell", "--apply"])
+    assert hooks.command == "agent-hooks"
+    assert hooks.apply is True
+    assert hasattr(hooks, "func")
+
+    worker = parser.parse_args(["agent-hooks", "install-worker", "--apply", "--load"])
+    assert worker.command == "agent-hooks"
+    assert worker.apply is True
+    assert worker.load is True

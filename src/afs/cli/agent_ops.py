@@ -10,6 +10,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..agent_hooks import (
+    DEFAULT_WORKER_LABEL,
+    default_shell_profile,
+    install_shell_profile_hooks,
+    install_worker_launchd,
+    render_launchd_plist,
+    render_shell_profile_block,
+    shell_hooks_installed,
+    worker_launchd_installed,
+)
 from ..agent_job_worker import run_agent_job_worker
 from ..agent_jobs import AgentJobQueue, JOB_STATES
 from ..agent_manifest import (
@@ -36,6 +46,10 @@ def _add_context_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--path", help="Project path.")
     parser.add_argument("--context-root", help="Context root override.")
     parser.add_argument("--context-dir", help="Context directory name.")
+
+
+def _default_afs_root() -> Path:
+    return Path(__file__).resolve().parents[3]
 
 
 def _read_text_arg(value: str | None, file_value: str | None) -> str:
@@ -119,6 +133,86 @@ def manifest_sync_command(args: argparse.Namespace) -> int:
                 f"{action.status}\t{action.action}\t{action.harness}\t{action.target}"
             )
     return 1 if any(action.status == "error" for action in actions) else 0
+
+
+def hooks_show_command(args: argparse.Namespace) -> int:
+    afs_root = Path(args.afs_root).expanduser() if args.afs_root else _default_afs_root()
+    context_path = Path(args.path).expanduser() if args.path else afs_root
+    if args.kind == "launchd":
+        payload = render_launchd_plist(
+            afs_root=afs_root,
+            context_path=context_path,
+            agent_name=args.agent,
+            command=args.job_command,
+            poll_seconds=args.poll_seconds,
+            label=args.label,
+        )
+        print(payload.decode("utf-8"), end="")
+    else:
+        print(render_shell_profile_block(afs_root), end="")
+    return 0
+
+
+def hooks_install_shell_command(args: argparse.Namespace) -> int:
+    afs_root = Path(args.afs_root).expanduser() if args.afs_root else _default_afs_root()
+    profile = Path(args.profile).expanduser() if args.profile else default_shell_profile()
+    result = install_shell_profile_hooks(
+        afs_root=afs_root,
+        profile_path=profile,
+        apply=args.apply,
+    )
+    payload = result.to_dict()
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        mode = "applied" if result.applied else "planned"
+        print(f"{mode}: {result.target}")
+        print(f"changed: {str(result.changed).lower()}")
+        print(result.message)
+    return 0
+
+
+def hooks_install_worker_command(args: argparse.Namespace) -> int:
+    afs_root = Path(args.afs_root).expanduser() if args.afs_root else _default_afs_root()
+    context_path = Path(args.path).expanduser() if args.path else afs_root
+    result = install_worker_launchd(
+        afs_root=afs_root,
+        context_path=context_path,
+        agent_name=args.agent,
+        command=args.job_command,
+        poll_seconds=args.poll_seconds,
+        label=args.label,
+        apply=args.apply,
+        load=args.load,
+    )
+    payload = result.to_dict()
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        mode = "applied" if result.applied or result.loaded else "planned"
+        print(f"{mode}: {result.target}")
+        print(f"changed: {str(result.changed).lower()}")
+        print(f"loaded: {str(result.loaded).lower()}")
+        print(result.message)
+    return 0
+
+
+def hooks_status_command(args: argparse.Namespace) -> int:
+    profile = Path(args.profile).expanduser() if args.profile else default_shell_profile()
+    payload = {
+        "shell_profile": str(profile),
+        "shell_hooks_installed": shell_hooks_installed(profile),
+        "launchd_label": args.label,
+        "worker_launchd_installed": worker_launchd_installed(args.label),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"shell_profile: {payload['shell_profile']}")
+        print(f"shell_hooks_installed: {str(payload['shell_hooks_installed']).lower()}")
+        print(f"launchd_label: {payload['launchd_label']}")
+        print(f"worker_launchd_installed: {str(payload['worker_launchd_installed']).lower()}")
+    return 0
 
 
 def runs_start_command(args: argparse.Namespace) -> int:
@@ -311,6 +405,44 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     sync.add_argument("--no-exports", action="store_true", help="Skip per-harness manifest exports.")
     sync.add_argument("--json", action="store_true", help="Output JSON.")
     sync.set_defaults(func=manifest_sync_command)
+
+    hooks = subparsers.add_parser("agent-hooks", help="Install shell and background hooks for agent harnesses.")
+    hooks_sub = hooks.add_subparsers(dest="agent_hooks_command")
+
+    hooks_show = hooks_sub.add_parser("show", help="Render hook content without installing.")
+    hooks_show.add_argument("--kind", choices=["shell", "launchd"], default="shell")
+    hooks_show.add_argument("--afs-root", help="AFS repo root.")
+    hooks_show.add_argument("--path", help="Context/project path for the worker.")
+    hooks_show.add_argument("--agent", default="local-worker", help="Worker agent name.")
+    hooks_show.add_argument("--command", dest="job_command", help="Worker shell command.")
+    hooks_show.add_argument("--poll-seconds", type=float, default=30.0)
+    hooks_show.add_argument("--label", default=DEFAULT_WORKER_LABEL)
+    hooks_show.set_defaults(func=hooks_show_command)
+
+    install_shell = hooks_sub.add_parser("install-shell", help="Install shell profile hooks.")
+    install_shell.add_argument("--afs-root", help="AFS repo root.")
+    install_shell.add_argument("--profile", help="Shell profile path. Defaults to ~/.zshrc.")
+    install_shell.add_argument("--apply", action="store_true", help="Write the profile block.")
+    install_shell.add_argument("--json", action="store_true")
+    install_shell.set_defaults(func=hooks_install_shell_command)
+
+    install_worker = hooks_sub.add_parser("install-worker", help="Install a launchd agent-jobs worker.")
+    install_worker.add_argument("--afs-root", help="AFS repo root.")
+    install_worker.add_argument("--path", help="Context/project path for queued jobs.")
+    install_worker.add_argument("--agent", default="local-worker", help="Worker agent name.")
+    install_worker.add_argument("--command", dest="job_command", help="Worker shell command.")
+    install_worker.add_argument("--poll-seconds", type=float, default=30.0)
+    install_worker.add_argument("--label", default=DEFAULT_WORKER_LABEL)
+    install_worker.add_argument("--apply", action="store_true", help="Write the LaunchAgent plist.")
+    install_worker.add_argument("--load", action="store_true", help="Load the LaunchAgent with launchctl.")
+    install_worker.add_argument("--json", action="store_true")
+    install_worker.set_defaults(func=hooks_install_worker_command)
+
+    hooks_status = hooks_sub.add_parser("status", help="Show installed hook status.")
+    hooks_status.add_argument("--profile", help="Shell profile path. Defaults to ~/.zshrc.")
+    hooks_status.add_argument("--label", default=DEFAULT_WORKER_LABEL)
+    hooks_status.add_argument("--json", action="store_true")
+    hooks_status.set_defaults(func=hooks_status_command)
 
     runs = subparsers.add_parser("agent-runs", help="Record and inspect agent run records.")
     runs_sub = runs.add_subparsers(dest="agent_runs_command")

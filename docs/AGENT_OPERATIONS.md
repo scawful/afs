@@ -18,6 +18,8 @@ These surfaces are visible in:
 ./scripts/afs agent-manifest validate
 ./scripts/afs agent-manifest export codex
 ./scripts/afs agent-manifest sync --apply
+./scripts/afs agent-hooks install-shell --apply
+./scripts/afs agent-hooks install-worker --apply --load
 ```
 
 Use this before editing Codex, Claude, Gemini, hcode, or z3cli-specific config. Harness-specific files can still exist, but they should point back to this manifest or derive their local view from it.
@@ -25,6 +27,16 @@ Use this before editing Codex, Claude, Gemini, hcode, or z3cli-specific config. 
 `sync` copies manifest-declared shared skill directories into harness skill
 roots and writes per-harness JSON export files. It deliberately uses copied
 directories rather than symlinks.
+
+`agent-hooks install-shell` adds a marked, idempotent block to the shell profile
+that sources `afs-shell-init.sh` and `afs-agent-hooks.sh`. After a new shell,
+normal `codex`, `claude`, `gemini`, `hcode`, and `z3cli` commands route through
+the AFS wrappers. Run `afs-agent-hooks-off` inside a shell to disable the
+functions for that shell.
+
+`agent-hooks install-worker` installs a user LaunchAgent for
+`agent-jobs work --loop`, so queued background jobs are claimed and executed
+without a manual worker command.
 
 MCP:
 

@@ -88,6 +88,8 @@ afs agents run <name> [--prompt ...]  # Run an agent
 afs agents capabilities               # Agent capability matrix
 afs agent-manifest validate           # Validate harness/skill/MCP manifest
 afs agent-manifest sync --apply       # Copy shared skills and write harness exports
+afs agent-hooks install-shell --apply # Route harness commands through AFS wrappers
+afs agent-hooks install-worker --apply --load  # Run queued jobs automatically
 afs agent-runs start "task"           # Record a replayable agent run
 afs agent-jobs create "task"          # Queue a markdown background job
 afs agent-jobs work --agent codex --command '...'  # Claim and execute queued jobs

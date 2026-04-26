@@ -54,6 +54,10 @@ Also supported once installed into the active environment:
 ./scripts/afs agent-manifest export codex
 ./scripts/afs agent-manifest sync --apply
 
+./scripts/afs agent-hooks show
+./scripts/afs agent-hooks install-shell --apply
+./scripts/afs agent-hooks install-worker --apply --load
+
 run_id="$(./scripts/afs agent-runs start "Fix settings drift" --harness codex)"
 ./scripts/afs agent-runs event "$run_id" verification --summary "pytest passed"
 ./scripts/afs agent-runs finish "$run_id" --summary "patched" --verify "pytest=passed"
@@ -69,6 +73,11 @@ truth for harnesses, shared skills, MCP servers, and startup hints.
 `agent-manifest sync` copies manifest-declared shared skills into harness skill
 roots and writes per-harness export JSON. It uses real copied directories, not
 symlinks.
+`agent-hooks install-shell` adds an idempotent block to the shell profile that
+sources `afs-shell-init.sh` and `afs-agent-hooks.sh`, making normal `codex`,
+`claude`, `gemini`, `hcode`, and `z3cli` commands route through AFS wrappers.
+`agent-hooks install-worker` writes a user LaunchAgent that runs
+`agent-jobs work --loop` for automatic queued-job execution.
 `agent-runs` writes replayable run records under `scratchpad/agent_runs/`.
 `agent-jobs` writes markdown prompt jobs under
 `items/agent_jobs/{queue,running,done,failed}/`.
