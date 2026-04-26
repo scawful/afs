@@ -186,6 +186,7 @@ def _build_cli_hints(
     summary = bootstrap_state or {}
     status = summary.get("status") or {}
     index_state = status.get("index") or {}
+    agent_jobs = summary.get("agent_jobs") or {}
     stale_mounts = [str(value).strip() for value in (summary.get("stale_mounts") or []) if str(value).strip()]
 
     if bool(index_state.get("enabled")) and (
@@ -198,12 +199,17 @@ def _build_cli_hints(
         notes.append(
             "Bootstrap reported low-freshness mounts; prefer recent scratchpad/history context over older summaries."
         )
+    if int(agent_jobs.get("inbox_attention_count", 0) or 0) > 0:
+        notes.append(
+            "Agent job inbox has background output to review before starting more work."
+        )
 
     return {
         "workspace_path": str(resolved_workspace),
         "query_shortcut": f"afs query <text> --path {quoted_workspace}",
         "query_canonical": f"afs context query <text> --path {quoted_workspace}",
         "index_rebuild": f"afs index rebuild --path {quoted_workspace}",
+        "agent_jobs_inbox": f"afs agent-jobs inbox --path {quoted_workspace}",
         "notes": notes,
     }
 

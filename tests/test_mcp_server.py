@@ -2597,6 +2597,10 @@ def test_tools_list_includes_agent_tools(tmp_path: Path) -> None:
     assert "agent.stop" in names
     assert "agent.job.status" in names
     assert "agent.job.seed" in names
+    assert "agent.job.inbox" in names
+    assert "agent.job.review" in names
+    assert "agent.job.archive" in names
+    assert "agent.job.promote" in names
 
 
 def test_agent_ps_returns_empty_list(tmp_path: Path) -> None:
@@ -2900,6 +2904,99 @@ def test_hivemind_task_and_agent_logs_tools_use_context_path(tmp_path: Path) -> 
     )
     assert claim_response is not None
     assert claim_response["result"]["structuredContent"]["status"] == "running"
+
+    move_job_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 751,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.move",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "job_id": job_payload["id"],
+                    "status": "done",
+                    "result": "done via MCP",
+                },
+            },
+        },
+        manager,
+    )
+    assert move_job_response is not None
+    assert move_job_response["result"]["structuredContent"]["status"] == "done"
+
+    inbox_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 752,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.inbox",
+                "arguments": {"context_path": str(context_path)},
+            },
+        },
+        manager,
+    )
+    assert inbox_response is not None
+    inbox_payload = inbox_response["result"]["structuredContent"]
+    assert inbox_payload["attention_count"] == 1
+    assert "afs agent-jobs inbox" in inbox_payload["command"]
+
+    review_job_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 753,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.review",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "job_id": job_payload["id"],
+                },
+            },
+        },
+        manager,
+    )
+    assert review_job_response is not None
+    assert review_job_response["result"]["structuredContent"]["job"]["result"] == "done via MCP"
+
+    promote_job_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 754,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.promote",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "job_id": job_payload["id"],
+                    "handoff_name": "mcp-job.md",
+                },
+            },
+        },
+        manager,
+    )
+    assert promote_job_response is not None
+    handoff_path = Path(promote_job_response["result"]["structuredContent"]["path"])
+    assert handoff_path.exists()
+
+    archive_job_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 755,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.archive",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "job_id": job_payload["id"],
+                },
+            },
+        },
+        manager,
+    )
+    assert archive_job_response is not None
+    assert archive_job_response["result"]["structuredContent"]["status"] == "archived"
 
     logs_response = _handle_request(
         {

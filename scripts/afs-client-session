@@ -326,6 +326,7 @@ cli_hints = payload.get("cli_hints") or {}
 print(cli_hints.get("query_shortcut", ""))
 print(cli_hints.get("query_canonical", ""))
 print(cli_hints.get("index_rebuild", ""))
+print(cli_hints.get("agent_jobs_inbox", ""))
 print(cli_hints.get("verify_plan", ""))
 print(cli_hints.get("verify_run", ""))
 structured = payload.get("structured_guidance") or {}
@@ -347,11 +348,12 @@ print(" | ".join(str(item) for item in repair_loop if str(item).strip()))
   export AFS_SESSION_QUERY_HINT="${bootstrap_fields[9]:-}"
   export AFS_SESSION_CONTEXT_QUERY_HINT="${bootstrap_fields[10]:-}"
   export AFS_SESSION_INDEX_REBUILD_HINT="${bootstrap_fields[11]:-}"
-  export AFS_SESSION_VERIFY_PLAN_HINT="${bootstrap_fields[12]:-}"
-  export AFS_SESSION_VERIFY_RUN_HINT="${bootstrap_fields[13]:-}"
-  export AFS_SESSION_RECOMMENDED_SCHEMA="${bootstrap_fields[14]:-}"
-  export AFS_SESSION_FOLLOWUP_SCHEMA="${bootstrap_fields[15]:-}"
-  export AFS_SESSION_REPAIR_LOOP_HINT="${bootstrap_fields[16]:-}"
+  export AFS_SESSION_AGENT_JOBS_INBOX_HINT="${bootstrap_fields[12]:-}"
+  export AFS_SESSION_VERIFY_PLAN_HINT="${bootstrap_fields[13]:-}"
+  export AFS_SESSION_VERIFY_RUN_HINT="${bootstrap_fields[14]:-}"
+  export AFS_SESSION_RECOMMENDED_SCHEMA="${bootstrap_fields[15]:-}"
+  export AFS_SESSION_FOLLOWUP_SCHEMA="${bootstrap_fields[16]:-}"
+  export AFS_SESSION_REPAIR_LOOP_HINT="${bootstrap_fields[17]:-}"
 fi
 
 if [ -n "${AFS_SESSION_BOOTSTRAP_MARKDOWN:-}" ]; then
@@ -368,6 +370,9 @@ if [ -n "${AFS_SESSION_SYSTEM_PROMPT_TEXT:-}" ]; then
 fi
 if [ -n "${AFS_SESSION_CLIENT_PAYLOAD_JSON:-}" ]; then
   echo "AFS session payload (${CLIENT_LABEL}): ${AFS_SESSION_CLIENT_PAYLOAD_JSON}" >&2
+fi
+if [ -n "${AFS_SESSION_AGENT_JOBS_INBOX_HINT:-}" ]; then
+  echo "AFS agent jobs inbox (${CLIENT_LABEL}): ${AFS_SESSION_AGENT_JOBS_INBOX_HINT}" >&2
 fi
 if [ -n "${AFS_SESSION_QUERY_HINT:-}" ]; then
   echo "AFS query hint (${CLIENT_LABEL}): ${AFS_SESSION_QUERY_HINT}" >&2

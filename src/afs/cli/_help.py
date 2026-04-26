@@ -168,6 +168,7 @@ def render_default_help(parser: argparse.ArgumentParser, config: AFSConfig | Non
                 _cmd("afs status"),
                 _cmd("afs session bootstrap"),
                 _cmd("afs agent-jobs status"),
+                _cmd("afs agent-jobs inbox"),
                 _cmd("afs doctor"),
                 _cmd(
                     f"afs init --context-root {_format_path(context_root)} --workspace-name {workspace_label}"

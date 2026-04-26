@@ -1171,6 +1171,8 @@ def session_prepare_client_command(args: argparse.Namespace) -> int:
         print(f"canonical_query_hint: {cli_hints['query_canonical']}")
     if cli_hints.get("index_rebuild"):
         print(f"index_hint: {cli_hints['index_rebuild']}")
+    if cli_hints.get("agent_jobs_inbox"):
+        print(f"agent_jobs_inbox_hint: {cli_hints['agent_jobs_inbox']}")
     if cli_hints.get("verify_plan"):
         print(f"verify_plan_hint: {cli_hints['verify_plan']}")
     if cli_hints.get("verify_run"):

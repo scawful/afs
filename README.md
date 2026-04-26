@@ -93,6 +93,10 @@ afs agent-hooks install-worker --apply --load  # Run queued jobs automatically
 afs agent-runs start "task"           # Record a replayable agent run
 afs agent-jobs create "task"          # Queue a markdown background job
 afs agent-jobs status                 # Queue, worker, run, and watchdog status
+afs agent-jobs inbox                  # Review completed, failed, stale, or blocked jobs
+afs agent-jobs review <job-id>        # Inspect one job and its linked run record
+afs agent-jobs promote <job-id> --to-handoff  # Save a job review into scratchpad/handoffs
+afs agent-jobs archive <job-id>       # Archive a handled job without deleting it
 afs agent-jobs seed                   # Idempotently queue safe maintenance jobs
 afs agent-jobs work --agent codex --command '...'  # Claim and execute queued jobs
 ```

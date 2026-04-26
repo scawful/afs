@@ -20,10 +20,18 @@ from ..agent_hooks import (
     shell_hooks_installed,
     worker_launchd_installed,
 )
-from ..agent_job_worker import run_agent_job_worker
+from ..agent_job_inbox import (
+    archive_agent_job,
+    build_agent_job_inbox,
+    format_agent_job_inbox,
+    format_agent_job_review,
+    promote_agent_job_to_handoff,
+    review_agent_job,
+)
 from ..agent_job_seeds import SEED_CADENCES, SEED_PROFILES, seed_agent_jobs
 from ..agent_job_status import build_agent_job_status, format_agent_job_status
-from ..agent_jobs import AgentJobQueue, JOB_STATES
+from ..agent_job_worker import run_agent_job_worker
+from ..agent_jobs import JOB_STATES, AgentJobQueue
 from ..agent_manifest import (
     default_manifest_path,
     export_for_harness,
@@ -343,6 +351,59 @@ def jobs_status_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def jobs_inbox_command(args: argparse.Namespace) -> int:
+    context_path = _resolve_context(args)
+    payload = build_agent_job_inbox(
+        context_path,
+        stale_after_seconds=args.stale_after,
+        limit=args.limit,
+    )
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(format_agent_job_inbox(payload))
+    if args.strict and payload["attention_count"] > 0:
+        return 1
+    return 0
+
+
+def jobs_review_command(args: argparse.Namespace) -> int:
+    context_path = _resolve_context(args)
+    payload = review_agent_job(context_path, args.job_id)
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(format_agent_job_review(payload))
+    return 0
+
+
+def jobs_archive_command(args: argparse.Namespace) -> int:
+    context_path = _resolve_context(args)
+    job = archive_agent_job(context_path, args.job_id)
+    print(json.dumps(job.to_dict(), indent=2) if args.json else f"archived: {job.id}")
+    return 0
+
+
+def jobs_promote_command(args: argparse.Namespace) -> int:
+    context_path = _resolve_context(args)
+    if not args.to_handoff:
+        raise ValueError("provide --to-handoff")
+    payload = promote_agent_job_to_handoff(
+        context_path,
+        args.job_id,
+        handoff_name=args.handoff_name or "",
+    )
+    if args.archive:
+        payload["archived"] = archive_agent_job(context_path, args.job_id).to_dict()
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"handoff: {payload['path']}")
+        if args.archive:
+            print(f"archived: {args.job_id}")
+    return 0
+
+
 def jobs_seed_command(args: argparse.Namespace) -> int:
     context_path = _resolve_context(args)
     payload = seed_agent_jobs(
@@ -588,6 +649,44 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=jobs_status_command)
 
+    inbox = jobs_sub.add_parser("inbox", help="Show completed, failed, stale, or blocked jobs needing review.")
+    _add_context_args(inbox)
+    inbox.add_argument(
+        "--stale-after",
+        type=float,
+        default=3600.0,
+        help="Seconds before a running job is reported as stale.",
+    )
+    inbox.add_argument("--limit", type=int, default=20, help="Items per inbox section.")
+    inbox.add_argument(
+        "--strict",
+        action="store_true",
+        help="Return non-zero when the inbox has items needing attention.",
+    )
+    inbox.add_argument("--json", action="store_true")
+    inbox.set_defaults(func=jobs_inbox_command)
+
+    review = jobs_sub.add_parser("review", help="Review a completed, failed, stale, or blocked job.")
+    _add_context_args(review)
+    review.add_argument("job_id")
+    review.add_argument("--json", action="store_true")
+    review.set_defaults(func=jobs_review_command)
+
+    archive = jobs_sub.add_parser("archive", help="Archive a job without deleting its markdown record.")
+    _add_context_args(archive)
+    archive.add_argument("job_id")
+    archive.add_argument("--json", action="store_true")
+    archive.set_defaults(func=jobs_archive_command)
+
+    promote = jobs_sub.add_parser("promote", help="Promote a job review packet into scratchpad/handoffs.")
+    _add_context_args(promote)
+    promote.add_argument("job_id")
+    promote.add_argument("--to-handoff", action="store_true", help="Write a handoff markdown file.")
+    promote.add_argument("--handoff-name", help="Optional handoff filename.")
+    promote.add_argument("--archive", action="store_true", help="Archive the job after writing the handoff.")
+    promote.add_argument("--json", action="store_true")
+    promote.set_defaults(func=jobs_promote_command)
+
     seed = jobs_sub.add_parser("seed", help="Idempotently queue safe background maintenance jobs.")
     _add_context_args(seed)
     seed.add_argument("--profile", choices=sorted(SEED_PROFILES), default="repo-maintenance")
@@ -606,7 +705,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     claim.add_argument("--json", action="store_true")
     claim.set_defaults(func=jobs_claim_command)
 
-    move = jobs_sub.add_parser("move", help="Move a job to queue, running, done, or failed.")
+    move = jobs_sub.add_parser("move", help="Move a job to queue, running, done, failed, or archived.")
     _add_context_args(move)
     move.add_argument("job_id")
     move.add_argument("status", choices=JOB_STATES)

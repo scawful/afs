@@ -87,6 +87,7 @@ def _write_fake_afs_cli(
                 "query_shortcut": f"afs query <text> --path {workspace_path}",
                 "query_canonical": f"afs context query <text> --path {workspace_path}",
                 "index_rebuild": f"afs index rebuild --path {workspace_path}",
+                "agent_jobs_inbox": f"afs agent-jobs inbox --path {workspace_path}",
                 "verify_plan": f"afs verify plan --payload-file {payload_json} --json",
                 "verify_run": f"afs verify run --payload-file {payload_json} --json",
                 "notes": [],
@@ -165,6 +166,7 @@ def _write_fake_client(path: Path, log_path: Path) -> Path:
         "    'AFS_SESSION_QUERY_HINT': os.environ.get('AFS_SESSION_QUERY_HINT'),\n"
         "    'AFS_SESSION_CONTEXT_QUERY_HINT': os.environ.get('AFS_SESSION_CONTEXT_QUERY_HINT'),\n"
         "    'AFS_SESSION_INDEX_REBUILD_HINT': os.environ.get('AFS_SESSION_INDEX_REBUILD_HINT'),\n"
+        "    'AFS_SESSION_AGENT_JOBS_INBOX_HINT': os.environ.get('AFS_SESSION_AGENT_JOBS_INBOX_HINT'),\n"
         "    'AFS_SESSION_VERIFY_PLAN_HINT': os.environ.get('AFS_SESSION_VERIFY_PLAN_HINT'),\n"
         "    'AFS_SESSION_VERIFY_RUN_HINT': os.environ.get('AFS_SESSION_VERIFY_RUN_HINT'),\n"
         "    'AFS_SESSION_RECOMMENDED_SCHEMA': os.environ.get('AFS_SESSION_RECOMMENDED_SCHEMA'),\n"
@@ -304,6 +306,7 @@ def _run_client_session(
     payload["_afs_calls"] = afs_log.read_text(encoding="utf-8").splitlines() if afs_log.exists() else []
     payload["_workspace"] = str(workspace)
     payload["_returncode"] = result.returncode
+    payload["_stderr"] = result.stderr
     return payload
 
 
@@ -760,6 +763,11 @@ def test_afs_client_session_uses_client_specific_allowed_roots(tmp_path: Path) -
         == f"afs context query <text> --path {payload['_workspace']}"
     )
     assert payload["AFS_SESSION_INDEX_REBUILD_HINT"] == f"afs index rebuild --path {payload['_workspace']}"
+    assert (
+        payload["AFS_SESSION_AGENT_JOBS_INBOX_HINT"]
+        == f"afs agent-jobs inbox --path {payload['_workspace']}"
+    )
+    assert f"AFS agent jobs inbox (gemini): afs agent-jobs inbox --path {payload['_workspace']}" in payload["_stderr"]
     assert (
         payload["AFS_SESSION_VERIFY_PLAN_HINT"]
         == f"afs verify plan --payload-file {payload['AFS_SESSION_CLIENT_PAYLOAD_JSON']} --json"

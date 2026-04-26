@@ -180,7 +180,7 @@ def run_agent_job_worker(
             )
             status = "done" if completed.returncode == 0 else "failed"
             result_text = _tail(completed.stdout or completed.stderr or f"exit code {completed.returncode}")
-            queue.move(claimed.id, status, result=result_text)
+            queue.move(claimed.id, status, result=result_text, run_id=run.id)
             run_store.finish(
                 run.id,
                 status=status,
@@ -208,7 +208,7 @@ def run_agent_job_worker(
             runnable_processed += 1
         except Exception as exc:
             result_text = str(exc)
-            queue.move(claimed.id, "failed", result=result_text)
+            queue.move(claimed.id, "failed", result=result_text, run_id=run.id)
             run_store.finish(
                 run.id,
                 status="failed",

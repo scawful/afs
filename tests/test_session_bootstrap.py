@@ -5,14 +5,14 @@ from argparse import Namespace
 from pathlib import Path
 
 import afs.cli.core as cli_core_module
+from afs.agent_jobs import AgentJobQueue
+from afs.agent_runs import AgentRunStore
 from afs.cli.core import session_bootstrap_command
 from afs.context_index import ContextSQLiteIndex
 from afs.hivemind import HivemindBus
 from afs.manager import AFSManager
 from afs.models import MountType
 from afs.schema import AFSConfig, DirectoryConfig, GeneralConfig, default_directory_configs
-from afs.agent_jobs import AgentJobQueue
-from afs.agent_runs import AgentRunStore
 from afs.tasks import TaskQueue
 
 
@@ -65,12 +65,13 @@ def test_session_bootstrap_command_outputs_json_and_writes_artifacts(
     queue = TaskQueue(context_root)
     queue.create("bootstrap task", created_by="tester", priority=2)
 
-    AgentJobQueue(context_root).create(
+    bootstrap_job = AgentJobQueue(context_root).create(
         "bootstrap background job",
         "Check background state.",
         created_by="tester",
         priority=1,
     )
+    AgentJobQueue(context_root).move(bootstrap_job.id, "done", result="ready")
     AgentRunStore(context_root).start(
         "bootstrap recorded run",
         harness="codex",
@@ -111,6 +112,8 @@ def test_session_bootstrap_command_outputs_json_and_writes_artifacts(
     assert payload["tasks"]["total"] == 1
     assert payload["agent_manifest"]["available"] is True
     assert payload["agent_jobs"]["total"] == 1
+    assert payload["agent_jobs"]["inbox_attention_count"] == 1
+    assert "afs agent-jobs inbox" in payload["agent_jobs"]["inbox_command"]
     assert payload["agent_runs"]["recent_count"] == 1
     assert payload["hivemind"]["recent_count"] == 1
     assert payload["memory"]["entries_count"] == 1
@@ -121,6 +124,7 @@ def test_session_bootstrap_command_outputs_json_and_writes_artifacts(
     assert any("afs context query" in step for step in payload["startup_sequence"])
     assert any("afs index rebuild" in action for action in payload["recommended_actions"])
     assert any("scratchpad state" in action.lower() for action in payload["recommended_actions"])
+    assert any("afs agent-jobs inbox" in action for action in payload["recommended_actions"])
 
 
 def test_build_session_bootstrap_does_not_mutate_hivemind_or_memory(

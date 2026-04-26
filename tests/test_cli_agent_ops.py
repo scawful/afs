@@ -43,6 +43,28 @@ def test_agent_ops_parsers_register() -> None:
     assert status.stale_after == 60
     assert hasattr(status, "func")
 
+    inbox = parser.parse_args(["agent-jobs", "inbox", "--strict", "--stale-after", "60"])
+    assert inbox.command == "agent-jobs"
+    assert inbox.strict is True
+    assert inbox.stale_after == 60
+    assert hasattr(inbox, "func")
+
+    review = parser.parse_args(["agent-jobs", "review", "job-1"])
+    assert review.command == "agent-jobs"
+    assert review.job_id == "job-1"
+    assert hasattr(review, "func")
+
+    archive = parser.parse_args(["agent-jobs", "archive", "job-1"])
+    assert archive.command == "agent-jobs"
+    assert archive.job_id == "job-1"
+    assert hasattr(archive, "func")
+
+    promote = parser.parse_args(["agent-jobs", "promote", "job-1", "--to-handoff", "--archive"])
+    assert promote.command == "agent-jobs"
+    assert promote.to_handoff is True
+    assert promote.archive is True
+    assert hasattr(promote, "func")
+
     seed = parser.parse_args(["agent-jobs", "seed", "--profile", "repo-maintenance", "--dry-run"])
     assert seed.command == "agent-jobs"
     assert seed.profile == "repo-maintenance"

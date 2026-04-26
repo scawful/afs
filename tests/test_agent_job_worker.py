@@ -38,9 +38,12 @@ def test_agent_job_worker_runs_command_and_records_run(tmp_path: Path) -> None:
     assert results[0].status == "done"
     assert results[0].job_id == job.id
     assert output_path.read_text(encoding="utf-8") == "Write a concise summary."
-    assert AgentJobQueue(context_path).get(job.id).status == "done"  # type: ignore[union-attr]
+    recorded_job = AgentJobQueue(context_path).get(job.id)
+    assert recorded_job is not None
+    assert recorded_job.status == "done"
     runs = AgentRunStore(context_path).list()
     assert len(runs) == 1
+    assert recorded_job.run_id == runs[0].id
     assert runs[0].harness == "codex-worker"
     assert runs[0].status == "done"
 

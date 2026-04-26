@@ -13,7 +13,7 @@ from .agent_scope import assert_mount_allowed
 from .context_paths import resolve_mount_root
 from .models import MountType
 
-JOB_STATES = ("queue", "running", "done", "failed")
+JOB_STATES = ("queue", "running", "done", "failed", "archived")
 
 
 def _now_iso() -> str:
@@ -42,6 +42,7 @@ class AgentJob:
     expected_output: str = ""
     allow_destructive: bool = False
     dedupe_key: str = ""
+    run_id: str = ""
     result: str = ""
     created_at: str = ""
     updated_at: str = ""
@@ -58,6 +59,7 @@ class AgentJob:
             "expected_output": self.expected_output,
             "allow_destructive": self.allow_destructive,
             "dedupe_key": self.dedupe_key,
+            "run_id": self.run_id,
             "result": self.result,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -131,6 +133,7 @@ class AgentJobQueue:
             expected_output=metadata.get("expected_output", ""),
             allow_destructive=_parse_bool(metadata.get("allow_destructive", "")),
             dedupe_key=metadata.get("dedupe_key", ""),
+            run_id=metadata.get("run_id", ""),
             result=metadata.get("result", ""),
             created_at=metadata.get("created_at", ""),
             updated_at=metadata.get("updated_at", ""),
@@ -194,6 +197,7 @@ class AgentJobQueue:
         *,
         assigned_to: str = "",
         result: str = "",
+        run_id: str = "",
     ) -> AgentJob:
         if status not in JOB_STATES:
             raise ValueError(f"Invalid job state: {status}")
@@ -206,6 +210,8 @@ class AgentJobQueue:
             job.assigned_to = assigned_to
         if result:
             job.result = result
+        if run_id:
+            job.run_id = run_id
         job.updated_at = _now_iso()
         new_path = self._write(job)
         if old_path.exists() and old_path != new_path:

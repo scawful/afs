@@ -484,6 +484,9 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
             f"{name}={count}" for name, count in sorted(agent_jobs["counts"].items())
         )
         lines.append(f"- counts: {counts_line}")
+    if agent_jobs.get("inbox_attention_count", 0) > 0:
+        lines.append(f"- inbox_attention: {agent_jobs['inbox_attention_count']}")
+        lines.append(f"- inbox_command: `{agent_jobs.get('inbox_command', '')}`")
     if agent_jobs.get("items"):
         lines.append("- top_jobs:")
         for item in agent_jobs["items"]:
@@ -663,7 +666,12 @@ def _collect_tasks(context_path: Path, *, limit: int) -> dict[str, Any]:
 
 def _collect_agent_manifest() -> dict[str, Any]:
     try:
-        from .agent_manifest import default_manifest_path, load_manifest, summarize_manifest, validate_manifest
+        from .agent_manifest import (
+            default_manifest_path,
+            load_manifest,
+            summarize_manifest,
+            validate_manifest,
+        )
 
         path = default_manifest_path().expanduser()
         data = load_manifest(path)
@@ -681,14 +689,16 @@ def _collect_agent_manifest() -> dict[str, Any]:
 
 def _collect_agent_jobs(context_path: Path, *, limit: int) -> dict[str, Any]:
     try:
+        from .agent_job_inbox import build_agent_job_inbox
         from .agent_jobs import AgentJobQueue
 
         queue = AgentJobQueue(context_path)
         jobs = [
             job
             for job in queue.list()
-            if job.status in {"queue", "running", "failed"}
+            if job.status in {"queue", "running", "done", "failed"}
         ]
+        inbox = build_agent_job_inbox(context_path, limit=max(1, limit))
     except Exception as exc:
         return {"total": 0, "counts": {}, "items": [], "error": str(exc)}
 
@@ -699,6 +709,9 @@ def _collect_agent_jobs(context_path: Path, *, limit: int) -> dict[str, Any]:
         "total": len(jobs),
         "counts": counts,
         "items": [job.to_dict() for job in jobs[: max(1, limit)]],
+        "inbox_attention_count": inbox.get("attention_count", 0),
+        "inbox_command": inbox.get("command", ""),
+        "inbox": inbox,
     }
 
 
@@ -925,7 +938,11 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
     if agent_manifest.get("issues"):
         recommendations.append("Run `afs agent-manifest validate --check-paths` before editing harness config.")
 
-    if agent_jobs.get("total", 0) > 0:
+    if agent_jobs.get("inbox_attention_count", 0) > 0:
+        recommendations.append(
+            f"Review agent job inbox with `{agent_jobs.get('inbox_command', 'afs agent-jobs inbox')}`."
+        )
+    elif agent_jobs.get("total", 0) > 0:
         recommendations.append("Review `afs agent-jobs status` before spawning background work.")
 
     if agent_runs.get("recent_count", 0) > 0:

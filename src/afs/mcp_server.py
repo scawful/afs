@@ -1177,6 +1177,24 @@ def _tool_agent_job_status(arguments: dict[str, Any], manager: AFSManager) -> di
     )
 
 
+def _tool_agent_job_inbox(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_job_inbox import build_agent_job_inbox
+
+    context_path = _resolve_context_path(arguments, manager)
+    stale_after_raw = arguments.get("stale_after_seconds", 3600.0)
+    stale_after = (
+        float(stale_after_raw)
+        if isinstance(stale_after_raw, (int, float))
+        else 3600.0
+    )
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    return build_agent_job_inbox(
+        context_path,
+        stale_after_seconds=stale_after,
+        limit=limit,
+    )
+
+
 def _tool_agent_job_seed(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     from .agent_job_seeds import seed_agent_jobs
 
@@ -1216,6 +1234,45 @@ def _tool_agent_job_show(arguments: dict[str, Any], manager: AFSManager) -> dict
     if job is None:
         raise FileNotFoundError(f"Agent job not found: {job_id}")
     return job.to_dict()
+
+
+def _tool_agent_job_review(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_job_inbox import review_agent_job
+
+    job_id = str(arguments.get("job_id", "") or "").strip()
+    if not job_id:
+        raise ValueError("job_id is required")
+    context_path = _resolve_context_path(arguments, manager)
+    return review_agent_job(context_path, job_id)
+
+
+def _tool_agent_job_archive(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_job_inbox import archive_agent_job
+
+    job_id = str(arguments.get("job_id", "") or "").strip()
+    if not job_id:
+        raise ValueError("job_id is required")
+    context_path = _resolve_context_path(arguments, manager)
+    return archive_agent_job(context_path, job_id).to_dict()
+
+
+def _tool_agent_job_promote(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_job_inbox import archive_agent_job, promote_agent_job_to_handoff
+
+    job_id = str(arguments.get("job_id", "") or "").strip()
+    if not job_id:
+        raise ValueError("job_id is required")
+    if not bool(arguments.get("to_handoff", True)):
+        raise ValueError("agent.job.promote currently supports --to-handoff only")
+    context_path = _resolve_context_path(arguments, manager)
+    payload = promote_agent_job_to_handoff(
+        context_path,
+        job_id,
+        handoff_name=str(arguments.get("handoff_name", "") or ""),
+    )
+    if bool(arguments.get("archive", False)):
+        payload["archived"] = archive_agent_job(context_path, job_id).to_dict()
+    return payload
 
 
 def _tool_agent_job_claim(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
@@ -2563,6 +2620,20 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             handler=_tool_agent_job_status,
         ),
         MCPToolDefinition(
+            name="agent.job.inbox",
+            description="Show completed, failed, stale, or blocked background jobs needing human review.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "stale_after_seconds": {"type": "number", "default": 3600},
+                    "limit": {"type": "integer", "default": 20},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_inbox,
+        ),
+        MCPToolDefinition(
             name="agent.job.seed",
             description="Idempotently queue safe report-only background maintenance jobs.",
             input_schema={
@@ -2586,7 +2657,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "type": "object",
                 "properties": {
                     "context_path": {"type": "string"},
-                    "status": {"type": "string", "description": "queue, running, done, or failed."},
+                    "status": {"type": "string", "description": "queue, running, done, failed, or archived."},
                 },
                 "additionalProperties": False,
             },
@@ -2607,6 +2678,51 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             handler=_tool_agent_job_show,
         ),
         MCPToolDefinition(
+            name="agent.job.review",
+            description="Review one background job and its linked run record.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "job_id": {"type": "string"},
+                },
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_review,
+        ),
+        MCPToolDefinition(
+            name="agent.job.archive",
+            description="Archive one background job without deleting its markdown record.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "job_id": {"type": "string"},
+                },
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_archive,
+        ),
+        MCPToolDefinition(
+            name="agent.job.promote",
+            description="Promote one background job review into scratchpad/handoffs.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "job_id": {"type": "string"},
+                    "to_handoff": {"type": "boolean", "default": True},
+                    "handoff_name": {"type": "string"},
+                    "archive": {"type": "boolean", "default": False},
+                },
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_promote,
+        ),
+        MCPToolDefinition(
             name="agent.job.claim",
             description="Claim a queued markdown background agent job.",
             input_schema={
@@ -2623,7 +2739,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
         ),
         MCPToolDefinition(
             name="agent.job.move",
-            description="Move a markdown background agent job to queue, running, done, or failed.",
+            description="Move a markdown background agent job to queue, running, done, failed, or archived.",
             input_schema={
                 "type": "object",
                 "properties": {
