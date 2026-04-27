@@ -40,6 +40,7 @@ It provides filesystem-native primitives for:
 
 - [Agent Surfaces](AGENT_SURFACES.md)
 - [Agent Operations](AGENT_OPERATIONS.md)
+- [Agent Integration Upgrade](AGENT_INTEGRATION_UPGRADE.md)
 - [Architecture](ARCHITECTURE.md)
 - [Profiles and Hooks](PROFILES.md)
 - [Extensions](PLUGINS.md)
@@ -50,7 +51,6 @@ It provides filesystem-native primitives for:
 - [Memory and Context Layout](MEMORY_SYSTEM.md)
 - [CLI Reference](CLI_REFERENCE.md)
 - [Training and Feedback RFC](TRAINING_FEEDBACK_RFC.md)
-- [Roadmap](ROADMAP.md)
 - [Emacs Integration](EMACS_INTEGRATION.md)
 
 ## Agent Note

@@ -53,6 +53,8 @@ Also supported once installed into the active environment:
 ./scripts/afs agent-manifest validate
 ./scripts/afs agent-manifest export codex
 ./scripts/afs agent-manifest sync --apply
+./scripts/afs-upgrade-agent-setup --workspace ~/src
+./scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
 
 ./scripts/afs agent-hooks show
 ./scripts/afs agent-hooks install-shell --apply
@@ -77,6 +79,8 @@ job_id="$(./scripts/afs agent-jobs create "Review stale instructions" --prompt "
 
 `agent-manifest` reads `configs/agent_manifest.toml`, the repo-owned source of
 truth for harnesses, shared skills, MCP servers, and startup hints.
+`afs-upgrade-agent-setup` wraps the common local upgrade path and stays dry-run
+unless `--apply` is provided.
 `agent-manifest sync` copies manifest-declared shared skills into harness skill
 roots and writes per-harness export JSON. It uses real copied directories, not
 symlinks.

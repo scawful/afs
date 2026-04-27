@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: afs-upgrade-agent-setup [options]
+
+Upgrade local agent harnesses around the current AFS checkout.
+
+Default mode is a dry-run: it runs read-only checks and prints write commands.
+Add --apply to copy skills, write manifest exports, repair context metadata,
+or update client MCP config.
+
+Options:
+  --workspace PATH        Project/workspace to repair and inspect (default: $PWD)
+  --harness NAME          Limit manifest sync to a harness; repeatable
+  --apply                 Apply write operations
+  --all                   Enable common write operations when paired with --apply
+                          (shell hooks, worker, Claude MCP, Gemini MCP, index rebuild)
+  --rebuild-index         Rebuild the workspace SQLite context index during repair
+  --install-shell-hooks   Install idempotent shell wrappers for agent commands
+  --install-worker        Install/load the background agent-jobs LaunchAgent
+  --setup-claude          Write Claude MCP setup for the selected scope
+  --setup-gemini          Write Gemini MCP setup for the selected scope
+  --claude-scope SCOPE    project or user (default: project)
+  --gemini-scope SCOPE    project or user (default: project)
+  --force-mcp             Pass --force to Claude/Gemini MCP setup
+  --skip-venv             Do not create/update the AFS venv
+  --skip-manifest-sync    Do not validate/sync the harness manifest
+  --skip-context-repair   Do not run context repair
+  -h, --help              Show this help
+
+Examples:
+  scripts/afs-upgrade-agent-setup --workspace ~/src/lab/afs
+  scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
+  scripts/afs-upgrade-agent-setup --apply --harness codex --harness claude
+EOF
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AFS_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+AFS_CLI="${SCRIPT_DIR}/afs"
+
+WORKSPACE="${AFS_UPGRADE_WORKSPACE:-$PWD}"
+APPLY=0
+RUN_VENV=1
+RUN_MANIFEST=1
+RUN_CONTEXT_REPAIR=1
+REBUILD_INDEX=0
+INSTALL_SHELL_HOOKS=0
+INSTALL_WORKER=0
+SETUP_CLAUDE=0
+SETUP_GEMINI=0
+CLAUDE_SCOPE="project"
+GEMINI_SCOPE="project"
+FORCE_MCP=0
+HARNESSES=()
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --workspace|-C)
+      WORKSPACE="${2:-}"
+      shift 2
+      ;;
+    --harness)
+      HARNESSES+=("${2:-}")
+      shift 2
+      ;;
+    --apply)
+      APPLY=1
+      shift
+      ;;
+    --all)
+      REBUILD_INDEX=1
+      INSTALL_SHELL_HOOKS=1
+      INSTALL_WORKER=1
+      SETUP_CLAUDE=1
+      SETUP_GEMINI=1
+      shift
+      ;;
+    --rebuild-index)
+      REBUILD_INDEX=1
+      shift
+      ;;
+    --install-shell-hooks)
+      INSTALL_SHELL_HOOKS=1
+      shift
+      ;;
+    --install-worker)
+      INSTALL_WORKER=1
+      shift
+      ;;
+    --setup-claude)
+      SETUP_CLAUDE=1
+      shift
+      ;;
+    --setup-gemini)
+      SETUP_GEMINI=1
+      shift
+      ;;
+    --claude-scope)
+      CLAUDE_SCOPE="${2:-}"
+      shift 2
+      ;;
+    --gemini-scope)
+      GEMINI_SCOPE="${2:-}"
+      shift 2
+      ;;
+    --force-mcp)
+      FORCE_MCP=1
+      shift
+      ;;
+    --skip-venv)
+      RUN_VENV=0
+      shift
+      ;;
+    --skip-manifest-sync)
+      RUN_MANIFEST=0
+      shift
+      ;;
+    --skip-context-repair)
+      RUN_CONTEXT_REPAIR=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [ -z "$WORKSPACE" ]; then
+  echo "--workspace requires a path" >&2
+  exit 2
+fi
+if [ ! -d "$WORKSPACE" ]; then
+  echo "workspace is not a directory: $WORKSPACE" >&2
+  exit 2
+fi
+if [ "$CLAUDE_SCOPE" != "project" ] && [ "$CLAUDE_SCOPE" != "user" ]; then
+  echo "--claude-scope must be project or user" >&2
+  exit 2
+fi
+if [ "$GEMINI_SCOPE" != "project" ] && [ "$GEMINI_SCOPE" != "user" ]; then
+  echo "--gemini-scope must be project or user" >&2
+  exit 2
+fi
+for harness in "${HARNESSES[@]}"; do
+  if [ -z "$harness" ]; then
+    echo "--harness requires a non-empty name" >&2
+    exit 2
+  fi
+done
+
+WORKSPACE="$(cd "$WORKSPACE" && pwd)"
+
+print_command() {
+  printf '+'
+  printf ' %q' "$@"
+  printf '\n'
+}
+
+run_cmd() {
+  print_command "$@"
+  "$@"
+}
+
+plan_cmd() {
+  printf 'next:'
+  printf ' %q' "$@"
+  printf '\n'
+}
+
+run_or_plan_write() {
+  if [ "$APPLY" -eq 1 ]; then
+    run_cmd "$@"
+  else
+    plan_cmd "$@"
+  fi
+}
+
+echo "AFS agent setup upgrade"
+echo "mode: $([ "$APPLY" -eq 1 ] && echo apply || echo dry-run)"
+echo "afs_root: ${AFS_ROOT}"
+echo "workspace: ${WORKSPACE}"
+echo
+
+run_cmd "$AFS_CLI" status --start-dir "$WORKSPACE"
+echo
+
+if [ "$RUN_VENV" -eq 1 ]; then
+  if [ "$APPLY" -eq 1 ]; then
+    run_cmd "${SCRIPT_DIR}/afs-venv"
+  else
+    plan_cmd "${SCRIPT_DIR}/afs-venv"
+  fi
+  echo
+fi
+
+if [ "$RUN_MANIFEST" -eq 1 ]; then
+  run_cmd "$AFS_CLI" agent-manifest validate --check-paths
+
+  manifest_sync_args=(agent-manifest sync)
+  for harness in "${HARNESSES[@]}"; do
+    manifest_sync_args+=(--harness "$harness")
+  done
+  if [ "$APPLY" -eq 1 ]; then
+    manifest_sync_args+=(--apply)
+  fi
+  run_cmd "$AFS_CLI" "${manifest_sync_args[@]}"
+  echo
+fi
+
+if [ "$RUN_CONTEXT_REPAIR" -eq 1 ]; then
+  if [ "$APPLY" -eq 1 ]; then
+    repair_args=(context repair --path "$WORKSPACE" --json)
+    if [ "$REBUILD_INDEX" -eq 1 ]; then
+      repair_args+=(--rebuild-index)
+    fi
+    run_cmd "$AFS_CLI" "${repair_args[@]}"
+  else
+    run_cmd "$AFS_CLI" context repair --path "$WORKSPACE" --dry-run --json
+  fi
+  echo
+elif [ "$REBUILD_INDEX" -eq 1 ]; then
+  run_or_plan_write "$AFS_CLI" index rebuild --path "$WORKSPACE" --json
+  echo
+fi
+
+if [ "$REBUILD_INDEX" -eq 0 ]; then
+  echo "index rebuild skipped; command:"
+  plan_cmd "$AFS_CLI" index rebuild --path "$WORKSPACE" --json
+  echo
+fi
+
+if [ "$INSTALL_SHELL_HOOKS" -eq 1 ]; then
+  shell_args=(agent-hooks install-shell --afs-root "$AFS_ROOT")
+  if [ "$APPLY" -eq 1 ]; then
+    shell_args+=(--apply)
+  fi
+  run_cmd "$AFS_CLI" "${shell_args[@]}"
+else
+  echo "shell hooks not requested; command:"
+  plan_cmd "$AFS_CLI" agent-hooks install-shell --afs-root "$AFS_ROOT" --apply
+fi
+echo
+
+if [ "$INSTALL_WORKER" -eq 1 ]; then
+  worker_args=(agent-hooks install-worker --afs-root "$AFS_ROOT" --path "$WORKSPACE")
+  if [ "$APPLY" -eq 1 ]; then
+    worker_args+=(--apply --load)
+  fi
+  run_cmd "$AFS_CLI" "${worker_args[@]}"
+else
+  echo "background worker not requested; command:"
+  plan_cmd "$AFS_CLI" agent-hooks install-worker --afs-root "$AFS_ROOT" --path "$WORKSPACE" --apply --load
+fi
+echo
+
+if [ "$SETUP_CLAUDE" -eq 1 ]; then
+  claude_args=(claude setup --scope "$CLAUDE_SCOPE" --path "$WORKSPACE")
+  if [ "$FORCE_MCP" -eq 1 ]; then
+    claude_args+=(--force)
+  fi
+  run_or_plan_write "$AFS_CLI" "${claude_args[@]}"
+else
+  echo "Claude MCP setup not requested; command:"
+  plan_cmd "$AFS_CLI" claude setup --scope project --path "$WORKSPACE"
+fi
+echo
+
+if [ "$SETUP_GEMINI" -eq 1 ]; then
+  gemini_args=(gemini setup --scope "$GEMINI_SCOPE")
+  if [ "$GEMINI_SCOPE" = "project" ]; then
+    gemini_args+=(--project-path "$WORKSPACE")
+  fi
+  if [ "$FORCE_MCP" -eq 1 ]; then
+    gemini_args+=(--force)
+  fi
+  run_or_plan_write "$AFS_CLI" "${gemini_args[@]}"
+else
+  echo "Gemini MCP setup not requested; command:"
+  plan_cmd "$AFS_CLI" gemini setup --scope project --project-path "$WORKSPACE"
+fi
+echo
+
+run_cmd "$AFS_CLI" agent-hooks status --path "$WORKSPACE"
+
+echo
+echo "Review commands:"
+plan_cmd "$AFS_CLI" agent-jobs status --path "$WORKSPACE"
+plan_cmd "$AFS_CLI" agent-jobs inbox --path "$WORKSPACE"
+plan_cmd "$AFS_CLI" session bootstrap --json
+
+if [ "$APPLY" -eq 0 ]; then
+  echo
+  echo "Apply the common local upgrade with:"
+  plan_cmd "$0" --workspace "$WORKSPACE" --apply --all
+fi

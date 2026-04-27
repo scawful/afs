@@ -23,8 +23,17 @@ Use the wrapper script for reliable agent invocation (sets `AFS_ROOT` and `PYTHO
 ```bash
 ./scripts/afs init                    # Initialize AFS configuration
 ./scripts/afs context init            # Create .context directory structure
+./scripts/afs status --start-dir "$PWD"  # Show context, mount, and index health
 ./scripts/afs doctor                  # Diagnose and auto-fix issues
 ./scripts/afs health                  # Health check
+```
+
+Refresh local agent harnesses, MCP setup, copied skills, hooks, and context
+indexes with a dry-run first:
+
+```bash
+./scripts/afs-upgrade-agent-setup --workspace ~/src
+./scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
 ```
 
 ## Branching
@@ -38,9 +47,11 @@ See `docs/development.md` for PR target and promotion guidance.
 
 **Session System** — Token-budgeted context packs, bootstrap summaries, and client harness for Gemini, Claude, and Codex integrations.
 
-**Agent Supervisor** — Background agent lifecycle management with dependency graphs, restart with exponential backoff, mutex groups, and agent-to-agent handoff.
+**Agent Operations** — Optional run records, safe background job queues, and
+handoffs for work that spans turns or harnesses.
 
-**Hivemind** — Inter-agent message bus for coordination, with pub/sub channels and structured message routing.
+**Hivemind** — Optional inter-agent message bus for tasks that explicitly need
+cross-agent coordination.
 
 **Memory Consolidation** — Event history rolled up into durable memory entries, with optional LLM-assisted summarization.
 
@@ -51,8 +62,8 @@ See `docs/development.md` for PR target and promotion guidance.
 ```
 src/afs/
 ├── cli/              # 30+ CLI command groups
-├── agents/           # 17 background agents + supervisor
-├── mcp_server.py     # 40+ MCP tools for external clients
+├── agents/           # optional background agents + supervisor
+├── mcp_server.py     # MCP prompts/tools/resources for external clients
 ├── context_index.py  # SQLite-backed context indexing and search
 ├── context_pack.py   # Token-budgeted context packs with caching
 ├── session_*.py      # Session bootstrap, harness, workflows
@@ -73,10 +84,10 @@ src/afs/
 ```bash
 afs context discover                  # Find .context roots
 afs context mount <path>              # Mount a context directory
-afs context status                    # Show mount status and health
+afs status --start-dir "$PWD"         # Show mount status and index health
 afs context query "search term"       # Search the context index
 afs context diff                      # Changes since last session
-afs context pack --model gemini       # Token-budgeted context export
+afs session pack --model gemini       # Token-budgeted context export
 ```
 
 ### Agents
@@ -146,7 +157,9 @@ afs services status --system          # Service status
 
 ## MCP Server
 
-AFS exposes 40+ tools via MCP for use by Gemini, Claude, Codex, and other MCP clients.
+AFS exposes a small recommended MCP surface for normal agent work, with broader
+agent, hivemind, events, embeddings, and training tools available for harnesses
+that explicitly need them.
 
 ```bash
 afs mcp serve                         # Start MCP server
@@ -154,7 +167,12 @@ afs mcp serve                         # Start MCP server
 .venv/bin/python -m afs.mcp_server
 ```
 
-**Tool categories:** `fs.*`, `context.*`, `session.*`, `memory.*`, `handoff.*`, `agent.*`, `hivemind.*`, `task.*`, `review.*`, `events.*`
+Recommended default tools/prompts: `afs.session.bootstrap`, `context.status`,
+`context.query`, `context.read`, `context.write`, `context.list`,
+`context.diff`, `context.index.rebuild`, and `handoff.create`.
+
+Optional categories: `agent.*`, `hivemind.*`, `task.*`, `review.*`,
+`events.*`, `embeddings.*`, and `training.*`.
 
 See [docs/MCP_SERVER.md](docs/MCP_SERVER.md) for configuration and tool reference.
 
@@ -229,6 +247,7 @@ Domain-specific functionality (model training, persona configurations, deploymen
 - [docs/index.md](docs/index.md) — Documentation index
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — System architecture
 - [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) — Full CLI reference
+- [docs/AGENT_INTEGRATION_UPGRADE.md](docs/AGENT_INTEGRATION_UPGRADE.md) — Upgrade agent harnesses, MCP setup, hooks, and copied skills
 - [docs/AGENT_SURFACES.md](docs/AGENT_SURFACES.md) — Agent system design
 - [docs/MCP_SERVER.md](docs/MCP_SERVER.md) — MCP server setup and tools
 - [docs/PROFILES.md](docs/PROFILES.md) — Profile system

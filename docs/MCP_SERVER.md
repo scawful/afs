@@ -163,6 +163,18 @@ In Antigravity, open `MCP Servers -> Manage MCP Servers -> View raw config`, the
 
 ## Tools
 
+Recommended default MCP/profile surface:
+
+- `afs.session.bootstrap`
+- `context.status`
+- `context.query`
+- `context.read`
+- `context.write`
+- `context.list`
+- `context.diff`
+- `context.index.rebuild`
+- `handoff.create`
+
 Preferred agent-facing file operations:
 
 - `context.read`
@@ -178,14 +190,13 @@ Legacy compatibility aliases:
 - `fs.delete`
 - `fs.move`
 - `fs.list`
+
+Optional tools for explicit workflows:
+
 - `context.discover`
 - `context.init`
 - `context.mount`
 - `context.unmount`
-- `context.index.rebuild`
-- `context.query`
-- `context.diff`
-- `context.status`
 - `context.repair`
 - `session.pack`
 - `agent.spawn`
@@ -199,7 +210,6 @@ Legacy compatibility aliases:
 - `hivemind.subscribe`
 - `hivemind.unsubscribe`
 - `hivemind.reap`
-- `handoff.create`
 - `handoff.read`
 - `handoff.list`
 - `embeddings.index`

@@ -21,9 +21,15 @@ These surfaces are visible in:
 ./scripts/afs agent-hooks install-shell --apply
 ./scripts/afs agent-hooks install-worker --apply --load
 ./scripts/afs agent-hooks status --path "$PWD"
+./scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
 ```
 
 Use this before editing Codex, Claude, Gemini, hcode, or z3cli-specific config. Harness-specific files can still exist, but they should point back to this manifest or derive their local view from it.
+
+`scripts/afs-upgrade-agent-setup` is the operator wrapper for a full local
+refresh. It defaults to dry-run, then with `--apply` can update the venv, copy
+skills, write manifest exports, repair/rebuild context state, install hooks,
+and write Claude/Gemini MCP setup.
 
 `sync` copies manifest-declared shared skill directories into harness skill
 roots and writes per-harness JSON export files. It deliberately uses copied

@@ -67,11 +67,6 @@ export AFS_VENV=<afs-root>/.venv
 <afs-root>/scripts/afs context discover --path ~/src
 <afs-root>/scripts/afs context ensure-all --path ~/src
 <afs-root>/scripts/afs session bootstrap --json
-<afs-root>/scripts/afs training dataset stats ./data/output/tooling
-<afs-root>/scripts/afs training dataset outliers ./data/output/tooling --limit 5
-<afs-root>/scripts/afs training run start ./training/jobs/local.toml
-<afs-root>/scripts/afs training run status <run-id>
-<afs-root>/scripts/afs training run stop <run-id>
 <afs-root>/scripts/afs session prepare-client --client codex --json
 <afs-root>/scripts/afs session hook session_start --client codex --session-id "$AFS_SESSION_ID"
 <afs-root>/scripts/afs session event user_prompt_submit --client codex --session-id "$AFS_SESSION_ID" --prompt "current task"
@@ -86,6 +81,17 @@ export AFS_VENV=<afs-root>/.venv
 <afs-root>/scripts/afs skills list --profile work
 <afs-root>/scripts/afs health
 ```
+
+Harness upgrade and setup:
+
+```bash
+<afs-root>/scripts/afs-upgrade-agent-setup --workspace ~/src
+<afs-root>/scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
+```
+
+Training commands are intentionally not part of the default agent startup path.
+Use `afs training ...` only for reusable training/eval work that explicitly
+needs those surfaces.
 
 Warm context/cache:
 
@@ -122,6 +128,18 @@ Run the built-in stdio MCP server:
 
 Built-in tools:
 
+Recommended default MCP/profile surface:
+
+- `afs.session.bootstrap`
+- `context.status`
+- `context.query`
+- `context.read`
+- `context.write`
+- `context.list`
+- `context.diff`
+- `context.index.rebuild`
+- `handoff.create`
+
 Preferred agent-facing file operations:
 
 - `context.read`
@@ -137,14 +155,13 @@ Legacy compatibility aliases:
 - `fs.delete`
 - `fs.move`
 - `fs.list`
+
+Optional tools for explicit workflows:
+
 - `context.discover`
 - `context.init`
 - `context.mount`
 - `context.unmount`
-- `context.index.rebuild`
-- `context.query`
-- `context.diff`
-- `context.status`
 - `context.repair`
 - `session.pack`
 - `events.query`
@@ -152,7 +169,6 @@ Legacy compatibility aliases:
 - `events.analytics`
 - `events.replay`
 - `hivemind.reap`
-- `handoff.create`
 - `handoff.read`
 - `handoff.list`
 
