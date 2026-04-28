@@ -82,6 +82,19 @@ Create a request:
   --permission-required "ticket comment approval"
 ```
 
+For connector-backed actions, pass structured preview data:
+
+```bash
+./scripts/afs work approvals request \
+  --path ~/src/project-a \
+  --target-system gmail \
+  --target-id "email:person@example.com" \
+  --action send_email \
+  --summary "Send approved follow-up email" \
+  --permission-required "email send approval" \
+  --preview-json '{"to":"person@example.com","subject":"Follow-up","body":"Thanks for the update."}'
+```
+
 Review and approve:
 
 ```bash
@@ -103,9 +116,20 @@ Smoke-test with the included no-op executor:
   --executor "python3 scripts/afs-work-approval-echo.py"
 ```
 
+Execute supported Google Workspace actions:
+
+```bash
+./scripts/setup_gws.sh --dry-run
+./scripts/afs work approvals execute <approval-id> --path ~/src/project-a \
+  --executor "python3 scripts/afs-work-gws-executor.py"
+```
+
 The no-op executor only echoes the approved payload. Real connector commands
 should read the final JSON file argument, perform exactly the approved action,
 print JSON to stdout, and exit non-zero on failure.
+
+See `docs/WORK_ASSISTANT_CONNECTORS.md` for the supported Google Workspace
+actions and payload shapes.
 
 ## Connector Payload
 

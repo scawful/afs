@@ -86,6 +86,7 @@ def test_work_approval_request_and_approve(tmp_path: Path, capsys) -> None:
             action="post_ticket_comment",
             summary="Send drafted support reply",
             preview="Thanks for the report.",
+            preview_json=None,
             affected_person=["requester@example.com"],
             risk_level="medium",
             permission_required="ticket comment approval",
@@ -106,6 +107,27 @@ def test_work_approval_request_and_approve(tmp_path: Path, capsys) -> None:
     assert approvals_show_command(_args(context_root, approval_id=approval_id, json=True)) == 0
     shown = json.loads(capsys.readouterr().out)
     assert shown["status"] == "approved"
+
+    assert approvals_request_command(
+        _args(
+            context_root,
+            target_system="gmail",
+            target_id="message",
+            action="send_email",
+            summary="Send approved email",
+            preview=None,
+            preview_json='{"to":"person@example.com","subject":"Hi","body":"Approved."}',
+            affected_person=[],
+            risk_level="medium",
+            permission_required="email approval",
+            requested_by="agent",
+            json=True,
+        )
+    ) == 0
+    structured_id = json.loads(capsys.readouterr().out)["approval_id"]
+    structured = WorkAssistantStore(context_root).get_approval(structured_id)
+    assert structured is not None
+    assert structured["preview"]["subject"] == "Hi"
 
 
 def test_work_approval_execute_command(tmp_path: Path, capsys) -> None:

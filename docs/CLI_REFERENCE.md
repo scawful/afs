@@ -221,10 +221,19 @@ It is intentionally not exposed as a broad MCP CRUD surface.
   --summary "Send drafted support reply" \
   --preview "Thanks for the report..." \
   --permission-required "ticket comment approval"
+./scripts/afs work approvals request \
+  --path . \
+  --target-system gmail \
+  --target-id "email:person@example.com" \
+  --action send_email \
+  --summary "Send approved follow-up email" \
+  --preview-json '{"to":"person@example.com","subject":"Follow-up","body":"Thanks for the update."}'
 ./scripts/afs work approvals approve <approval-id> --path . --by human
 ./scripts/afs work approvals execute <approval-id> --path . --dry-run --json
 ./scripts/afs work approvals execute <approval-id> --path . \
   --executor "python3 scripts/afs-work-approval-echo.py"
+./scripts/afs work approvals execute <approval-id> --path . \
+  --executor "python3 scripts/afs-work-gws-executor.py"
 ./scripts/afs work activity list --path .
 ```
 
@@ -237,6 +246,7 @@ connector command and marks the request `applied` only when that command exits
 successfully.
 
 See `docs/WORK_ASSISTANT.md` and `docs/WORK_ASSISTANT_UPGRADE.md`.
+Google Workspace connector examples are in `docs/WORK_ASSISTANT_CONNECTORS.md`.
 
 ## Memory
 

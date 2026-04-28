@@ -129,6 +129,7 @@ afs work people list                  # Known work-scoped people
 afs work reviewers --target-type docs # Suggested reviewers
 afs work approvals list               # Pending external-write approvals
 afs work approvals execute <id> --dry-run
+afs work approvals execute <id> --executor "python3 scripts/afs-work-gws-executor.py"
 afs work activity list                # Recent work-assistant activity
 ```
 

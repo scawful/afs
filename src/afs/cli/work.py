@@ -166,12 +166,22 @@ def approvals_show_command(args: argparse.Namespace) -> int:
 
 def approvals_request_command(args: argparse.Namespace) -> int:
     store, _context_path = _store_from_args(args)
+    preview: Any = {}
+    preview_json = getattr(args, "preview_json", None)
+    if preview_json:
+        try:
+            preview = json.loads(preview_json)
+        except json.JSONDecodeError as exc:
+            print(f"Invalid --preview-json: {exc}")
+            return 2
+    elif args.preview:
+        preview = {"text": args.preview}
     approval_id = store.create_approval(
         target_system=args.target_system,
         target_id=args.target_id,
         action=args.action,
         summary=args.summary,
-        preview={"text": args.preview} if args.preview else {},
+        preview=preview,
         affected_people=args.affected_person or [],
         risk_level=args.risk_level,
         permission_required=args.permission_required,
@@ -317,6 +327,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     approvals_request.add_argument("--action", required=True, help="Action to approve.")
     approvals_request.add_argument("--summary", required=True, help="Plain-language summary.")
     approvals_request.add_argument("--preview", help="Short preview or diff text.")
+    approvals_request.add_argument("--preview-json", help="Structured preview JSON for connector executors.")
     approvals_request.add_argument(
         "--affected-person",
         action="append",

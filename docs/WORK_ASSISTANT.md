@@ -108,11 +108,20 @@ Approvals:
   --summary "Send drafted support reply" \
   --preview "Thanks for the report..." \
   --permission-required "ticket comment approval"
+./scripts/afs work approvals request \
+  --path . \
+  --target-system google-sheets \
+  --target-id "<spreadsheet-id>" \
+  --action append_sheet_rows \
+  --summary "Append approved planning rows" \
+  --preview-json '{"range":"Sheet1!A:B","values":[["Task","Owner"],["Draft plan","Dana"]]}'
 ./scripts/afs work approvals approve <approval-id> --path . --by human
 ./scripts/afs work approvals reject <approval-id> --path . --by human
 ./scripts/afs work approvals execute <approval-id> --path . --dry-run
 ./scripts/afs work approvals execute <approval-id> --path . \
   --executor "python3 scripts/afs-work-approval-echo.py"
+./scripts/afs work approvals execute <approval-id> --path . \
+  --executor "python3 scripts/afs-work-gws-executor.py"
 ```
 
 Activity:
@@ -176,6 +185,13 @@ Smoke-test the flow without changing external systems:
   --executor "python3 scripts/afs-work-approval-echo.py"
 ```
 
+Execute supported Google Workspace actions after approval:
+
+```bash
+./scripts/afs work approvals execute <approval-id> --path . \
+  --executor "python3 scripts/afs-work-gws-executor.py"
+```
+
 Connector scripts should read the JSON file, perform exactly the approved
 action, print a compact JSON result to stdout, and exit non-zero if the external
 write fails.
@@ -208,6 +224,9 @@ The current implementation provides:
   and activity
 - CLI inspection and approval management under `afs work`
 - approval-gated execution through explicit local connector commands
+- a Google Workspace executor for approved email send, sheet append, and
+  calendar event creation
 - no new MCP tool expansion
 
-Future connector executors should remain approval-gated and narrow.
+Future connector executors should remain approval-gated and narrow. See
+`docs/WORK_ASSISTANT_CONNECTORS.md`.
