@@ -128,13 +128,15 @@ afs work                              # People/review/approval summary
 afs work people list                  # Known work-scoped people
 afs work reviewers --target-type docs # Suggested reviewers
 afs work approvals list               # Pending external-write approvals
+afs work approvals execute <id> --dry-run
 afs work activity list                # Recent work-assistant activity
 ```
 
 Work-assistant state is native to AFS and backed by
 `.context/global/work_assistant.sqlite3`. It creates approval records for
 external writes instead of editing shared docs, sheets, tickets, or messages
-directly.
+directly. Approved actions can be handed to explicit local connector commands
+with `afs work approvals execute`.
 
 ### Session
 

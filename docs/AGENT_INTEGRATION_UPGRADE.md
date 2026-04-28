@@ -60,6 +60,10 @@ An AFS-aware harness should do this at session start:
 5. Treat `memory` and `knowledge` as deliberate durable updates.
 6. Create a handoff with `handoff.create` or a scratchpad handoff file when work
    spans turns, agents, or tools.
+7. Run `afs work --path . --json` when the task involves docs, sheets, tickets,
+   planning, people, or review routing.
+8. For external writes, create or reuse an AFS work approval request and execute
+   exactly one approved action with `afs work approvals execute`.
 
 Do not start background agents, hivemind coordination, embeddings, training
 workflows, or domain MCP servers just because AFS is present. Those are opt-in
@@ -160,3 +164,20 @@ The hook status command always prints what to run next:
 ```bash
 scripts/afs agent-hooks status --path ~/src/project-a
 ```
+
+## Work Assistant Upgrade
+
+The work-assistant layer is native AFS state, not a broad MCP administration
+surface. Upgrade agents by teaching them the small command contract:
+
+```bash
+scripts/afs work --path .
+scripts/afs work approvals list --path .
+scripts/afs work approvals request --path . ...
+scripts/afs work approvals approve <approval-id> --path . --by human
+scripts/afs work approvals execute <approval-id> --path . --dry-run --json
+scripts/afs work approvals execute <approval-id> --path . --executor "<connector command>"
+```
+
+Use `docs/WORK_ASSISTANT_UPGRADE.md` as the copy-paste guide for harness
+instructions and connector setup.

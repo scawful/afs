@@ -76,6 +76,7 @@ export AFS_VENV=<afs-root>/.venv
 <afs-root>/scripts/afs events tail --json
 <afs-root>/scripts/afs work --path .
 <afs-root>/scripts/afs work approvals list --path .
+<afs-root>/scripts/afs work approvals execute <approval-id> --path . --dry-run --json
 <afs-root>/scripts/afs claude setup --path ~/src/project-a
 <afs-root>/scripts/afs claude setup --scope user
 <afs-root>/scripts/afs claude doctor
@@ -185,7 +186,7 @@ Optional tools for explicit workflows:
 Work-assistant state should not be expanded into a broad MCP CRUD API. Prefer
 native AFS/background enrichment plus a small future surface for context
 overview, relevant people, pending approvals, draft creation, approval status,
-and executing one approved action.
+and executing one approved action through an explicit connector command.
 
 Paths are scoped to:
 

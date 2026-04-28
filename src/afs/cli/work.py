@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 from pathlib import Path
 from typing import Any
 
 from ..work_assistant import WorkAssistantStore
+from ..work_execution import WorkApprovalExecutionError, execute_approved_action
 from ._utils import load_manager, resolve_context_paths
 
 
@@ -149,6 +151,19 @@ def approvals_list_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def approvals_show_command(args: argparse.Namespace) -> int:
+    store, _context_path = _store_from_args(args)
+    approval = store.get_approval(args.approval_id)
+    if approval is None:
+        print(f"No approval found: {args.approval_id}")
+        return 1
+    if args.json:
+        _print_json(approval)
+        return 0
+    _print_json(approval)
+    return 0
+
+
 def approvals_request_command(args: argparse.Namespace) -> int:
     store, _context_path = _store_from_args(args)
     approval_id = store.create_approval(
@@ -188,6 +203,36 @@ def approvals_reject_command(args: argparse.Namespace) -> int:
     return 1
 
 
+def approvals_execute_command(args: argparse.Namespace) -> int:
+    store, context_path = _store_from_args(args)
+    executor_command = _split_executor(args.executor or "")
+    try:
+        result = execute_approved_action(
+            store,
+            context_root=context_path,
+            approval_id=args.approval_id,
+            executor_command=executor_command,
+            actor=args.actor,
+            timeout=args.timeout,
+            dry_run=args.dry_run,
+        )
+    except WorkApprovalExecutionError as exc:
+        if args.json:
+            _print_json({"error": str(exc)})
+        else:
+            print(str(exc))
+        return 1
+
+    if args.json or args.dry_run:
+        _print_json(result)
+        return 0 if result.get("status") != "failed" else 1
+    if result.get("status") == "failed":
+        print(f"Executor failed for {args.approval_id}: {result.get('stderr') or result.get('stdout')}")
+        return 1
+    print(f"Applied approved action: {args.approval_id}")
+    return 0
+
+
 def activity_list_command(args: argparse.Namespace) -> int:
     store, _context_path = _store_from_args(args)
     rows = store.list_activity(limit=args.limit)
@@ -204,6 +249,12 @@ def activity_list_command(args: argparse.Namespace) -> int:
         ],
     )
     return 0
+
+
+def _split_executor(value: str) -> list[str]:
+    if not value.strip():
+        return []
+    return shlex.split(value)
 
 
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
@@ -253,6 +304,12 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     approvals_list.add_argument("--json", action="store_true", help="Output JSON.")
     approvals_list.set_defaults(func=approvals_list_command)
 
+    approvals_show = approvals_sub.add_parser("show", help="Show one approval request.")
+    _add_context_args(approvals_show)
+    approvals_show.add_argument("approval_id", help="Approval id.")
+    approvals_show.add_argument("--json", action="store_true", help="Output JSON.")
+    approvals_show.set_defaults(func=approvals_show_command)
+
     approvals_request = approvals_sub.add_parser("request", help="Create an approval request.")
     _add_context_args(approvals_request)
     approvals_request.add_argument("--target-system", required=True, help="External system name.")
@@ -282,6 +339,23 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     approvals_reject.add_argument("approval_id", help="Approval id.")
     approvals_reject.add_argument("--by", default="human", help="Reviewer identity.")
     approvals_reject.set_defaults(func=approvals_reject_command)
+
+    approvals_execute = approvals_sub.add_parser(
+        "execute",
+        help="Execute one approved request with an explicit connector command.",
+    )
+    _add_context_args(approvals_execute)
+    approvals_execute.add_argument("approval_id", help="Approval id.")
+    approvals_execute.add_argument("--actor", default="agent", help="Executor identity.")
+    approvals_execute.add_argument("--timeout", type=int, default=60, help="Executor timeout seconds.")
+    approvals_execute.add_argument("--dry-run", action="store_true", help="Print payload without executing.")
+    approvals_execute.add_argument("--json", action="store_true", help="Output JSON.")
+    approvals_execute.add_argument(
+        "--executor",
+        default="",
+        help="Executor command. AFS parses it without a shell and appends the approval JSON path.",
+    )
+    approvals_execute.set_defaults(func=approvals_execute_command)
 
     activity = work_sub.add_parser("activity", help="Work-assistant activity.")
     activity_sub = activity.add_subparsers(dest="activity_command")

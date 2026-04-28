@@ -212,6 +212,7 @@ It is intentionally not exposed as a broad MCP CRUD surface.
 ./scripts/afs work relationships list --path .
 ./scripts/afs work reviewers --path . --target-type docs
 ./scripts/afs work approvals list --path .
+./scripts/afs work approvals show <approval-id> --path .
 ./scripts/afs work approvals request \
   --path . \
   --target-system zendesk \
@@ -221,6 +222,9 @@ It is intentionally not exposed as a broad MCP CRUD surface.
   --preview "Thanks for the report..." \
   --permission-required "ticket comment approval"
 ./scripts/afs work approvals approve <approval-id> --path . --by human
+./scripts/afs work approvals execute <approval-id> --path . --dry-run --json
+./scripts/afs work approvals execute <approval-id> --path . \
+  --executor "python3 scripts/afs-work-approval-echo.py"
 ./scripts/afs work activity list --path .
 ```
 
@@ -228,8 +232,11 @@ When context/history events include work metadata such as `owner`,
 `reviewers`, `relationships`, `review_routes`, `approval_request`, or
 `requires_approval`, AFS enriches the work-assistant database automatically.
 External writes should be executed only from one approved action at a time.
+`approvals execute` passes an approved request JSON file to an explicit local
+connector command and marks the request `applied` only when that command exits
+successfully.
 
-See `docs/WORK_ASSISTANT.md`.
+See `docs/WORK_ASSISTANT.md` and `docs/WORK_ASSISTANT_UPGRADE.md`.
 
 ## Memory
 

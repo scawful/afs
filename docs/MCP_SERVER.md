@@ -5,7 +5,8 @@ AFS provides a lightweight stdio MCP server for context operations.
 Work-assistant state for people, project relationships, review routes,
 approvals, and activity is native AFS state. Keep MCP thin: do not expose full
 people, docs, sheets, ticket, or permission administration through the default
-server.
+server. External writes should flow through an approved AFS work request and
+one explicit connector executor command.
 
 For Gemini CLI, prefer the MCP server from the repo or project root you want to
 work in. That keeps repo-local `context.init` available while preserving the

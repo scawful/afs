@@ -99,6 +99,7 @@ Approvals:
 
 ```bash
 ./scripts/afs work approvals list --path .
+./scripts/afs work approvals show <approval-id> --path .
 ./scripts/afs work approvals request \
   --path . \
   --target-system zendesk \
@@ -109,6 +110,9 @@ Approvals:
   --permission-required "ticket comment approval"
 ./scripts/afs work approvals approve <approval-id> --path . --by human
 ./scripts/afs work approvals reject <approval-id> --path . --by human
+./scripts/afs work approvals execute <approval-id> --path . --dry-run
+./scripts/afs work approvals execute <approval-id> --path . \
+  --executor "python3 scripts/afs-work-approval-echo.py"
 ```
 
 Activity:
@@ -120,8 +124,9 @@ Activity:
 ## Permission Rule
 
 The work-assistant layer may create drafts and approval requests, but it does
-not apply external edits by itself. Connector write executors should accept only
-one approved action at a time and record the result back into activity.
+not apply external edits until a request is explicitly approved. Connector write
+executors should accept only one approved action at a time and record the result
+back into activity.
 
 Actions that should require approval include:
 
@@ -134,6 +139,59 @@ Actions that should require approval include:
 - assigning work or changing due dates
 - sharing files or changing access
 
+## Approved Action Executors
+
+`afs work approvals execute` is the minimal handoff point between AFS and
+external systems. It does not expose a broad MCP CRUD surface. It only passes
+one approved request to one explicit local command.
+
+Execution rules:
+
+- the approval must already be `approved`
+- the executor is invoked without a shell
+- AFS appends a temporary approval JSON file as the final command argument
+- AFS also sets `AFS_WORK_APPROVAL_FILE`, `AFS_WORK_APPROVAL_ID`, and
+  `AFS_CONTEXT_ROOT`
+- exit code `0` marks the approval `applied`
+- non-zero exit keeps the approval `approved`, records the failure result, and
+  leaves it retryable
+
+Preview the payload before wiring a real connector:
+
+```bash
+./scripts/afs work approvals execute <approval-id> --path . --dry-run --json
+```
+
+Smoke-test the flow without changing external systems:
+
+```bash
+./scripts/afs work approvals execute <approval-id> --path . \
+  --executor "python3 scripts/afs-work-approval-echo.py"
+```
+
+Connector scripts should read the JSON file, perform exactly the approved
+action, print a compact JSON result to stdout, and exit non-zero if the external
+write fails.
+
+Payload shape:
+
+```json
+{
+  "version": 1,
+  "context_root": "/path/to/.context",
+  "actor": "agent",
+  "approval": {
+    "approval_id": "approval_...",
+    "status": "approved",
+    "target_system": "zendesk",
+    "target_id": "ticket-123",
+    "action": "post_ticket_comment",
+    "summary": "Send drafted support reply",
+    "preview": {"text": "Thanks for the report..."}
+  }
+}
+```
+
 ## First Implementation Slice
 
 The current implementation provides:
@@ -142,6 +200,7 @@ The current implementation provides:
 - context-log enrichment for people, relationships, review routes, approvals,
   and activity
 - CLI inspection and approval management under `afs work`
+- approval-gated execution through explicit local connector commands
 - no new MCP tool expansion
 
 Future connector executors should remain approval-gated and narrow.

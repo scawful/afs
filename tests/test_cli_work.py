@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import sys
 from argparse import Namespace
 from pathlib import Path
 
 from afs.cli.work import (
     approvals_approve_command,
+    approvals_execute_command,
     approvals_list_command,
     approvals_request_command,
+    approvals_show_command,
     people_list_command,
     register_parsers,
     reviewers_command,
@@ -100,6 +103,43 @@ def test_work_approval_request_and_approve(tmp_path: Path, capsys) -> None:
     assert approvals_approve_command(_args(context_root, approval_id=approval_id, by="human")) == 0
     assert "Approved" in capsys.readouterr().out
 
+    assert approvals_show_command(_args(context_root, approval_id=approval_id, json=True)) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["status"] == "approved"
+
+
+def test_work_approval_execute_command(tmp_path: Path, capsys) -> None:
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    approval_id = store.create_approval(
+        target_system="google-docs",
+        target_id="doc-1",
+        action="edit_doc",
+        summary="Apply approved edit",
+    )
+    assert store.approve(approval_id, approved_by="human")
+
+    assert approvals_execute_command(
+        _args(
+            context_root,
+            approval_id=approval_id,
+            actor="test-agent",
+            timeout=10,
+            dry_run=False,
+            json=True,
+            executor=(
+                f"{sys.executable} -c "
+                "'import json,sys; "
+                "payload=json.load(open(sys.argv[-1])); "
+                "print(json.dumps({\"approval\": payload[\"approval\"][\"approval_id\"]}))'"
+            ),
+        )
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "applied"
+    assert result["output"]["approval"] == approval_id
+
 
 def test_register_parsers_includes_work_subcommands() -> None:
     import argparse
@@ -129,3 +169,18 @@ def test_register_parsers_includes_work_subcommands() -> None:
         ]
     )
     assert args.action == "edit_doc"
+
+    args = parser.parse_args(
+        [
+            "work",
+            "approvals",
+            "execute",
+            "approval_1",
+            "--dry-run",
+            "--executor",
+            "python3 connector.py",
+        ]
+    )
+    assert args.work_approvals_command == "execute"
+    assert args.approval_id == "approval_1"
+    assert args.executor == "python3 connector.py"

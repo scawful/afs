@@ -622,11 +622,45 @@ class WorkAssistantStore:
             rows = connection.execute(query, params).fetchall()
         return [self._approval_row_to_dict(row) for row in rows]
 
+    def get_approval(self, approval_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM approvals WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+        return self._approval_row_to_dict(row) if row else None
+
     def approve(self, approval_id: str, *, approved_by: str = "human") -> bool:
         return self._set_approval_status(approval_id, "approved", approved_by=approved_by)
 
     def reject(self, approval_id: str, *, rejected_by: str = "human") -> bool:
         return self._set_approval_status(approval_id, "rejected", approved_by=rejected_by)
+
+    def record_approval_result(
+        self,
+        approval_id: str,
+        *,
+        result: dict[str, Any],
+        status: str | None = None,
+    ) -> bool:
+        now = _now()
+        if status:
+            statement = """
+                UPDATE approvals
+                SET result_json = ?, status = ?, updated_at = ?
+                WHERE approval_id = ?
+            """
+            params: tuple[Any, ...] = (_json_dumps(result), status, now, approval_id)
+        else:
+            statement = """
+                UPDATE approvals
+                SET result_json = ?, updated_at = ?
+                WHERE approval_id = ?
+            """
+            params = (_json_dumps(result), now, approval_id)
+        with self._connect() as connection:
+            cursor = connection.execute(statement, params)
+            return cursor.rowcount > 0
 
     def record_activity(
         self,

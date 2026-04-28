@@ -47,6 +47,7 @@ It provides filesystem-native primitives for:
 - [Extensions](PLUGINS.md)
 - [MCP Server](MCP_SERVER.md)
 - [Work Assistant](WORK_ASSISTANT.md)
+- [Work Assistant Upgrade Guide](WORK_ASSISTANT_UPGRADE.md)
 - [Embeddings](EMBEDDINGS.md)
 - [Knowledge System & Gemini Setup Guide](KNOWLEDGE_SYSTEM_GUIDE.md)
 - [VSCode Extension Review](VSCODE_EXTENSION_REVIEW.md)
