@@ -291,6 +291,7 @@ See `docs/JOURNAL_AGENT.md` for full argument reference and JSON output shape.
 - cheap codebase orientation from `context overview`
 - scratchpad state and deferred notes
 - queued tasks from `items/`
+- work-assistant people, activity, and pending approval-gated external writes
 - recent `hivemind/` messages
 - latest durable memory summary
 
@@ -373,6 +374,9 @@ around the client process.
 - `query_shortcut`
 - `query_canonical`
 - `index_rebuild`
+- `agent_jobs_inbox`
+- `work_summary`
+- `work_approvals`
 - `notes`
 
 `afs-client-session` exports the same follow-up hints as:
@@ -381,6 +385,8 @@ around the client process.
 - `AFS_SESSION_CONTEXT_QUERY_HINT`
 - `AFS_SESSION_INDEX_REBUILD_HINT`
 - `AFS_SESSION_AGENT_JOBS_INBOX_HINT`
+- `AFS_SESSION_WORK_HINT`
+- `AFS_SESSION_WORK_APPROVALS_HINT`
 
 Client-session wrappers also call `agent-jobs seed --profile repo-maintenance`
 by default. This queues report-only maintenance jobs with daily dedupe keys and

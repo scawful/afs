@@ -187,6 +187,7 @@ def _build_cli_hints(
     status = summary.get("status") or {}
     index_state = status.get("index") or {}
     agent_jobs = summary.get("agent_jobs") or {}
+    work_assistant = summary.get("work_assistant") or {}
     stale_mounts = [str(value).strip() for value in (summary.get("stale_mounts") or []) if str(value).strip()]
 
     if bool(index_state.get("enabled")) and (
@@ -203,6 +204,10 @@ def _build_cli_hints(
         notes.append(
             "Agent job inbox has background output to review before starting more work."
         )
+    if work_assistant.get("pending_approvals"):
+        notes.append(
+            "Work assistant has pending external-write approvals to review before using connector write tools."
+        )
 
     return {
         "workspace_path": str(resolved_workspace),
@@ -210,6 +215,8 @@ def _build_cli_hints(
         "query_canonical": f"afs context query <text> --path {quoted_workspace}",
         "index_rebuild": f"afs index rebuild --path {quoted_workspace}",
         "agent_jobs_inbox": f"afs agent-jobs inbox --path {quoted_workspace}",
+        "work_summary": f"afs work --path {quoted_workspace}",
+        "work_approvals": f"afs work approvals list --path {quoted_workspace}",
         "notes": notes,
     }
 
@@ -825,6 +832,7 @@ def _bootstrap_bundle(
         "project": summary["project"],
         "profile": summary["profile"],
         "stale_mounts": list(summary.get("stale_mounts", [])),
+        "work_assistant": summary.get("work_assistant", {}),
         "recommended_actions": list(summary.get("recommended_actions", [])),
         "artifact_paths": artifact_paths,
     }

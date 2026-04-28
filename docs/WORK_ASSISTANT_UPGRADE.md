@@ -58,6 +58,12 @@ Log connector reads, drafts, approval requests, and write results through AFS
 context/history metadata so future agents can recover the project state.
 ```
 
+`afs session bootstrap --json` and `afs session prepare-client --json` include a
+compact work-assistant summary. Client wrappers also export:
+
+- `AFS_SESSION_WORK_HINT`
+- `AFS_SESSION_WORK_APPROVALS_HINT`
+
 Keep the default tool surface small. Agents should use AFS context and work
 commands first; domain MCPs and connector tools are opt-in for the active task.
 

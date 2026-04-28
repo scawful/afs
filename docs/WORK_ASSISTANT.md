@@ -121,6 +121,13 @@ Activity:
 ./scripts/afs work activity list --path .
 ```
 
+Session startup:
+
+- `afs session bootstrap --json` includes a compact `work_assistant` block.
+- `afs session prepare-client --json` includes work hints under `cli_hints`.
+- `afs-client-session` exports `AFS_SESSION_WORK_HINT` and
+  `AFS_SESSION_WORK_APPROVALS_HINT` for harness wrappers.
+
 ## Permission Rule
 
 The work-assistant layer may create drafts and approval requests, but it does

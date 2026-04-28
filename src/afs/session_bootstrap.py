@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ _SECTION_PRIORITY = [
     "agent_manifest",   # high: shared harness/source-of-truth state
     "agent_jobs",       # high: file-backed background work queue
     "tasks",            # high: pending work items
+    "work_assistant",   # high: external-write approvals and people context
     "codebase",         # high: quick repo orientation
     "session_changes",  # medium-high: what changed since last session
     "diff",             # medium: recent index drift
@@ -190,6 +192,7 @@ def build_session_bootstrap(
     agent_jobs = _collect_agent_jobs(context_path, limit=task_limit)
     agent_runs = _collect_agent_runs(context_path, limit=task_limit)
     agent_manifest = _collect_agent_manifest()
+    work_assistant = _collect_work_assistant(manager, context_path, limit=task_limit)
     hivemind = _collect_hivemind(context_path, limit=message_limit)
     memory = _collect_memory(manager, context_path)
     reports = _collect_agent_reports(manager, context_path)
@@ -249,6 +252,7 @@ def build_session_bootstrap(
             "Check the agent manifest for shared harness, skill, and MCP routing before editing harness config.",
             "Read scratchpad state and deferred notes before editing.",
             "Check pending tasks, agent jobs, recent run records, and hivemind messages for handoffs.",
+            "Check `afs work` for people, review routes, activity, and pending approval-gated external writes.",
             "Use `afs context overview` / `afs.context.overview` for a fast repo map before deeper grep/query passes.",
             "Use `afs context query` / `context.query` before asking for context that may already be in memory or knowledge.",
             "Write updates back to scratchpad, tasks, or hivemind before handoff.",
@@ -260,6 +264,7 @@ def build_session_bootstrap(
         "agent_manifest": agent_manifest,
         "agent_jobs": agent_jobs,
         "agent_runs": agent_runs,
+        "work_assistant": work_assistant,
         "codebase": codebase,
         "hivemind": hivemind,
         "memory": memory,
@@ -347,6 +352,7 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
     agent_manifest = summary.get("agent_manifest", {})
     agent_jobs = summary.get("agent_jobs", {})
     agent_runs = summary.get("agent_runs", {})
+    work_assistant = summary.get("work_assistant", {})
     hivemind = summary["hivemind"]
     memory = summary["memory"]
     reports = summary["agent_reports"]
@@ -463,6 +469,36 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
             lines.append(
                 f"  - [{item['status']}] p{item['priority']} {item['title']}{assigned}"
             )
+
+    lines.extend(["", "## Work Assistant"])
+    if work_assistant.get("available", True):
+        summary_counts = work_assistant.get("summary") or {}
+        initialized = "yes" if work_assistant.get("initialized") else "no"
+        lines.append(f"- initialized: {initialized}")
+        lines.append(f"- database: {work_assistant.get('db_path', '')}")
+        lines.append(
+            "- counts: "
+            f"people={summary_counts.get('people', 0)}, "
+            f"relationships={summary_counts.get('relationships', 0)}, "
+            f"review_routes={summary_counts.get('review_routes', 0)}, "
+            f"approvals={summary_counts.get('approvals', 0)}, "
+            f"activity={summary_counts.get('activity', 0)}"
+        )
+        pending = work_assistant.get("pending_approvals") or []
+        if pending:
+            lines.append("- pending_approvals:")
+            for approval in pending:
+                lines.append(
+                    f"  - {approval.get('approval_id')}: "
+                    f"{approval.get('target_system')}/{approval.get('action')} - "
+                    f"{approval.get('summary')}"
+                )
+        commands = work_assistant.get("commands") or {}
+        if commands:
+            lines.append(f"- summary_command: `{commands.get('summary', '')}`")
+            lines.append(f"- approvals_command: `{commands.get('approvals', '')}`")
+    else:
+        lines.append(f"- unavailable: {work_assistant.get('error', 'unknown error')}")
 
     lines.extend(["", "## Agent Manifest"])
     if agent_manifest.get("available"):
@@ -729,6 +765,65 @@ def _collect_agent_runs(context_path: Path, *, limit: int) -> dict[str, Any]:
     }
 
 
+def _collect_work_assistant(
+    manager: AFSManager,
+    context_path: Path,
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    quoted_context = shlex.quote(str(context_path.expanduser().resolve()))
+    commands = {
+        "summary": f"afs work --context-root {quoted_context}",
+        "approvals": f"afs work approvals list --context-root {quoted_context}",
+        "activity": f"afs work activity list --context-root {quoted_context}",
+    }
+    try:
+        from .work_assistant import DEFAULT_DB_FILENAME, WorkAssistantStore
+
+        global_root = resolve_mount_root(context_path, MountType.GLOBAL, config=manager.config)
+        db_path = global_root / DEFAULT_DB_FILENAME
+        empty_summary = {
+            "people": 0,
+            "relationships": 0,
+            "review_routes": 0,
+            "approvals": 0,
+            "activity": 0,
+            "pending_approvals": 0,
+            "db_path": str(db_path),
+        }
+        if not db_path.exists():
+            return {
+                "available": True,
+                "initialized": False,
+                "db_path": str(db_path),
+                "summary": empty_summary,
+                "pending_approvals": [],
+                "recent_activity": [],
+                "commands": commands,
+            }
+
+        store = WorkAssistantStore(context_path, config=manager.config, db_path=db_path)
+        return {
+            "available": True,
+            "initialized": True,
+            "db_path": str(db_path),
+            "summary": store.summary(),
+            "pending_approvals": store.list_approvals(status="pending", limit=max(1, limit)),
+            "recent_activity": store.list_activity(limit=max(1, min(limit, _MAX_LIST_ITEMS))),
+            "commands": commands,
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "initialized": False,
+            "summary": {},
+            "pending_approvals": [],
+            "recent_activity": [],
+            "commands": commands,
+            "error": str(exc),
+        }
+
+
 def _collect_hivemind(context_path: Path, *, limit: int) -> dict[str, Any]:
     try:
         from .hivemind import HivemindBus
@@ -905,6 +1000,7 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
     agent_manifest = summary.get("agent_manifest", {})
     agent_jobs = summary.get("agent_jobs", {})
     agent_runs = summary.get("agent_runs", {})
+    work_assistant = summary.get("work_assistant", {})
     hivemind = summary["hivemind"]
     memory = summary["memory"]
 
@@ -947,6 +1043,11 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
 
     if agent_runs.get("recent_count", 0) > 0:
         recommendations.append("Review recent `afs agent-runs list` output for replayable prior agent state.")
+
+    pending_approvals = work_assistant.get("pending_approvals") or []
+    if pending_approvals:
+        command = (work_assistant.get("commands") or {}).get("approvals", "afs work approvals list")
+        recommendations.append(f"Review pending external-write approvals with `{command}`.")
 
     if hivemind.get("recent_count", 0) > 0:
         recommendations.append("Review recent hivemind messages for cross-agent handoffs.")

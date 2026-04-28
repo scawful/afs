@@ -88,6 +88,8 @@ def _write_fake_afs_cli(
                 "query_canonical": f"afs context query <text> --path {workspace_path}",
                 "index_rebuild": f"afs index rebuild --path {workspace_path}",
                 "agent_jobs_inbox": f"afs agent-jobs inbox --path {workspace_path}",
+                "work_summary": f"afs work --path {workspace_path}",
+                "work_approvals": f"afs work approvals list --path {workspace_path}",
                 "verify_plan": f"afs verify plan --payload-file {payload_json} --json",
                 "verify_run": f"afs verify run --payload-file {payload_json} --json",
                 "notes": [],
@@ -167,6 +169,8 @@ def _write_fake_client(path: Path, log_path: Path) -> Path:
         "    'AFS_SESSION_CONTEXT_QUERY_HINT': os.environ.get('AFS_SESSION_CONTEXT_QUERY_HINT'),\n"
         "    'AFS_SESSION_INDEX_REBUILD_HINT': os.environ.get('AFS_SESSION_INDEX_REBUILD_HINT'),\n"
         "    'AFS_SESSION_AGENT_JOBS_INBOX_HINT': os.environ.get('AFS_SESSION_AGENT_JOBS_INBOX_HINT'),\n"
+        "    'AFS_SESSION_WORK_HINT': os.environ.get('AFS_SESSION_WORK_HINT'),\n"
+        "    'AFS_SESSION_WORK_APPROVALS_HINT': os.environ.get('AFS_SESSION_WORK_APPROVALS_HINT'),\n"
         "    'AFS_SESSION_VERIFY_PLAN_HINT': os.environ.get('AFS_SESSION_VERIFY_PLAN_HINT'),\n"
         "    'AFS_SESSION_VERIFY_RUN_HINT': os.environ.get('AFS_SESSION_VERIFY_RUN_HINT'),\n"
         "    'AFS_SESSION_RECOMMENDED_SCHEMA': os.environ.get('AFS_SESSION_RECOMMENDED_SCHEMA'),\n"
@@ -768,6 +772,16 @@ def test_afs_client_session_uses_client_specific_allowed_roots(tmp_path: Path) -
         == f"afs agent-jobs inbox --path {payload['_workspace']}"
     )
     assert f"AFS agent jobs inbox (gemini): afs agent-jobs inbox --path {payload['_workspace']}" in payload["_stderr"]
+    assert payload["AFS_SESSION_WORK_HINT"] == f"afs work --path {payload['_workspace']}"
+    assert (
+        payload["AFS_SESSION_WORK_APPROVALS_HINT"]
+        == f"afs work approvals list --path {payload['_workspace']}"
+    )
+    assert f"AFS work hint (gemini): afs work --path {payload['_workspace']}" in payload["_stderr"]
+    assert (
+        f"AFS work approvals (gemini): afs work approvals list --path {payload['_workspace']}"
+        in payload["_stderr"]
+    )
     assert (
         payload["AFS_SESSION_VERIFY_PLAN_HINT"]
         == f"afs verify plan --payload-file {payload['AFS_SESSION_CLIENT_PAYLOAD_JSON']} --json"

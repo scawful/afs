@@ -267,9 +267,11 @@ surfaces into a single JSON artifact for wrappers and IDE adapters.
 `AFS_SESSION_EVENT_BIN` variables, then fires `session_start` / `session_end`
 hooks around the client run. The JSON payload also carries a `cli_hints` block
 with the resolved workspace path plus `afs query`, `afs context query`, and
-`afs index rebuild` follow-up commands, and the wrapper exports the same values
-via `AFS_SESSION_QUERY_HINT`, `AFS_SESSION_CONTEXT_QUERY_HINT`, and
-`AFS_SESSION_INDEX_REBUILD_HINT`. By default it also hands the prompt artifact
+`afs index rebuild`, `afs work`, and `afs work approvals list` follow-up
+commands, and the wrapper exports the same values via
+`AFS_SESSION_QUERY_HINT`, `AFS_SESSION_CONTEXT_QUERY_HINT`,
+`AFS_SESSION_INDEX_REBUILD_HINT`, `AFS_SESSION_WORK_HINT`, and
+`AFS_SESSION_WORK_APPROVALS_HINT`. By default it also hands the prompt artifact
 to the native client surface when available: Codex via
 `-c model_instructions_file=...`, Claude via `--append-system-prompt-file`,
 and Gemini via `GEMINI_SYSTEM_MD`. Set `AFS_CLIENT_NATIVE_PROMPT=0` or the

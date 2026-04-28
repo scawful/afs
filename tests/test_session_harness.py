@@ -169,6 +169,8 @@ def test_session_prepare_client_command_outputs_artifacts(
     )
     assert payload["cli_hints"]["index_rebuild"] == f"afs index rebuild --path {tmp_path.resolve()}"
     assert payload["cli_hints"]["agent_jobs_inbox"] == f"afs agent-jobs inbox --path {tmp_path.resolve()}"
+    assert payload["cli_hints"]["work_summary"] == f"afs work --path {tmp_path.resolve()}"
+    assert payload["cli_hints"]["work_approvals"] == f"afs work approvals list --path {tmp_path.resolve()}"
     assert payload["cli_hints"]["verify_plan"].startswith("afs verify plan --payload-file ")
     assert payload["cli_hints"]["verify_run"].startswith("afs verify run --payload-file ")
     assert isinstance(payload["cli_hints"]["notes"], list)

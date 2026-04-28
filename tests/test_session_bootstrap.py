@@ -14,6 +14,7 @@ from afs.manager import AFSManager
 from afs.models import MountType
 from afs.schema import AFSConfig, DirectoryConfig, GeneralConfig, default_directory_configs
 from afs.tasks import TaskQueue
+from afs.work_assistant import WorkAssistantStore
 
 
 def _remap_directories(**overrides: str) -> list[DirectoryConfig]:
@@ -77,6 +78,15 @@ def test_session_bootstrap_command_outputs_json_and_writes_artifacts(
         harness="codex",
         workspace=str(project_path),
     )
+    work_store = WorkAssistantStore(context_root, config=config)
+    work_store.create_approval(
+        target_system="zendesk",
+        target_id="ticket-1",
+        action="post_ticket_comment",
+        summary="Send drafted support reply",
+        preview={"text": "Thanks for the report."},
+        permission_required="ticket comment approval",
+    )
 
     bus = HivemindBus(context_root)
     bus.send("tester", "status", {"detail": "handoff ready"})
@@ -115,6 +125,8 @@ def test_session_bootstrap_command_outputs_json_and_writes_artifacts(
     assert payload["agent_jobs"]["inbox_attention_count"] == 1
     assert "afs agent-jobs inbox" in payload["agent_jobs"]["inbox_command"]
     assert payload["agent_runs"]["recent_count"] == 1
+    assert payload["work_assistant"]["summary"]["pending_approvals"] == 1
+    assert payload["work_assistant"]["pending_approvals"][0]["summary"] == "Send drafted support reply"
     assert payload["hivemind"]["recent_count"] == 1
     assert payload["memory"]["entries_count"] == 1
     assert payload["artifact_paths"]["json"].endswith("session_bootstrap.json")
@@ -125,6 +137,7 @@ def test_session_bootstrap_command_outputs_json_and_writes_artifacts(
     assert any("afs index rebuild" in action for action in payload["recommended_actions"])
     assert any("scratchpad state" in action.lower() for action in payload["recommended_actions"])
     assert any("afs agent-jobs inbox" in action for action in payload["recommended_actions"])
+    assert any("afs work approvals list" in action for action in payload["recommended_actions"])
 
 
 def test_build_session_bootstrap_does_not_mutate_hivemind_or_memory(

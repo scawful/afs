@@ -1173,6 +1173,10 @@ def session_prepare_client_command(args: argparse.Namespace) -> int:
         print(f"index_hint: {cli_hints['index_rebuild']}")
     if cli_hints.get("agent_jobs_inbox"):
         print(f"agent_jobs_inbox_hint: {cli_hints['agent_jobs_inbox']}")
+    if cli_hints.get("work_summary"):
+        print(f"work_hint: {cli_hints['work_summary']}")
+    if cli_hints.get("work_approvals"):
+        print(f"work_approvals_hint: {cli_hints['work_approvals']}")
     if cli_hints.get("verify_plan"):
         print(f"verify_plan_hint: {cli_hints['verify_plan']}")
     if cli_hints.get("verify_run"):
