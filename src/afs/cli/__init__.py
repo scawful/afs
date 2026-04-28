@@ -45,6 +45,7 @@ from . import (
     training,
     verify,
     watch,
+    work,
 )
 from ._help import _build_command_tree, render_default_help, render_topic_help
 
@@ -217,6 +218,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
 
     # Register approvals commands
     approvals.register_parsers(subparsers)
+
+    # Register work-assistant people/review/approval commands
+    work.register_parsers(subparsers)
 
     # Register agent operations commands
     agent_ops.register_parsers(subparsers)

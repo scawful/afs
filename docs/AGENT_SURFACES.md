@@ -74,6 +74,8 @@ export AFS_VENV=<afs-root>/.venv
 <afs-root>/scripts/afs session event user_prompt_submit --client codex --session-id "$AFS_SESSION_ID" --prompt "current task"
 <afs-root>/scripts/afs-session-notify task_created --task-id bg-1 --task-title "Index context"
 <afs-root>/scripts/afs events tail --json
+<afs-root>/scripts/afs work --path .
+<afs-root>/scripts/afs work approvals list --path .
 <afs-root>/scripts/afs claude setup --path ~/src/project-a
 <afs-root>/scripts/afs claude setup --scope user
 <afs-root>/scripts/afs claude doctor
@@ -96,6 +98,10 @@ Harness upgrade and setup:
 Training commands are intentionally not part of the default agent startup path.
 Use `afs training ...` only for reusable training/eval work that explicitly
 needs those surfaces.
+
+Work-assistant commands are for non-technical documents, sheets, tickets,
+planning, people, review routing, and approval queues. The state is native to
+AFS and should stay behind a thin command/tool surface.
 
 Warm context/cache:
 
@@ -175,6 +181,11 @@ Optional tools for explicit workflows:
 - `hivemind.reap`
 - `handoff.read`
 - `handoff.list`
+
+Work-assistant state should not be expanded into a broad MCP CRUD API. Prefer
+native AFS/background enrichment plus a small future surface for context
+overview, relevant people, pending approvals, draft creation, approval status,
+and executing one approved action.
 
 Paths are scoped to:
 

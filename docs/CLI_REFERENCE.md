@@ -199,6 +199,38 @@ For compatibility, `./scripts/afs review approve project-a draft.md` still
 works when `project-a` can be resolved from configured
 `general.workspace_directories`.
 
+## Work Assistant
+
+`work` manages non-technical work-assistant state in the active context:
+people, project relationships, review routes, approval requests, and activity.
+This state is native to AFS and backed by `.context/global/work_assistant.sqlite3`.
+It is intentionally not exposed as a broad MCP CRUD surface.
+
+```bash
+./scripts/afs work --path .
+./scripts/afs work people list --path .
+./scripts/afs work relationships list --path .
+./scripts/afs work reviewers --path . --target-type docs
+./scripts/afs work approvals list --path .
+./scripts/afs work approvals request \
+  --path . \
+  --target-system zendesk \
+  --target-id ticket-123 \
+  --action post_ticket_comment \
+  --summary "Send drafted support reply" \
+  --preview "Thanks for the report..." \
+  --permission-required "ticket comment approval"
+./scripts/afs work approvals approve <approval-id> --path . --by human
+./scripts/afs work activity list --path .
+```
+
+When context/history events include work metadata such as `owner`,
+`reviewers`, `relationships`, `review_routes`, `approval_request`, or
+`requires_approval`, AFS enriches the work-assistant database automatically.
+External writes should be executed only from one approved action at a time.
+
+See `docs/WORK_ASSISTANT.md`.
+
 ## Memory
 
 ```bash

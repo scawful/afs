@@ -9,6 +9,7 @@ from afs.history import log_cli_invocation, log_event, log_session_event
 from afs.manager import AFSManager
 from afs.models import MountType
 from afs.schema import AFSConfig, GeneralConfig, HistoryConfig
+from afs.work_assistant import WorkAssistantStore
 
 
 def _write_config(path: Path, context_root: Path, *, include_payloads: bool = True) -> None:
@@ -160,6 +161,39 @@ def test_log_session_event_respects_explicit_context_root(tmp_path, monkeypatch)
     assert event_id
     log_files = list((context_root / "history").glob("events_*.jsonl"))
     assert log_files
+
+
+def test_log_event_enriches_work_assistant_state(tmp_path, monkeypatch) -> None:
+    context_root = tmp_path / "context"
+    config_path = tmp_path / "afs.toml"
+    _write_config(config_path, context_root, include_payloads=True)
+
+    monkeypatch.setenv("AFS_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("AFS_CONTEXT_ROOT", str(context_root))
+    monkeypatch.delenv("AFS_HISTORY_DISABLED", raising=False)
+    monkeypatch.delenv("AFS_WORK_ASSISTANT_ENRICH_DISABLED", raising=False)
+
+    event_id = log_event(
+        "context",
+        "test.connector",
+        op="snapshot",
+        metadata={
+            "target_system": "google-docs",
+            "target_type": "docs",
+            "target_id": "doc-1",
+            "owner": {"display_name": "Doc Owner", "email": "owner@example.com"},
+            "requires_approval": True,
+            "action": "edit_doc",
+            "summary": "Apply doc edit",
+        },
+        context_root=context_root,
+    )
+
+    assert event_id
+    store = WorkAssistantStore(context_root)
+    assert store.list_people()[0]["display_name"] == "Doc Owner"
+    assert store.list_approvals()[0]["summary"] == "Apply doc edit"
+    assert store.list_activity()[0]["event_id"] == event_id
 
 
 def test_context_fs_history_records_metadata_not_file_contents(tmp_path, monkeypatch) -> None:

@@ -83,6 +83,7 @@ def test_render_default_help_mentions_context_query_and_index_rebuild(
     assert "afs index rebuild" in out
     assert "afs setup" in out
     assert "afs guide context" in out
+    assert "afs work" in out
 
 
 def test_render_topic_help_for_context_query_shows_examples_and_output_fields(

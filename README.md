@@ -52,6 +52,10 @@ See `docs/development.md` for PR target and promotion guidance.
 **Agent Operations** — Optional run records, safe background job queues, and
 handoffs for work that spans turns or harnesses.
 
+**Work Assistant** — Context-local people, relationship, review-route,
+approval, and activity records for documents, sheets, tickets, planning, and
+other non-technical workflows.
+
 **Hivemind** — Optional inter-agent message bus for tasks that explicitly need
 cross-agent coordination.
 
@@ -116,6 +120,21 @@ afs agent-jobs work --agent codex --command '...'  # Claim and execute queued jo
 
 `session bootstrap` includes manifest, run, and job state; MCP clients can use
 `agent.manifest.show`, `agent.run.*`, and `agent.job.*` directly.
+
+### Work Assistant
+
+```bash
+afs work                              # People/review/approval summary
+afs work people list                  # Known work-scoped people
+afs work reviewers --target-type docs # Suggested reviewers
+afs work approvals list               # Pending external-write approvals
+afs work activity list                # Recent work-assistant activity
+```
+
+Work-assistant state is native to AFS and backed by
+`.context/global/work_assistant.sqlite3`. It creates approval records for
+external writes instead of editing shared docs, sheets, tickets, or messages
+directly.
 
 ### Session
 
