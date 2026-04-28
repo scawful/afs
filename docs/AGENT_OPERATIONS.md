@@ -36,10 +36,11 @@ roots and writes per-harness JSON export files. It deliberately uses copied
 directories rather than symlinks.
 
 `agent-hooks install-shell` adds a marked, idempotent block to the shell profile
-that sources `afs-shell-init.sh` and `afs-agent-hooks.sh`. After a new shell,
-normal `codex`, `claude`, `gemini`, `hcode`, and `z3cli` commands route through
-the AFS wrappers. Run `afs-agent-hooks-off` inside a shell to disable the
-functions for that shell. Use `codex-raw`, `claude-raw`, `gemini-raw`,
+that sources AFS shell helpers. Use `--helpers-only` for aliases, colors, and
+completion without routing AI harness commands. Without `--helpers-only`, a new
+shell routes normal `codex`, `claude`, `gemini`, `hcode`, and `z3cli` commands
+through the AFS wrappers. Run `afs-agent-hooks-off` inside a shell to disable
+the functions for that shell. Use `codex-raw`, `claude-raw`, `gemini-raw`,
 `hcode-raw`, or `z3cli-raw` when you want the underlying command directly.
 
 `agent-hooks install-worker` installs a user LaunchAgent for

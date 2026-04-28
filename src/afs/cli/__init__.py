@@ -21,8 +21,8 @@ from ..health import cli as health_cli
 from ..history import log_cli_invocation
 from ..profiles import resolve_active_profile
 from . import (
-    approvals,
     agent_ops,
+    approvals,
     briefing,
     bundle,
     cache,
@@ -34,11 +34,13 @@ from . import (
     events,
     fs,
     gemini,
+    guide,
     gws_cli,
     mcp,
     personal,
     profile,
     review,
+    setup_wizard,
     skills,
     training,
     verify,
@@ -208,6 +210,10 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
 
     # Register core commands (init, plugins, status, services, agents, orchestrator, studio)
     core.register_parsers(subparsers)
+
+    # Register guided setup and workflow guides early so they are easy to find.
+    setup_wizard.register_parsers(subparsers)
+    guide.register_parsers(subparsers)
 
     # Register approvals commands
     approvals.register_parsers(subparsers)

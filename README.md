@@ -21,6 +21,8 @@ Use the wrapper script for reliable agent invocation (sets `AFS_ROOT` and `PYTHO
 ## Quick Start
 
 ```bash
+./scripts/afs setup                   # Guided setup wizard
+./scripts/afs guide                   # Friendly workflow menu
 ./scripts/afs init                    # Initialize AFS configuration
 ./scripts/afs context init            # Create .context directory structure
 ./scripts/afs status --start-dir "$PWD"  # Show context, mount, and index health
@@ -246,6 +248,7 @@ Domain-specific functionality (model training, persona configurations, deploymen
 
 - [docs/index.md](docs/index.md) — Documentation index
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — System architecture
+- [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md) — Guided setup, shell helpers, and approachable onboarding
 - [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) — Full CLI reference
 - [docs/AGENT_INTEGRATION_UPGRADE.md](docs/AGENT_INTEGRATION_UPGRADE.md) — Upgrade agent harnesses, MCP setup, hooks, and copied skills
 - [docs/AGENT_SURFACES.md](docs/AGENT_SURFACES.md) — Agent system design

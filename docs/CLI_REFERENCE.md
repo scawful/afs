@@ -13,6 +13,8 @@ Also supported once installed into the active environment:
 ## Quickstart
 
 - `./scripts/afs`
+- `./scripts/afs setup`
+- `./scripts/afs guide`
 - `./scripts/afs help context`
 - `./scripts/afs init --context-root ~/.context --workspace-name src`
 - `./scripts/afs status`
@@ -122,6 +124,24 @@ unless `AFS_CLIENT_RECORD_RUNS=0` is set. MCP exposes the same surfaces through
 `agent.manifest.show`, `agent.run.*`, and `agent.job.*` tools, including
 `agent.job.status` for the watchdog payload, `agent.job.inbox/review/promote/archive`
 for review handling, and `agent.job.seed` for safe maintenance job seeding.
+
+## Guided Setup
+
+```bash
+./scripts/afs setup
+./scripts/afs setup --yes --dry-run --shell helpers --mcp none --google-workspace skip
+./scripts/afs setup --yes --apply --shell helpers --mcp none --google-workspace skip
+./scripts/afs guide
+./scripts/afs guide context
+./scripts/afs guide shell
+./scripts/afs guide mcp
+```
+
+`setup` asks for config scope, context placement, shell integration level,
+optional MCP registration, optional Google Workspace handling, and background
+worker installation. It prints a plan before writing. `--shell helpers` installs
+aliases, colors, and zsh completion without routing AI harness commands;
+`--shell agent-hooks` enables the full wrapper routing.
 
 ## Context
 
@@ -531,6 +551,8 @@ AFS heuristic for avoiding explicit cache creation on tiny prefixes.
 ## GWS
 
 ```bash
+./scripts/setup_gws.sh --dry-run                     # preview install/auth
+./scripts/setup_gws.sh --credentials ~/Downloads/client_secret.json
 ./scripts/afs gws status                               # gws auth status
 ./scripts/afs gws agenda                               # today's calendar agenda
 ./scripts/afs gws unread                               # unread primary inbox

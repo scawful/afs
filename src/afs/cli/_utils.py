@@ -465,6 +465,7 @@ def write_config(path: Path, config: AFSConfig) -> None:
     hivemind_table["reaper_enabled"] = config.hivemind.reaper_enabled
     doc["hivemind"] = hivemind_table
 
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(tomlkit.dumps(doc), encoding="utf-8")
 
 

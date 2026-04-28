@@ -88,9 +88,10 @@ def test_build_parser_includes_agent_ops_commands() -> None:
     assert sync.apply is True
     assert sync.harness == ["claude"]
 
-    hooks = parser.parse_args(["agent-hooks", "install-shell", "--apply"])
+    hooks = parser.parse_args(["agent-hooks", "install-shell", "--apply", "--helpers-only"])
     assert hooks.command == "agent-hooks"
     assert hooks.apply is True
+    assert hooks.helpers_only is True
     assert hasattr(hooks, "func")
 
     worker = parser.parse_args(["agent-hooks", "install-worker", "--apply", "--load"])

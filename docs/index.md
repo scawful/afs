@@ -41,6 +41,7 @@ It provides filesystem-native primitives for:
 - [Agent Surfaces](AGENT_SURFACES.md)
 - [Agent Operations](AGENT_OPERATIONS.md)
 - [Agent Integration Upgrade](AGENT_INTEGRATION_UPGRADE.md)
+- [Guided Setup](SETUP_GUIDE.md)
 - [Architecture](ARCHITECTURE.md)
 - [Profiles and Hooks](PROFILES.md)
 - [Extensions](PLUGINS.md)

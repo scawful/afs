@@ -171,6 +171,7 @@ def hooks_install_shell_command(args: argparse.Namespace) -> int:
         afs_root=afs_root,
         profile_path=profile,
         apply=args.apply,
+        include_agent_hooks=not args.helpers_only,
     )
     payload = result.to_dict()
     if args.json:
@@ -556,6 +557,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     install_shell = hooks_sub.add_parser("install-shell", help="Install shell profile hooks.")
     install_shell.add_argument("--afs-root", help="AFS repo root.")
     install_shell.add_argument("--profile", help="Shell profile path. Defaults to ~/.zshrc.")
+    install_shell.add_argument(
+        "--helpers-only",
+        action="store_true",
+        help="Source shell helpers/completion without routing AI harness commands.",
+    )
     install_shell.add_argument("--apply", action="store_true", help="Write the profile block.")
     install_shell.add_argument("--json", action="store_true")
     install_shell.set_defaults(func=hooks_install_shell_command)

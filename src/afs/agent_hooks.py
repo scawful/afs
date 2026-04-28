@@ -42,19 +42,18 @@ def default_launchd_plist_path(label: str = DEFAULT_WORKER_LABEL) -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
 
 
-def render_shell_profile_block(afs_root: Path) -> str:
+def render_shell_profile_block(afs_root: Path, *, include_agent_hooks: bool = True) -> str:
     root = str(afs_root.expanduser().resolve())
     shell_init = shlex.quote(f"{root}/scripts/afs-shell-init.sh")
     agent_hooks = shlex.quote(f"{root}/scripts/afs-agent-hooks.sh")
-    return "\n".join(
-        [
-            SHELL_BLOCK_BEGIN,
-            f"[ -f {shell_init} ] && source {shell_init}",
-            f"[ -f {agent_hooks} ] && source {agent_hooks}",
-            SHELL_BLOCK_END,
-            "",
-        ]
-    )
+    lines = [
+        SHELL_BLOCK_BEGIN,
+        f"[ -f {shell_init} ] && source {shell_init}",
+    ]
+    if include_agent_hooks:
+        lines.append(f"[ -f {agent_hooks} ] && source {agent_hooks}")
+    lines.extend([SHELL_BLOCK_END, ""])
+    return "\n".join(lines)
 
 
 def _replace_or_append_block(text: str, block: str) -> tuple[str, bool]:
@@ -76,10 +75,14 @@ def install_shell_profile_hooks(
     afs_root: Path,
     profile_path: Path | None = None,
     apply: bool = False,
+    include_agent_hooks: bool = True,
 ) -> HookInstallResult:
     target = (profile_path or default_shell_profile()).expanduser()
     current = target.read_text(encoding="utf-8") if target.exists() else ""
-    updated, changed = _replace_or_append_block(current, render_shell_profile_block(afs_root))
+    updated, changed = _replace_or_append_block(
+        current,
+        render_shell_profile_block(afs_root, include_agent_hooks=include_agent_hooks),
+    )
     if apply and changed:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(updated, encoding="utf-8")

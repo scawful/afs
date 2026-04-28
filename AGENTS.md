@@ -31,6 +31,7 @@ AFS Defaults
 
 Reference Material
 - Agent harness upgrade guide: `docs/AGENT_INTEGRATION_UPGRADE.md`
+- Guided setup and approachable CLI guide: `docs/SETUP_GUIDE.md`
 - Detailed agent/runtime docs: `docs/AGENT_SURFACES.md`
 - MCP surface docs: `docs/MCP_SERVER.md`
 - CLI docs: `docs/CLI_REFERENCE.md`

@@ -18,6 +18,8 @@ _TOP_LEVEL_ORDER = [
     "query",
     "index",
     "session",
+    "setup",
+    "guide",
     "workspace",
     "graph",
     "status",
@@ -47,6 +49,8 @@ _TOP_LEVEL_COLORS = {
     "query": "1;32",
     "index": "1;32",
     "session": "1;32",
+    "setup": "1;36",
+    "guide": "1;36",
     "workspace": "1;32",
     "graph": "1;32",
     "status": "1;34",
@@ -166,6 +170,8 @@ def render_default_help(parser: argparse.ArgumentParser, config: AFSConfig | Non
         _format_list(
             [
                 _cmd("afs status"),
+                _cmd("afs setup"),
+                _cmd("afs guide context"),
                 _cmd("afs session bootstrap"),
                 _cmd("afs agent-jobs status"),
                 _cmd("afs agent-jobs inbox"),
@@ -206,6 +212,7 @@ def render_default_help(parser: argparse.ArgumentParser, config: AFSConfig | Non
         _format_list(
             [
                 f"{_cmd('afs help <command>')}            # or: {_cmd('afs <command> --help')}",
+                f"{_cmd('afs guide')}                     # friendly workflow menu",
                 f"{_cmd('afs context discover --json')}   # agent-friendly output",
                 _cmd("afs session bootstrap --json"),
                 _cmd("afs doctor --fix"),
@@ -220,6 +227,7 @@ def render_default_help(parser: argparse.ArgumentParser, config: AFSConfig | Non
         _format_list(
             [
                 f"{_cmd('source scripts/afs-shell-init.sh')}  # aliases, completions, helpers",
+                f"{_cmd('afs agent-hooks install-shell --helpers-only --apply')}  # install helpers safely",
                 f"{_dim('a=afs  as=status  ab=session-bootstrap  ap=agents-ps  tl=tasks  hm=hivemind  sk=skills')}",
                 f"{_dim('afs-here  afs-bootstrap  afs-find  afs-watch  afs-spawn  afs-task  afs-say')}",
                 f"{_dim('afs-gemini  afs-claude  afs-codex  # client launchers with AFS bootstrap')}",

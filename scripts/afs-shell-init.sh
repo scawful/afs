@@ -41,6 +41,8 @@ alias apa='afs agents ps --all'
 alias aw='afs agents watch'
 alias al='afs agents list'
 alias ab='afs session bootstrap'
+alias ag='afs guide'
+alias asetup='afs setup'
 alias tl='afs tasks list'
 alias hm='afs hivemind list'
 alias sk='afs skills list'
@@ -258,6 +260,8 @@ if [ -n "${ZSH_VERSION-}" ]; then
   _afs_commands() {
     local commands=(
       'status:Show AFS status'
+      'setup:Guided setup wizard'
+      'guide:Friendly workflow guides'
       'init:Initialize context root'
       'agents:Agent operations'
       'tasks:Task queue'

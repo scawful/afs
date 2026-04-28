@@ -23,6 +23,8 @@ environment the agent actually runs in.
 Help:
 
 - `<afs-root>/scripts/afs`
+- `<afs-root>/scripts/afs setup`
+- `<afs-root>/scripts/afs guide`
 - `<afs-root>/scripts/afs help <command>`
 - `<afs-root>/scripts/afs <command> --help`
 
@@ -85,6 +87,8 @@ export AFS_VENV=<afs-root>/.venv
 Harness upgrade and setup:
 
 ```bash
+<afs-root>/scripts/afs setup
+<afs-root>/scripts/afs guide shell
 <afs-root>/scripts/afs-upgrade-agent-setup --workspace ~/src
 <afs-root>/scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
 ```

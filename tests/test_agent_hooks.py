@@ -37,6 +37,12 @@ def test_render_shell_profile_block_sources_expected_scripts(tmp_path: Path) -> 
     assert "afs-agent-hooks.sh" in block
 
 
+def test_render_shell_profile_block_can_skip_agent_routing(tmp_path: Path) -> None:
+    block = render_shell_profile_block(tmp_path / "afs", include_agent_hooks=False)
+    assert "afs-shell-init.sh" in block
+    assert "afs-agent-hooks.sh" not in block
+
+
 def test_render_launchd_plist_runs_agent_job_worker(tmp_path: Path) -> None:
     payload = plistlib.loads(
         render_launchd_plist(
