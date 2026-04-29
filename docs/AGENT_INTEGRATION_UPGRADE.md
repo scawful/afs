@@ -62,7 +62,9 @@ An AFS-aware harness should do this at session start:
    spans turns, agents, or tools.
 7. Run `afs work --path . --json` when the task involves docs, sheets, tickets,
    planning, people, or review routing.
-8. For external writes, create or reuse an AFS work approval request and execute
+8. For work-context writing, inspect `afs work communication guide` or MCP
+   `work.communication.guide` before matching the user's tone.
+9. For external writes, create or reuse an AFS work approval request and execute
    exactly one approved action with `afs work approvals execute`.
 
 Do not start background agents, hivemind coordination, embeddings, training
@@ -76,6 +78,8 @@ Keep the default MCP set small:
 - `afs.session.bootstrap`
 - `context.status`
 - `context.query`
+- `work.communication.guide`
+- `work.approvals.list`
 - `context.read`
 - `context.write`
 - `context.list`
@@ -171,6 +175,7 @@ surface. Upgrade agents by teaching them the small command contract:
 ```bash
 scripts/afs work --path .
 scripts/afs work communication list --path .
+scripts/afs work communication guide --path .
 scripts/afs work approvals list --path .
 scripts/afs work approvals request --path . ...
 scripts/afs work approvals approve <approval-id> --path . --by human

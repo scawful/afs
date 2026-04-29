@@ -21,6 +21,7 @@ from afs.schema import (
     WorkspaceDirectory,
     default_directory_configs,
 )
+from afs.work_assistant import WorkAssistantStore
 
 
 def _make_manager(tmp_path: Path) -> AFSManager:
@@ -106,6 +107,12 @@ def test_tools_list_returns_preferred_and_compatibility_file_tools(tmp_path: Pat
         "operator.digest",
         "context.repair",
         "session.pack",
+        "work.communication.list",
+        "work.communication.add",
+        "work.communication.guide",
+        "work.approvals.list",
+        "work.approvals.show",
+        "work.approvals.request",
         "events.analytics",
         "events.replay",
         "hivemind.reap",
@@ -235,6 +242,112 @@ def test_fs_file_aliases_match_context_tool_behavior(tmp_path: Path) -> None:
     )
     assert delete_response is not None
     assert not moved.exists()
+
+
+def test_work_mcp_tools_capture_style_and_request_approval(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_path = manager.config.general.context_root
+
+    add_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 240,
+            "method": "tools/call",
+            "params": {
+                "name": "work.communication.add",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "text": "Findings first, exact file evidence, short follow-up.",
+                    "source_system": "github",
+                    "source_id": "comment-1",
+                    "channel": "pr_review",
+                    "purpose": "responding_to_comments",
+                    "style_notes": ["findings-first", "direct"],
+                },
+            },
+        },
+        manager,
+    )
+    assert add_response is not None
+    assert add_response["result"]["structuredContent"]["sample_id"]
+
+    guide_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 241,
+            "method": "tools/call",
+            "params": {
+                "name": "work.communication.guide",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "purpose": "responding_to_comments",
+                },
+            },
+        },
+        manager,
+    )
+    assert guide_response is not None
+    guide = guide_response["result"]["structuredContent"]
+    assert guide["sample_count"] == 1
+    assert guide["style_notes"] == ["findings-first", "direct"]
+    assert any("explicit approval" in line for line in guide["guidance"])
+
+    request_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 242,
+            "method": "tools/call",
+            "params": {
+                "name": "work.approvals.request",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "target_system": "github",
+                    "target_id": "PR-1",
+                    "action": "post_pr_comment",
+                    "summary": "Post drafted PR response",
+                    "preview": {"body": "Thanks, fixed in src/afs/work_assistant.py."},
+                },
+            },
+        },
+        manager,
+    )
+    assert request_response is not None
+    approval_id = request_response["result"]["structuredContent"]["approval_id"]
+    approval = WorkAssistantStore(context_path).get_approval(approval_id)
+    assert approval is not None
+    assert approval["status"] == "pending"
+
+    list_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 243,
+            "method": "tools/call",
+            "params": {
+                "name": "work.approvals.list",
+                "arguments": {"context_path": str(context_path)},
+            },
+        },
+        manager,
+    )
+    assert list_response is not None
+    approvals = list_response["result"]["structuredContent"]["approvals"]
+    assert approvals[0]["approval_id"] == approval_id
+    assert approvals[0]["status"] == "pending"
+
+    show_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 244,
+            "method": "tools/call",
+            "params": {
+                "name": "work.approvals.show",
+                "arguments": {"context_path": str(context_path), "approval_id": approval_id},
+            },
+        },
+        manager,
+    )
+    assert show_response is not None
+    assert show_response["result"]["structuredContent"]["approval"]["preview"]["body"].startswith("Thanks")
 
 
 def test_events_analytics_tool_reports_mcp_usage(tmp_path: Path) -> None:

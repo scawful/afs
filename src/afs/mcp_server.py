@@ -393,6 +393,110 @@ def _as_text_result(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _work_store(
+    arguments: dict[str, Any],
+    manager: AFSManager,
+) -> tuple[Any, Path]:
+    from .work_assistant import WorkAssistantStore
+
+    context_path = _resolve_context_path(arguments, manager)
+    return WorkAssistantStore(context_path, config=manager.config), context_path
+
+
+def _tool_work_communication_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    store, context_path = _work_store(arguments, manager)
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    person_id = arguments.get("person_id")
+    purpose = arguments.get("purpose")
+    samples = store.list_communication_samples(
+        person_id=person_id if isinstance(person_id, str) and person_id.strip() else None,
+        purpose=purpose if isinstance(purpose, str) and purpose.strip() else None,
+        limit=limit,
+    )
+    return {"context_path": str(context_path), "samples": samples, "count": len(samples)}
+
+
+def _tool_work_communication_add(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    store, context_path = _work_store(arguments, manager)
+    text = arguments.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("work.communication.add requires non-empty text")
+    style_notes = arguments.get("style_notes")
+    provenance = arguments.get("provenance")
+    sample_id = store.record_communication_sample(
+        text=text,
+        person_id=str(arguments.get("person_id") or ""),
+        source_system=str(arguments.get("source_system") or ""),
+        source_id=str(arguments.get("source_id") or ""),
+        channel=str(arguments.get("channel") or ""),
+        purpose=str(arguments.get("purpose") or "work_communication"),
+        style_notes=style_notes if isinstance(style_notes, list) else [],
+        provenance=provenance if isinstance(provenance, list) else ([provenance] if provenance else []),
+        confidence=float(arguments.get("confidence") or 0.5),
+        dedupe_key=str(arguments.get("dedupe_key") or "") or None,
+    )
+    return {"context_path": str(context_path), "sample_id": sample_id}
+
+
+def _tool_work_communication_guide(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    store, context_path = _work_store(arguments, manager)
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    person_id = arguments.get("person_id")
+    purpose = arguments.get("purpose")
+    summary = store.communication_style_summary(
+        person_id=person_id if isinstance(person_id, str) and person_id.strip() else None,
+        purpose=purpose if isinstance(purpose, str) and purpose.strip() else None,
+        limit=limit,
+    )
+    summary["context_path"] = str(context_path)
+    return summary
+
+
+def _tool_work_approvals_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    store, context_path = _work_store(arguments, manager)
+    limit = _coerce_int(arguments.get("limit"), default=50, minimum=1, maximum=100)
+    status_arg = arguments.get("status")
+    status = status_arg if isinstance(status_arg, str) and status_arg.strip() else "pending"
+    if bool(arguments.get("all", False)):
+        status = None
+    approvals = store.list_approvals(status=status, limit=limit)
+    return {"context_path": str(context_path), "approvals": approvals, "count": len(approvals)}
+
+
+def _tool_work_approvals_show(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    store, context_path = _work_store(arguments, manager)
+    approval_id = arguments.get("approval_id")
+    if not isinstance(approval_id, str) or not approval_id.strip():
+        raise ValueError("work.approvals.show requires approval_id")
+    approval = store.get_approval(approval_id)
+    if approval is None:
+        raise FileNotFoundError(f"No approval found: {approval_id}")
+    return {"context_path": str(context_path), "approval": approval}
+
+
+def _tool_work_approvals_request(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    store, context_path = _work_store(arguments, manager)
+    required = ("target_system", "target_id", "action", "summary")
+    missing = [name for name in required if not str(arguments.get(name) or "").strip()]
+    if missing:
+        raise ValueError(f"work.approvals.request missing required fields: {', '.join(missing)}")
+    preview = arguments.get("preview")
+    approval_id = store.create_approval(
+        target_system=str(arguments.get("target_system") or ""),
+        target_id=str(arguments.get("target_id") or ""),
+        action=str(arguments.get("action") or ""),
+        summary=str(arguments.get("summary") or ""),
+        preview=preview if preview is not None else {},
+        affected_people=arguments.get("affected_people") if isinstance(arguments.get("affected_people"), list) else [],
+        risk_level=str(arguments.get("risk_level") or "medium"),
+        permission_required=str(arguments.get("permission_required") or "human approval"),
+        requested_by=str(arguments.get("requested_by") or "agent"),
+        expires_at=str(arguments.get("expires_at") or "") or None,
+        dedupe_key=str(arguments.get("dedupe_key") or "") or None,
+    )
+    return {"context_path": str(context_path), "approval_id": approval_id, "status": "pending"}
+
+
 def _tool_fs_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     path_value = arguments.get("path")
     if not isinstance(path_value, str):
@@ -2286,6 +2390,112 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_session_pack,
+        ),
+        MCPToolDefinition(
+            name="work.communication.list",
+            description="List captured work communication samples before drafting docs, design docs, requirements, or replies in the user's work style.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "person_id": {"type": "string"},
+                    "purpose": {"type": "string"},
+                    "limit": {"type": "integer", "default": 20},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_work_communication_list,
+        ),
+        MCPToolDefinition(
+            name="work.communication.add",
+            description="Capture a work communication sample for future tone/style grounding. Store only deliberate work samples, not arbitrary private text.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "text": {"type": "string"},
+                    "person_id": {"type": "string"},
+                    "source_system": {"type": "string"},
+                    "source_id": {"type": "string"},
+                    "channel": {"type": "string"},
+                    "purpose": {"type": "string"},
+                    "style_notes": {"type": "array", "items": {"type": "string"}},
+                    "provenance": {"type": "array", "items": {"type": "object"}},
+                    "confidence": {"type": "number", "default": 0.5},
+                    "dedupe_key": {"type": "string"},
+                },
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+            handler=_tool_work_communication_add,
+        ),
+        MCPToolDefinition(
+            name="work.communication.guide",
+            description="Summarize available work communication style evidence and mandatory approval guardrails for work-context writing.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "person_id": {"type": "string"},
+                    "purpose": {"type": "string"},
+                    "limit": {"type": "integer", "default": 20},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_work_communication_guide,
+        ),
+        MCPToolDefinition(
+            name="work.approvals.list",
+            description="List local AFS work approval requests. Review this before using connector write tools or claiming permission to post externally.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "status": {"type": "string", "default": "pending"},
+                    "all": {"type": "boolean", "default": False},
+                    "limit": {"type": "integer", "default": 50},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_work_approvals_list,
+        ),
+        MCPToolDefinition(
+            name="work.approvals.show",
+            description="Show one local AFS work approval request and its preview/result details.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "approval_id": {"type": "string"},
+                },
+                "required": ["approval_id"],
+                "additionalProperties": False,
+            },
+            handler=_tool_work_approvals_show,
+        ),
+        MCPToolDefinition(
+            name="work.approvals.request",
+            description="Create a local approval request for posting, sending, submitting, or editing an external work system. This asks for permission; it does not execute the write.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "target_system": {"type": "string"},
+                    "target_id": {"type": "string"},
+                    "action": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "preview": {"type": "object"},
+                    "affected_people": {"type": "array", "items": {}},
+                    "risk_level": {"type": "string", "default": "medium"},
+                    "permission_required": {"type": "string", "default": "human approval"},
+                    "requested_by": {"type": "string", "default": "agent"},
+                    "expires_at": {"type": "string"},
+                    "dedupe_key": {"type": "string"},
+                },
+                "required": ["target_system", "target_id", "action", "summary"],
+                "additionalProperties": False,
+            },
+            handler=_tool_work_approvals_request,
         ),
         MCPToolDefinition(
             name="operator.digest",

@@ -367,6 +367,14 @@ def _session_context_block(
                     excerpt = excerpt[:177].rstrip() + "..."
                 if excerpt:
                     lines.append(f"- {purpose}: {excerpt}")
+        guidance = work_assistant.get("communication_guidance", {})
+        if isinstance(guidance, dict):
+            guidance_lines = guidance.get("guidance", [])
+            if isinstance(guidance_lines, list) and guidance_lines:
+                lines.append("Work communication guidance:")
+                for item in guidance_lines[:3]:
+                    if isinstance(item, str) and item.strip():
+                        lines.append(f"- {item.strip()}")
         if has_work_context:
             lines.append("Work communication contract:")
             lines.extend(_work_communication_contract_lines())

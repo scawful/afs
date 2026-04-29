@@ -238,6 +238,11 @@ It is intentionally not exposed as a broad MCP CRUD surface.
   --executor "python3 scripts/afs-work-gws-executor.py"
 ./scripts/afs work communication list --path .
 ./scripts/afs work communication list --path . --purpose responding_to_comments --json
+./scripts/afs work communication add --path . \
+  --purpose responding_to_comments \
+  --style-note "direct" \
+  --text "Short, concrete reply with exact file evidence."
+./scripts/afs work communication guide --path . --purpose responding_to_comments
 ./scripts/afs work activity list --path .
 ```
 

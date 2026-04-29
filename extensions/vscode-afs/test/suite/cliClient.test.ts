@@ -118,6 +118,70 @@ if (args[0] === "context" && args[1] === "query") {
   process.exit(0);
 }
 
+if (args[0] === "work" && args[1] === "communication" && args[2] === "list") {
+  process.stdout.write(
+    JSON.stringify([
+      {
+        sample_id: "comm_1",
+        purpose: "responding_to_comments",
+        text_excerpt: "Use exact file evidence.",
+        style_notes: ["direct"],
+      },
+    ]),
+  );
+  process.exit(0);
+}
+
+if (args[0] === "work" && args[1] === "communication" && args[2] === "guide") {
+  process.stdout.write(
+    JSON.stringify({
+      sample_count: 1,
+      style_notes: ["direct"],
+      guidance: ["Use samples before drafting.", "Never post externally without approval."],
+      samples: [],
+    }),
+  );
+  process.exit(0);
+}
+
+if (args[0] === "work" && args[1] === "communication" && args[2] === "add") {
+  process.stdout.write(JSON.stringify({ sample_id: "comm_added" }));
+  process.exit(0);
+}
+
+if (args[0] === "work" && args[1] === "approvals" && args[2] === "list") {
+  process.stdout.write(
+    JSON.stringify([
+      {
+        approval_id: "approval_1",
+        status: "pending",
+        target_system: "github",
+        action: "post_pr_comment",
+        summary: "Post drafted reply",
+      },
+    ]),
+  );
+  process.exit(0);
+}
+
+if (args[0] === "work" && args[1] === "approvals" && args[2] === "show") {
+  process.stdout.write(
+    JSON.stringify({
+      approval_id: args[3],
+      status: "pending",
+      target_system: "github",
+      action: "post_pr_comment",
+      summary: "Post drafted reply",
+    }),
+  );
+  process.exit(0);
+}
+
+if (args[0] === "work" && args[1] === "approvals" && args[2] === "request") {
+  process.stdout.write(JSON.stringify({ approval_id: "approval_requested", status: "pending" }));
+  process.exit(0);
+}
+
 if (args[0] === "context" && args[1] === "discover") {
   process.stdout.write(
     JSON.stringify({
@@ -453,6 +517,78 @@ describe("CliClient", () => {
     assert.ok(queryCall.args.includes("--prefix"));
     assert.ok(queryCall.args.includes("notes"));
     assert.ok(queryCall.args.includes("--include-content"));
+  });
+
+  it("maps work communication and approval tools to the CLI fallback", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "afs-cli-client-work-"));
+    const logPath = path.join(tmpDir, "cli.log");
+    const workspaceRoot = path.join(tmpDir, "workspace");
+    fs.mkdirSync(path.join(workspaceRoot, ".context", "scratchpad"), { recursive: true });
+    workspace.workspaceFolders = [{ uri: { fsPath: workspaceRoot } }];
+
+    const client = new CliClient(
+      writeFakeAfsBinary(tmpDir, logPath),
+      [],
+      {
+        CLI_TEST_LOG: logPath,
+        CLI_TEST_ROOT: tmpDir,
+      },
+      {
+        appendLine() {},
+        dispose() {},
+      } as never,
+      5_000,
+    );
+
+    await client.initialize();
+    const guide = await client.callTool("work.communication.guide", {
+      context_path: path.join(workspaceRoot, ".context"),
+      purpose: "responding_to_comments",
+      limit: 5,
+    });
+    const added = await client.callTool("work.communication.add", {
+      context_path: path.join(workspaceRoot, ".context"),
+      text: "Use exact file evidence.",
+      purpose: "responding_to_comments",
+      style_notes: ["direct"],
+    });
+    const approvals = await client.callTool("work.approvals.list", {
+      context_path: path.join(workspaceRoot, ".context"),
+      status: "pending",
+    });
+    const requested = await client.callTool("work.approvals.request", {
+      context_path: path.join(workspaceRoot, ".context"),
+      target_system: "github",
+      target_id: "PR-1",
+      action: "post_pr_comment",
+      summary: "Post drafted reply",
+      preview: { body: "Thanks, fixed." },
+      affected_people: ["reviewer@example.com"],
+    });
+    client.dispose();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.strictEqual(guide.sample_count, 1);
+    assert.strictEqual(added.sample_id, "comm_added");
+    assert.strictEqual(approvals.count, 1);
+    assert.strictEqual(requested.approval_id, "approval_requested");
+
+    const calls = readLogEntries(logPath);
+    const guideCall = calls.find(
+      (entry) => entry.args[0] === "work" && entry.args[1] === "communication" && entry.args[2] === "guide",
+    );
+    assert.ok(guideCall);
+    assert.ok(guideCall.args.includes("--purpose"));
+    assert.ok(guideCall.args.includes("responding_to_comments"));
+
+    const requestCall = calls.find(
+      (entry) => entry.args[0] === "work" && entry.args[1] === "approvals" && entry.args[2] === "request",
+    );
+    assert.ok(requestCall);
+    assert.ok(requestCall.args.includes("--preview-json"));
+    assert.ok(requestCall.args.includes('{"body":"Thanks, fixed."}'));
+    assert.ok(requestCall.args.includes("--affected-person"));
+    assert.ok(requestCall.args.includes("reviewer@example.com"));
   });
 
   it("normalizes context.discover results to the MCP shape", async () => {

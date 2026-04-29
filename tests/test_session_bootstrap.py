@@ -127,6 +127,11 @@ def test_session_bootstrap_command_outputs_json_and_writes_artifacts(
     assert payload["agent_runs"]["recent_count"] == 1
     assert payload["work_assistant"]["summary"]["pending_approvals"] == 1
     assert payload["work_assistant"]["pending_approvals"][0]["summary"] == "Send drafted support reply"
+    assert payload["work_assistant"]["communication_guidance"]["sample_count"] == 0
+    assert any(
+        "style evidence is missing" in line
+        for line in payload["work_assistant"]["communication_guidance"]["guidance"]
+    )
     assert payload["hivemind"]["recent_count"] == 1
     assert payload["memory"]["entries_count"] == 1
     assert payload["artifact_paths"]["json"].endswith("session_bootstrap.json")

@@ -856,6 +856,63 @@ class WorkAssistantStore:
             ).fetchall()
         return [self._communication_sample_row_to_dict(row) for row in rows]
 
+    def communication_style_summary(
+        self,
+        *,
+        person_id: str | None = None,
+        purpose: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Return compact work-writing guidance from stored communication samples."""
+        samples = self.list_communication_samples(
+            person_id=person_id,
+            purpose=purpose,
+            limit=limit,
+        )
+        purposes: dict[str, int] = {}
+        channels: dict[str, int] = {}
+        notes: list[str] = []
+        for sample in samples:
+            sample_purpose = str(sample.get("purpose") or "work_communication")
+            purposes[sample_purpose] = purposes.get(sample_purpose, 0) + 1
+            channel = str(sample.get("channel") or "").strip()
+            if channel:
+                channels[channel] = channels.get(channel, 0) + 1
+            for note in _str_list(sample.get("style_notes")):
+                if note not in notes:
+                    notes.append(note)
+
+        guidance: list[str] = []
+        if samples:
+            guidance.append(
+                "Use these work communication samples as grounding before drafting "
+                "documentation, design docs, technical requirements, or replies."
+            )
+            if notes:
+                guidance.append(f"Observed style notes: {', '.join(notes[:8])}.")
+            else:
+                guidance.append("No explicit style notes were stored; infer conservatively from excerpts.")
+        else:
+            guidance.append(
+                "No work communication samples are stored for this filter; state that "
+                "style evidence is missing before imitating the user."
+            )
+        guidance.append(
+            "Never post, send, submit, or edit an external work system on the user's "
+            "behalf without explicit approval; draft locally or create an AFS work approval first."
+        )
+
+        return {
+            "sample_count": len(samples),
+            "person_id": person_id or "",
+            "purpose": purpose or "",
+            "purposes": purposes,
+            "channels": channels,
+            "style_notes": notes,
+            "samples": samples,
+            "guidance": guidance,
+        }
+
     def summary(self) -> dict[str, Any]:
         with self._connect() as connection:
             counts = {

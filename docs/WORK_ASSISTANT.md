@@ -143,6 +143,13 @@ Communication samples:
 ```bash
 ./scripts/afs work communication list --path .
 ./scripts/afs work communication list --path . --purpose responding_to_comments --json
+./scripts/afs work communication add --path . \
+  --purpose responding_to_comments \
+  --channel pr_review \
+  --style-note "direct" \
+  --style-note "evidence-backed" \
+  --text "Short, concrete reply with exact file evidence."
+./scripts/afs work communication guide --path . --purpose responding_to_comments
 ```
 
 Session startup:
@@ -153,14 +160,18 @@ Session startup:
   `AFS_SESSION_WORK_APPROVALS_HINT` for harness wrappers.
 - `AFS_SESSION_WORK_COMMUNICATION_HINT` points editor/harness surfaces at
   captured work communication samples.
+- VS Code and Antigravity hosts get `AFS: Work Communication Guidance`,
+  `AFS: Work Approvals`, and the `@afs /work` chat command when the bundled
+  extension is installed.
 
 ## Work Communication Rule
 
 For docs, design docs, technical requirements, and replies/comments, an agent
-should first inspect available communication samples, personal-context mode
-content, scratchpad, and relevant history before matching the user's voice. If
-there is not enough evidence, it should say what is missing instead of inventing
-a style.
+should first inspect available communication samples (`afs work communication
+guide` or MCP `work.communication.guide`), personal-context mode content,
+scratchpad, and relevant history before matching the user's voice. If there is
+not enough evidence, it should say what is missing instead of inventing a
+style.
 
 External posts remain approval-gated: the agent may draft locally, but must ask
 for explicit permission before posting, sending, submitting, or editing on the

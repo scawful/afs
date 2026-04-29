@@ -503,6 +503,12 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
                 if len(excerpt) > 120:
                     excerpt = excerpt[:117].rstrip() + "..."
                 lines.append(f"  - {label}: {excerpt}")
+        guidance = work_assistant.get("communication_guidance") or {}
+        guidance_lines = guidance.get("guidance") if isinstance(guidance, dict) else []
+        if guidance_lines:
+            lines.append("- communication_guidance:")
+            for item in guidance_lines[:3]:
+                lines.append(f"  - {item}")
         commands = work_assistant.get("commands") or {}
         if commands:
             lines.append(f"- summary_command: `{commands.get('summary', '')}`")
@@ -812,6 +818,7 @@ def _collect_work_assistant(
                 "summary": empty_summary,
                 "pending_approvals": [],
                 "communication_samples": [],
+                "communication_guidance": {},
                 "recent_activity": [],
                 "commands": commands,
             }
@@ -826,6 +833,9 @@ def _collect_work_assistant(
             "communication_samples": store.list_communication_samples(
                 limit=max(1, min(limit, _MAX_LIST_ITEMS))
             ),
+            "communication_guidance": store.communication_style_summary(
+                limit=max(1, min(limit, _MAX_LIST_ITEMS))
+            ),
             "recent_activity": store.list_activity(limit=max(1, min(limit, _MAX_LIST_ITEMS))),
             "commands": commands,
         }
@@ -836,6 +846,7 @@ def _collect_work_assistant(
             "summary": {},
             "pending_approvals": [],
             "communication_samples": [],
+            "communication_guidance": {},
             "recent_activity": [],
             "commands": commands,
             "error": str(exc),

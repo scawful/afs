@@ -12,7 +12,7 @@ import {
   type AfsModelProfileSetting,
 } from "./modelProfile";
 
-type ChatCommand = "" | "pack" | "query" | "scratchpad" | "status";
+type ChatCommand = "" | "pack" | "query" | "scratchpad" | "status" | "work";
 type ChatWorkflow = "general" | "scan_fast" | "edit_fast" | "review_deep" | "root_cause_deep";
 type ChatToolProfile = "default" | "context_readonly" | "context_repair" | "edit_and_verify" | "handoff_only";
 type ChatPackMode = "focused" | "retrieval" | "full_slice";
@@ -39,6 +39,8 @@ interface GatheredContext {
   status: Record<string, unknown> | null;
   freshness: Record<string, unknown> | null;
   pack: Record<string, unknown> | null;
+  workCommunicationGuide: Record<string, unknown> | null;
+  workApprovals: Record<string, unknown> | null;
   queryEntries: QueryEntry[];
   scratchpadState: string;
   scratchpadDeferred: string;
@@ -109,6 +111,8 @@ async function handleChatRequest(
       status: gathered.status,
       freshness: gathered.freshness,
       pack: gathered.pack,
+      workCommunicationGuide: gathered.workCommunicationGuide,
+      workApprovals: gathered.workApprovals,
       queryEntries: gathered.queryEntries,
       scratchpadState: gathered.scratchpadState,
       scratchpadDeferred: gathered.scratchpadDeferred,
@@ -179,6 +183,21 @@ async function gatherChatContext(
     max_query_results: settings.maxQueryResults,
   });
 
+  const shouldGatherWork = command === "work" || isWorkWritingPrompt(prompt);
+  const workCommunicationGuide = shouldGatherWork
+    ? await callOptionalTool(deps.transport, deps.logger, "work.communication.guide", {
+        ...contextArgs,
+        limit: 8,
+      })
+    : null;
+  const workApprovals = shouldGatherWork
+    ? await callOptionalTool(deps.transport, deps.logger, "work.approvals.list", {
+        ...contextArgs,
+        status: "pending",
+        limit: 8,
+      })
+    : null;
+
   let scratchpadState = "";
   let scratchpadDeferred = "";
   const references = queryEntries
@@ -213,6 +232,8 @@ async function gatherChatContext(
     status,
     freshness,
     pack,
+    workCommunicationGuide,
+    workApprovals,
     queryEntries,
     scratchpadState,
     scratchpadDeferred,
@@ -269,7 +290,7 @@ async function callOptionalTool(
 }
 
 function normalizeCommand(command?: string): ChatCommand {
-  return command === "pack" || command === "query" || command === "scratchpad" || command === "status"
+  return command === "pack" || command === "query" || command === "scratchpad" || command === "status" || command === "work"
     ? command
     : "";
 }
@@ -286,6 +307,8 @@ function normalizePrompt(command: ChatCommand, prompt: string): string {
       return "Summarize the current scratchpad state and deferred notes for this workspace.";
     case "pack":
       return "Explain the currently prepared AFS session pack and the most relevant context for this workspace.";
+    case "work":
+      return "Summarize available AFS work communication style guidance, pending approvals, and safe next steps.";
     case "query":
       return "Find the most relevant indexed AFS context for this workspace and summarize it.";
     default:
@@ -301,6 +324,8 @@ function summarizeCommand(command: ChatCommand): string {
       return "Review AFS scratchpad state";
     case "pack":
       return "Review AFS session pack";
+    case "work":
+      return "Review AFS work communication and approvals";
     case "query":
       return "Search indexed AFS context";
     default:
@@ -316,6 +341,8 @@ function taskForCommand(command: ChatCommand, prompt: string): string {
       return "Use scratchpad state and deferred notes to answer the current workspace question.";
     case "pack":
       return "Explain the current AFS session pack and answer the user with grounded workspace context.";
+    case "work":
+      return "Use work communication samples, work assistant state, and approval guardrails to answer safely.";
     case "query":
       return `Use indexed AFS context to answer: ${prompt}`;
     default:
@@ -342,7 +369,34 @@ function buildInstruction(command: ChatCommand): string {
   if (command === "pack") {
     base.push("Explain what the current session pack contributes before answering the request.");
   }
+  if (command === "work") {
+    base.push("Focus on communication samples, tone evidence, pending approvals, and safe draft-first workflows.");
+  }
+  base.push(
+    "For work comments, docs, design docs, requirements, email, or messages, inspect work communication evidence first and never post, send, submit, or edit externally without explicit approval.",
+  );
   return base.join(" ");
+}
+
+function isWorkWritingPrompt(prompt: string): boolean {
+  const marker = prompt.toLowerCase();
+  return [
+    "comment",
+    "design doc",
+    "documentation",
+    "docs",
+    "email",
+    "message",
+    "post",
+    "requirements",
+    "reply",
+    "review response",
+    "send",
+    "technical requirement",
+    "ticket",
+    "tone",
+    "writing style",
+  ].some((term) => marker.includes(term));
 }
 
 async function resolveModel(

@@ -244,4 +244,59 @@ describe("registerCommands", () => {
     assert.match(infoMessages[0], /Work communication hint: afs work communication list --path \/tmp\/workspace/);
     assert.match(infoMessages[0], /Note: Indexed retrieval may be stale\./);
   });
+
+  it("shows work communication guidance and approvals from editor commands", async () => {
+    const transport = new MockTransport();
+    const infoMessages: string[] = [];
+    const workspaceRoot = "/tmp/afs-vscode-workspace";
+
+    workspace.workspaceFolders = [{ name: "demo", uri: { fsPath: workspaceRoot } }];
+    transport.toolResponses["work.communication.guide"] = {
+      sample_count: 1,
+      style_notes: ["direct", "evidence-backed"],
+      guidance: ["Use stored samples before drafting.", "Never post externally without approval."],
+    };
+    transport.toolResponses["work.approvals.list"] = {
+      approvals: [
+        {
+          approval_id: "approval_1",
+          target_system: "github",
+          action: "post_pr_comment",
+          summary: "Post drafted PR response",
+        },
+      ],
+      count: 1,
+    };
+    __setShowInformationMessage(async (message) => {
+      infoMessages.push(String(message));
+      return undefined;
+    });
+
+    registerCommands(
+      { subscriptions: [] } as never,
+      {
+        transport,
+        contextService: new ContextService(transport),
+        fileService: new FileService(transport),
+        indexService: new IndexService(transport),
+        treeProvider: { refresh() {} } as never,
+        binaryInfo: { command: "afs", args: [], env: {} },
+        logger: { appendLine() {}, dispose() {} } as never,
+      },
+    );
+
+    await commands.executeCommand("afs.work.communication");
+    await commands.executeCommand("afs.work.approvals");
+
+    assert.match(infoMessages[0], /Work communication samples: 1/);
+    assert.match(infoMessages[0], /direct, evidence-backed/);
+    assert.match(infoMessages[1], /Pending AFS work approvals: 1/);
+    assert.match(infoMessages[1], /approval_1: github\/post_pr_comment - Post drafted PR response/);
+    assert.deepStrictEqual(
+      transport.toolCalls
+        .filter((call) => call.name.startsWith("work."))
+        .map((call) => call.name),
+      ["work.communication.guide", "work.approvals.list"],
+    );
+  });
 });

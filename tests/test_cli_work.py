@@ -11,6 +11,8 @@ from afs.cli.work import (
     approvals_list_command,
     approvals_request_command,
     approvals_show_command,
+    communication_add_command,
+    communication_guide_command,
     communication_list_command,
     people_list_command,
     register_parsers,
@@ -102,6 +104,45 @@ def test_communication_list_command(tmp_path: Path, capsys) -> None:
     samples = json.loads(capsys.readouterr().out)
     assert samples[0]["display_name"] == "Doc Author"
     assert samples[0]["style_notes"] == ["findings-first"]
+
+
+def test_communication_add_and_guide_commands(tmp_path: Path, capsys) -> None:
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+
+    assert communication_add_command(
+        _args(
+            context_root,
+            text="Short direct comment with exact file evidence.",
+            text_file=None,
+            person_id="",
+            source_system="github",
+            source_id="comment-1",
+            channel="pr_review",
+            purpose="responding_to_comments",
+            style_note=["direct", "evidence-backed"],
+            provenance_json='{"url":"https://example.test/comment-1"}',
+            confidence=0.8,
+            dedupe_key=None,
+            json=True,
+        )
+    ) == 0
+    sample_id = json.loads(capsys.readouterr().out)["sample_id"]
+    assert sample_id
+
+    assert communication_guide_command(
+        _args(
+            context_root,
+            person_id=None,
+            purpose="responding_to_comments",
+            limit=10,
+            json=True,
+        )
+    ) == 0
+    guide = json.loads(capsys.readouterr().out)
+    assert guide["sample_count"] == 1
+    assert guide["style_notes"] == ["direct", "evidence-backed"]
+    assert any("explicit approval" in line for line in guide["guidance"])
 
 
 def test_work_approval_request_and_approve(tmp_path: Path, capsys) -> None:
@@ -241,3 +282,22 @@ def test_register_parsers_includes_work_subcommands() -> None:
     assert args.work_command == "communication"
     assert args.communication_command == "list"
     assert args.purpose == "design_feedback"
+
+    args = parser.parse_args(
+        [
+            "work",
+            "communication",
+            "add",
+            "--text",
+            "Use concrete evidence.",
+            "--style-note",
+            "direct",
+        ]
+    )
+    assert args.communication_command == "add"
+    assert args.text == "Use concrete evidence."
+    assert args.style_note == ["direct"]
+
+    args = parser.parse_args(["work", "communication", "guide", "--purpose", "docs"])
+    assert args.communication_command == "guide"
+    assert args.purpose == "docs"

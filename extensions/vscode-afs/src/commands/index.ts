@@ -356,6 +356,58 @@ export function registerCommands(
       await vscode.commands.executeCommand("afs.index.query");
     }),
 
+    vscode.commands.registerCommand("afs.work.communication", async () => {
+      const folder = await pickWorkspaceFolder("Select workspace folder for work communication guidance");
+      if (!folder) return;
+      const contextPath = path.join(folder.uri.fsPath, ".context");
+      try {
+        const guidance = await withRecordedTurn(
+          transport,
+          "Inspect AFS work communication samples and approval guardrails.",
+          "Review AFS work communication guidance",
+          async () =>
+            transport.callTool("work.communication.guide", {
+              context_path: contextPath,
+              limit: 8,
+            }),
+          {
+            successSummary: "Reviewed work communication guidance",
+          },
+        );
+        vscode.window.showInformationMessage(
+          formatWorkCommunicationGuidance(guidance),
+          { modal: true },
+        );
+      } catch (err) {
+        vscode.window.showErrorMessage(`Work communication guidance failed: ${err}`);
+      }
+    }),
+
+    vscode.commands.registerCommand("afs.work.approvals", async () => {
+      const folder = await pickWorkspaceFolder("Select workspace folder for work approvals");
+      if (!folder) return;
+      const contextPath = path.join(folder.uri.fsPath, ".context");
+      try {
+        const payload = await withRecordedTurn(
+          transport,
+          "Inspect pending AFS work approvals before external writes.",
+          "Review AFS work approvals",
+          async () =>
+            transport.callTool("work.approvals.list", {
+              context_path: contextPath,
+              status: "pending",
+              limit: 20,
+            }),
+          {
+            successSummary: "Reviewed pending work approvals",
+          },
+        );
+        vscode.window.showInformationMessage(formatWorkApprovals(payload), { modal: true });
+      } catch (err) {
+        vscode.window.showErrorMessage(`Work approvals failed: ${err}`);
+      }
+    }),
+
     vscode.commands.registerCommand("afs.mcp.register", async () => {
       await registerAfs(binaryInfo, logger);
     }),
@@ -420,6 +472,49 @@ export function registerCommands(
       logger.show(true);
     }),
   );
+}
+
+function formatWorkCommunicationGuidance(payload: Record<string, unknown>): string {
+  const sampleCount = typeof payload.sample_count === "number" ? payload.sample_count : 0;
+  const lines = [`Work communication samples: ${sampleCount}`];
+  const styleNotes = Array.isArray(payload.style_notes)
+    ? payload.style_notes.filter((note): note is string => typeof note === "string" && note.trim().length > 0)
+    : [];
+  if (styleNotes.length > 0) {
+    lines.push(`Style notes: ${styleNotes.slice(0, 8).join(", ")}`);
+  }
+  const guidance = Array.isArray(payload.guidance)
+    ? payload.guidance.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  for (const item of guidance.slice(0, 5)) {
+    lines.push(`- ${item}`);
+  }
+  return lines.join("\n");
+}
+
+function formatWorkApprovals(payload: Record<string, unknown>): string {
+  const approvals = Array.isArray(payload.approvals)
+    ? payload.approvals.filter(
+        (approval): approval is Record<string, unknown> =>
+          !!approval && typeof approval === "object" && !Array.isArray(approval),
+      )
+    : [];
+  if (approvals.length === 0) {
+    return "No pending AFS work approvals.";
+  }
+  const lines = [`Pending AFS work approvals: ${approvals.length}`];
+  for (const approval of approvals.slice(0, 10)) {
+    const id = stringValue(approval.approval_id) || "approval";
+    const system = stringValue(approval.target_system) || "external";
+    const action = stringValue(approval.action) || "write";
+    const summary = stringValue(approval.summary);
+    lines.push(`- ${id}: ${system}/${action}${summary ? ` - ${summary}` : ""}`);
+  }
+  return lines.join("\n");
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
 function getMountPointSelection(selection: unknown): MountPointSelection | undefined {

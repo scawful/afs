@@ -27,6 +27,8 @@
     "onCommand:afs.index.rebuild",
     "onCommand:afs.index.query",
     "onCommand:afs.index.queryQuickOpen",
+    "onCommand:afs.work.communication",
+    "onCommand:afs.work.approvals",
     "onCommand:afs.mcp.register",
     "onCommand:afs.mcp.unregister",
     "onCommand:afs.mcp.status",
@@ -88,6 +90,10 @@
           {
             "name": "pack",
             "description": "Use the current AFS session pack for context"
+          },
+          {
+            "name": "work",
+            "description": "Review work communication style samples and pending approval-gated writes"
           }
         ],
         "disambiguation": [
@@ -118,6 +124,8 @@
       { "command": "afs.index.rebuild", "title": "AFS: Rebuild Context Index", "category": "AFS" },
       { "command": "afs.index.query", "title": "AFS: Query Context Index", "category": "AFS" },
       { "command": "afs.index.queryQuickOpen", "title": "AFS: Quick Open Context File", "category": "AFS" },
+      { "command": "afs.work.communication", "title": "AFS: Work Communication Guidance", "category": "AFS" },
+      { "command": "afs.work.approvals", "title": "AFS: Work Approvals", "category": "AFS" },
       { "command": "afs.mcp.register", "title": "AFS: Register MCP Server", "category": "AFS" },
       { "command": "afs.mcp.unregister", "title": "AFS: Unregister MCP Server", "category": "AFS" },
       { "command": "afs.mcp.status", "title": "AFS: MCP Status", "category": "AFS" },
@@ -149,6 +157,8 @@
         { "command": "afs.index.query", "group": "2_index" },
         { "command": "afs.index.queryQuickOpen", "group": "2_index" },
         { "command": "afs.chat.open", "group": "3_chat" },
+        { "command": "afs.work.communication", "group": "3_chat" },
+        { "command": "afs.work.approvals", "group": "3_chat" },
         { "command": "afs.mcp.register", "group": "4_server" },
         { "command": "afs.mcp.status", "group": "4_server" },
         { "command": "afs.server.restart", "group": "4_server" },

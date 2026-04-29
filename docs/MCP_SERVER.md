@@ -175,6 +175,8 @@ Recommended default MCP/profile surface:
 - `afs.session.bootstrap`
 - `context.status`
 - `context.query`
+- `work.communication.guide`
+- `work.approvals.list`
 - `context.read`
 - `context.write`
 - `context.list`
@@ -206,6 +208,10 @@ Optional tools for explicit workflows:
 - `context.unmount`
 - `context.repair`
 - `session.pack`
+- `work.communication.list`
+- `work.communication.add`
+- `work.approvals.show`
+- `work.approvals.request`
 - `agent.spawn`
 - `agent.ps`
 - `agent.stop`
@@ -229,6 +235,13 @@ back to `LIKE` matching if FTS is unavailable on the host SQLite build.
 fresh without a full rebuild. With `auto_index=true` (default),
 `context.query` also auto-refreshes when it detects stale path/content metadata
 via mount fingerprints, including external renames that keep file counts stable.
+
+Work-context MCP tools stay deliberately narrow. `work.communication.guide`
+summarizes stored tone/style evidence and repeats the approval rule for work
+writing. `work.approvals.request` creates a local permission request for a
+drafted external write; it does not approve or execute the write. Approval and
+connector execution still happen through the explicit `afs work approvals ...`
+CLI flow.
 
 Gemini-facing MCP prompts:
 

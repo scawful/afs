@@ -285,6 +285,70 @@ def communication_list_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def communication_add_command(args: argparse.Namespace) -> int:
+    store, _context_path = _store_from_args(args)
+    text = str(args.text or "")
+    if args.text_file:
+        try:
+            text = Path(args.text_file).expanduser().read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"Failed to read --text-file: {exc}")
+            return 2
+    if not text.strip():
+        print("communication add requires --text or --text-file")
+        return 2
+
+    provenance: list[Any] = []
+    if args.provenance_json:
+        try:
+            decoded = json.loads(args.provenance_json)
+        except json.JSONDecodeError as exc:
+            print(f"Invalid --provenance-json: {exc}")
+            return 2
+        provenance = decoded if isinstance(decoded, list) else [decoded]
+
+    sample_id = store.record_communication_sample(
+        text=text,
+        person_id=args.person_id or "",
+        source_system=args.source_system or "",
+        source_id=args.source_id or "",
+        channel=args.channel or "",
+        purpose=args.purpose or "",
+        style_notes=args.style_note or [],
+        provenance=provenance,
+        confidence=args.confidence,
+        dedupe_key=args.dedupe_key,
+    )
+    if args.json:
+        _print_json({"sample_id": sample_id})
+        return 0
+    print(f"Stored communication sample: {sample_id}")
+    return 0
+
+
+def communication_guide_command(args: argparse.Namespace) -> int:
+    store, _context_path = _store_from_args(args)
+    guidance = store.communication_style_summary(
+        person_id=args.person_id,
+        purpose=args.purpose,
+        limit=args.limit,
+    )
+    if args.json:
+        _print_json(guidance)
+        return 0
+    print(f"samples: {guidance['sample_count']}")
+    if guidance["purposes"]:
+        print("purposes: " + ", ".join(f"{key}={value}" for key, value in guidance["purposes"].items()))
+    if guidance["style_notes"]:
+        print("style_notes:")
+        for note in guidance["style_notes"][:8]:
+            print(f"- {note}")
+    print("guidance:")
+    for line in guidance["guidance"]:
+        print(f"- {line}")
+    return 0
+
+
 def _split_executor(value: str) -> list[str]:
     if not value.strip():
         return []
@@ -415,3 +479,33 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     communication_list.add_argument("--limit", type=int, default=20, help="Max records.")
     communication_list.add_argument("--json", action="store_true", help="Output JSON.")
     communication_list.set_defaults(func=communication_list_command)
+
+    communication_add = communication_sub.add_parser(
+        "add",
+        help="Capture a work communication sample for tone/style grounding.",
+    )
+    _add_context_args(communication_add)
+    communication_add.add_argument("--text", help="Communication sample text.")
+    communication_add.add_argument("--text-file", help="Read communication sample text from a file.")
+    communication_add.add_argument("--person-id", default="", help="Known person id for the sample author.")
+    communication_add.add_argument("--source-system", default="", help="Source system, e.g. github, docs, chat.")
+    communication_add.add_argument("--source-id", default="", help="Source object id or URL.")
+    communication_add.add_argument("--channel", default="", help="Communication channel.")
+    communication_add.add_argument("--purpose", default="work_communication", help="Sample purpose.")
+    communication_add.add_argument("--style-note", action="append", help="Style/tone note; repeatable.")
+    communication_add.add_argument("--provenance-json", help="Structured provenance object or list.")
+    communication_add.add_argument("--confidence", type=float, default=0.5, help="Confidence score.")
+    communication_add.add_argument("--dedupe-key", help="Stable sample id/dedupe key.")
+    communication_add.add_argument("--json", action="store_true", help="Output JSON.")
+    communication_add.set_defaults(func=communication_add_command)
+
+    communication_guide = communication_sub.add_parser(
+        "guide",
+        help="Summarize available work communication style guidance.",
+    )
+    _add_context_args(communication_guide)
+    communication_guide.add_argument("--person-id", help="Filter by person id.")
+    communication_guide.add_argument("--purpose", help="Filter by purpose.")
+    communication_guide.add_argument("--limit", type=int, default=20, help="Max records.")
+    communication_guide.add_argument("--json", action="store_true", help="Output JSON.")
+    communication_guide.set_defaults(func=communication_guide_command)

@@ -5,6 +5,8 @@ export interface AfsChatContextPayload {
   status?: Record<string, unknown> | null;
   freshness?: Record<string, unknown> | null;
   pack?: Record<string, unknown> | null;
+  workCommunicationGuide?: Record<string, unknown> | null;
+  workApprovals?: Record<string, unknown> | null;
   queryEntries?: QueryEntry[];
   scratchpadState?: string;
   scratchpadDeferred?: string;
@@ -28,6 +30,14 @@ export function buildAfsContextMessage(payload: AfsChatContextPayload): string {
   const packBlock = renderPack(payload.pack);
   if (packBlock) {
     blocks.push(packBlock);
+  }
+
+  const workBlock = renderWorkContext(
+    payload.workCommunicationGuide,
+    payload.workApprovals,
+  );
+  if (workBlock) {
+    blocks.push(workBlock);
   }
 
   const queryBlock = renderQueryEntries(payload.queryEntries ?? []);
@@ -169,6 +179,77 @@ function renderPack(pack: Record<string, unknown> | null | undefined): string {
       lines.push(`### ${title}`);
       if (body) {
         lines.push(body);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function renderWorkContext(
+  guide: Record<string, unknown> | null | undefined,
+  approvalsPayload: Record<string, unknown> | null | undefined,
+): string {
+  const lines: string[] = [];
+  if (guide) {
+    lines.push("## Work Communication Grounding");
+    const sampleCount = numberValue(guide.sample_count);
+    if (sampleCount != null) {
+      lines.push(`Samples: ${sampleCount}`);
+    }
+    const purposes = recordValue(guide.purposes);
+    if (purposes && Object.keys(purposes).length > 0) {
+      lines.push(`Purposes: ${formatKeyValueRecord(purposes)}`);
+    }
+    const styleNotes = stringArray(guide.style_notes);
+    if (styleNotes.length > 0) {
+      lines.push(`Style notes: ${styleNotes.slice(0, 8).join(", ")}`);
+    }
+    const guidance = stringArray(guide.guidance);
+    if (guidance.length > 0) {
+      lines.push("Guidance:");
+      for (const item of guidance.slice(0, 4)) {
+        lines.push(`- ${item}`);
+      }
+    }
+
+    const samples = Array.isArray(guide.samples)
+      ? guide.samples.filter(
+          (sample): sample is Record<string, unknown> =>
+            !!sample && typeof sample === "object" && !Array.isArray(sample),
+        )
+      : [];
+    if (samples.length > 0) {
+      lines.push("Sample excerpts:");
+      for (const sample of samples.slice(0, 3)) {
+        const label = stringValue(sample.purpose) || stringValue(sample.channel) || "work_communication";
+        const excerpt = truncateText(stringValue(sample.text_excerpt), 240);
+        if (excerpt) {
+          lines.push(`- ${label}: ${excerpt}`);
+        }
+      }
+    }
+  }
+
+  if (approvalsPayload) {
+    const approvals = Array.isArray(approvalsPayload.approvals)
+      ? approvalsPayload.approvals.filter(
+          (approval): approval is Record<string, unknown> =>
+            !!approval && typeof approval === "object" && !Array.isArray(approval),
+        )
+      : [];
+    if (approvals.length > 0) {
+      if (lines.length === 0) {
+        lines.push("## Work Approval Guardrail");
+      } else {
+        lines.push("### Pending Work Approvals");
+      }
+      for (const approval of approvals.slice(0, 5)) {
+        const id = stringValue(approval.approval_id) || "approval";
+        const system = stringValue(approval.target_system) || "external";
+        const action = stringValue(approval.action) || "write";
+        const summary = stringValue(approval.summary);
+        lines.push(`- ${id}: ${system}/${action}${summary ? ` - ${summary}` : ""}`);
       }
     }
   }

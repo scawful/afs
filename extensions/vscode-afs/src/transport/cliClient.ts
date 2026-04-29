@@ -239,6 +239,146 @@ export class CliClient implements ITransportClient {
         }
         return this.execJson(cliArgs);
       }
+      case "work.communication.list": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const cliArgs = ["work", "communication", "list", "--path", projectPath, "--json"];
+        if (typeof args.person_id === "string" && args.person_id.trim()) {
+          cliArgs.push("--person-id", args.person_id.trim());
+        }
+        if (typeof args.purpose === "string" && args.purpose.trim()) {
+          cliArgs.push("--purpose", args.purpose.trim());
+        }
+        if (typeof args.limit === "number") {
+          cliArgs.push("--limit", String(args.limit));
+        }
+        const samples = await this.execJson(cliArgs);
+        return Array.isArray(samples) ? { samples, count: samples.length } : samples;
+      }
+      case "work.communication.add": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const text = args.text as string;
+        if (typeof text !== "string" || !text.trim()) {
+          throw new Error("work.communication.add requires text");
+        }
+        const cliArgs = ["work", "communication", "add", "--path", projectPath, "--text", text, "--json"];
+        for (const [argName, flag] of [
+          ["person_id", "--person-id"],
+          ["source_system", "--source-system"],
+          ["source_id", "--source-id"],
+          ["channel", "--channel"],
+          ["purpose", "--purpose"],
+          ["dedupe_key", "--dedupe-key"],
+        ] as Array<[string, string]>) {
+          const value = args[argName];
+          if (typeof value === "string" && value.trim()) {
+            cliArgs.push(flag, value.trim());
+          }
+        }
+        if (Array.isArray(args.style_notes)) {
+          for (const note of args.style_notes) {
+            if (typeof note === "string" && note.trim()) {
+              cliArgs.push("--style-note", note.trim());
+            }
+          }
+        }
+        if (typeof args.confidence === "number") {
+          cliArgs.push("--confidence", String(args.confidence));
+        }
+        return this.execJson(cliArgs);
+      }
+      case "work.communication.guide": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const cliArgs = ["work", "communication", "guide", "--path", projectPath, "--json"];
+        if (typeof args.person_id === "string" && args.person_id.trim()) {
+          cliArgs.push("--person-id", args.person_id.trim());
+        }
+        if (typeof args.purpose === "string" && args.purpose.trim()) {
+          cliArgs.push("--purpose", args.purpose.trim());
+        }
+        if (typeof args.limit === "number") {
+          cliArgs.push("--limit", String(args.limit));
+        }
+        return this.execJson(cliArgs);
+      }
+      case "work.approvals.list": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const cliArgs = ["work", "approvals", "list", "--path", projectPath, "--json"];
+        if (args.all === true) {
+          cliArgs.push("--all");
+        } else if (typeof args.status === "string" && args.status.trim()) {
+          cliArgs.push("--status", args.status.trim());
+        }
+        if (typeof args.limit === "number") {
+          cliArgs.push("--limit", String(args.limit));
+        }
+        const approvals = await this.execJson(cliArgs);
+        return Array.isArray(approvals) ? { approvals, count: approvals.length } : approvals;
+      }
+      case "work.approvals.show": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const approvalId = args.approval_id as string;
+        if (typeof approvalId !== "string" || !approvalId.trim()) {
+          throw new Error("work.approvals.show requires approval_id");
+        }
+        const approval = await this.execJson([
+          "work",
+          "approvals",
+          "show",
+          approvalId.trim(),
+          "--path",
+          projectPath,
+          "--json",
+        ]);
+        return { approval };
+      }
+      case "work.approvals.request": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const required = ["target_system", "target_id", "action", "summary"];
+        for (const name of required) {
+          if (typeof args[name] !== "string" || !String(args[name]).trim()) {
+            throw new Error(`work.approvals.request requires ${name}`);
+          }
+        }
+        const cliArgs = [
+          "work",
+          "approvals",
+          "request",
+          "--path",
+          projectPath,
+          "--target-system",
+          String(args.target_system).trim(),
+          "--target-id",
+          String(args.target_id).trim(),
+          "--action",
+          String(args.action).trim(),
+          "--summary",
+          String(args.summary).trim(),
+          "--json",
+        ];
+        if (args.preview && typeof args.preview === "object") {
+          cliArgs.push("--preview-json", JSON.stringify(args.preview));
+        } else if (typeof args.preview === "string" && args.preview.trim()) {
+          cliArgs.push("--preview", args.preview.trim());
+        }
+        if (Array.isArray(args.affected_people)) {
+          for (const person of args.affected_people) {
+            if (typeof person === "string" && person.trim()) {
+              cliArgs.push("--affected-person", person.trim());
+            }
+          }
+        }
+        for (const [argName, flag] of [
+          ["risk_level", "--risk-level"],
+          ["permission_required", "--permission-required"],
+          ["requested_by", "--requested-by"],
+        ] as Array<[string, string]>) {
+          const value = args[argName];
+          if (typeof value === "string" && value.trim()) {
+            cliArgs.push(flag, value.trim());
+          }
+        }
+        return this.execJson(cliArgs);
+      }
       case "session.pack": {
         const projectPath = this.projectPathFromContextArg(args.context_path);
         const cliArgs = ["session", "pack", "--path", projectPath, "--json", "--no-write-artifacts"];
@@ -395,6 +535,12 @@ export class CliClient implements ITransportClient {
       { name: "session.pack", description: "Build a context session pack", inputSchema: {} },
       { name: "context.index.rebuild", description: "Rebuild context index", inputSchema: {} },
       { name: "context.query", description: "Query context index", inputSchema: {} },
+      { name: "work.communication.list", description: "List work communication samples", inputSchema: {} },
+      { name: "work.communication.add", description: "Capture a work communication sample", inputSchema: {} },
+      { name: "work.communication.guide", description: "Summarize work communication style guidance", inputSchema: {} },
+      { name: "work.approvals.list", description: "List work approval requests", inputSchema: {} },
+      { name: "work.approvals.show", description: "Show a work approval request", inputSchema: {} },
+      { name: "work.approvals.request", description: "Request approval for an external work write", inputSchema: {} },
       { name: "context.read", description: "Read a context-scoped file", inputSchema: {} },
       { name: "context.write", description: "Write a context-scoped file", inputSchema: {} },
       { name: "context.delete", description: "Delete a context-scoped file", inputSchema: {} },

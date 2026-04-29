@@ -38,6 +38,12 @@ def test_build_model_system_prompt_includes_session_state_summary() -> None:
                         "text_excerpt": "Prefer direct, evidence-backed replies with concrete next steps.",
                     }
                 ],
+                "communication_guidance": {
+                    "guidance": [
+                        "Use these work communication samples as grounding before drafting replies.",
+                        "Never post externally without explicit approval.",
+                    ]
+                },
             },
             "handoff": {"available": True, "next_steps": ["Ship the MCP refactor."]},
         },
@@ -131,6 +137,8 @@ def test_build_model_system_prompt_includes_session_state_summary() -> None:
     assert "Work assistant: people=1, review_routes=1, approvals=1, pending_approvals=1, communication_samples=1" in prompt
     assert "Recent work communication samples:" in prompt
     assert "- responding_to_comments: Prefer direct, evidence-backed replies with concrete next steps." in prompt
+    assert "Work communication guidance:" in prompt
+    assert "- Use these work communication samples as grounding before drafting replies." in prompt
     assert "Work communication contract:" in prompt
     assert "Never post, send, submit, or edit an external work system" in prompt
     assert "Last session next steps:" in prompt

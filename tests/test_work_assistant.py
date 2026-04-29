@@ -70,6 +70,11 @@ def test_store_tracks_people_relationships_reviewers_and_approvals(tmp_path: Pat
     assert samples[0]["sample_id"] == sample_id
     assert samples[0]["display_name"] == "Doc Owner"
     assert samples[0]["style_notes"] == ["direct", "specific"]
+    style_summary = store.communication_style_summary(purpose="technical_requirements")
+    assert style_summary["sample_count"] == 1
+    assert style_summary["purposes"] == {"technical_requirements": 1}
+    assert style_summary["style_notes"] == ["direct", "specific"]
+    assert any("explicit approval" in line for line in style_summary["guidance"])
     assert store.summary()["communication_samples"] == 1
 
 

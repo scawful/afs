@@ -28,6 +28,28 @@ describe("buildAfsContextMessage", () => {
           { title: "Index Hits", body: "Hit summary." },
         ],
       },
+      workCommunicationGuide: {
+        sample_count: 1,
+        purposes: { responding_to_comments: 1 },
+        style_notes: ["direct", "evidence-backed"],
+        guidance: ["Use samples before drafting.", "Never post externally without approval."],
+        samples: [
+          {
+            purpose: "responding_to_comments",
+            text_excerpt: "Prefer concise replies with exact evidence.",
+          },
+        ],
+      },
+      workApprovals: {
+        approvals: [
+          {
+            approval_id: "approval_1",
+            target_system: "github",
+            action: "post_pr_comment",
+            summary: "Post drafted PR reply",
+          },
+        ],
+      },
       queryEntries: [
         {
           mount_type: "scratchpad",
@@ -50,6 +72,10 @@ describe("buildAfsContextMessage", () => {
     assert.match(text, /Recommended actions:/);
     assert.match(text, /Review context\.diff before editing\./);
     assert.match(text, /AFS Session Pack/);
+    assert.match(text, /Work Communication Grounding/);
+    assert.match(text, /Style notes: direct, evidence-backed/);
+    assert.match(text, /Never post externally without approval\./);
+    assert.match(text, /approval_1: github\/post_pr_comment - Post drafted PR reply/);
     assert.match(text, /Indexed Context Hits/);
     assert.match(text, /scratchpad\/notes\.md/);
     assert.match(text, /Most relevant note\./);
