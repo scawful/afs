@@ -1,8 +1,7 @@
 """Corpus builder for pre-training data collection.
 
-Collects and processes large corpora from:
-- ALTTP disassembly (65816 assembly)
-- Personal conversations and notes (Avatar models)
+Collects and processes large corpora from configured source directories.
+Domain-specific corpora and persona datasets belong in companion extension repos.
 """
 
 import logging

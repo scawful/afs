@@ -44,7 +44,7 @@ def build_model_system_prompt(
 
     Args:
         base_prompt: The model's base system prompt (from registry or Modelfile).
-        model_family: One of "oracle", "avatar", "persona", "cloud", "generic".
+        model_family: One of "avatar", "persona", "cloud", "generic", or an extension-owned family.
         role: Specific role within the family (e.g., "echo", "din", "scribe").
         context_path: AFS .context root for session bootstrap injection.
         session_state: Pre-built bootstrap summary (if already available).
@@ -182,13 +182,10 @@ def _family_constraints(model_family: str, role: str) -> str:
 
     if family == "oracle":
         return (
-            "## Oracle Constraints\n"
-            "You are an Oracle-family model specializing in 65816 ASM, "
-            "SNES ROM hacking, and Zelda game engine analysis.\n"
-            "- Use exact opcode mnemonics (LDA, STA, JSL, etc.)\n"
-            "- Reference ROM addresses in $XX:XXXX bank:offset format\n"
-            "- Prefer disassembly labels when available\n"
-            "- Validate memory access patterns against SNES memory map"
+            "## Extension-Owned Oracle Constraints\n"
+            "Oracle-family domain constraints now live in the afs_scawful "
+            "extension repo. Core AFS only applies generic prompt context; "
+            "enable the extension for Zelda/ROM-hacking behavior."
         )
 
     if family == "avatar":

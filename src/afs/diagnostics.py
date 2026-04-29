@@ -698,8 +698,6 @@ def _read_known_mcp_config_text() -> str:
         home / ".gemini" / "settings.json",
         home / "src" / ".gemini" / "settings.json",
         home / ".claude" / "settings.json",
-        home / "src" / "hobby" / "z3cli" / "src" / "core" / "config.py",
-        home / "src" / "hobby" / "z3cli" / "src" / "protocol" / "mcp_bridge.py",
         Path.cwd() / ".mcp.json",
     ]
     chunks: list[str] = []

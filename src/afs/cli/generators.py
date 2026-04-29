@@ -417,9 +417,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Minimum output length to validate (default: 10).",
     )
     gen_validate.add_argument(
+        "--no-project-context",
         "--no-alttp-context",
+        dest="no_alttp_context",
         action="store_true",
-        help="Disable ALTTP-specific include context.",
+        help="Disable project-specific include context.",
     )
     gen_validate.add_argument(
         "--keep-temp",

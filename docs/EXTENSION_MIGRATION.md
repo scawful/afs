@@ -1,13 +1,13 @@
 # AFS Extension Migration
 
-This repository (`lab/afs`) now documents and ships **core AFS platform capabilities** only.
+This repository (`lab/afs`) ships **core AFS platform capabilities** only. It
+should not assume one user's games, corpora, model lineages, work tools, or
+machine layout.
 
-Domain-specific content has moved to `lab/afs-ext`, including:
-
-- Persona/model lineages
-- Fine-tuning and dataset orchestration workflows
-- Domain adapters and specialist content
-- Local model deployment playbooks tied to personal environments
+Domain-specific content belongs in companion extension repos named like
+`afs_<name>` or `afs-<name>`. In this workspace, Zelda/Oracle/persona/training
+content lives in the `lab/afs-scawful` repo and imports as the `afs_scawful`
+Python package.
 
 ## Migration Rule
 
@@ -16,8 +16,10 @@ If a workflow is specific to:
 - a model family or persona strategy
 - game/domain corpora
 - personal workstation/laptop deployment paths
+- work connector implementations such as Google Workspace adapters
+- MCP/domain servers that are not useful for every AFS user
 
-it belongs in `afs-ext`.
+it belongs in a companion extension repo, not in core AFS.
 
 ## What Stays in Core AFS
 
@@ -30,9 +32,39 @@ it belongs in `afs-ext`.
 - Generic dataset/run/eval/feedback orchestration primitives
 - Shared schemas, metrics, and status artifacts for training workflows
 
-## Recommended Layout
+## Companion Repo Layout
 
-- Core docs: `lab/afs/docs/`
-- Domain/training docs: `lab/afs-ext/docs/`
-- Domain skills: `lab/afs-ext/skills/`
-- Domain registries/policies: `lab/afs-ext/config/`
+A companion repo can be a sibling of `afs`:
+
+```text
+~/src/lab/afs_google/
+  extension.toml
+  src/afs_google/
+    __init__.py
+    cli.py
+    agents.py
+    mcp_surface.py
+```
+
+Core AFS discovers it with:
+
+```toml
+[extensions]
+enabled_extensions = ["afs_google"]
+extension_repo_roots = ["~/src/lab"]
+```
+
+`src/` is added to the import path automatically when present, so src-layout
+packages do not need to be copied into `lab/afs/extensions/`.
+
+## Current Scawful/Zelda Boundary
+
+- Core docs/code: `lab/afs/`
+- Personal/domain extension repo: `lab/afs-scawful/`
+- Python package: `afs_scawful`
+- Zelda/Oracle modules: `afs_scawful.oracle.*`, `afs_scawful.agents.zelda_tools`
+- Scawful model/tool shims: `afs_scawful.agent_model_presets`,
+  `afs_scawful.agent_tools`
+
+Core AFS may keep compatibility shims that explain where a moved module lives,
+but new domain implementation should be added to the companion repo.

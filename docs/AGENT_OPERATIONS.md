@@ -24,7 +24,9 @@ These surfaces are visible in:
 ./scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
 ```
 
-Use this before editing Codex, Claude, Gemini, hcode, or z3cli-specific config. Harness-specific files can still exist, but they should point back to this manifest or derive their local view from it.
+Use this before editing Codex, Claude, Gemini, hcode, or another harness-specific
+config. Harness-specific files can still exist, but they should point back to
+this manifest or derive their local view from it.
 
 `scripts/afs-upgrade-agent-setup` is the operator wrapper for a full local
 refresh. It defaults to dry-run, then with `--apply` can update the venv, copy
@@ -38,10 +40,12 @@ directories rather than symlinks.
 `agent-hooks install-shell` adds a marked, idempotent block to the shell profile
 that sources AFS shell helpers. Use `--helpers-only` for aliases, colors, and
 completion without routing AI harness commands. Without `--helpers-only`, a new
-shell routes normal `codex`, `claude`, `gemini`, `hcode`, and `z3cli` commands
-through the AFS wrappers. Run `afs-agent-hooks-off` inside a shell to disable
-the functions for that shell. Use `codex-raw`, `claude-raw`, `gemini-raw`,
-`hcode-raw`, or `z3cli-raw` when you want the underlying command directly.
+shell routes normal generic harness commands such as `codex`, `claude`,
+`gemini`, and `hcode` through the AFS wrappers. Companion extension repos can
+add their own local harness wrappers. Run `afs-agent-hooks-off` inside a shell
+to disable the functions for that shell. Use raw bypass functions such as
+`codex-raw`, `claude-raw`, `gemini-raw`, or `hcode-raw` when you want the
+underlying command directly.
 
 `agent-hooks install-worker` installs a user LaunchAgent for
 `agent-jobs work --loop`, so queued background jobs are claimed and executed
@@ -152,4 +156,3 @@ Harness wrappers:
 - `scripts/afs-claude`
 - `scripts/afs-gemini`
 - `scripts/afs-hcode`
-- `scripts/afs-z3cli`

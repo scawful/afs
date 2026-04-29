@@ -1,6 +1,6 @@
 # EVALUATION_GUIDE.md
 
-This document has moved to afs-ext as part of the core/docs boundary cleanup.
+This document has moved to a companion extension repo as part of the core/docs boundary cleanup.
 
 Core afs now focuses on Agentic File System platform primitives:
 
@@ -12,5 +12,5 @@ Core afs now focuses on Agentic File System platform primitives:
 
 For model-training, persona, and domain-specific workflows, use:
 
-- <afs-ext-root>/docs/
-- docs/SCAWFUL_MIGRATION.md
+- <extension-repo-root>/docs/
+- docs/EXTENSION_MIGRATION.md

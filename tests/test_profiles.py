@@ -34,7 +34,7 @@ def test_resolve_profile_with_extension(tmp_path: Path) -> None:
         "knowledge_mounts = [\"knowledge\"]\n"
         "skill_roots = [\"skills\"]\n"
         "model_registries = [\"registry\"]\n"
-        "policies = [\"no_zelda\"]\n",
+        "policies = [\"deny_keywords:restricted\"]\n",
         encoding="utf-8",
     )
 
@@ -62,7 +62,7 @@ def test_resolve_profile_with_extension(tmp_path: Path) -> None:
 
     resolved = resolve_active_profile(config)
     assert resolved.name == "work"
-    assert "no_zelda" in resolved.policies
+    assert "deny_keywords:restricted" in resolved.policies
     assert work_knowledge.resolve() in resolved.knowledge_mounts
     assert work_skills.resolve() in resolved.skill_roots
     assert work_registry.resolve() in resolved.model_registries

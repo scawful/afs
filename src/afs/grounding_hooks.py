@@ -24,15 +24,6 @@ _PRE_HOOK_EVENTS = {
     "user_prompt_submit",
     "turn_started",
 }
-_ZELDA_KEYWORDS = {
-    "zelda",
-    "alttp",
-    "oracle-of-secrets",
-    "oracle of secrets",
-    "hyrule",
-    "triforce",
-    "snes",
-}
 
 
 def run_grounding_hooks(
@@ -100,7 +91,12 @@ def run_grounding_hooks(
 
 def _enforce_profile_policies(event: str, payload: dict[str, Any], policies: list[str]) -> None:
     policy_set = {policy.strip().lower() for policy in policies if policy and policy.strip()}
-    if "no_zelda" not in policy_set:
+    denied_keywords = _policy_keywords(policy_set, "deny_keywords")
+    denied_keywords.extend(_policy_keywords(policy_set, "deny_keyword"))
+    denied_keywords.extend(_policy_keywords(policy_set, "block_keywords"))
+    denied_keywords.extend(_policy_keywords(policy_set, "block_keyword"))
+    denied_keywords = sorted({keyword for keyword in denied_keywords if keyword})
+    if not denied_keywords:
         return
 
     text_parts: list[str] = []
@@ -109,10 +105,23 @@ def _enforce_profile_policies(event: str, payload: dict[str, Any], policies: lis
             text_parts.append(value.lower())
     combined = "\n".join(text_parts)
 
-    if any(keyword in combined for keyword in _ZELDA_KEYWORDS):
-        raise PermissionError(
-            "Profile policy violation: no_zelda is active for this context."
-        )
+    for keyword in denied_keywords:
+        if keyword in combined:
+            raise PermissionError(
+                f"Profile policy violation: denied keyword matched '{keyword}'."
+            )
+
+
+def _policy_keywords(policy_set: set[str], name: str) -> list[str]:
+    prefixes = (f"{name}:", f"{name}=")
+    values: list[str] = []
+    for policy in policy_set:
+        for prefix in prefixes:
+            if not policy.startswith(prefix):
+                continue
+            raw = policy[len(prefix):]
+            values.extend(part.strip().lower() for part in raw.split(",") if part.strip())
+    return values
 
 
 class _CompletedProcess:

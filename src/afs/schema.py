@@ -280,13 +280,23 @@ class ExtensionsConfig:
     enabled_extensions: list[str] = field(default_factory=list)
     extension_dirs: list[Path] = field(default_factory=list)
     auto_discover: bool = True
+    extension_repo_roots: list[Path] = field(default_factory=list)
+    extension_repo_prefixes: list[str] = field(
+        default_factory=lambda: ["afs_", "afs-"]
+    )
+    manifest_filenames: list[str] = field(default_factory=lambda: ["extension.toml"])
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ExtensionsConfig:
+        prefixes = _as_str_list(data.get("extension_repo_prefixes"))
+        manifest_filenames = _as_str_list(data.get("manifest_filenames"))
         return cls(
             enabled_extensions=_as_str_list(data.get("enabled_extensions")),
             extension_dirs=_as_path_list(data.get("extension_dirs")),
             auto_discover=bool(data.get("auto_discover", True)),
+            extension_repo_roots=_as_path_list(data.get("extension_repo_roots")),
+            extension_repo_prefixes=prefixes or cls().extension_repo_prefixes,
+            manifest_filenames=manifest_filenames or cls().manifest_filenames,
         )
 
 

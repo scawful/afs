@@ -1,6 +1,6 @@
 # Agent Integration Upgrade Guide
 
-Use this when refreshing Codex, Claude, Gemini, hcode, z3cli, or another local
+Use this when refreshing Codex, Claude, Gemini, hcode, or another local
 agent harness to follow AFS without adding unnecessary tool noise.
 
 ## Upgrade Command
@@ -26,8 +26,8 @@ normal local upgrade:
 - validates `configs/agent_manifest.toml`
 - copies shared skills and writes harness manifest exports
 - repairs the selected workspace context and rebuilds its SQLite index
-- installs idempotent shell hooks for `codex`, `claude`, `gemini`, `hcode`, and
-  `z3cli`
+- installs idempotent shell hooks for generic harnesses such as `codex`,
+  `claude`, `gemini`, and `hcode`
 - installs the background agent-job LaunchAgent
 - writes project-scoped Claude and Gemini MCP setup
 - prints the exact status, inbox, and bootstrap commands to run next
@@ -90,8 +90,8 @@ Optional surfaces should be profile-gated or harness-specific:
 - `events.*` for audits and telemetry
 - `embeddings.*` for semantic indexing
 - `training.*` for reusable training/eval workflows
-- domain servers such as `hyrule-historian`, `book-of-mudora`, `yaze-mcp`,
-  `yaze-debugger`, and `yaze-editor`
+- companion-repo domain servers, for example the MCP surfaces supplied by a
+  local `afs_google` or `afs_scawful` repo
 
 ## Skills
 
@@ -136,8 +136,8 @@ scripts/afs query "handoff" --path ~/src/project-a --mount scratchpad
 
 ## Harness Notes
 
-Codex, Claude, Gemini, hcode, and z3cli should all launch through the repo
-wrappers when shell hooks are enabled:
+Codex, Claude, Gemini, hcode, and any companion-repo harnesses should launch
+through the repo wrappers when shell hooks are enabled:
 
 ```bash
 scripts/afs agent-hooks install-shell --apply
@@ -149,7 +149,6 @@ After opening a new shell, normal commands route through:
 - `scripts/afs-claude`
 - `scripts/afs-gemini`
 - `scripts/afs-hcode`
-- `scripts/afs-z3cli`
 
 Bypass functions remain available in that shell:
 
@@ -157,7 +156,6 @@ Bypass functions remain available in that shell:
 - `claude-raw`
 - `gemini-raw`
 - `hcode-raw`
-- `z3cli-raw`
 
 The hook status command always prints what to run next:
 

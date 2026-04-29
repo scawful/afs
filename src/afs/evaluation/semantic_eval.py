@@ -1,6 +1,6 @@
 """Semantic evaluation of assembly code via emulator execution.
 
-Uses the yaze emulator to validate that generated assembly code:
+Uses a configured emulator client to validate generated assembly code:
 1. Compiles successfully with asar
 2. Executes without crashing
 3. Produces expected register/memory state changes
@@ -32,7 +32,10 @@ DUMMY_ROM_PATH = os.environ.get(
     "AFS_ASAR_ROM",
     "dummy.sfc"
 )
-YAZE_GRPC_TARGET = os.environ.get("YAZE_GRPC_TARGET", "127.0.0.1:50051")
+EMULATOR_GRPC_TARGET = os.environ.get(
+    "AFS_EMULATOR_GRPC_TARGET",
+    os.environ.get("YAZE_GRPC_TARGET", "127.0.0.1:50051"),
+)
 
 
 @dataclass
@@ -194,7 +197,7 @@ class SemanticEvalConfig:
     timeout: float = 10.0
 
     # gRPC settings
-    grpc_target: str = field(default_factory=lambda: YAZE_GRPC_TARGET)
+    grpc_target: str = field(default_factory=lambda: EMULATOR_GRPC_TARGET)
 
     # Scoring thresholds
     min_bytecode_size: int = 4
@@ -219,19 +222,22 @@ class SemanticEvaluator:
 
     @property
     def grpc_client(self):
-        """Lazy-load gRPC client for yaze emulator."""
+        """Lazy-load gRPC client for the configured emulator."""
         if self._grpc_client is None:
             try:
-                # Try to import the yaze-mcp client
+                # Try to import the configured emulator client
                 import sys
-                yaze_path = os.environ.get("AFS_YAZE_MCP_PATH", "")
-                if yaze_path:
-                    sys.path.insert(0, yaze_path)
+                client_path = os.environ.get("AFS_EMULATOR_CLIENT_PATH", "")
+                if client_path:
+                    sys.path.insert(0, client_path)
                 from core.emulator_client import EmulatorClient, SymbolResolver
 
                 symbols_path = os.environ.get(
-                    "YAZE_SYMBOLS_PATH",
-                    str(Path.home() / ".context/knowledge/alttp/symbols.json")
+                    "AFS_EMULATOR_SYMBOLS_PATH",
+                    os.environ.get(
+                        "YAZE_SYMBOLS_PATH",
+                        str(Path.home() / ".context/knowledge/alttp/symbols.json"),
+                    ),
                 )
                 resolver = SymbolResolver(symbols_path)
                 self._grpc_client = EmulatorClient(
@@ -239,10 +245,10 @@ class SemanticEvaluator:
                     resolver=resolver,
                 )
             except ImportError as e:
-                logger.warning(f"Could not import yaze-mcp client: {e}")
+                logger.warning(f"Could not import emulator client: {e}")
                 self._grpc_client = None
             except Exception as e:
-                logger.warning(f"Could not connect to yaze emulator: {e}")
+                logger.warning(f"Could not connect to emulator: {e}")
                 self._grpc_client = None
 
         return self._grpc_client
@@ -568,7 +574,7 @@ def create_semantic_evaluator(
     Args:
         asar_path: Path to asar executable
         base_rom_path: Path to base ROM for compilation
-        grpc_target: gRPC target for yaze emulator
+        grpc_target: gRPC target for the configured emulator
 
     Returns:
         Configured SemanticEvaluator

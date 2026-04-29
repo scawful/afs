@@ -3587,13 +3587,15 @@ def _load_extension_surface(
     manager: AFSManager,
     *,
     extension_name: str,
-    extension_root: Path,
+    extension_roots: list[Path],
     surface: str,
     module_name: str,
     factory_name: str,
 ) -> tuple[MCPExtensionContribution, ExtensionMCPStatus]:
     source = f"extension:{extension_name}"
-    search_roots = [extension_root, extension_root.parent]
+    search_roots: list[Path] = []
+    for root in extension_roots:
+        search_roots.extend([root, root.parent])
     status = ExtensionMCPStatus(
         extension=extension_name,
         surface=surface,
@@ -3661,7 +3663,7 @@ def _load_extension_mcp_definitions(
             contribution, status = _load_extension_surface(
                 manager,
                 extension_name=extension_name,
-                extension_root=manifest.root,
+                extension_roots=manifest.import_roots,
                 surface=surface,
                 module_name=module_name,
                 factory_name=factory_name,

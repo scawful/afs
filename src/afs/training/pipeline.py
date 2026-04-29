@@ -1,7 +1,7 @@
 """Training data pipeline.
 
 Provides core pipeline primitives used by afs.continuous and integration
-tests. Domain-specific pipeline stages belong in afs-ext.
+tests. Domain-specific pipeline stages belong in a companion extension repo.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ class DataPipeline:
 
     Orchestrates loading, filtering, scoring, deduplication, and export
     of training samples. This base implementation handles the pipeline
-    structure; domain-specific stages belong in afs-ext.
+    structure; domain-specific stages belong in a companion extension repo.
     """
 
     def __init__(self, config: PipelineConfig | None = None):

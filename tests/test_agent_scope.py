@@ -16,21 +16,21 @@ def _has_extension(module_name: str) -> bool:
 
 
 def test_domain_presets_require_extension() -> None:
-    if _has_extension("afs_ext.agent_model_presets"):
+    if _has_extension("afs_scawful.agent_model_presets"):
         config = ModelConfig.majora_lmstudio()
         assert config.model_id
         return
 
-    with pytest.raises(RuntimeError, match="afs-ext extension"):
+    with pytest.raises(RuntimeError, match="afs_scawful extension repo"):
         ModelConfig.majora_lmstudio()
 
 
 def test_triforce_tools_are_disabled_without_extension() -> None:
-    if _has_extension("afs_ext.agent_tools"):
+    if _has_extension("afs_scawful.agent_tools"):
         tools = create_triforce_tools()
         assert tools
         return
 
     assert TRIFORCE_TOOLS == []
-    with pytest.raises(RuntimeError, match="afs-ext extension"):
+    with pytest.raises(RuntimeError, match="afs_scawful extension repo"):
         create_triforce_tools()

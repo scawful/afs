@@ -1,15 +1,19 @@
 # Plugins and Extensions
 
-AFS supports two extension mechanisms:
+AFS supports two opt-in extension mechanisms:
 
-- Python plugins (runtime hooks)
-- Manifest-based extensions (`extension.toml`)
+- Python plugins for lightweight runtime hooks
+- Manifest-based extensions for repo-owned context, commands, agents, and MCP surfaces
+
+Core AFS stays neutral. Personal, work, or domain-specific behavior should live in
+a companion extension repo such as `afs_google`, `afs_company`, or
+`afs_scawful` instead of being hardcoded into `lab/afs`.
 
 ## Python Plugins
 
 Discovery inputs:
 
-- Name prefix (`afs_plugin`, optionally `afs_ext`)
+- Name prefix (`afs_plugin`, optionally a configured prefix)
 - Configured `plugin_dirs`
 - `AFS_PLUGIN_DIRS`
 - Default directories: `~/.config/afs/plugins`, `~/.afs/plugins`
@@ -35,20 +39,64 @@ Inspect resolved plugin state:
 
 ## Manifest Extensions
 
-Extensions are discovered from `extension.toml` files.
+Extensions are discovered from manifest files. The default manifest filename is
+`extension.toml`.
 
 Discovery roots:
 
 - `AFS_EXTENSION_DIRS`
 - configured `extension_dirs`
-- `extensions/`
+- repo-local `extensions/`
 - `~/.config/afs/extensions`
 - `~/.afs/extensions`
+
+Companion repo discovery:
+
+- `AFS_EXTENSION_REPO_ROOTS`
+- configured `extension_repo_roots`
+- `[general].workspace_directories` when a full `AFSConfig` is active
+- repos whose directory name matches `extension_repo_prefixes` (defaults:
+  `afs_`, `afs-`)
+- manifest names from `manifest_filenames` (default: `extension.toml`)
+
+That means a user can create a sibling repo like this:
+
+```text
+~/src/lab/afs_google/
+  extension.toml
+  src/afs_google/
+    __init__.py
+    cli.py
+    agents.py
+    mcp_surface.py
+```
+
+Then enable it from core AFS without copying implementation code:
+
+```toml
+[extensions]
+auto_discover = false
+enabled_extensions = ["afs_google"]
+extension_repo_roots = ["~/src/lab"]
+# optional overrides:
+extension_repo_prefixes = ["afs_", "team_"]
+manifest_filenames = ["extension.toml", "afs-extension.toml"]
+```
+
+Or with environment variables:
+
+```bash
+export AFS_EXTENSION_REPO_ROOTS="$HOME/src/lab"
+export AFS_ENABLED_EXTENSIONS="afs_google"
+```
 
 Config and env:
 
 - `[extensions]` in `afs.toml`
 - `AFS_EXTENSION_DIRS`
+- `AFS_EXTENSION_REPO_ROOTS`
+- `AFS_EXTENSION_REPO_PREFIXES`
+- `AFS_EXTENSION_MANIFEST_FILENAMES`
 - `AFS_ENABLED_EXTENSIONS`
 
 Manifest fields:
@@ -56,6 +104,8 @@ Manifest fields:
 - `knowledge_mounts`
 - `skill_roots`
 - `model_registries`
+- `python_paths` / `import_paths` (optional; `src/` is added automatically
+  when present)
 - `cli_modules`
 - `agent_modules`
 - `policies`
@@ -63,8 +113,26 @@ Manifest fields:
 - `[mcp_tools]`
 - `[mcp_server]`
 
-`agent_modules` let an extension register extra `afs agents run ...` entries without
-putting personal or domain-specific agent code into core `afs`.
+Example `extension.toml`:
+
+```toml
+name = "afs_google"
+description = "Google Workspace context and approval helpers"
+
+knowledge_mounts = ["knowledge"]
+skill_roots = ["skills"]
+python_paths = ["src"]
+cli_modules = ["afs_google.cli"]
+agent_modules = ["afs_google.agents"]
+
+[mcp_server]
+module = "afs_google.mcp_surface"
+factory = "register_mcp_server"
+```
+
+`agent_modules` let an extension register extra `afs agents run ...` entries
+without putting personal, work-specific, or domain-specific agent code into core
+AFS.
 
 When two extension roots contain the same manifest `name`, the first discovery
 root wins. That means repo-local or context-local extension dirs can safely

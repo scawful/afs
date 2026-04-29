@@ -64,7 +64,7 @@ def generator_model_command(args: argparse.Namespace) -> int:
 
 
 def generator_knowledge_command(args: argparse.Namespace) -> int:
-    """Generate assembly code with ALTTP knowledge context."""
+    """Generate assembly code with extension-owned knowledge context."""
     from ..generators.knowledge_generator import create_knowledge_generator
 
     # Parse entities
@@ -346,7 +346,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 
     # generator knowledge
     gen_knowledge = gen_sub.add_parser(
-        "knowledge", help="Generate with ALTTP knowledge context."
+        "knowledge", help="Generate with extension-owned knowledge context."
     )
     gen_knowledge.add_argument(
         "--instruction", "-i", required=True, help="Generation instruction."

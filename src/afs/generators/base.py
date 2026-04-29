@@ -180,7 +180,8 @@ class TrainingSample:
     ) -> TrainingSample:
         """Populate kg_entities field by extracting entities from output.
 
-        Uses the EntityExtractor to find ALTTP memory addresses and labels
+        Uses the optional extension-owned EntityExtractor to find project
+        memory addresses and labels
         in the assembly code output.
 
         Args:

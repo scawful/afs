@@ -4,8 +4,10 @@
 
 This repository documents and develops core AFS platform features.
 
-Domain-specific and model-training development flows live in afs-ext.
-See docs/SCAWFUL_MIGRATION.md.
+Domain-specific and model-training development flows live in companion extension
+repos. In this workspace, Scawful/Zelda/persona workflows live in
+`lab/afs-scawful` and import as `afs_scawful`.
+See docs/EXTENSION_MIGRATION.md.
 
 ## Local Setup
 

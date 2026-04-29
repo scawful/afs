@@ -93,6 +93,10 @@ def _expand_config_paths(config_data: dict[str, Any]) -> None:
         config_data["extensions"]["extension_dirs"] = [
             _expand_path(p) for p in config_data["extensions"]["extension_dirs"]
         ]
+    if "extensions" in config_data and "extension_repo_roots" in config_data["extensions"]:
+        config_data["extensions"]["extension_repo_roots"] = [
+            _expand_path(p) for p in config_data["extensions"]["extension_repo_roots"]
+        ]
 
     for profile_root_key in ("profiles", "profile"):
         profile_root = config_data.get(profile_root_key)

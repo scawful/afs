@@ -8,6 +8,7 @@ from afs.schema import AFSConfig
 
 
 def test_load_config_merges_workspace_registry(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("AFS_CONFIG_PATH", raising=False)
     context_root = tmp_path / "context"
     context_root.mkdir()
     workspace_dir = tmp_path / "workspace"
@@ -47,6 +48,7 @@ def test_load_config_model_uses_explicit_path(tmp_path) -> None:
 
 
 def test_load_runtime_config_model_uses_nearest_repo_config(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("AFS_CONFIG_PATH", raising=False)
     repo_root = tmp_path / "repo"
     nested = repo_root / "a" / "b"
     nested.mkdir(parents=True)
@@ -82,7 +84,7 @@ def test_load_config_model_parses_profiles_extensions_hooks(tmp_path) -> None:
         "skill_roots = [\"~/skills\"]\n"
         "model_registries = [\"~/registry/chat_registry.toml\"]\n"
         "enabled_extensions = [\"workspace_adapter\"]\n"
-        "policies = [\"no_zelda\"]\n\n"
+        "policies = [\"deny_keywords:restricted\"]\n\n"
         "[hooks]\n"
         "before_context_read = [\"scripts/hooks/read.sh\"]\n"
         "session_start = [\"scripts/hooks/session_start.sh\"]\n"
@@ -98,7 +100,7 @@ def test_load_config_model_parses_profiles_extensions_hooks(tmp_path) -> None:
     assert "work" in model.profiles.profiles
     work = model.profiles.profiles["work"]
     assert work.memory_mounts == [(Path.home() / "memory").resolve()]
-    assert work.policies == ["no_zelda"]
+    assert work.policies == ["deny_keywords:restricted"]
     assert model.hooks.before_context_read == ["scripts/hooks/read.sh"]
     assert model.hooks.session_start == ["scripts/hooks/session_start.sh"]
     assert model.hooks.session_end == ["scripts/hooks/session_end.sh"]
@@ -354,6 +356,14 @@ def test_write_config_round_trips_extended_sections(tmp_path) -> None:
                 "never_embed": ["**/*.secret.md"],
                 "never_export": ["memory/raw/*"],
             },
+            "extensions": {
+                "auto_discover": False,
+                "enabled_extensions": ["afs_google"],
+                "extension_dirs": [str(tmp_path / "extensions")],
+                "extension_repo_roots": [str(tmp_path / "lab")],
+                "extension_repo_prefixes": ["afs_", "team_"],
+                "manifest_filenames": ["extension.toml", "afs-extension.toml"],
+            },
             "hivemind": {
                 "default_ttl_hours": 8,
                 "reaper_enabled": False,
@@ -389,4 +399,12 @@ def test_write_config_round_trips_extended_sections(tmp_path) -> None:
     assert roundtrip.memory_consolidation.entries_filename == "durable.jsonl"
     assert roundtrip.context_index.decay_hours == 72.0
     assert roundtrip.sensitivity.never_embed == ["**/*.secret.md"]
+    assert roundtrip.extensions.auto_discover is False
+    assert roundtrip.extensions.enabled_extensions == ["afs_google"]
+    assert roundtrip.extensions.extension_repo_roots == [(tmp_path / "lab").resolve()]
+    assert roundtrip.extensions.extension_repo_prefixes == ["afs_", "team_"]
+    assert roundtrip.extensions.manifest_filenames == [
+        "extension.toml",
+        "afs-extension.toml",
+    ]
     assert roundtrip.hivemind.default_ttl_hours == 8

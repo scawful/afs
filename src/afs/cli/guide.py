@@ -62,7 +62,7 @@ GUIDES: dict[str, GuideTopic] = {
             ),
             (
                 "afs agent-hooks install-shell --apply",
-                "also route codex/claude/gemini/hcode/z3cli through AFS wrappers",
+                "also route generic harnesses through AFS wrappers",
             ),
             ("source scripts/afs-shell-init.sh", "enable helpers for the current shell"),
             ("AFS_COMPLETE=zsh_source afs > ~/.zfunc/_afs", "write completion source manually"),

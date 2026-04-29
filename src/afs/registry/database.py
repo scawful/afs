@@ -16,7 +16,7 @@ class ModelRegistry:
     Stores all model metadata in a JSON file with hierarchical structure:
     ```
     {
-      "majora": {
+      "sample-model": {
         "metadata": { ... },
         "versions": {
           "v1": { ... },
@@ -32,7 +32,7 @@ class ModelRegistry:
 
         # Register new version
         version = registry.register_model(
-            model_name="majora",
+            model_name="sample-model",
             version="v1",
             base_model="Qwen2.5-Coder-7B",
             samples=223,
@@ -42,16 +42,16 @@ class ModelRegistry:
         )
 
         # Get latest version
-        latest = registry.get_latest("majora")
+        latest = registry.get_latest("sample-model")
 
         # List all versions
-        versions = registry.list_versions("majora")
+        versions = registry.list_versions("sample-model")
 
         # Compare versions
-        diff = registry.compare_versions("majora", "v1", "v2")
+        diff = registry.compare_versions("sample-model", "v1", "v2")
 
         # Rollback
-        registry.rollback("majora", "v1")
+        registry.rollback("sample-model", "v1")
         ```
     """
 
@@ -151,7 +151,7 @@ class ModelRegistry:
         """Register a new model version.
 
         Args:
-            model_name: Name of the model (e.g., "majora")
+            model_name: Name of the model (e.g., "sample-model")
             version: Version string (e.g., "v1"). Auto-increments if None.
             base_model: Base model used (e.g., "Qwen2.5-Coder-7B")
             samples: Number of training samples

@@ -3044,3 +3044,57 @@ def test_review_tools_use_manager_config(tmp_path: Path) -> None:
     assert response is not None
     agents = response["result"]["structuredContent"]["agents"]
     assert [agent["name"] for agent in agents] == ["review-agent"]
+
+
+def test_companion_repo_mcp_server_uses_src_layout(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "lab"
+    repo = workspace_root / "afs_google"
+    package = repo / "src" / "afs_google"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "mcp_surface.py").write_text(
+        "def register_mcp_server(_manager):\n"
+        "    def echo(arguments):\n"
+        "        return {'echo': arguments.get('value', '')}\n"
+        "    return {'tools': [{'name': 'google.echo', 'description': 'echo', 'handler': echo}]}\n",
+        encoding="utf-8",
+    )
+    (repo / "extension.toml").write_text(
+        "name = \"afs_google\"\n"
+        "\n"
+        "[mcp_server]\n"
+        "module = \"afs_google.mcp_surface\"\n"
+        "factory = \"register_mcp_server\"\n",
+        encoding="utf-8",
+    )
+
+    context_root = tmp_path / "context"
+    context_root.mkdir(parents=True)
+    (context_root / "scratchpad").mkdir()
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            extensions=ExtensionsConfig(
+                enabled_extensions=["afs_google"],
+                extension_dirs=[],
+                extension_repo_roots=[workspace_root],
+                auto_discover=False,
+            ),
+        )
+    )
+
+    registry = build_mcp_registry(manager)
+    assert "google.echo" in registry.tools
+
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 98,
+            "method": "tools/call",
+            "params": {"name": "google.echo", "arguments": {"value": "ok"}},
+        },
+        manager,
+        registry=registry,
+    )
+    assert response is not None
+    assert response["result"]["structuredContent"]["echo"] == "ok"

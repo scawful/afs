@@ -321,7 +321,7 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
         extension_roots: dict[str, list[Path]] = {}
         for extension in extensions.values():
             for module_name in extension.cli_modules:
-                extension_roots.setdefault(module_name, []).append(extension.root)
+                extension_roots.setdefault(module_name, []).extend(extension.import_roots)
 
         for module_name in resolved_profile.cli_modules:
             try:

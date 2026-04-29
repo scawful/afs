@@ -27,7 +27,8 @@ Primary modules:
 
 - `afs.toml` + user config are merged into typed schema.
 - Profiles resolve inheritance, env overrides, and extension overlays.
-- Extensions are loaded from `extensions/*/extension.toml`.
+- Extensions are loaded from `extensions/*/extension.toml` and from opt-in
+  companion repos named like `afs_<name>` / `afs-<name>`.
 
 Primary modules:
 
@@ -64,9 +65,12 @@ Primary modules:
 AFS extension points are explicit:
 
 - Plugins: Python module discovery
-- Extensions: `extension.toml` mount/policy/CLI declarations
+- Extensions: `extension.toml` mount/policy/CLI/agent declarations
+- Companion repos: user-owned `afs_<name>` repos with their own manifest,
+  import paths, MCP surface, and overrides
 - Hooks: pre/post operation command hooks
-- MCP tools: extension module factories via `[mcp_tools]`
+- MCP tools/resources/prompts: extension module factories via `[mcp_tools]`
+  or `[mcp_server]`
 
 ## Operational Diagnostics
 

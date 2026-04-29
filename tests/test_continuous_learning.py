@@ -19,7 +19,7 @@ try:
         UsageLogger,
     )
 except (RuntimeError, ImportError):
-    pytest.skip("afs.continuous moved to afs-ext", allow_module_level=True)
+    pytest.skip("afs.continuous moved to a companion extension repo", allow_module_level=True)
 
 
 class TestUsageLogger:

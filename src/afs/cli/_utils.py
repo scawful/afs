@@ -286,6 +286,11 @@ def write_config(path: Path, config: AFSConfig) -> None:
     ext_table["auto_discover"] = config.extensions.auto_discover
     ext_table["enabled_extensions"] = list(config.extensions.enabled_extensions)
     ext_table["extension_dirs"] = [str(p) for p in config.extensions.extension_dirs]
+    ext_table["extension_repo_roots"] = [
+        str(p) for p in config.extensions.extension_repo_roots
+    ]
+    ext_table["extension_repo_prefixes"] = list(config.extensions.extension_repo_prefixes)
+    ext_table["manifest_filenames"] = list(config.extensions.manifest_filenames)
     doc["extensions"] = ext_table
 
     # --- [profiles] ---

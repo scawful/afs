@@ -24,6 +24,7 @@ class ExtensionManifest:
     knowledge_mounts: list[Path] = field(default_factory=list)
     skill_roots: list[Path] = field(default_factory=list)
     model_registries: list[Path] = field(default_factory=list)
+    python_paths: list[Path] = field(default_factory=list)
     cli_modules: list[str] = field(default_factory=list)
     agent_modules: list[str] = field(default_factory=list)
     policies: list[str] = field(default_factory=list)
@@ -32,6 +33,11 @@ class ExtensionManifest:
     mcp_tools_factory: str = "register_mcp_tools"
     mcp_server_module: str = ""
     mcp_server_factory: str = "register_mcp_server"
+
+    @property
+    def import_roots(self) -> list[Path]:
+        """Python import roots for extension-owned implementation modules."""
+        return _merge_unique_paths(self.python_paths, [self.root, self.root.parent])
 
 
 def _as_path_list(items: Any, root: Path) -> list[Path]:
@@ -74,6 +80,31 @@ def _env_enabled_extensions() -> list[str]:
     return [entry.strip() for entry in re.split(r"[,\s]+", raw) if entry.strip()]
 
 
+def _env_extension_repo_roots() -> list[Path]:
+    raw = os.environ.get("AFS_EXTENSION_REPO_ROOTS", "").strip()
+    if not raw:
+        return []
+    values: list[Path] = []
+    for entry in raw.split(os.pathsep):
+        if entry.strip():
+            values.append(Path(entry).expanduser().resolve())
+    return values
+
+
+def _env_extension_repo_prefixes() -> list[str]:
+    raw = os.environ.get("AFS_EXTENSION_REPO_PREFIXES", "").strip()
+    if not raw:
+        return []
+    return [entry.strip() for entry in re.split(r"[,\s]+", raw) if entry.strip()]
+
+
+def _env_manifest_filenames() -> list[str]:
+    raw = os.environ.get("AFS_EXTENSION_MANIFEST_FILENAMES", "").strip()
+    if not raw:
+        return []
+    return [entry.strip() for entry in re.split(r"[,\s]+", raw) if entry.strip()]
+
+
 def _default_extension_dirs() -> list[Path]:
     return [
         Path("extensions").expanduser().resolve(),
@@ -110,6 +141,7 @@ def _merge_unique_str(*groups: list[str]) -> list[str]:
 
 def resolve_extensions_config(config: AFSConfig | ExtensionsConfig | dict | None = None) -> ExtensionsConfig:
     """Resolve extension config with env and default dirs."""
+    workspace_extension_roots: list[Path] = []
     if config is None:
         resolved = ExtensionsConfig()
     elif isinstance(config, ExtensionsConfig):
@@ -117,13 +149,23 @@ def resolve_extensions_config(config: AFSConfig | ExtensionsConfig | dict | None
             enabled_extensions=list(config.enabled_extensions),
             extension_dirs=list(config.extension_dirs),
             auto_discover=config.auto_discover,
+            extension_repo_roots=list(config.extension_repo_roots),
+            extension_repo_prefixes=list(config.extension_repo_prefixes),
+            manifest_filenames=list(config.manifest_filenames),
         )
     elif isinstance(config, AFSConfig):
         source = config.extensions
+        workspace_extension_roots = [
+            workspace.path
+            for workspace in config.general.workspace_directories
+        ]
         resolved = ExtensionsConfig(
             enabled_extensions=list(source.enabled_extensions),
             extension_dirs=list(source.extension_dirs),
             auto_discover=source.auto_discover,
+            extension_repo_roots=list(source.extension_repo_roots),
+            extension_repo_prefixes=list(source.extension_repo_prefixes),
+            manifest_filenames=list(source.manifest_filenames),
         )
     elif isinstance(config, dict):
         resolved = ExtensionsConfig.from_dict(config.get("extensions", config))
@@ -135,6 +177,19 @@ def resolve_extensions_config(config: AFSConfig | ExtensionsConfig | dict | None
         resolved.extension_dirs,
         _default_extension_dirs(),
     )
+    resolved.extension_repo_roots = _merge_unique_paths(
+        _env_extension_repo_roots(),
+        resolved.extension_repo_roots,
+        workspace_extension_roots,
+    )
+    resolved.extension_repo_prefixes = _merge_unique_str(
+        _env_extension_repo_prefixes(),
+        resolved.extension_repo_prefixes,
+    )
+    resolved.manifest_filenames = _merge_unique_str(
+        _env_manifest_filenames(),
+        resolved.manifest_filenames,
+    )
     resolved.enabled_extensions = _merge_unique_str(
         _env_enabled_extensions(),
         resolved.enabled_extensions,
@@ -142,15 +197,20 @@ def resolve_extensions_config(config: AFSConfig | ExtensionsConfig | dict | None
     return resolved
 
 
-def _iter_manifest_paths(extension_dirs: list[Path]) -> list[Path]:
+def _iter_manifest_paths(extension_dirs: list[Path], manifest_filenames: list[str]) -> list[Path]:
     manifests: list[Path] = []
     for extension_dir in extension_dirs:
         if not extension_dir.exists():
             continue
 
-        direct_manifest = extension_dir / "extension.toml"
-        if direct_manifest.exists():
-            manifests.append(direct_manifest)
+        for filename in manifest_filenames:
+            direct_manifest = extension_dir / filename
+            if direct_manifest.exists():
+                manifests.append(direct_manifest)
+                break
+        else:
+            direct_manifest = None
+        if direct_manifest is not None and direct_manifest.exists():
             continue
 
         try:
@@ -161,9 +221,40 @@ def _iter_manifest_paths(extension_dirs: list[Path]) -> list[Path]:
         for child in children:
             if not child.is_dir():
                 continue
-            manifest = child / "extension.toml"
-            if manifest.exists():
-                manifests.append(manifest)
+            for filename in manifest_filenames:
+                manifest = child / filename
+                if manifest.exists():
+                    manifests.append(manifest)
+                    break
+    return manifests
+
+
+def _iter_extension_repo_manifest_paths(
+    repo_roots: list[Path],
+    prefixes: list[str],
+    manifest_filenames: list[str],
+) -> list[Path]:
+    manifests: list[Path] = []
+    prefix_tuple = tuple(prefixes or [])
+    for repo_root in repo_roots:
+        if not repo_root.exists():
+            continue
+        candidates: list[Path] = []
+        if repo_root.is_dir() and repo_root.name.startswith(prefix_tuple):
+            candidates.append(repo_root)
+        try:
+            children = list(repo_root.iterdir())
+        except OSError:
+            children = []
+        for child in children:
+            if child.is_dir() and child.name.startswith(prefix_tuple):
+                candidates.append(child)
+        for candidate in candidates:
+            for filename in manifest_filenames:
+                manifest = candidate / filename
+                if manifest.exists():
+                    manifests.append(manifest)
+                    break
     return manifests
 
 
@@ -194,6 +285,12 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
         raw.get("model_registries", mounts.get("model_registries")),
         root,
     )
+    python_paths = _as_path_list(
+        raw.get("python_paths", raw.get("import_paths")),
+        root,
+    )
+    if not python_paths and (root / "src").is_dir():
+        python_paths = [(root / "src").resolve()]
 
     hooks_raw = raw.get("hooks")
     hooks: dict[str, list[str]] = {}
@@ -240,6 +337,7 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
         knowledge_mounts=knowledge_mounts,
         skill_roots=skill_roots,
         model_registries=model_registries,
+        python_paths=python_paths,
         cli_modules=_as_str_list(raw.get("cli_modules")),
         agent_modules=_as_str_list(raw.get("agent_modules")),
         policies=_as_str_list(raw.get("policies")),
@@ -262,7 +360,15 @@ def discover_extension_manifests(
         extension_dirs.extend([path.expanduser().resolve() for path in extra_dirs])
 
     discovered: dict[str, Path] = {}
-    for manifest_path in _iter_manifest_paths(extension_dirs):
+    manifest_paths = [
+        *_iter_manifest_paths(extension_dirs, extension_config.manifest_filenames),
+        *_iter_extension_repo_manifest_paths(
+            extension_config.extension_repo_roots,
+            extension_config.extension_repo_prefixes,
+            extension_config.manifest_filenames,
+        ),
+    ]
+    for manifest_path in manifest_paths:
         try:
             manifest = load_extension_manifest(manifest_path)
         except Exception:

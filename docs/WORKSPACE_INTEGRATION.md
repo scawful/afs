@@ -7,7 +7,8 @@ generic here; refer to workspace docs for specifics.
 
 - Workspace infrastructure: `<workspace-docs-root>/NERV_INFRASTRUCTURE.md`
 - Source universe sync: `<workspace-docs-root>/SRC_UNIVERSE_NETWORK.md`
-- Windows workflow: `<afs-ext-root>/docs/WINDOWS_WORKFLOW.md`
+- Windows workflow: companion repo docs, for example
+  `<afs_scawful-root>/docs/WINDOWS_WORKFLOW.md` in this workspace
 
 ## Codenames (no IPs)
 
@@ -45,9 +46,11 @@ export AFS_MCP_ALLOWED_ROOTS=~/workspaces/company
 
 If you want work-machine bundles or extensions to stay repo-local instead of
 landing in a shared user directory, set `extensions.extension_dirs` to a path
-inside the workspace or context. AFS now prefers earlier extension roots over
-later defaults, so a work-local install can safely override an older
-`~/.config/afs/extensions/<name>` copy with the same extension name.
+inside the workspace/context or set `extensions.extension_repo_roots` to a
+parent that contains companion repos such as `afs_google` or `afs_scawful`. AFS
+prefers earlier extension roots over later defaults, so a work-local install can
+safely override an older `~/.config/afs/extensions/<name>` copy with the same
+extension name.
 
 When a workspace path under one of those roots moves, `afs context repair` and the
 background `context-warm` / `context-watch` services will try a conservative

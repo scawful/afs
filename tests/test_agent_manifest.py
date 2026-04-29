@@ -59,3 +59,25 @@ targets = ["claude"]
     result = check_agent_manifest()
 
     assert result.status == "ok"
+
+
+def test_default_agent_manifest_stays_domain_neutral() -> None:
+    data = load_manifest(Path("configs/agent_manifest.toml"))
+    harness_names = {harness.get("name") for harness in data.get("harnesses", [])}
+    server_names = {server.get("name") for server in data.get("mcp_servers", [])}
+    harness_server_names = {
+        name
+        for harness in data.get("harnesses", [])
+        for name in harness.get("mcp_servers", [])
+    }
+
+    assert "z3cli" not in harness_names
+    forbidden = {
+        "hyrule-historian",
+        "book-of-mudora",
+        "yaze-mcp",
+        "yaze-debugger",
+        "yaze-editor",
+    }
+    assert server_names.isdisjoint(forbidden)
+    assert harness_server_names.isdisjoint(forbidden)

@@ -82,7 +82,7 @@ def validate_command(
     """Validate a model before deployment.
 
     Example:
-        python -m afs.deployment.cli validate model.gguf --model-name majora --version v5 --baseline v4
+        python -m afs.deployment.cli validate model.gguf --model-name sample-model --version v5 --baseline v4
     """
     click.echo(f"Validating {model_name} v{version}...")
 

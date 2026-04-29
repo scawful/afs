@@ -18,10 +18,10 @@ def test_oracle_testing_runtime_is_extension_owned() -> None:
     sys.modules.pop("afs.oracle", None)
     sys.modules.pop("afs.oracle.testing", None)
 
-    if _has_extension("afs_ext.oracle"):
+    if _has_extension("afs_scawful.oracle"):
         module = importlib.import_module("afs.oracle.testing")
         assert hasattr(module, "AgenticTestLoop")
         return
 
-    with pytest.raises(RuntimeError, match="afs-ext extension"):
+    with pytest.raises(RuntimeError, match="afs_scawful extension repo"):
         importlib.import_module("afs.oracle.testing")

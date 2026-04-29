@@ -13,7 +13,7 @@ Usage:
 
     logger = get_logger(__name__)
     logger.info("Training started", extra={
-        "model": "majora-v1",
+        "model": "sample-model-v1",
         "dataset_size": 187,
         "epochs": 3
     })
@@ -195,7 +195,7 @@ class LogContext:
     """Context manager for adding contextual information to logs.
 
     Usage:
-        with LogContext(run_id="training_123", model="majora-v1"):
+        with LogContext(run_id="training_123", model="sample-model-v1"):
             logger.info("Training started")
             # All logs in this block will include run_id and model
     """

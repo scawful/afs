@@ -18,10 +18,10 @@ def test_oracle_embeddings_are_extension_owned() -> None:
     sys.modules.pop("afs.oracle", None)
     sys.modules.pop("afs.oracle.embeddings", None)
 
-    if _has_extension("afs_ext.oracle"):
+    if _has_extension("afs_scawful.oracle"):
         module = importlib.import_module("afs.oracle.embeddings")
         assert hasattr(module, "OracleEmbeddingGenerator")
         return
 
-    with pytest.raises(RuntimeError, match="afs-ext extension"):
+    with pytest.raises(RuntimeError, match="afs_scawful extension repo"):
         importlib.import_module("afs.oracle.embeddings")

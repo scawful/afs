@@ -5,9 +5,9 @@ from pathlib import Path
 from afs.agents import get_agent, list_agents
 
 
-def test_core_agents_include_claude_orchestrator() -> None:
+def test_core_agents_exclude_extension_owned_claude_orchestrator() -> None:
     names = {spec.name for spec in list_agents()}
-    assert "claude-orchestrator" in names
+    assert "claude-orchestrator" not in names
 
 
 def test_extension_agent_modules_register_agents(
@@ -48,3 +48,41 @@ def test_extension_agent_modules_register_agents(
     names = {spec.name for spec in list_agents()}
     assert "demo-agent" in names
     assert get_agent("demo-agent") is not None
+
+
+def test_companion_repo_agent_module_uses_src_layout(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "lab"
+    repo = workspace_root / "afs_agent_google"
+    package = repo / "src" / "afs_agent_google"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "agents.py").write_text(
+        "def _run(_args=None):\n"
+        "    return 0\n"
+        "\n"
+        "def register_agents():\n"
+        "    return [{'name': 'agent-google-agent', 'description': 'src layout', 'entrypoint': _run}]\n",
+        encoding="utf-8",
+    )
+    (repo / "extension.toml").write_text(
+        "name = \"afs_agent_google\"\n"
+        "agent_modules = [\"afs_agent_google.agents\"]\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "afs.toml"
+    config_path.write_text(
+        "[extensions]\n"
+        "auto_discover = false\n"
+        f"extension_repo_roots = [\"{workspace_root}\"]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AFS_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("AFS_ENABLED_EXTENSIONS", "afs_agent_google")
+    monkeypatch.delenv("AFS_EXTENSION_DIRS", raising=False)
+    monkeypatch.setenv("AFS_EXTENSION_REPO_ROOTS", str(workspace_root))
+
+    assert get_agent("agent-google-agent") is not None

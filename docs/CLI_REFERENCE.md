@@ -87,10 +87,11 @@ unless `--apply` is provided.
 roots and writes per-harness export JSON. It uses real copied directories, not
 symlinks.
 `agent-hooks install-shell` adds an idempotent block to the shell profile that
-sources `afs-shell-init.sh` and `afs-agent-hooks.sh`, making normal `codex`,
-`claude`, `gemini`, `hcode`, and `z3cli` commands route through AFS wrappers.
-Raw bypass functions are also exposed: `codex-raw`, `claude-raw`,
-`gemini-raw`, `hcode-raw`, and `z3cli-raw`.
+sources `afs-shell-init.sh` and `afs-agent-hooks.sh`, making normal generic
+harness commands such as `codex`, `claude`, `gemini`, and `hcode` route
+through AFS wrappers. Companion extension repos can add more local harnesses.
+Raw bypass functions are also exposed for installed wrappers, such as
+`codex-raw`, `claude-raw`, `gemini-raw`, and `hcode-raw`.
 `agent-hooks install-worker` writes a user LaunchAgent that runs
 `agent-jobs work --loop` for automatic queued-job execution. The worker skips
 obvious destructive prompts unless the job or worker uses `--allow-destructive`.
@@ -666,9 +667,11 @@ Gemini brief agent:
 ./scripts/afs agents ps --all --json
 ./scripts/afs services start gemini-workspace-brief
 ./scripts/afs services start agent-supervisor
-./scripts/afs agents run claude-orchestrator --prompt "Summarize this repo"
 ./scripts/afs services start context-warm
 ```
+
+Extension-owned agents, including local domain orchestrators, appear here only
+after their companion repo is enabled via `[extensions]`.
 
 `context-warm` now audits each discovered context for broken symlink mounts,
 duplicate mount targets, missing profile-managed mounts, untracked/stale mount

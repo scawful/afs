@@ -44,7 +44,7 @@ cd ~/src/lab/afs
 ## Upgrade Agent Instructions
 
 Add this compact contract to harness instructions for Codex, Claude, Gemini,
-hcode, z3cli, or other agents:
+hcode, companion-repo harnesses, or other agents:
 
 ```text
 At session start, run `afs session bootstrap --json` if available.

@@ -159,7 +159,7 @@ class DistillationDataGenerator:
                     "How can I reduce the byte count of this SNES code:\n```\nLDX #$00\nloop:\nINX\nCPX #$10\nBNE loop\n```",
                 ],
                 "intermediate": [
-                    "Optimize this DMA setup for ALTTP:\n```\nLDA #$01\nSTA $420B\nLDA #$00\nSTA $4300\n```",
+                    "Optimize this DMA-style register setup:\n```\nLDA #$01\nSTA $420B\nLDA #$00\nSTA $4300\n```",
                 ],
                 "advanced": [
                     "Optimize this tile decompression routine for SNES, considering both cycles and size.",
@@ -171,10 +171,10 @@ class DistillationDataGenerator:
                     "Generate SNES code to copy 16 bytes from $7E0000 to $7E0100",
                 ],
                 "intermediate": [
-                    "Write code to update Link's X coordinate at $7E0022 by adding 4 pixels",
+                    "Write code to update an entity X coordinate by adding 4 pixels",
                 ],
                 "advanced": [
-                    "Generate a routine to spawn a new sprite in ALTTP using the OAM system",
+                    "Generate a routine to initialize a new sprite entry in an object table",
                 ],
             },
             "farore": {
@@ -185,7 +185,7 @@ class DistillationDataGenerator:
                     "Debug this DMA transfer that isn't working:\n```\nLDA #$80\nSTA $2115\nLDA $4300\n```",
                 ],
                 "advanced": [
-                    "Diagnose why this interrupt handler causes crashes in ALTTP",
+                    "Diagnose why this interrupt handler causes crashes",
                 ],
             },
             "veran": {
@@ -197,14 +197,14 @@ class DistillationDataGenerator:
                     "Explain how SNES DMA works and what the $43xx registers control",
                 ],
                 "advanced": [
-                    "Describe the ALTTP sprite animation system and how it manages OAM",
+                    "Describe a sprite animation system and how it manages object attribute memory",
                 ],
             },
         }
 
         system_prompts = {
-            "din": "You are Din, an expert at optimizing 65816 assembly code for the SNES. Focus on reducing cycles and bytes while maintaining correctness.",
-            "nayru": "You are Nayru, an expert at generating 65816 assembly code for SNES games. Write clean, well-commented code.",
+            "din": "You are an expert at optimizing 65816 assembly code. Focus on reducing cycles and bytes while maintaining correctness.",
+            "nayru": "You are an expert at generating 65816 assembly code. Write clean, well-commented code.",
             "farore": "You are Farore, an expert at debugging 65816 assembly code. Identify bugs, explain their causes, and provide fixes.",
             "veran": "You are Veran, an expert at explaining 65816 assembly concepts. Provide clear, educational explanations.",
         }

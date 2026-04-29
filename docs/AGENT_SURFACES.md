@@ -334,13 +334,13 @@ Gemini background agent surfaces:
 <afs-root>/scripts/afs services start gemini-workspace-brief
 <afs-root>/scripts/afs services start history-memory
 <afs-root>/scripts/afs services start agent-supervisor
-<afs-root>/scripts/afs agents run claude-orchestrator --prompt "Summarize this workspace"
 ```
 
 The brief agent writes JSON and Markdown summaries under
 `.context/scratchpad/afs_agents/` and requires `GEMINI_API_KEY` or
-`GOOGLE_API_KEY`. `claude-orchestrator` is now a built-in agent surface and can
-be listed with `afs agents list`.
+`GOOGLE_API_KEY`. Domain-specific orchestration agents such as
+`claude-orchestrator` are extension-owned; enable the companion repo that
+registers them before expecting them in `afs agents list`.
 
 `context-warm` is the background maintenance surface for contexts:
 

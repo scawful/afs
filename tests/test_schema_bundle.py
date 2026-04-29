@@ -68,11 +68,11 @@ def test_profile_config_backward_compat() -> None:
     data = {
         "inherits": ["base"],
         "knowledge_mounts": ["/tmp/knowledge"],
-        "policies": ["no_zelda"],
+        "policies": ["deny_keywords:restricted"],
     }
     profile = ProfileConfig.from_dict(data)
     assert profile.inherits == ["base"]
-    assert profile.policies == ["no_zelda"]
+    assert profile.policies == ["deny_keywords:restricted"]
     assert profile.mcp_tools == []
     assert profile.agent_configs == []
 
@@ -120,3 +120,23 @@ def test_bundle_manifest_defaults() -> None:
     assert manifest.tools_dir == "tools"
     assert manifest.agents_dir == "agents"
     assert manifest.mcp_tools_dir == "mcp_tools"
+
+
+def test_extensions_config_from_dict_supports_companion_repos() -> None:
+    from pathlib import Path
+
+    from afs.schema import ExtensionsConfig
+
+    config = ExtensionsConfig.from_dict(
+        {
+            "enabled_extensions": ["afs_google"],
+            "extension_repo_roots": ["/tmp/workspaces"],
+            "extension_repo_prefixes": ["afs_", "team_"],
+            "manifest_filenames": ["extension.toml", "afs-extension.toml"],
+        }
+    )
+
+    assert config.enabled_extensions == ["afs_google"]
+    assert config.extension_repo_roots == [Path("/tmp/workspaces").resolve()]
+    assert config.extension_repo_prefixes == ["afs_", "team_"]
+    assert config.manifest_filenames == ["extension.toml", "afs-extension.toml"]

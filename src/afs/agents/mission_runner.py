@@ -23,12 +23,6 @@ from .guardrails import GuardrailConfig, GuardrailedAgent
 
 logger = logging.getLogger(__name__)
 
-# Default paths for Zelda projects (can be overridden via mission config)
-DEFAULT_OOS_PATH = Path.home() / "src" / "hobby" / "oracle-of-secrets"
-DEFAULT_YAZE_PATH = Path.home() / "src" / "hobby" / "yaze"
-DEFAULT_MESEN2_PATH = Path.home() / "src" / "third_party" / "forks" / "mesen2"
-DEFAULT_DISASM_PATH = Path.home() / "src" / "hobby" / "USDASM"
-
 AGENT_NAME = "mission-runner"
 AGENT_DESCRIPTION = (
     "Read mission definitions from scratchpad/missions/, execute OODA phases "
@@ -140,23 +134,6 @@ def load_mission(path: Path) -> dict[str, Any]:
             raise RuntimeError("No TOML parser available (need Python 3.11+ or tomli)") from exc
     with path.open("rb") as f:
         return tomllib.load(f)
-
-
-def _is_zelda_mission(mission_data: dict[str, Any]) -> bool:
-    """Detect whether a mission is zelda-related by name, owner, or description."""
-    m = mission_data.get("mission", {})
-    name = str(m.get("name", "")).lower()
-    owner = str(m.get("owner", "")).lower()
-    description = str(m.get("description", "")).lower()
-    return (
-        "zelda" in name
-        or "zelda" in owner
-        or "oos" in name
-        or "oracle-of-secrets" in name
-        or "oracle of secrets" in description
-        or "mesen" in name
-        or "yaze" in name
-    )
 
 
 def _discover_missions(context_root: Path) -> list[tuple[Path, Mission]]:
