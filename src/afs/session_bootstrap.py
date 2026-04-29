@@ -482,6 +482,7 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
             f"relationships={summary_counts.get('relationships', 0)}, "
             f"review_routes={summary_counts.get('review_routes', 0)}, "
             f"approvals={summary_counts.get('approvals', 0)}, "
+            f"communication_samples={summary_counts.get('communication_samples', 0)}, "
             f"activity={summary_counts.get('activity', 0)}"
         )
         pending = work_assistant.get("pending_approvals") or []
@@ -493,10 +494,20 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
                     f"{approval.get('target_system')}/{approval.get('action')} - "
                     f"{approval.get('summary')}"
                 )
+        samples = work_assistant.get("communication_samples") or []
+        if samples:
+            lines.append("- communication_samples:")
+            for sample in samples[:3]:
+                label = sample.get("purpose") or sample.get("channel") or "work_communication"
+                excerpt = str(sample.get("text_excerpt") or "").strip().replace("\n", " ")
+                if len(excerpt) > 120:
+                    excerpt = excerpt[:117].rstrip() + "..."
+                lines.append(f"  - {label}: {excerpt}")
         commands = work_assistant.get("commands") or {}
         if commands:
             lines.append(f"- summary_command: `{commands.get('summary', '')}`")
             lines.append(f"- approvals_command: `{commands.get('approvals', '')}`")
+            lines.append(f"- communication_command: `{commands.get('communication', '')}`")
     else:
         lines.append(f"- unavailable: {work_assistant.get('error', 'unknown error')}")
 
@@ -775,6 +786,7 @@ def _collect_work_assistant(
     commands = {
         "summary": f"afs work --context-root {quoted_context}",
         "approvals": f"afs work approvals list --context-root {quoted_context}",
+        "communication": f"afs work communication list --context-root {quoted_context}",
         "activity": f"afs work activity list --context-root {quoted_context}",
     }
     try:
@@ -788,6 +800,7 @@ def _collect_work_assistant(
             "review_routes": 0,
             "approvals": 0,
             "activity": 0,
+            "communication_samples": 0,
             "pending_approvals": 0,
             "db_path": str(db_path),
         }
@@ -798,6 +811,7 @@ def _collect_work_assistant(
                 "db_path": str(db_path),
                 "summary": empty_summary,
                 "pending_approvals": [],
+                "communication_samples": [],
                 "recent_activity": [],
                 "commands": commands,
             }
@@ -809,6 +823,9 @@ def _collect_work_assistant(
             "db_path": str(db_path),
             "summary": store.summary(),
             "pending_approvals": store.list_approvals(status="pending", limit=max(1, limit)),
+            "communication_samples": store.list_communication_samples(
+                limit=max(1, min(limit, _MAX_LIST_ITEMS))
+            ),
             "recent_activity": store.list_activity(limit=max(1, min(limit, _MAX_LIST_ITEMS))),
             "commands": commands,
         }
@@ -818,6 +835,7 @@ def _collect_work_assistant(
             "initialized": False,
             "summary": {},
             "pending_approvals": [],
+            "communication_samples": [],
             "recent_activity": [],
             "commands": commands,
             "error": str(exc),
@@ -1048,6 +1066,16 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
     if pending_approvals:
         command = (work_assistant.get("commands") or {}).get("approvals", "afs work approvals list")
         recommendations.append(f"Review pending external-write approvals with `{command}`.")
+    work_summary = work_assistant.get("summary") if isinstance(work_assistant, dict) else {}
+    if isinstance(work_summary, dict) and work_summary.get("communication_samples", 0) == 0:
+        command = (work_assistant.get("commands") or {}).get(
+            "communication",
+            "afs work communication list",
+        )
+        recommendations.append(
+            "For work-context writing, inspect or capture user communication samples before "
+            f"matching tone (`{command}`)."
+        )
 
     if hivemind.get("recent_count", 0) > 0:
         recommendations.append("Review recent hivemind messages for cross-agent handoffs.")

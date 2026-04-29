@@ -63,9 +63,14 @@ compact work-assistant summary. Client wrappers also export:
 
 - `AFS_SESSION_WORK_HINT`
 - `AFS_SESSION_WORK_APPROVALS_HINT`
+- `AFS_SESSION_WORK_COMMUNICATION_HINT`
 
 Keep the default tool surface small. Agents should use AFS context and work
 commands first; domain MCPs and connector tools are opt-in for the active task.
+For work-context writing, inspect `afs work communication list --path .` plus
+personal-context/scratchpad evidence before matching the user's tone. Draft
+locally first and ask for explicit approval before posting or submitting
+externally on the user's behalf.
 
 ## Approval Flow
 

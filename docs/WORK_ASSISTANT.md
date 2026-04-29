@@ -26,6 +26,7 @@ Tables:
 - `relationships`: person-to-project/doc/repo/ticket relationships
 - `review_routes`: who should review what, with explainable reasons
 - `approvals`: pending/approved/rejected external write approvals
+- `communication_samples`: work-writing examples used for tone/style grounding
 - `activity`: what AFS read, inferred, drafted, requested, approved, or applied
 
 ## Context Logging Enrichment
@@ -43,6 +44,7 @@ as:
 - `reviewers`
 - `relationships`
 - `review_routes`
+- `communication_sample` / `communication_samples`
 - `approval_request`
 - `requires_approval`
 - `target_system`
@@ -57,6 +59,12 @@ Example event metadata:
   "target_id": "doc-123",
   "owner": {"display_name": "Doc Owner", "email": "owner@example.com"},
   "reviewers": [{"display_name": "Reviewer", "email": "reviewer@example.com"}],
+  "communication_sample": {
+    "channel": "doc_comment",
+    "purpose": "responding_to_comments",
+    "text": "Let's keep this concrete: what changed, what was verified, and what's still risky.",
+    "style_notes": ["direct", "evidence-backed"]
+  },
   "approval_request": {
     "action": "edit_doc",
     "summary": "Apply suggested doc edit",
@@ -130,12 +138,33 @@ Activity:
 ./scripts/afs work activity list --path .
 ```
 
+Communication samples:
+
+```bash
+./scripts/afs work communication list --path .
+./scripts/afs work communication list --path . --purpose responding_to_comments --json
+```
+
 Session startup:
 
 - `afs session bootstrap --json` includes a compact `work_assistant` block.
 - `afs session prepare-client --json` includes work hints under `cli_hints`.
 - `afs-client-session` exports `AFS_SESSION_WORK_HINT` and
   `AFS_SESSION_WORK_APPROVALS_HINT` for harness wrappers.
+- `AFS_SESSION_WORK_COMMUNICATION_HINT` points editor/harness surfaces at
+  captured work communication samples.
+
+## Work Communication Rule
+
+For docs, design docs, technical requirements, and replies/comments, an agent
+should first inspect available communication samples, personal-context mode
+content, scratchpad, and relevant history before matching the user's voice. If
+there is not enough evidence, it should say what is missing instead of inventing
+a style.
+
+External posts remain approval-gated: the agent may draft locally, but must ask
+for explicit permission before posting, sending, submitting, or editing on the
+user's behalf.
 
 ## Permission Rule
 
@@ -150,6 +179,8 @@ Actions that should require approval include:
 - adding doc comments
 - changing sheet cells, formulas, protected ranges, rows, or columns
 - posting ticket comments
+- posting doc, PR, or code-review comments
+- submitting reviews
 - changing ticket status, priority, or assignee
 - sending email or chat messages
 - assigning work or changing due dates

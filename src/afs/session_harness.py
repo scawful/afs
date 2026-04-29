@@ -26,7 +26,7 @@ _RECENT_ACTIVITY_LIMIT = 20
 _PROMPT_PREVIEW_CHARS = 180
 _SUMMARY_PREVIEW_CHARS = 160
 _SYSTEM_PROMPT_PREVIEW_CHARS = 320
-_DEFAULT_SYSTEM_PROMPT_TOKEN_BUDGET = 2000
+_DEFAULT_SYSTEM_PROMPT_TOKEN_BUDGET = 4000
 _WORKFLOW_SNAPSHOT_STEP_LIMIT = 6
 _WORKFLOW_SNAPSHOT_SKILL_LIMIT = 4
 _VERIFICATION_RECORD_LIMIT = 10
@@ -208,6 +208,11 @@ def _build_cli_hints(
         notes.append(
             "Work assistant has pending external-write approvals to review before using connector write tools."
         )
+    work_summary = work_assistant.get("summary") if isinstance(work_assistant, dict) else {}
+    if work_assistant and isinstance(work_summary, dict) and work_summary.get("communication_samples", 0) == 0:
+        notes.append(
+            "For work-context writing, collect or inspect communication samples before imitating the user's tone."
+        )
 
     return {
         "workspace_path": str(resolved_workspace),
@@ -217,6 +222,7 @@ def _build_cli_hints(
         "agent_jobs_inbox": f"afs agent-jobs inbox --path {quoted_workspace}",
         "work_summary": f"afs work --path {quoted_workspace}",
         "work_approvals": f"afs work approvals list --path {quoted_workspace}",
+        "work_communication": f"afs work communication list --path {quoted_workspace}",
         "notes": notes,
     }
 

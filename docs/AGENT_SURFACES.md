@@ -101,8 +101,9 @@ Use `afs training ...` only for reusable training/eval work that explicitly
 needs those surfaces.
 
 Work-assistant commands are for non-technical documents, sheets, tickets,
-planning, people, review routing, and approval queues. The state is native to
-AFS and should stay behind a thin command/tool surface.
+planning, people, review routing, communication-style samples, and approval
+queues. The state is native to AFS and should stay behind a thin command/tool
+surface.
 
 Warm context/cache:
 
@@ -185,8 +186,9 @@ Optional tools for explicit workflows:
 
 Work-assistant state should not be expanded into a broad MCP CRUD API. Prefer
 native AFS/background enrichment plus a small future surface for context
-overview, relevant people, pending approvals, draft creation, approval status,
-and executing one approved action through an explicit connector command.
+overview, relevant people, communication samples for tone/style grounding,
+pending approvals, draft creation, approval status, and executing one approved
+action through an explicit connector command.
 
 Paths are scoped to:
 
@@ -518,7 +520,8 @@ Antigravity raw config example:
 If the client requires a Python module entrypoint instead, use a Python
 environment where `afs` is installed and run `python3 -m afs.mcp_server`.
 
-For the VS Code extension, `AFS: Register MCP Server` checks the configured
+For the VS Code extension, `AFS: Register MCP Server` checks workspace
+`.cursor`, `.vscode`, and `.antigravity` MCP configs plus the configured
 Antigravity context-root candidates first. Set `afs.mcp.configPath` when your
 fork stores the raw MCP config in a nonstandard location.
 

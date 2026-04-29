@@ -172,6 +172,7 @@ surface. Upgrade agents by teaching them the small command contract:
 
 ```bash
 scripts/afs work --path .
+scripts/afs work communication list --path .
 scripts/afs work approvals list --path .
 scripts/afs work approvals request --path . ...
 scripts/afs work approvals approve <approval-id> --path . --by human
@@ -182,4 +183,5 @@ scripts/afs work approvals execute <approval-id> --path . --executor "<connector
 Use `docs/WORK_ASSISTANT_UPGRADE.md` as the copy-paste guide for harness
 instructions and connector setup. `afs-client-session` also exports
 `AFS_SESSION_WORK_HINT` and `AFS_SESSION_WORK_APPROVALS_HINT` so wrappers can
-show the exact commands at startup.
+show the exact commands at startup. `AFS_SESSION_WORK_COMMUNICATION_HINT`
+points editor and harness surfaces at captured work-writing samples.

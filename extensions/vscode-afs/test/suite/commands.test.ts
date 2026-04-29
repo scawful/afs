@@ -206,6 +206,9 @@ describe("registerCommands", () => {
         queryShortcut: "afs query <text> --path /tmp/workspace",
         queryCanonical: "afs context query <text> --path /tmp/workspace",
         indexRebuild: "afs index rebuild --path /tmp/workspace",
+        workSummary: "afs work --path /tmp/workspace",
+        workApprovals: "afs work approvals list --path /tmp/workspace",
+        workCommunication: "afs work communication list --path /tmp/workspace",
         notes: ["Indexed retrieval may be stale."],
       },
     };
@@ -236,6 +239,9 @@ describe("registerCommands", () => {
     assert.match(infoMessages[0], /Query hint: afs query <text> --path \/tmp\/workspace/);
     assert.match(infoMessages[0], /Canonical query hint: afs context query <text> --path \/tmp\/workspace/);
     assert.match(infoMessages[0], /Index hint: afs index rebuild --path \/tmp\/workspace/);
+    assert.match(infoMessages[0], /Work hint: afs work --path \/tmp\/workspace/);
+    assert.match(infoMessages[0], /Work approvals hint: afs work approvals list --path \/tmp\/workspace/);
+    assert.match(infoMessages[0], /Work communication hint: afs work communication list --path \/tmp\/workspace/);
     assert.match(infoMessages[0], /Note: Indexed retrieval may be stale\./);
   });
 });

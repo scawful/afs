@@ -30,6 +30,10 @@ def personal_load_command(args: argparse.Namespace) -> int:
                 "mode": payload.mode,
                 "tone": payload.tone,
                 "bias_warning": payload.bias_warning,
+                "style_instructions": payload.style_instructions,
+                "communication_sources": payload.communication_sources,
+                "posting_policy": payload.posting_policy,
+                "work_context": payload.work_context,
                 "profile_text": payload.profile_text,
                 "files": [
                     {"path": rel, "content": content}

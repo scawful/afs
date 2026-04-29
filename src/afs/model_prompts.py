@@ -138,6 +138,15 @@ def build_model_system_prompt(
             label="structured_guidance",
         ))
 
+    work_contract_block = _work_communication_contract_block(pack_state, session_state)
+    if work_contract_block:
+        sections.append(PromptSection(
+            content=work_contract_block,
+            cacheable=False,
+            priority=51,
+            label="work_communication_contract",
+        ))
+
     # --- Dynamic section: session context (scratchpad, diff, memory) ---
     context_block = _session_context_block(context_path, session_state)
     if context_block:
@@ -325,6 +334,46 @@ def _session_context_block(
     if tasks.get("total", 0) > 0:
         lines.append(f"Tasks: {tasks['total']} ({', '.join(f'{k}={v}' for k, v in sorted(tasks.get('counts', {}).items()))})")
 
+    work_assistant = state.get("work_assistant", {})
+    if isinstance(work_assistant, dict) and work_assistant.get("available", True):
+        summary = work_assistant.get("summary", {})
+        has_work_context = False
+        if isinstance(summary, dict):
+            has_work_context = any(
+                int(summary.get(name, 0) or 0) > 0
+                for name in (
+                    "people",
+                    "review_routes",
+                    "approvals",
+                    "pending_approvals",
+                    "communication_samples",
+                )
+            )
+        if isinstance(summary, dict) and has_work_context:
+            lines.append(
+                "Work assistant: "
+                f"people={summary.get('people', 0)}, "
+                f"review_routes={summary.get('review_routes', 0)}, "
+                f"approvals={summary.get('approvals', 0)}, "
+                f"pending_approvals={summary.get('pending_approvals', 0)}, "
+                f"communication_samples={summary.get('communication_samples', 0)}"
+            )
+        samples = work_assistant.get("communication_samples", [])
+        if isinstance(samples, list) and samples:
+            lines.append("Recent work communication samples:")
+            for sample in samples[:3]:
+                if not isinstance(sample, dict):
+                    continue
+                purpose = str(sample.get("purpose") or sample.get("channel") or "work_communication")
+                excerpt = str(sample.get("text_excerpt") or "").strip().replace("\n", " ")
+                if len(excerpt) > 180:
+                    excerpt = excerpt[:177].rstrip() + "..."
+                if excerpt:
+                    lines.append(f"- {purpose}: {excerpt}")
+        if has_work_context:
+            lines.append("Work communication contract:")
+            lines.extend(_work_communication_contract_lines())
+
     # Handoff from last session
     handoff = state.get("handoff", {})
     if handoff.get("available"):
@@ -335,6 +384,62 @@ def _session_context_block(
                 lines.append(f"- {step}")
 
     return "\n".join(lines)
+
+
+def _work_communication_contract_block(
+    pack_state: dict[str, Any] | None,
+    session_state: dict[str, Any] | None,
+) -> str:
+    """Return mandatory work-writing guardrails when the active task needs them."""
+    text_parts: list[str] = []
+    for state in (pack_state, session_state):
+        if not isinstance(state, dict):
+            continue
+        for key in ("query", "task", "prompt", "summary"):
+            value = state.get(key)
+            if isinstance(value, str) and value.strip():
+                text_parts.append(value)
+
+    marker = " ".join(text_parts).lower()
+    work_terms = (
+        "comment",
+        "design doc",
+        "documentation",
+        "docs",
+        "email",
+        "message",
+        "post",
+        "requirements",
+        "reply",
+        "review response",
+        "send",
+        "technical requirements",
+        "ticket",
+        "work context",
+        "writing style",
+    )
+    if not any(term in marker for term in work_terms):
+        return ""
+
+    return "\n".join(["## Work Communication Contract", *_work_communication_contract_lines()])
+
+
+def _work_communication_contract_lines() -> list[str]:
+    return [
+        (
+            "- Before drafting docs, design docs, technical requirements, or replies/comments, "
+            "investigate the user's available communication samples, personal context mode, "
+            "scratchpad, and relevant history; state when evidence is missing."
+        ),
+        (
+            "- Match the user's discovered tone and writing style for work artifacts without "
+            "inventing preferences."
+        ),
+        (
+            "- Never post, send, submit, or edit an external work system on the user's behalf "
+            "without explicit approval; draft locally or create an AFS work approval first."
+        ),
+    ]
 
 
 def _pack_context_block(pack_state: dict[str, Any] | None) -> str:

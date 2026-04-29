@@ -11,6 +11,7 @@ from afs.cli.work import (
     approvals_list_command,
     approvals_request_command,
     approvals_show_command,
+    communication_list_command,
     people_list_command,
     register_parsers,
     reviewers_command,
@@ -72,6 +73,35 @@ def test_reviewers_command_lists_native_routes(tmp_path: Path, capsys) -> None:
     reviewers = json.loads(capsys.readouterr().out)
     assert reviewers[0]["display_name"] == "Code Reviewer"
     assert reviewers[0]["reason"] == "owns the package"
+
+
+def test_communication_list_command(tmp_path: Path, capsys) -> None:
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    person_id = store.upsert_person({"display_name": "Doc Author", "email": "author@example.com"})
+    store.record_communication_sample(
+        person_id=person_id,
+        source_system="google-docs",
+        source_id="doc-1",
+        channel="design_doc",
+        purpose="design_feedback",
+        text="Prefer a concise findings-first response with exact evidence.",
+        style_notes=["findings-first"],
+    )
+
+    assert communication_list_command(
+        _args(
+            context_root,
+            person_id=None,
+            purpose="design_feedback",
+            limit=10,
+            json=True,
+        )
+    ) == 0
+    samples = json.loads(capsys.readouterr().out)
+    assert samples[0]["display_name"] == "Doc Author"
+    assert samples[0]["style_notes"] == ["findings-first"]
 
 
 def test_work_approval_request_and_approve(tmp_path: Path, capsys) -> None:
@@ -206,3 +236,8 @@ def test_register_parsers_includes_work_subcommands() -> None:
     assert args.work_approvals_command == "execute"
     assert args.approval_id == "approval_1"
     assert args.executor == "python3 connector.py"
+
+    args = parser.parse_args(["work", "communication", "list", "--purpose", "design_feedback"])
+    assert args.work_command == "communication"
+    assert args.communication_command == "list"
+    assert args.purpose == "design_feedback"

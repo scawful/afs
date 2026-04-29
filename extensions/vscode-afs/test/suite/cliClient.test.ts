@@ -32,6 +32,9 @@ fs.appendFileSync(
       AFS_SESSION_QUERY_HINT: process.env.AFS_SESSION_QUERY_HINT || "",
       AFS_SESSION_CONTEXT_QUERY_HINT: process.env.AFS_SESSION_CONTEXT_QUERY_HINT || "",
       AFS_SESSION_INDEX_REBUILD_HINT: process.env.AFS_SESSION_INDEX_REBUILD_HINT || "",
+      AFS_SESSION_WORK_HINT: process.env.AFS_SESSION_WORK_HINT || "",
+      AFS_SESSION_WORK_APPROVALS_HINT: process.env.AFS_SESSION_WORK_APPROVALS_HINT || "",
+      AFS_SESSION_WORK_COMMUNICATION_HINT: process.env.AFS_SESSION_WORK_COMMUNICATION_HINT || "",
       AFS_SESSION_DEFAULT_TURN_ID: process.env.AFS_SESSION_DEFAULT_TURN_ID || "",
       AFS_ACTIVE_CONTEXT_ROOT: process.env.AFS_ACTIVE_CONTEXT_ROOT || "",
     },
@@ -67,6 +70,9 @@ if (args[0] === "session" && args[1] === "prepare-client") {
         query_shortcut: "afs query <text> --path " + path.join(root, "workspace"),
         query_canonical: "afs context query <text> --path " + path.join(root, "workspace"),
         index_rebuild: "afs index rebuild --path " + path.join(root, "workspace"),
+        work_summary: "afs work --path " + path.join(root, "workspace"),
+        work_approvals: "afs work approvals list --path " + path.join(root, "workspace"),
+        work_communication: "afs work communication list --path " + path.join(root, "workspace"),
         notes: ["Index may be stale"],
       },
       artifact_paths: {
@@ -257,12 +263,24 @@ describe("CliClient", () => {
       fsReadCall.env.AFS_SESSION_INDEX_REBUILD_HINT,
       `afs index rebuild --path ${workspaceRoot}`,
     );
+    assert.strictEqual(fsReadCall.env.AFS_SESSION_WORK_HINT, `afs work --path ${workspaceRoot}`);
+    assert.strictEqual(
+      fsReadCall.env.AFS_SESSION_WORK_APPROVALS_HINT,
+      `afs work approvals list --path ${workspaceRoot}`,
+    );
+    assert.strictEqual(
+      fsReadCall.env.AFS_SESSION_WORK_COMMUNICATION_HINT,
+      `afs work communication list --path ${workspaceRoot}`,
+    );
     assert.strictEqual(fsReadCall.env.AFS_ACTIVE_CONTEXT_ROOT, path.join(tmpDir, "workspace", ".context"));
     assert.deepStrictEqual(client.getSessionInfo()?.cliHints, {
       workspacePath: workspaceRoot,
       queryShortcut: `afs query <text> --path ${workspaceRoot}`,
       queryCanonical: `afs context query <text> --path ${workspaceRoot}`,
       indexRebuild: `afs index rebuild --path ${workspaceRoot}`,
+      workSummary: `afs work --path ${workspaceRoot}`,
+      workApprovals: `afs work approvals list --path ${workspaceRoot}`,
+      workCommunication: `afs work communication list --path ${workspaceRoot}`,
       notes: ["Index may be stale"],
     });
   });

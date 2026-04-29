@@ -30,9 +30,16 @@ EXTERNAL_WRITE_ACTIONS = frozenset(
         "edit_doc",
         "edit_sheet",
         "post_ticket_comment",
+        "post_code_review_comment",
+        "post_doc_comment",
+        "post_pr_comment",
+        "post_pull_request_review",
+        "publish_comment",
+        "reply_to_comment",
         "send_email",
         "send_message",
         "share_doc",
+        "submit_review",
         "update_sheet_cell",
     }
 )
@@ -292,6 +299,21 @@ class WorkAssistantStore:
                     metadata_json TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS communication_samples (
+                    sample_id TEXT PRIMARY KEY,
+                    person_id TEXT NOT NULL DEFAULT '',
+                    source_system TEXT NOT NULL DEFAULT '',
+                    source_id TEXT NOT NULL DEFAULT '',
+                    channel TEXT NOT NULL DEFAULT '',
+                    purpose TEXT NOT NULL DEFAULT '',
+                    text_excerpt TEXT NOT NULL,
+                    style_notes_json TEXT NOT NULL,
+                    provenance_json TEXT NOT NULL,
+                    confidence REAL NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_relationships_scope
                     ON relationships(scope_type, scope_id, relationship_type);
                 CREATE INDEX IF NOT EXISTS idx_review_routes_target
@@ -300,6 +322,10 @@ class WorkAssistantStore:
                     ON approvals(status, created_at);
                 CREATE INDEX IF NOT EXISTS idx_activity_timestamp
                     ON activity(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_communication_samples_purpose
+                    ON communication_samples(purpose, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_communication_samples_person
+                    ON communication_samples(person_id, updated_at);
                 """
             )
 
@@ -704,6 +730,132 @@ class WorkAssistantStore:
             ).fetchall()
         return [self._activity_row_to_dict(row) for row in rows]
 
+    def record_communication_sample(
+        self,
+        *,
+        text: str,
+        person_id: str = "",
+        source_system: str = "",
+        source_id: str = "",
+        channel: str = "",
+        purpose: str = "",
+        style_notes: Iterable[Any] | None = None,
+        provenance: Iterable[Any] | None = None,
+        confidence: float = 0.5,
+        dedupe_key: str | None = None,
+    ) -> str:
+        """Store a work communication sample for later style grounding."""
+        text_excerpt = str(text or "").strip()
+        if not text_excerpt:
+            return ""
+        if len(text_excerpt) > 1200:
+            text_excerpt = text_excerpt[:1197].rstrip() + "..."
+
+        sample_id = dedupe_key or _stable_id(
+            "comm",
+            person_id,
+            source_system,
+            source_id,
+            channel,
+            purpose,
+            text_excerpt[:120],
+        )
+        now = _now()
+        notes = _str_list(style_notes or [])
+        sample_provenance = _as_list(provenance)
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM communication_samples WHERE sample_id = ?",
+                (sample_id,),
+            ).fetchone()
+            if existing:
+                merged_notes = _merge_lists(
+                    _json_loads(existing["style_notes_json"], []),
+                    notes,
+                )
+                merged_provenance = _merge_lists(
+                    _json_loads(existing["provenance_json"], []),
+                    sample_provenance,
+                )
+                connection.execute(
+                    """
+                    UPDATE communication_samples
+                    SET person_id = ?, source_system = ?, source_id = ?, channel = ?,
+                        purpose = ?, text_excerpt = ?, style_notes_json = ?,
+                        provenance_json = ?, confidence = ?, updated_at = ?
+                    WHERE sample_id = ?
+                    """,
+                    (
+                        person_id or existing["person_id"],
+                        source_system or existing["source_system"],
+                        source_id or existing["source_id"],
+                        channel or existing["channel"],
+                        purpose or existing["purpose"],
+                        text_excerpt or existing["text_excerpt"],
+                        _json_dumps(merged_notes),
+                        _json_dumps(merged_provenance),
+                        max(float(existing["confidence"] or 0), confidence),
+                        now,
+                        sample_id,
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO communication_samples (
+                        sample_id, person_id, source_system, source_id, channel,
+                        purpose, text_excerpt, style_notes_json, provenance_json,
+                        confidence, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sample_id,
+                        person_id,
+                        source_system,
+                        source_id,
+                        channel,
+                        purpose,
+                        text_excerpt,
+                        _json_dumps(notes),
+                        _json_dumps(sample_provenance),
+                        confidence,
+                        now,
+                        now,
+                    ),
+                )
+        return sample_id
+
+    def list_communication_samples(
+        self,
+        *,
+        person_id: str | None = None,
+        purpose: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if person_id:
+            clauses.append("communication_samples.person_id = ?")
+            params.append(person_id)
+        if purpose:
+            clauses.append("communication_samples.purpose = ?")
+            params.append(purpose)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT communication_samples.*, people.display_name
+                FROM communication_samples
+                LEFT JOIN people ON people.person_id = communication_samples.person_id
+                {where}
+                ORDER BY communication_samples.updated_at DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._communication_sample_row_to_dict(row) for row in rows]
+
     def summary(self) -> dict[str, Any]:
         with self._connect() as connection:
             counts = {
@@ -712,7 +864,14 @@ class WorkAssistantStore:
                         "count"
                     ]
                 )
-                for name in ("people", "relationships", "review_routes", "approvals", "activity")
+                for name in (
+                    "people",
+                    "relationships",
+                    "review_routes",
+                    "approvals",
+                    "activity",
+                    "communication_samples",
+                )
             }
             pending = int(
                 connection.execute(
@@ -908,19 +1067,36 @@ class WorkAssistantStore:
             "metadata": _json_loads(row["metadata_json"], {}),
         }
 
+    def _communication_sample_row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "sample_id": row["sample_id"],
+            "person_id": row["person_id"],
+            "display_name": row["display_name"] if "display_name" in row.keys() else "",
+            "source_system": row["source_system"],
+            "source_id": row["source_id"],
+            "channel": row["channel"],
+            "purpose": row["purpose"],
+            "text_excerpt": row["text_excerpt"],
+            "style_notes": _json_loads(row["style_notes_json"], []),
+            "provenance": _json_loads(row["provenance_json"], []),
+            "confidence": row["confidence"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
 
 def enrich_logged_event(context_root: Path | None, event: dict[str, Any]) -> dict[str, int]:
     """Enrich native work-assistant state from a logged context/history event."""
     if context_root is None or os.getenv("AFS_WORK_ASSISTANT_ENRICH_DISABLED") == "1":
-        return {"people": 0, "relationships": 0, "review_routes": 0, "approvals": 0, "activity": 0}
+        return _empty_counts()
 
     metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     if not _looks_work_relevant(event, metadata, payload):
-        return {"people": 0, "relationships": 0, "review_routes": 0, "approvals": 0, "activity": 0}
+        return _empty_counts()
 
     store = WorkAssistantStore(context_root)
-    counts = {"people": 0, "relationships": 0, "review_routes": 0, "approvals": 0, "activity": 0}
+    counts = _empty_counts()
 
     target_type = str(metadata.get("target_type") or payload.get("target_type") or "").strip()
     scope_type = str(metadata.get("scope_type") or metadata.get("target_system") or "project").strip()
@@ -966,6 +1142,8 @@ def enrich_logged_event(context_root: Path | None, event: dict[str, Any]) -> dic
                     provenance=[_event_provenance(event)],
                 )
                 counts["review_routes"] += 1
+
+    known_person_ids = set(person_ids.values())
 
     for relationship in _as_list(metadata.get("relationships") or payload.get("relationships")):
         if not isinstance(relationship, dict):
@@ -1017,6 +1195,24 @@ def enrich_logged_event(context_root: Path | None, event: dict[str, Any]) -> dic
         store.create_approval(**approval)
         counts["approvals"] += 1
 
+    for sample in _communication_samples_from_event(
+        metadata,
+        payload,
+        event,
+        person_ids=person_ids,
+        target_type=target_type,
+    ):
+        sample_person = sample.pop("person", None)
+        if not sample.get("person_id") and isinstance(sample_person, dict):
+            sample["person_id"] = store.upsert_person(
+                _normalize_person(sample_person, target_type=target_type or None)
+            )
+            if sample["person_id"] not in known_person_ids:
+                known_person_ids.add(sample["person_id"])
+                counts["people"] += 1
+        if store.record_communication_sample(**sample):
+            counts["communication_samples"] += 1
+
     store.record_activity(
         activity_type="context_logged",
         event_id=str(event.get("id") or ""),
@@ -1031,10 +1227,22 @@ def enrich_logged_event(context_root: Path | None, event: dict[str, Any]) -> dic
             "relationships": counts["relationships"],
             "review_routes": counts["review_routes"],
             "approvals": counts["approvals"],
+            "communication_samples": counts["communication_samples"],
         },
     )
     counts["activity"] += 1
     return counts
+
+
+def _empty_counts() -> dict[str, int]:
+    return {
+        "people": 0,
+        "relationships": 0,
+        "review_routes": 0,
+        "approvals": 0,
+        "activity": 0,
+        "communication_samples": 0,
+    }
 
 
 def _looks_work_relevant(
@@ -1054,10 +1262,15 @@ def _looks_work_relevant(
         "relationships",
         "review_routes",
         "approval_request",
+        "communication_sample",
+        "communication_samples",
         "requires_approval",
+        "style_notes",
         "target_system",
         "target_type",
         "work_item",
+        "writing_sample",
+        "writing_samples",
     }
     return any(key in metadata or key in payload for key in keys)
 
@@ -1154,6 +1367,104 @@ def _approval_from_event(
         "dedupe_key": metadata.get("approval_dedupe_key")
         or _stable_id("approval", event.get("id"), target_system, target_id, action),
     }
+
+
+def _communication_samples_from_event(
+    metadata: dict[str, Any],
+    payload: dict[str, Any],
+    event: dict[str, Any],
+    *,
+    person_ids: dict[str, str],
+    target_type: str,
+) -> list[dict[str, Any]]:
+    samples: list[dict[str, Any]] = []
+    raw_values: list[Any] = []
+    for key in ("communication_samples", "writing_samples"):
+        raw_values.extend(_as_list(metadata.get(key) or payload.get(key)))
+    for key in ("communication_sample", "writing_sample"):
+        raw = metadata.get(key) if key in metadata else payload.get(key)
+        if raw:
+            raw_values.extend(_as_list(raw))
+
+    provenance = _event_provenance(event)
+    for raw in raw_values:
+        if isinstance(raw, dict):
+            record = dict(raw)
+        else:
+            record = {"text": str(raw)}
+
+        text = str(
+            record.get("text")
+            or record.get("content")
+            or record.get("excerpt")
+            or record.get("body")
+            or record.get("draft")
+            or ""
+        ).strip()
+        if not text:
+            continue
+
+        source_system = str(
+            record.get("source_system")
+            or metadata.get("target_system")
+            or payload.get("target_system")
+            or event.get("source")
+            or ""
+        ).strip()
+        source_id = str(
+            record.get("source_id")
+            or record.get("target_id")
+            or metadata.get("target_id")
+            or metadata.get("path")
+            or payload.get("target_id")
+            or event.get("id")
+            or ""
+        ).strip()
+        channel = str(
+            record.get("channel")
+            or metadata.get("channel")
+            or target_type
+            or metadata.get("target_type")
+            or ""
+        ).strip()
+        purpose = str(
+            record.get("purpose")
+            or metadata.get("purpose")
+            or metadata.get("action")
+            or event.get("op")
+            or "work_communication"
+        ).strip()
+
+        style_notes = _merge_lists(
+            _str_list(record.get("style_notes")),
+            _str_list(record.get("style")),
+            _str_list(record.get("tone")),
+        )
+        person_id = str(record.get("person_id") or "").strip()
+        if not person_id and not isinstance(record.get("person"), dict):
+            for source_key in ("author", "actor", "requester", "owner"):
+                if source_key in person_ids:
+                    person_id = person_ids[source_key]
+                    break
+
+        sample: dict[str, Any] = {
+            "person_id": person_id,
+            "source_system": source_system,
+            "source_id": source_id,
+            "channel": channel,
+            "purpose": purpose or "work_communication",
+            "text": text,
+            "style_notes": style_notes,
+            "provenance": _as_list(record.get("provenance")) or [provenance],
+            "confidence": float(record.get("confidence") or metadata.get("confidence") or 0.5),
+            "dedupe_key": record.get("dedupe_key")
+            or _stable_id("comm", event.get("id"), source_system, source_id, purpose, text[:80]),
+        }
+        if isinstance(record.get("person"), dict):
+            sample["person"] = record["person"]
+        samples.append(sample)
+
+    return samples
 
 
 def _permission_class_for_role(role: str) -> str:

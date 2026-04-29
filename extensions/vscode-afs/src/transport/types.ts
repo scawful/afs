@@ -40,6 +40,9 @@ export interface SessionCliHints {
   queryShortcut: string;
   queryCanonical: string;
   indexRebuild: string;
+  workSummary: string;
+  workApprovals: string;
+  workCommunication: string;
   notes: string[];
 }
 

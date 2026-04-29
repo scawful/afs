@@ -25,6 +25,9 @@ describe("AfsStatusBar", () => {
           queryShortcut: "afs query <text> --path /tmp/workspace",
           queryCanonical: "afs context query <text> --path /tmp/workspace",
           indexRebuild: "afs index rebuild --path /tmp/workspace",
+          workSummary: "afs work --path /tmp/workspace",
+          workApprovals: "afs work approvals list --path /tmp/workspace",
+          workCommunication: "afs work communication list --path /tmp/workspace",
           notes: ["Indexed retrieval may be stale."],
         },
       },
@@ -37,6 +40,8 @@ describe("AfsStatusBar", () => {
     assert.match(item.tooltip, /Workspace: workspace/);
     assert.match(item.tooltip, /Query: afs query <text> --path \/tmp\/workspace/);
     assert.match(item.tooltip, /Rebuild: afs index rebuild --path \/tmp\/workspace/);
+    assert.match(item.tooltip, /Work: afs work --path \/tmp\/workspace/);
+    assert.match(item.tooltip, /Work style: afs work communication list --path \/tmp\/workspace/);
     assert.match(item.tooltip, /Note: Indexed retrieval may be stale\./);
   });
 

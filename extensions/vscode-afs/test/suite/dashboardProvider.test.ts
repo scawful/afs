@@ -27,6 +27,9 @@ describe("AfsDashboardProvider", () => {
         queryShortcut: "afs query <text> --path /tmp/workspace",
         queryCanonical: "afs context query <text> --path /tmp/workspace",
         indexRebuild: "afs index rebuild --path /tmp/workspace",
+        workSummary: "afs work --path /tmp/workspace",
+        workApprovals: "afs work approvals list --path /tmp/workspace",
+        workCommunication: "afs work communication list --path /tmp/workspace",
         notes: ["Indexed retrieval may be stale."],
       },
     };
@@ -63,9 +66,13 @@ describe("AfsDashboardProvider", () => {
     assert.match(html, /afs query &lt;text&gt; --path \/tmp\/workspace/);
     assert.match(html, /afs context query &lt;text&gt; --path \/tmp\/workspace/);
     assert.match(html, /afs index rebuild --path \/tmp\/workspace/);
+    assert.match(html, /afs work --path \/tmp\/workspace/);
+    assert.match(html, /afs work approvals list --path \/tmp\/workspace/);
+    assert.match(html, /afs work communication list --path \/tmp\/workspace/);
     assert.match(html, /Query More/);
     assert.match(html, /Copy Query Command/);
     assert.match(html, /Copy Rebuild Command/);
+    assert.match(html, /Copy Work Style Command/);
     assert.match(html, /Indexed retrieval may be stale\./);
   });
 
@@ -83,6 +90,9 @@ describe("AfsDashboardProvider", () => {
         queryShortcut: "afs query <text> --path /tmp/workspace",
         queryCanonical: "afs context query <text> --path /tmp/workspace",
         indexRebuild: "afs index rebuild --path /tmp/workspace",
+        workSummary: "afs work --path /tmp/workspace",
+        workApprovals: "afs work approvals list --path /tmp/workspace",
+        workCommunication: "afs work communication list --path /tmp/workspace",
         notes: [],
       },
     };
@@ -120,6 +130,9 @@ describe("AfsDashboardProvider", () => {
         queryShortcut: "afs query <text> --path /tmp/workspace-one",
         queryCanonical: "afs context query <text> --path /tmp/workspace-one",
         indexRebuild: "afs index rebuild --path /tmp/workspace-one",
+        workSummary: "afs work --path /tmp/workspace-one",
+        workApprovals: "afs work approvals list --path /tmp/workspace-one",
+        workCommunication: "afs work communication list --path /tmp/workspace-one",
         notes: [],
       },
     };

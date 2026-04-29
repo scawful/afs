@@ -14,6 +14,7 @@ export function buildMcpConfigCandidates(options: McpConfigCandidateOptions): st
     candidates.push(
       path.join(folder, ".cursor", "mcp.json"),
       path.join(folder, ".vscode", "mcp.json"),
+      path.join(folder, ".antigravity", "mcp.json"),
     );
   }
 

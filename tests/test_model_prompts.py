@@ -23,6 +23,22 @@ def test_build_model_system_prompt_includes_session_state_summary() -> None:
                 ]
             },
             "tasks": {"total": 2, "counts": {"pending": 2}},
+            "work_assistant": {
+                "available": True,
+                "summary": {
+                    "people": 1,
+                    "review_routes": 1,
+                    "approvals": 1,
+                    "pending_approvals": 1,
+                    "communication_samples": 1,
+                },
+                "communication_samples": [
+                    {
+                        "purpose": "responding_to_comments",
+                        "text_excerpt": "Prefer direct, evidence-backed replies with concrete next steps.",
+                    }
+                ],
+            },
             "handoff": {"available": True, "next_steps": ["Ship the MCP refactor."]},
         },
         pack_state={
@@ -112,6 +128,11 @@ def test_build_model_system_prompt_includes_session_state_summary() -> None:
     assert "Recent changes: 7 files changed" in prompt
     assert "Memory topics: tag:mcp, domain:session" in prompt
     assert "Tasks: 2 (pending=2)" in prompt
+    assert "Work assistant: people=1, review_routes=1, approvals=1, pending_approvals=1, communication_samples=1" in prompt
+    assert "Recent work communication samples:" in prompt
+    assert "- responding_to_comments: Prefer direct, evidence-backed replies with concrete next steps." in prompt
+    assert "Work communication contract:" in prompt
+    assert "Never post, send, submit, or edit an external work system" in prompt
     assert "Last session next steps:" in prompt
     assert "- Ship the MCP refactor." in prompt
 

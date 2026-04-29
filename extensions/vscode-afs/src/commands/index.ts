@@ -386,6 +386,15 @@ export function registerCommands(
         if (session.cliHints.indexRebuild) {
           lines.push(`Index hint: ${session.cliHints.indexRebuild}`);
         }
+        if (session.cliHints.workSummary) {
+          lines.push(`Work hint: ${session.cliHints.workSummary}`);
+        }
+        if (session.cliHints.workApprovals) {
+          lines.push(`Work approvals hint: ${session.cliHints.workApprovals}`);
+        }
+        if (session.cliHints.workCommunication) {
+          lines.push(`Work communication hint: ${session.cliHints.workCommunication}`);
+        }
         for (const note of session.cliHints.notes) {
           if (note.trim()) {
             lines.push(`Note: ${note.trim()}`);

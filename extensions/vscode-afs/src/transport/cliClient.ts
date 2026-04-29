@@ -564,6 +564,15 @@ export class CliClient implements ITransportClient {
     if (this.sessionCliHints.indexRebuild) {
       env.AFS_SESSION_INDEX_REBUILD_HINT = this.sessionCliHints.indexRebuild;
     }
+    if (this.sessionCliHints.workSummary) {
+      env.AFS_SESSION_WORK_HINT = this.sessionCliHints.workSummary;
+    }
+    if (this.sessionCliHints.workApprovals) {
+      env.AFS_SESSION_WORK_APPROVALS_HINT = this.sessionCliHints.workApprovals;
+    }
+    if (this.sessionCliHints.workCommunication) {
+      env.AFS_SESSION_WORK_COMMUNICATION_HINT = this.sessionCliHints.workCommunication;
+    }
     if (this.activeTurnId) env.AFS_SESSION_DEFAULT_TURN_ID = this.activeTurnId;
     return env;
   }
@@ -741,6 +750,9 @@ export class CliClient implements ITransportClient {
       queryShortcut: this.stringValue(raw.query_shortcut).trim() || fallback.queryShortcut,
       queryCanonical: this.stringValue(raw.query_canonical).trim() || fallback.queryCanonical,
       indexRebuild: this.stringValue(raw.index_rebuild).trim() || fallback.indexRebuild,
+      workSummary: this.stringValue(raw.work_summary).trim() || fallback.workSummary,
+      workApprovals: this.stringValue(raw.work_approvals).trim() || fallback.workApprovals,
+      workCommunication: this.stringValue(raw.work_communication).trim() || fallback.workCommunication,
       notes: Array.isArray(raw.notes)
         ? raw.notes
             .filter((entry): entry is string => typeof entry === "string")
@@ -760,6 +772,9 @@ export class CliClient implements ITransportClient {
         ? `afs context query <text> --path ${quotedWorkspace}`
         : "",
       indexRebuild: resolvedWorkspace ? `afs index rebuild --path ${quotedWorkspace}` : "",
+      workSummary: resolvedWorkspace ? `afs work --path ${quotedWorkspace}` : "",
+      workApprovals: resolvedWorkspace ? `afs work approvals list --path ${quotedWorkspace}` : "",
+      workCommunication: resolvedWorkspace ? `afs work communication list --path ${quotedWorkspace}` : "",
       notes: [],
     };
   }

@@ -55,6 +55,23 @@ def test_store_tracks_people_relationships_reviewers_and_approvals(tmp_path: Pat
     assert store.list_approvals(status="pending") == []
     assert store.list_approvals(status="approved")[0]["approved_by"] == "human"
 
+    sample_id = store.record_communication_sample(
+        person_id=person_id,
+        source_system="google-docs",
+        source_id="doc-123",
+        channel="design_doc",
+        purpose="technical_requirements",
+        text="Short, direct requirement with concrete acceptance criteria.",
+        style_notes=["direct", "specific"],
+        provenance=[{"source": "test"}],
+        confidence=0.8,
+    )
+    samples = store.list_communication_samples(purpose="technical_requirements")
+    assert samples[0]["sample_id"] == sample_id
+    assert samples[0]["display_name"] == "Doc Owner"
+    assert samples[0]["style_notes"] == ["direct", "specific"]
+    assert store.summary()["communication_samples"] == 1
+
 
 def test_enrich_logged_event_extracts_people_routes_approvals_and_activity(tmp_path: Path) -> None:
     context_root = tmp_path / ".context"
@@ -80,6 +97,13 @@ def test_enrich_logged_event_extracts_people_routes_approvals_and_activity(tmp_p
                     "permission_required": "doc edit approval",
                     "preview": {"diff": "-old\n+new"},
                 },
+                "communication_sample": {
+                    "person": {"display_name": "Doc Owner", "email": "owner@example.com"},
+                    "channel": "doc_comment",
+                    "purpose": "responding_to_comments",
+                    "text": "Let's keep this concrete: what changed, what was verified, and what's still risky.",
+                    "style_notes": ["concrete", "findings-first"],
+                },
             },
         },
     )
@@ -88,6 +112,7 @@ def test_enrich_logged_event_extracts_people_routes_approvals_and_activity(tmp_p
     assert counts["relationships"] == 2
     assert counts["review_routes"] == 2
     assert counts["approvals"] == 1
+    assert counts["communication_samples"] == 1
     assert counts["activity"] == 1
 
     store = WorkAssistantStore(context_root)
@@ -101,4 +126,35 @@ def test_enrich_logged_event_extracts_people_routes_approvals_and_activity(tmp_p
     )
     assert {reviewer["display_name"] for reviewer in reviewers} == {"Doc Owner", "Reviewer"}
     assert store.list_approvals()[0]["summary"] == "Apply suggested doc edit"
+    samples = store.list_communication_samples()
+    assert samples[0]["purpose"] == "responding_to_comments"
+    assert "what changed" in samples[0]["text_excerpt"]
     assert store.list_activity()[0]["event_id"] == "evt1"
+
+
+def test_communication_sample_explicit_person_wins_over_context_owner(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+
+    counts = enrich_logged_event(
+        context_root,
+        {
+            "id": "evt-person-sample",
+            "type": "context.log",
+            "metadata": {
+                "target_system": "google-docs",
+                "target_type": "design_doc",
+                "owner": {"display_name": "Doc Owner", "email": "owner@example.com"},
+                "communication_sample": {
+                    "person": {"display_name": "Comment Author", "email": "author@example.com"},
+                    "purpose": "responding_to_comments",
+                    "text": "Concrete, evidence-backed reply.",
+                },
+            },
+        },
+    )
+
+    assert counts["people"] == 2
+    store = WorkAssistantStore(context_root)
+    samples = store.list_communication_samples()
+    assert samples[0]["display_name"] == "Comment Author"

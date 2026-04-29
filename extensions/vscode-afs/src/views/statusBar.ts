@@ -69,6 +69,12 @@ export class AfsStatusBar implements vscode.Disposable {
     if (sessionInfo.cliHints.indexRebuild) {
       lines.push(`Rebuild: ${sessionInfo.cliHints.indexRebuild}`);
     }
+    if (sessionInfo.cliHints.workSummary) {
+      lines.push(`Work: ${sessionInfo.cliHints.workSummary}`);
+    }
+    if (sessionInfo.cliHints.workCommunication) {
+      lines.push(`Work style: ${sessionInfo.cliHints.workCommunication}`);
+    }
     for (const note of sessionInfo.cliHints.notes) {
       if (note.trim()) {
         lines.push(`Note: ${note.trim()}`);

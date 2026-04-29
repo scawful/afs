@@ -66,6 +66,7 @@ def work_summary_command(args: argparse.Namespace) -> int:
     print(f"relationships: {summary['relationships']}")
     print(f"review_routes: {summary['review_routes']}")
     print(f"approvals: {summary['approvals']} ({summary['pending_approvals']} pending)")
+    print(f"communication_samples: {summary['communication_samples']}")
     print(f"activity: {summary['activity']}")
     return 0
 
@@ -261,6 +262,29 @@ def activity_list_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def communication_list_command(args: argparse.Namespace) -> int:
+    store, _context_path = _store_from_args(args)
+    rows = store.list_communication_samples(
+        person_id=args.person_id,
+        purpose=args.purpose,
+        limit=args.limit,
+    )
+    if args.json:
+        _print_json(rows)
+        return 0
+    _print_table(
+        rows,
+        [
+            ("updated_at", "UPDATED"),
+            ("display_name", "PERSON"),
+            ("purpose", "PURPOSE"),
+            ("channel", "CHANNEL"),
+            ("text_excerpt", "EXCERPT"),
+        ],
+    )
+    return 0
+
+
 def _split_executor(value: str) -> list[str]:
     if not value.strip():
         return []
@@ -375,3 +399,19 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     activity_list.add_argument("--limit", type=int, default=50, help="Max records.")
     activity_list.add_argument("--json", action="store_true", help="Output JSON.")
     activity_list.set_defaults(func=activity_list_command)
+
+    communication = work_sub.add_parser(
+        "communication",
+        help="Work communication samples for tone/style grounding.",
+    )
+    communication_sub = communication.add_subparsers(dest="communication_command")
+    communication_list = communication_sub.add_parser(
+        "list",
+        help="List captured work communication samples.",
+    )
+    _add_context_args(communication_list)
+    communication_list.add_argument("--person-id", help="Filter by person id.")
+    communication_list.add_argument("--purpose", help="Filter by purpose.")
+    communication_list.add_argument("--limit", type=int, default=20, help="Max records.")
+    communication_list.add_argument("--json", action="store_true", help="Output JSON.")
+    communication_list.set_defaults(func=communication_list_command)

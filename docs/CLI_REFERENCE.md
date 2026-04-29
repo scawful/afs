@@ -202,7 +202,8 @@ works when `project-a` can be resolved from configured
 ## Work Assistant
 
 `work` manages non-technical work-assistant state in the active context:
-people, project relationships, review routes, approval requests, and activity.
+people, project relationships, review routes, communication samples, approval
+requests, and activity.
 This state is native to AFS and backed by `.context/global/work_assistant.sqlite3`.
 It is intentionally not exposed as a broad MCP CRUD surface.
 
@@ -234,12 +235,15 @@ It is intentionally not exposed as a broad MCP CRUD surface.
   --executor "python3 scripts/afs-work-approval-echo.py"
 ./scripts/afs work approvals execute <approval-id> --path . \
   --executor "python3 scripts/afs-work-gws-executor.py"
+./scripts/afs work communication list --path .
+./scripts/afs work communication list --path . --purpose responding_to_comments --json
 ./scripts/afs work activity list --path .
 ```
 
 When context/history events include work metadata such as `owner`,
-`reviewers`, `relationships`, `review_routes`, `approval_request`, or
-`requires_approval`, AFS enriches the work-assistant database automatically.
+`reviewers`, `relationships`, `review_routes`, `communication_sample`,
+`approval_request`, or `requires_approval`, AFS enriches the work-assistant
+database automatically.
 External writes should be executed only from one approved action at a time.
 `approvals execute` passes an approved request JSON file to an explicit local
 connector command and marks the request `applied` only when that command exits
@@ -247,6 +251,23 @@ successfully.
 
 See `docs/WORK_ASSISTANT.md` and `docs/WORK_ASSISTANT_UPGRADE.md`.
 Google Workspace connector examples are in `docs/WORK_ASSISTANT_CONNECTORS.md`.
+
+## Personal Context
+
+`personal` loads an explicit personal-context mode from
+`$AFS_PERSONAL_CONTEXT_ROOT` or `~/.config/afs/personal`.
+
+```bash
+./scripts/afs personal modes
+./scripts/afs personal load work
+./scripts/afs personal load work --json
+```
+
+For work modes, `manifest.toml` may include `work_context = true`,
+`style_instructions`, `communication_sources`, and `posting_policy`. Rendered
+context then tells agents to inspect the user's actual communication samples
+before matching tone and to ask for explicit permission before posting on the
+user's behalf.
 
 ## Memory
 
@@ -387,6 +408,7 @@ around the client process.
 - `agent_jobs_inbox`
 - `work_summary`
 - `work_approvals`
+- `work_communication`
 - `notes`
 
 `afs-client-session` exports the same follow-up hints as:
@@ -397,6 +419,7 @@ around the client process.
 - `AFS_SESSION_AGENT_JOBS_INBOX_HINT`
 - `AFS_SESSION_WORK_HINT`
 - `AFS_SESSION_WORK_APPROVALS_HINT`
+- `AFS_SESSION_WORK_COMMUNICATION_HINT`
 
 Client-session wrappers also call `agent-jobs seed --profile repo-maintenance`
 by default. This queues report-only maintenance jobs with daily dedupe keys and

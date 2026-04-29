@@ -64,6 +64,10 @@ class PersonalContextPayload:
     files: list[tuple[str, str]]  # (relative_path, content)
     tone: str
     bias_warning: str | None
+    style_instructions: list[str]
+    communication_sources: list[str]
+    posting_policy: str
+    work_context: bool
     missing: list[str]
 
     def render_markdown(self) -> str:
@@ -76,6 +80,39 @@ class PersonalContextPayload:
         if self.bias_warning:
             lines.append(f"_Bias warning:_ {self.bias_warning}")
         lines.append("")
+
+        if (
+            self.work_context
+            or self.style_instructions
+            or self.communication_sources
+            or self.posting_policy
+        ):
+            lines.append("## Work communication instructions")
+            if self.work_context:
+                lines.append(
+                    "- Before drafting docs, design docs, technical requirements, or "
+                    "comments/replies, inspect the loaded samples and profile for the "
+                    "user's actual communication style."
+                )
+                lines.append(
+                    "- If the loaded context does not contain enough style evidence, "
+                    "say what is missing instead of inventing a voice."
+                )
+                lines.append(
+                    "- Do not post, send, submit, or edit an external work system on "
+                    "the user's behalf without explicit permission."
+                )
+            if self.style_instructions:
+                lines.append("- Style instructions:")
+                for item in self.style_instructions:
+                    lines.append(f"  - {item}")
+            if self.communication_sources:
+                lines.append("- Required communication sources to inspect:")
+                for item in self.communication_sources:
+                    lines.append(f"  - {item}")
+            if self.posting_policy:
+                lines.append(f"- Posting policy: {self.posting_policy}")
+            lines.append("")
 
         if self.profile_text:
             lines.append("## Profile")
@@ -121,6 +158,17 @@ def list_modes(context_root: Path | None = None) -> list[str]:
     if isinstance(modes, dict):
         return sorted(modes.keys())
     return list(KNOWN_MODES)
+
+
+def _list_of_strings(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text:
+            result.append(text)
+    return result
 
 
 def load_personal_context(
@@ -169,6 +217,8 @@ def load_personal_context(
     tone = mode_entry.get("tone", "") if isinstance(mode_entry.get("tone", ""), str) else ""
     bias_warning_raw = mode_entry.get("bias_warning")
     bias_warning = bias_warning_raw if isinstance(bias_warning_raw, str) else None
+    posting_policy_raw = mode_entry.get("posting_policy")
+    posting_policy = posting_policy_raw if isinstance(posting_policy_raw, str) else ""
 
     return PersonalContextPayload(
         mode=mode,
@@ -176,6 +226,10 @@ def load_personal_context(
         files=files,
         tone=tone,
         bias_warning=bias_warning,
+        style_instructions=_list_of_strings(mode_entry.get("style_instructions")),
+        communication_sources=_list_of_strings(mode_entry.get("communication_sources")),
+        posting_policy=posting_policy,
+        work_context=bool(mode_entry.get("work_context")),
         missing=missing,
     )
 

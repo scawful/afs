@@ -1177,6 +1177,8 @@ def session_prepare_client_command(args: argparse.Namespace) -> int:
         print(f"work_hint: {cli_hints['work_summary']}")
     if cli_hints.get("work_approvals"):
         print(f"work_approvals_hint: {cli_hints['work_approvals']}")
+    if cli_hints.get("work_communication"):
+        print(f"work_communication_hint: {cli_hints['work_communication']}")
     if cli_hints.get("verify_plan"):
         print(f"verify_plan_hint: {cli_hints['verify_plan']}")
     if cli_hints.get("verify_run"):

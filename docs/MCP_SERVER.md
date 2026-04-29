@@ -95,9 +95,10 @@ been the most reliable path in practice.
 }
 ```
 
-For the bundled VS Code extension, `AFS: Register MCP Server` now checks the
-existing Antigravity context-root candidates before falling back to
-workspace `.cursor/mcp.json`. If your fork stores the raw config elsewhere, set
+For the bundled VS Code extension, `AFS: Register MCP Server` now checks
+workspace `.cursor`, `.vscode`, and `.antigravity` MCP configs plus existing
+Antigravity context-root candidates before falling back to workspace
+`.cursor/mcp.json`. If your fork stores the raw config elsewhere, set
 `afs.mcp.configPath` explicitly in editor settings and rerun the command.
 
 AFS can write the user-level Claude config automatically:

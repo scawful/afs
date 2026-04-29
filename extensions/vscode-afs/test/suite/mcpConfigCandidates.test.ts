@@ -16,6 +16,7 @@ describe("MCP config candidate discovery", () => {
 
     assert.ok(candidates.includes("/Users/test/workspace/.cursor/mcp.json"));
     assert.ok(candidates.includes("/Users/test/workspace/.vscode/mcp.json"));
+    assert.ok(candidates.includes("/Users/test/workspace/.antigravity/mcp.json"));
     assert.ok(candidates.includes("/Users/test/.gemini/antigravity/mcp.json"));
     assert.ok(candidates.includes("/Users/test/.gemini/antigravity/mcp_config.json"));
     assert.ok(candidates.includes("/Users/test/.cursor/mcp.json"));
