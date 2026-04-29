@@ -792,7 +792,8 @@ def _collect_work_assistant(
     commands = {
         "summary": f"afs work --context-root {quoted_context}",
         "approvals": f"afs work approvals list --context-root {quoted_context}",
-        "communication": f"afs work communication list --context-root {quoted_context}",
+        "communication": f"afs work communication guide --context-root {quoted_context}",
+        "communication_list": f"afs work communication list --context-root {quoted_context}",
         "activity": f"afs work activity list --context-root {quoted_context}",
     }
     try:
@@ -1081,7 +1082,7 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
     if isinstance(work_summary, dict) and work_summary.get("communication_samples", 0) == 0:
         command = (work_assistant.get("commands") or {}).get(
             "communication",
-            "afs work communication list",
+            "afs work communication guide",
         )
         recommendations.append(
             "For work-context writing, inspect or capture user communication samples before "

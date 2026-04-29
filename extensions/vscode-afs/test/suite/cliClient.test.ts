@@ -72,7 +72,7 @@ if (args[0] === "session" && args[1] === "prepare-client") {
         index_rebuild: "afs index rebuild --path " + path.join(root, "workspace"),
         work_summary: "afs work --path " + path.join(root, "workspace"),
         work_approvals: "afs work approvals list --path " + path.join(root, "workspace"),
-        work_communication: "afs work communication list --path " + path.join(root, "workspace"),
+        work_communication: "afs work communication guide --path " + path.join(root, "workspace"),
         notes: ["Index may be stale"],
       },
       artifact_paths: {
@@ -334,7 +334,7 @@ describe("CliClient", () => {
     );
     assert.strictEqual(
       fsReadCall.env.AFS_SESSION_WORK_COMMUNICATION_HINT,
-      `afs work communication list --path ${workspaceRoot}`,
+      `afs work communication guide --path ${workspaceRoot}`,
     );
     assert.strictEqual(fsReadCall.env.AFS_ACTIVE_CONTEXT_ROOT, path.join(tmpDir, "workspace", ".context"));
     assert.deepStrictEqual(client.getSessionInfo()?.cliHints, {
@@ -344,7 +344,7 @@ describe("CliClient", () => {
       indexRebuild: `afs index rebuild --path ${workspaceRoot}`,
       workSummary: `afs work --path ${workspaceRoot}`,
       workApprovals: `afs work approvals list --path ${workspaceRoot}`,
-      workCommunication: `afs work communication list --path ${workspaceRoot}`,
+      workCommunication: `afs work communication guide --path ${workspaceRoot}`,
       notes: ["Index may be stale"],
     });
   });

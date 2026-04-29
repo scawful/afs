@@ -158,8 +158,8 @@ Session startup:
 - `afs session prepare-client --json` includes work hints under `cli_hints`.
 - `afs-client-session` exports `AFS_SESSION_WORK_HINT` and
   `AFS_SESSION_WORK_APPROVALS_HINT` for harness wrappers.
-- `AFS_SESSION_WORK_COMMUNICATION_HINT` points editor/harness surfaces at
-  captured work communication samples.
+- `AFS_SESSION_WORK_COMMUNICATION_HINT` points editor/harness surfaces at the
+  communication style guide command.
 - VS Code and Antigravity hosts get `AFS: Work Communication Guidance`,
   `AFS: Work Approvals`, and the `@afs /work` chat command when the bundled
   extension is installed.
@@ -176,6 +176,12 @@ style.
 External posts remain approval-gated: the agent may draft locally, but must ask
 for explicit permission before posting, sending, submitting, or editing on the
 user's behalf.
+
+When an approved communication action is successfully applied (`send_email`,
+`send_message`, `post_*_comment`, `reply_to_comment`, `submit_review`, etc.),
+AFS records the approved text as a high-confidence communication sample. This
+lets future drafts learn from text the user explicitly permitted, while failed
+or dry-run executions do not seed style context.
 
 ## Permission Rule
 

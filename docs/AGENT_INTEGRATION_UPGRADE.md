@@ -187,4 +187,4 @@ Use `docs/WORK_ASSISTANT_UPGRADE.md` as the copy-paste guide for harness
 instructions and connector setup. `afs-client-session` also exports
 `AFS_SESSION_WORK_HINT` and `AFS_SESSION_WORK_APPROVALS_HINT` so wrappers can
 show the exact commands at startup. `AFS_SESSION_WORK_COMMUNICATION_HINT`
-points editor and harness surfaces at captured work-writing samples.
+points editor and harness surfaces at the communication style guide command.

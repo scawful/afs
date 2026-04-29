@@ -254,6 +254,9 @@ External writes should be executed only from one approved action at a time.
 `approvals execute` passes an approved request JSON file to an explicit local
 connector command and marks the request `applied` only when that command exits
 successfully.
+Applied communication actions also seed `communication_samples` from the
+approved preview/body so future work-writing guidance learns only from text the
+user permitted to send or post.
 
 See `docs/WORK_ASSISTANT.md` and `docs/WORK_ASSISTANT_UPGRADE.md`.
 Google Workspace connector examples are in `docs/WORK_ASSISTANT_CONNECTORS.md`.

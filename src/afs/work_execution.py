@@ -13,6 +13,20 @@ from typing import Any
 from .work_assistant import WorkAssistantStore
 
 PAYLOAD_VERSION = 1
+COMMUNICATION_WRITE_ACTIONS = frozenset(
+    {
+        "post_ticket_comment",
+        "post_code_review_comment",
+        "post_doc_comment",
+        "post_pr_comment",
+        "post_pull_request_review",
+        "publish_comment",
+        "reply_to_comment",
+        "send_email",
+        "send_message",
+        "submit_review",
+    }
+)
 
 
 class WorkApprovalExecutionError(RuntimeError):
@@ -123,13 +137,23 @@ def execute_approved_action(
     )
     if completed.returncode == 0:
         store.record_approval_result(approval_id, result=result, status="applied")
+        sample_id = _record_applied_communication_sample(
+            store,
+            approval,
+            result=result,
+            actor=actor,
+        )
         store.record_activity(
             activity_type="approval_applied",
             summary=f"Applied approved action {approval_id}",
             target_system=approval["target_system"],
             target_id=approval["target_id"],
             actor=actor,
-            metadata={"approval_id": approval_id, "result": result},
+            metadata={
+                "approval_id": approval_id,
+                "result": result,
+                "communication_sample_id": sample_id,
+            },
         )
     else:
         store.record_approval_result(approval_id, result=result)
@@ -142,6 +166,83 @@ def execute_approved_action(
             metadata={"approval_id": approval_id, "result": result},
         )
     return result
+
+
+def _record_applied_communication_sample(
+    store: WorkAssistantStore,
+    approval: dict[str, Any],
+    *,
+    result: dict[str, Any],
+    actor: str,
+) -> str:
+    action = str(approval.get("action") or "").strip()
+    if action not in COMMUNICATION_WRITE_ACTIONS:
+        return ""
+
+    text = _extract_approved_text(approval.get("preview"), result.get("output"))
+    if not text:
+        return ""
+
+    return store.record_communication_sample(
+        text=text,
+        source_system=str(approval.get("target_system") or ""),
+        source_id=str(approval.get("target_id") or ""),
+        channel=str(approval.get("target_system") or ""),
+        purpose=action,
+        style_notes=["approved external write"],
+        provenance=[
+            {
+                "source": "work_approval",
+                "approval_id": approval.get("approval_id"),
+                "action": action,
+                "target_system": approval.get("target_system"),
+                "target_id": approval.get("target_id"),
+                "actor": actor,
+                "result_status": result.get("status"),
+            }
+        ],
+        confidence=0.9,
+        dedupe_key=f"comm_approval_{approval.get('approval_id')}",
+    )
+
+
+def _extract_approved_text(preview: Any, output: Any) -> str:
+    for value in (output, preview):
+        text = _extract_text_candidate(value)
+        if text:
+            return text
+    return ""
+
+
+def _extract_text_candidate(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, dict):
+        return ""
+
+    for key in (
+        "body",
+        "text",
+        "comment",
+        "message",
+        "content",
+        "draft",
+        "reply",
+        "review",
+        "posted_text",
+        "sent_text",
+    ):
+        raw = value.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+
+    # Some connector outputs wrap the submitted payload one level down.
+    for key in ("preview", "details", "payload", "result"):
+        nested = value.get(key)
+        text = _extract_text_candidate(nested)
+        if text:
+            return text
+    return ""
 
 
 def _resolve_executable(executable: str) -> str:

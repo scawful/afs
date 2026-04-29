@@ -71,6 +71,8 @@ For work-context writing, inspect `afs work communication guide --path .` (or
 MCP `work.communication.guide`) plus personal-context/scratchpad evidence
 before matching the user's tone. Draft locally first and ask for explicit
 approval before posting or submitting externally on the user's behalf.
+Successfully applied approved communication writes automatically seed future
+communication samples; dry-runs and failed executions do not.
 
 ## Approval Flow
 

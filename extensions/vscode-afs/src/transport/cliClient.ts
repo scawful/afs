@@ -920,7 +920,7 @@ export class CliClient implements ITransportClient {
       indexRebuild: resolvedWorkspace ? `afs index rebuild --path ${quotedWorkspace}` : "",
       workSummary: resolvedWorkspace ? `afs work --path ${quotedWorkspace}` : "",
       workApprovals: resolvedWorkspace ? `afs work approvals list --path ${quotedWorkspace}` : "",
-      workCommunication: resolvedWorkspace ? `afs work communication list --path ${quotedWorkspace}` : "",
+      workCommunication: resolvedWorkspace ? `afs work communication guide --path ${quotedWorkspace}` : "",
       notes: [],
     };
   }
