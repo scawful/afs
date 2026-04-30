@@ -29,16 +29,30 @@ describe("buildAfsContextMessage", () => {
         ],
       },
       workCommunicationGuide: {
-        sample_count: 1,
-        purposes: { responding_to_comments: 1 },
-        style_notes: ["direct", "evidence-backed"],
-        guidance: ["Use samples before drafting.", "Never post externally without approval."],
-        samples: [
+        style: {
+          sample_count: 1,
+          purposes: { responding_to_comments: 1 },
+          style_notes: ["direct", "evidence-backed"],
+          guidance: ["Use samples before drafting.", "Never post externally without approval."],
+          samples: [
+            {
+              purpose: "responding_to_comments",
+              text_excerpt: "Prefer concise replies with exact evidence.",
+            },
+          ],
+        },
+        approval_guardrail: {
+          requires_explicit_approval: true,
+          ready_to_post: false,
+          policy: "Ask before posting externally.",
+        },
+        checklist: [
           {
-            purpose: "responding_to_comments",
-            text_excerpt: "Prefer concise replies with exact evidence.",
+            step: "Inspect stored work communication samples before drafting.",
+            status: "done",
           },
         ],
+        guidance: ["Use samples before drafting.", "Never post externally without approval."],
       },
       workApprovals: {
         approvals: [
@@ -72,7 +86,9 @@ describe("buildAfsContextMessage", () => {
     assert.match(text, /Recommended actions:/);
     assert.match(text, /Review context\.diff before editing\./);
     assert.match(text, /AFS Session Pack/);
-    assert.match(text, /Work Communication Grounding/);
+    assert.match(text, /Work Communication Preflight/);
+    assert.match(text, /approval_required=yes/);
+    assert.match(text, /Preflight checklist:/);
     assert.match(text, /Style notes: direct, evidence-backed/);
     assert.match(text, /Never post externally without approval\./);
     assert.match(text, /approval_1: github\/post_pr_comment - Post drafted PR reply/);

@@ -90,7 +90,7 @@ def _write_fake_afs_cli(
                 "agent_jobs_inbox": f"afs agent-jobs inbox --path {workspace_path}",
                 "work_summary": f"afs work --path {workspace_path}",
                 "work_approvals": f"afs work approvals list --path {workspace_path}",
-                "work_communication": f"afs work communication guide --path {workspace_path}",
+                "work_communication": f"afs work communication preflight --path {workspace_path}",
                 "verify_plan": f"afs verify plan --payload-file {payload_json} --json",
                 "verify_run": f"afs verify run --payload-file {payload_json} --json",
                 "notes": [],
@@ -781,7 +781,7 @@ def test_afs_client_session_uses_client_specific_allowed_roots(tmp_path: Path) -
     )
     assert (
         payload["AFS_SESSION_WORK_COMMUNICATION_HINT"]
-        == f"afs work communication guide --path {payload['_workspace']}"
+        == f"afs work communication preflight --path {payload['_workspace']}"
     )
     assert f"AFS work hint (gemini): afs work --path {payload['_workspace']}" in payload["_stderr"]
     assert (
@@ -789,7 +789,7 @@ def test_afs_client_session_uses_client_specific_allowed_roots(tmp_path: Path) -
         in payload["_stderr"]
     )
     assert (
-        f"AFS work communication (gemini): afs work communication guide --path {payload['_workspace']}"
+        f"AFS work communication (gemini): afs work communication preflight --path {payload['_workspace']}"
         in payload["_stderr"]
     )
     assert (

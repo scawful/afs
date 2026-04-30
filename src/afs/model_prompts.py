@@ -375,6 +375,40 @@ def _session_context_block(
                 for item in guidance_lines[:3]:
                     if isinstance(item, str) and item.strip():
                         lines.append(f"- {item.strip()}")
+        preflight = work_assistant.get("communication_preflight", {})
+        if isinstance(preflight, dict):
+            style = preflight.get("style", {})
+            personal_context = preflight.get("personal_context", {})
+            has_preflight_evidence = has_work_context
+            if isinstance(style, dict):
+                try:
+                    style_sample_count = int(style.get("sample_count", 0) or 0)
+                except (TypeError, ValueError):
+                    style_sample_count = 0
+                if style_sample_count > 0:
+                    has_preflight_evidence = True
+            try:
+                pending_approval_count = int(preflight.get("pending_approval_count", 0) or 0)
+            except (TypeError, ValueError):
+                pending_approval_count = 0
+            if pending_approval_count > 0:
+                has_preflight_evidence = True
+            if isinstance(personal_context, dict) and personal_context.get("loaded"):
+                has_preflight_evidence = True
+            if not has_preflight_evidence:
+                preflight = {}
+        if isinstance(preflight, dict) and preflight:
+            guardrail = preflight.get("approval_guardrail", {})
+            checklist = preflight.get("checklist", [])
+            if isinstance(guardrail, dict) and guardrail.get("requires_explicit_approval"):
+                lines.append("Work communication preflight: explicit external-write approval required.")
+            if isinstance(checklist, list) and checklist:
+                for item in checklist[:3]:
+                    if isinstance(item, dict):
+                        step = str(item.get("step") or "").strip()
+                        status = str(item.get("status") or "").strip()
+                        if step:
+                            lines.append(f"- [{status or 'required'}] {step}")
         if has_work_context:
             lines.append("Work communication contract:")
             lines.extend(_work_communication_contract_lines())

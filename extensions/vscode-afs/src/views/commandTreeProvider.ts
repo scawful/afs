@@ -74,7 +74,7 @@ export class AfsCommandTreeProvider implements vscode.TreeDataProvider<TreeNode>
       ]),
       new CommandGroupItem("Chat", "comment-discussion", [
         new CommandItem("Open Chat", "afs.chat.open", "comment-discussion"),
-        new CommandItem("Work Communication", "afs.work.communication", "quote"),
+        new CommandItem("Work Communication Preflight", "afs.work.communication", "quote"),
         new CommandItem("Work Approvals", "afs.work.approvals", "checklist"),
       ]),
       new CommandGroupItem("Server", "server", [

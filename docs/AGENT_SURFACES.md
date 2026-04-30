@@ -145,7 +145,7 @@ Recommended default MCP/profile surface:
 - `afs.session.bootstrap`
 - `context.status`
 - `context.query`
-- `work.communication.guide`
+- `work.communication.preflight`
 - `work.approvals.list`
 - `context.read`
 - `context.write`

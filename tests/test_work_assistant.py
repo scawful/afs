@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from afs.personal_context import load_personal_context
 from afs.work_assistant import WorkAssistantStore, enrich_logged_event
 
 
@@ -163,3 +164,75 @@ def test_communication_sample_explicit_person_wins_over_context_owner(tmp_path: 
     store = WorkAssistantStore(context_root)
     samples = store.list_communication_samples()
     assert samples[0]["display_name"] == "Comment Author"
+
+
+def test_communication_preflight_merges_style_personal_context_and_approvals(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    personal_root = tmp_path / "personal"
+    personal_root.mkdir()
+    (personal_root / "profile.toml").write_text('name = "Test User"\n', encoding="utf-8")
+    (personal_root / "samples.md").write_text(
+        "Findings first. Exact evidence. Short follow-up.",
+        encoding="utf-8",
+    )
+    (personal_root / "manifest.toml").write_text(
+        """
+[modes.work]
+tone = "direct and specific"
+work_context = true
+load = ["samples.md"]
+style_instructions = ["avoid generic corporate filler"]
+communication_sources = ["approved PR comments"]
+posting_policy = "Ask before posting externally."
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    store = WorkAssistantStore(context_root)
+    store.record_communication_sample(
+        source_system="github",
+        source_id="comment-1",
+        channel="pr_review",
+        purpose="responding_to_comments",
+        text="Concise reply with exact file evidence.",
+        style_notes=["concise"],
+    )
+    approval_id = store.create_approval(
+        target_system="github",
+        target_id="PR-1",
+        action="post_pr_comment",
+        summary="Post drafted PR response",
+    )
+    personal = load_personal_context("work", context_root=personal_root)
+
+    preflight = store.communication_preflight(
+        purpose="responding_to_comments",
+        personal_context=personal,
+        context_path=context_root,
+    )
+
+    assert preflight["style"]["sample_count"] == 1
+    assert preflight["personal_context"]["loaded"] is True
+    assert preflight["personal_context"]["mode"] == "work"
+    assert preflight["personal_context"]["style_instructions"] == [
+        "avoid generic corporate filler"
+    ]
+    assert preflight["pending_approvals"][0]["approval_id"] == approval_id
+    assert preflight["approval_guardrail"]["requires_explicit_approval"] is True
+    assert preflight["approval_guardrail"]["ready_to_post"] is False
+    assert preflight["missing_style_evidence"] is False
+    assert any("Personal posting policy" in line for line in preflight["guidance"])
+
+
+def test_communication_preflight_flags_missing_style_evidence(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+
+    preflight = WorkAssistantStore(context_root).communication_preflight()
+
+    assert preflight["missing_style_evidence"] is True
+    assert preflight["checklist"][0]["status"] == "not_loaded"
+    assert preflight["checklist"][1]["status"] == "missing"
+    assert any("Style evidence is missing" in line for line in preflight["guidance"])

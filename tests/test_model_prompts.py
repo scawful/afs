@@ -44,6 +44,15 @@ def test_build_model_system_prompt_includes_session_state_summary() -> None:
                         "Never post externally without explicit approval.",
                     ]
                 },
+                "communication_preflight": {
+                    "approval_guardrail": {"requires_explicit_approval": True},
+                    "checklist": [
+                        {
+                            "step": "Inspect stored work communication samples before drafting.",
+                            "status": "done",
+                        }
+                    ],
+                },
             },
             "handoff": {"available": True, "next_steps": ["Ship the MCP refactor."]},
         },
@@ -139,6 +148,8 @@ def test_build_model_system_prompt_includes_session_state_summary() -> None:
     assert "- responding_to_comments: Prefer direct, evidence-backed replies with concrete next steps." in prompt
     assert "Work communication guidance:" in prompt
     assert "- Use these work communication samples as grounding before drafting replies." in prompt
+    assert "Work communication preflight: explicit external-write approval required." in prompt
+    assert "- [done] Inspect stored work communication samples before drafting." in prompt
     assert "Work communication contract:" in prompt
     assert "Never post, send, submit, or edit an external work system" in prompt
     assert "Last session next steps:" in prompt

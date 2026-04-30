@@ -14,6 +14,7 @@ from afs.cli.work import (
     communication_add_command,
     communication_guide_command,
     communication_list_command,
+    communication_preflight_command,
     people_list_command,
     register_parsers,
     reviewers_command,
@@ -143,6 +144,58 @@ def test_communication_add_and_guide_commands(tmp_path: Path, capsys) -> None:
     assert guide["sample_count"] == 1
     assert guide["style_notes"] == ["direct", "evidence-backed"]
     assert any("explicit approval" in line for line in guide["guidance"])
+
+
+def test_communication_preflight_command_loads_personal_context(tmp_path: Path, capsys) -> None:
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    personal_root = tmp_path / "personal"
+    personal_root.mkdir()
+    (personal_root / "profile.toml").write_text('name = "Test User"\n', encoding="utf-8")
+    (personal_root / "style.md").write_text(
+        "Use direct notes with exact evidence.",
+        encoding="utf-8",
+    )
+    (personal_root / "manifest.toml").write_text(
+        """
+[modes.work]
+tone = "direct"
+work_context = true
+load = ["style.md"]
+style_instructions = ["findings first"]
+communication_sources = ["approved review replies"]
+posting_policy = "Ask before posting."
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    store = WorkAssistantStore(context_root)
+    store.record_communication_sample(
+        text="Short direct comment with exact file evidence.",
+        source_system="github",
+        source_id="comment-1",
+        purpose="responding_to_comments",
+        style_notes=["direct"],
+    )
+
+    assert communication_preflight_command(
+        _args(
+            context_root,
+            person_id=None,
+            purpose="responding_to_comments",
+            limit=10,
+            approval_limit=10,
+            personal_mode="work",
+            personal_context_root=str(personal_root),
+            json=True,
+        )
+    ) == 0
+    preflight = json.loads(capsys.readouterr().out)
+    assert preflight["style"]["sample_count"] == 1
+    assert preflight["personal_context"]["mode"] == "work"
+    assert preflight["personal_context"]["style_instructions"] == ["findings first"]
+    assert preflight["approval_guardrail"]["requires_explicit_approval"] is True
 
 
 def test_work_approval_request_and_approve(tmp_path: Path, capsys) -> None:
@@ -301,3 +354,18 @@ def test_register_parsers_includes_work_subcommands() -> None:
     args = parser.parse_args(["work", "communication", "guide", "--purpose", "docs"])
     assert args.communication_command == "guide"
     assert args.purpose == "docs"
+
+    args = parser.parse_args(
+        [
+            "work",
+            "communication",
+            "preflight",
+            "--purpose",
+            "reply",
+            "--personal-mode",
+            "work",
+        ]
+    )
+    assert args.communication_command == "preflight"
+    assert args.purpose == "reply"
+    assert args.personal_mode == "work"

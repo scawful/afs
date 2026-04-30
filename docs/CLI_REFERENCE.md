@@ -243,6 +243,9 @@ It is intentionally not exposed as a broad MCP CRUD surface.
   --style-note "direct" \
   --text "Short, concrete reply with exact file evidence."
 ./scripts/afs work communication guide --path . --purpose responding_to_comments
+./scripts/afs work communication preflight --path . \
+  --purpose responding_to_comments \
+  --personal-mode work
 ./scripts/afs work activity list --path .
 ```
 

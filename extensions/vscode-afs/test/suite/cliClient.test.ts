@@ -72,7 +72,7 @@ if (args[0] === "session" && args[1] === "prepare-client") {
         index_rebuild: "afs index rebuild --path " + path.join(root, "workspace"),
         work_summary: "afs work --path " + path.join(root, "workspace"),
         work_approvals: "afs work approvals list --path " + path.join(root, "workspace"),
-        work_communication: "afs work communication guide --path " + path.join(root, "workspace"),
+        work_communication: "afs work communication preflight --path " + path.join(root, "workspace"),
         notes: ["Index may be stale"],
       },
       artifact_paths: {
@@ -139,6 +139,28 @@ if (args[0] === "work" && args[1] === "communication" && args[2] === "guide") {
       style_notes: ["direct"],
       guidance: ["Use samples before drafting.", "Never post externally without approval."],
       samples: [],
+    }),
+  );
+  process.exit(0);
+}
+
+if (args[0] === "work" && args[1] === "communication" && args[2] === "preflight") {
+  process.stdout.write(
+    JSON.stringify({
+      style: {
+        sample_count: 1,
+        style_notes: ["direct"],
+        guidance: ["Use samples before drafting.", "Never post externally without approval."],
+        samples: [],
+      },
+      approval_guardrail: {
+        requires_explicit_approval: true,
+        ready_to_post: false,
+      },
+      checklist: [
+        { step: "Inspect stored work communication samples before drafting.", status: "done" },
+      ],
+      pending_approval_count: 1,
     }),
   );
   process.exit(0);
@@ -334,7 +356,7 @@ describe("CliClient", () => {
     );
     assert.strictEqual(
       fsReadCall.env.AFS_SESSION_WORK_COMMUNICATION_HINT,
-      `afs work communication guide --path ${workspaceRoot}`,
+      `afs work communication preflight --path ${workspaceRoot}`,
     );
     assert.strictEqual(fsReadCall.env.AFS_ACTIVE_CONTEXT_ROOT, path.join(tmpDir, "workspace", ".context"));
     assert.deepStrictEqual(client.getSessionInfo()?.cliHints, {
@@ -344,7 +366,7 @@ describe("CliClient", () => {
       indexRebuild: `afs index rebuild --path ${workspaceRoot}`,
       workSummary: `afs work --path ${workspaceRoot}`,
       workApprovals: `afs work approvals list --path ${workspaceRoot}`,
-      workCommunication: `afs work communication guide --path ${workspaceRoot}`,
+      workCommunication: `afs work communication preflight --path ${workspaceRoot}`,
       notes: ["Index may be stale"],
     });
   });
@@ -546,6 +568,12 @@ describe("CliClient", () => {
       purpose: "responding_to_comments",
       limit: 5,
     });
+    const preflight = await client.callTool("work.communication.preflight", {
+      context_path: path.join(workspaceRoot, ".context"),
+      purpose: "responding_to_comments",
+      limit: 5,
+      approval_limit: 5,
+    });
     const added = await client.callTool("work.communication.add", {
       context_path: path.join(workspaceRoot, ".context"),
       text: "Use exact file evidence.",
@@ -569,6 +597,7 @@ describe("CliClient", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     assert.strictEqual(guide.sample_count, 1);
+    assert.strictEqual((preflight.style as Record<string, unknown>).sample_count, 1);
     assert.strictEqual(added.sample_id, "comm_added");
     assert.strictEqual(approvals.count, 1);
     assert.strictEqual(requested.approval_id, "approval_requested");
@@ -580,6 +609,11 @@ describe("CliClient", () => {
     assert.ok(guideCall);
     assert.ok(guideCall.args.includes("--purpose"));
     assert.ok(guideCall.args.includes("responding_to_comments"));
+    const preflightCall = calls.find(
+      (entry) => entry.args[0] === "work" && entry.args[1] === "communication" && entry.args[2] === "preflight",
+    );
+    assert.ok(preflightCall);
+    assert.ok(preflightCall.args.includes("--approval-limit"));
 
     const requestCall = calls.find(
       (entry) => entry.args[0] === "work" && entry.args[1] === "approvals" && entry.args[2] === "request",

@@ -185,9 +185,10 @@ async function gatherChatContext(
 
   const shouldGatherWork = command === "work" || isWorkWritingPrompt(prompt);
   const workCommunicationGuide = shouldGatherWork
-    ? await callOptionalTool(deps.transport, deps.logger, "work.communication.guide", {
+    ? await callOptionalTool(deps.transport, deps.logger, "work.communication.preflight", {
         ...contextArgs,
         limit: 8,
+        approval_limit: 8,
       })
     : null;
   const workApprovals = shouldGatherWork
@@ -308,7 +309,7 @@ function normalizePrompt(command: ChatCommand, prompt: string): string {
     case "pack":
       return "Explain the currently prepared AFS session pack and the most relevant context for this workspace.";
     case "work":
-      return "Summarize available AFS work communication style guidance, pending approvals, and safe next steps.";
+      return "Run the AFS work communication preflight, pending approvals check, and safe next steps.";
     case "query":
       return "Find the most relevant indexed AFS context for this workspace and summarize it.";
     default:
@@ -342,7 +343,7 @@ function taskForCommand(command: ChatCommand, prompt: string): string {
     case "pack":
       return "Explain the current AFS session pack and answer the user with grounded workspace context.";
     case "work":
-      return "Use work communication samples, work assistant state, and approval guardrails to answer safely.";
+      return "Use work communication preflight, work assistant state, and approval guardrails to answer safely.";
     case "query":
       return `Use indexed AFS context to answer: ${prompt}`;
     default:

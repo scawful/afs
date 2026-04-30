@@ -93,7 +93,7 @@
           },
           {
             "name": "work",
-            "description": "Review work communication style samples and pending approval-gated writes"
+            "description": "Run work communication style and approval preflight"
           }
         ],
         "disambiguation": [
@@ -124,7 +124,7 @@
       { "command": "afs.index.rebuild", "title": "AFS: Rebuild Context Index", "category": "AFS" },
       { "command": "afs.index.query", "title": "AFS: Query Context Index", "category": "AFS" },
       { "command": "afs.index.queryQuickOpen", "title": "AFS: Quick Open Context File", "category": "AFS" },
-      { "command": "afs.work.communication", "title": "AFS: Work Communication Guidance", "category": "AFS" },
+      { "command": "afs.work.communication", "title": "AFS: Work Communication Preflight", "category": "AFS" },
       { "command": "afs.work.approvals", "title": "AFS: Work Approvals", "category": "AFS" },
       { "command": "afs.mcp.register", "title": "AFS: Register MCP Server", "category": "AFS" },
       { "command": "afs.mcp.unregister", "title": "AFS: Unregister MCP Server", "category": "AFS" },

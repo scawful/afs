@@ -128,6 +128,13 @@ def test_session_bootstrap_command_outputs_json_and_writes_artifacts(
     assert payload["work_assistant"]["summary"]["pending_approvals"] == 1
     assert payload["work_assistant"]["pending_approvals"][0]["summary"] == "Send drafted support reply"
     assert payload["work_assistant"]["communication_guidance"]["sample_count"] == 0
+    assert payload["work_assistant"]["communication_preflight"]["missing_style_evidence"] is True
+    assert (
+        payload["work_assistant"]["communication_preflight"]["approval_guardrail"][
+            "requires_explicit_approval"
+        ]
+        is True
+    )
     assert any(
         "style evidence is missing" in line
         for line in payload["work_assistant"]["communication_guidance"]["guidance"]

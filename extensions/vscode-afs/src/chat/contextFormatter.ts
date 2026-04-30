@@ -192,20 +192,70 @@ function renderWorkContext(
 ): string {
   const lines: string[] = [];
   if (guide) {
-    lines.push("## Work Communication Grounding");
-    const sampleCount = numberValue(guide.sample_count);
+    const preflightStyle = recordValue(guide.style);
+    const styleGuide = preflightStyle ?? guide;
+    lines.push(preflightStyle ? "## Work Communication Preflight" : "## Work Communication Grounding");
+    const guardrail = recordValue(guide.approval_guardrail);
+    if (guardrail) {
+      const readyToPost = boolValue(guardrail.ready_to_post);
+      const requiresApproval = boolValue(guardrail.requires_explicit_approval);
+      if (readyToPost != null || requiresApproval != null) {
+        lines.push(
+          `External write: ready_to_post=${readyToPost ? "yes" : "no"}, approval_required=${
+            requiresApproval ? "yes" : "no"
+          }`,
+        );
+      }
+      pushIfString(lines, "Policy", guardrail.policy);
+    }
+    const sampleCount = numberValue(styleGuide.sample_count);
     if (sampleCount != null) {
       lines.push(`Samples: ${sampleCount}`);
     }
-    const purposes = recordValue(guide.purposes);
+    const purposes = recordValue(styleGuide.purposes);
     if (purposes && Object.keys(purposes).length > 0) {
       lines.push(`Purposes: ${formatKeyValueRecord(purposes)}`);
     }
-    const styleNotes = stringArray(guide.style_notes);
+    const personalContext = recordValue(guide.personal_context);
+    if (personalContext) {
+      const mode = stringValue(personalContext.mode);
+      const loaded = boolValue(personalContext.loaded);
+      if (loaded || mode) {
+        lines.push(`Personal context: ${loaded ? mode || "loaded" : "not loaded"}`);
+      }
+      const personalStyle = stringArray(personalContext.style_instructions);
+      if (personalStyle.length > 0) {
+        lines.push(`Personal style: ${personalStyle.slice(0, 6).join(", ")}`);
+      }
+      const sources = stringArray(personalContext.communication_sources);
+      if (sources.length > 0) {
+        lines.push(`Required sources: ${sources.slice(0, 6).join(", ")}`);
+      }
+    }
+    const styleNotes = stringArray(styleGuide.style_notes);
     if (styleNotes.length > 0) {
       lines.push(`Style notes: ${styleNotes.slice(0, 8).join(", ")}`);
     }
-    const guidance = stringArray(guide.guidance);
+    const checklist = Array.isArray(guide.checklist)
+      ? guide.checklist.filter(
+          (item): item is Record<string, unknown> =>
+            !!item && typeof item === "object" && !Array.isArray(item),
+        )
+      : [];
+    if (checklist.length > 0) {
+      lines.push("Preflight checklist:");
+      for (const item of checklist.slice(0, 5)) {
+        const status = stringValue(item.status) || "required";
+        const step = stringValue(item.step);
+        if (step) {
+          lines.push(`- [${status}] ${step}`);
+        }
+      }
+    }
+    const preflightGuidance = stringArray(guide.guidance);
+    const guidance = preflightGuidance.length > 0
+      ? preflightGuidance
+      : stringArray(styleGuide.guidance);
     if (guidance.length > 0) {
       lines.push("Guidance:");
       for (const item of guidance.slice(0, 4)) {
@@ -213,8 +263,8 @@ function renderWorkContext(
       }
     }
 
-    const samples = Array.isArray(guide.samples)
-      ? guide.samples.filter(
+    const samples = Array.isArray(styleGuide.samples)
+      ? styleGuide.samples.filter(
           (sample): sample is Record<string, unknown> =>
             !!sample && typeof sample === "object" && !Array.isArray(sample),
         )

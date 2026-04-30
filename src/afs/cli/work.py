@@ -349,6 +349,66 @@ def communication_guide_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_personal_context_from_args(args: argparse.Namespace) -> Any | None:
+    personal_mode = getattr(args, "personal_mode", None)
+    if not personal_mode:
+        return None
+    from ..personal_context import load_personal_context
+
+    personal_root = getattr(args, "personal_context_root", None)
+    return load_personal_context(
+        str(personal_mode),
+        context_root=Path(personal_root).expanduser() if personal_root else None,
+    )
+
+
+def communication_preflight_command(args: argparse.Namespace) -> int:
+    store, context_path = _store_from_args(args)
+    try:
+        personal_context = _load_personal_context_from_args(args)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Failed to load personal context: {exc}")
+        return 2
+
+    preflight = store.communication_preflight(
+        person_id=args.person_id,
+        purpose=args.purpose,
+        limit=args.limit,
+        approval_limit=args.approval_limit,
+        personal_context=personal_context,
+        context_path=context_path,
+    )
+    if args.json:
+        _print_json(preflight)
+        return 0
+
+    style = preflight["style"]
+    personal = preflight["personal_context"]
+    guardrail = preflight["approval_guardrail"]
+    print("Work communication preflight")
+    print(f"samples: {style['sample_count']}")
+    print(
+        "personal_context: "
+        + (
+            f"{personal['mode']} loaded"
+            if personal["loaded"]
+            else "not loaded (opt-in via --personal-mode)"
+        )
+    )
+    print(f"pending_approvals: {preflight['pending_approval_count']}")
+    print(f"ready_to_post: {'yes' if guardrail['ready_to_post'] else 'no'}")
+    print(f"approval_required: {'yes' if guardrail['requires_explicit_approval'] else 'no'}")
+    if preflight["missing_style_evidence"]:
+        print("missing_style_evidence: yes")
+    print("checklist:")
+    for item in preflight["checklist"]:
+        print(f"- [{item['status']}] {item['step']} {item['detail']}")
+    print("guidance:")
+    for line in preflight["guidance"][:8]:
+        print(f"- {line}")
+    return 0
+
+
 def _split_executor(value: str) -> list[str]:
     if not value.strip():
         return []
@@ -509,3 +569,28 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     communication_guide.add_argument("--limit", type=int, default=20, help="Max records.")
     communication_guide.add_argument("--json", action="store_true", help="Output JSON.")
     communication_guide.set_defaults(func=communication_guide_command)
+
+    communication_preflight = communication_sub.add_parser(
+        "preflight",
+        help="Run work-writing style and approval guardrail preflight.",
+    )
+    _add_context_args(communication_preflight)
+    communication_preflight.add_argument("--person-id", help="Filter by person id.")
+    communication_preflight.add_argument("--purpose", help="Filter by purpose.")
+    communication_preflight.add_argument("--limit", type=int, default=20, help="Max style records.")
+    communication_preflight.add_argument(
+        "--approval-limit",
+        type=int,
+        default=10,
+        help="Max pending approvals to include.",
+    )
+    communication_preflight.add_argument(
+        "--personal-mode",
+        help="Opt-in personal context mode to load for work style grounding.",
+    )
+    communication_preflight.add_argument(
+        "--personal-context-root",
+        help="Override personal context root for --personal-mode.",
+    )
+    communication_preflight.add_argument("--json", action="store_true", help="Output JSON.")
+    communication_preflight.set_defaults(func=communication_preflight_command)

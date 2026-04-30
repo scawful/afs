@@ -792,7 +792,8 @@ def _collect_work_assistant(
     commands = {
         "summary": f"afs work --context-root {quoted_context}",
         "approvals": f"afs work approvals list --context-root {quoted_context}",
-        "communication": f"afs work communication guide --context-root {quoted_context}",
+        "communication": f"afs work communication preflight --context-root {quoted_context}",
+        "communication_guide": f"afs work communication guide --context-root {quoted_context}",
         "communication_list": f"afs work communication list --context-root {quoted_context}",
         "activity": f"afs work activity list --context-root {quoted_context}",
     }
@@ -820,6 +821,7 @@ def _collect_work_assistant(
                 "pending_approvals": [],
                 "communication_samples": [],
                 "communication_guidance": {},
+                "communication_preflight": {},
                 "recent_activity": [],
                 "commands": commands,
             }
@@ -837,6 +839,11 @@ def _collect_work_assistant(
             "communication_guidance": store.communication_style_summary(
                 limit=max(1, min(limit, _MAX_LIST_ITEMS))
             ),
+            "communication_preflight": store.communication_preflight(
+                limit=max(1, min(limit, _MAX_LIST_ITEMS)),
+                approval_limit=max(1, min(limit, _MAX_LIST_ITEMS)),
+                context_path=context_path,
+            ),
             "recent_activity": store.list_activity(limit=max(1, min(limit, _MAX_LIST_ITEMS))),
             "commands": commands,
         }
@@ -848,6 +855,7 @@ def _collect_work_assistant(
             "pending_approvals": [],
             "communication_samples": [],
             "communication_guidance": {},
+            "communication_preflight": {},
             "recent_activity": [],
             "commands": commands,
             "error": str(exc),
@@ -1082,7 +1090,7 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
     if isinstance(work_summary, dict) and work_summary.get("communication_samples", 0) == 0:
         command = (work_assistant.get("commands") or {}).get(
             "communication",
-            "afs work communication guide",
+            "afs work communication preflight",
         )
         recommendations.append(
             "For work-context writing, inspect or capture user communication samples before "

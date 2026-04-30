@@ -300,6 +300,29 @@ export class CliClient implements ITransportClient {
         }
         return this.execJson(cliArgs);
       }
+      case "work.communication.preflight": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const cliArgs = ["work", "communication", "preflight", "--path", projectPath, "--json"];
+        if (typeof args.person_id === "string" && args.person_id.trim()) {
+          cliArgs.push("--person-id", args.person_id.trim());
+        }
+        if (typeof args.purpose === "string" && args.purpose.trim()) {
+          cliArgs.push("--purpose", args.purpose.trim());
+        }
+        if (typeof args.limit === "number") {
+          cliArgs.push("--limit", String(args.limit));
+        }
+        if (typeof args.approval_limit === "number") {
+          cliArgs.push("--approval-limit", String(args.approval_limit));
+        }
+        if (typeof args.personal_mode === "string" && args.personal_mode.trim()) {
+          cliArgs.push("--personal-mode", args.personal_mode.trim());
+        }
+        if (typeof args.personal_context_root === "string" && args.personal_context_root.trim()) {
+          cliArgs.push("--personal-context-root", args.personal_context_root.trim());
+        }
+        return this.execJson(cliArgs);
+      }
       case "work.approvals.list": {
         const projectPath = this.projectPathFromContextArg(args.context_path);
         const cliArgs = ["work", "approvals", "list", "--path", projectPath, "--json"];
@@ -538,6 +561,7 @@ export class CliClient implements ITransportClient {
       { name: "work.communication.list", description: "List work communication samples", inputSchema: {} },
       { name: "work.communication.add", description: "Capture a work communication sample", inputSchema: {} },
       { name: "work.communication.guide", description: "Summarize work communication style guidance", inputSchema: {} },
+      { name: "work.communication.preflight", description: "Run work communication preflight", inputSchema: {} },
       { name: "work.approvals.list", description: "List work approval requests", inputSchema: {} },
       { name: "work.approvals.show", description: "Show a work approval request", inputSchema: {} },
       { name: "work.approvals.request", description: "Request approval for an external work write", inputSchema: {} },
@@ -920,7 +944,7 @@ export class CliClient implements ITransportClient {
       indexRebuild: resolvedWorkspace ? `afs index rebuild --path ${quotedWorkspace}` : "",
       workSummary: resolvedWorkspace ? `afs work --path ${quotedWorkspace}` : "",
       workApprovals: resolvedWorkspace ? `afs work approvals list --path ${quotedWorkspace}` : "",
-      workCommunication: resolvedWorkspace ? `afs work communication guide --path ${quotedWorkspace}` : "",
+      workCommunication: resolvedWorkspace ? `afs work communication preflight --path ${quotedWorkspace}` : "",
       notes: [],
     };
   }

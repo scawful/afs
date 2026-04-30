@@ -357,21 +357,22 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand("afs.work.communication", async () => {
-      const folder = await pickWorkspaceFolder("Select workspace folder for work communication guidance");
+      const folder = await pickWorkspaceFolder("Select workspace folder for work communication preflight");
       if (!folder) return;
       const contextPath = path.join(folder.uri.fsPath, ".context");
       try {
         const guidance = await withRecordedTurn(
           transport,
           "Inspect AFS work communication samples and approval guardrails.",
-          "Review AFS work communication guidance",
+          "Run AFS work communication preflight",
           async () =>
-            transport.callTool("work.communication.guide", {
+            transport.callTool("work.communication.preflight", {
               context_path: contextPath,
               limit: 8,
+              approval_limit: 8,
             }),
           {
-            successSummary: "Reviewed work communication guidance",
+            successSummary: "Completed work communication preflight",
           },
         );
         vscode.window.showInformationMessage(
@@ -379,7 +380,7 @@ export function registerCommands(
           { modal: true },
         );
       } catch (err) {
-        vscode.window.showErrorMessage(`Work communication guidance failed: ${err}`);
+        vscode.window.showErrorMessage(`Work communication preflight failed: ${err}`);
       }
     }),
 
@@ -475,16 +476,41 @@ export function registerCommands(
 }
 
 function formatWorkCommunicationGuidance(payload: Record<string, unknown>): string {
-  const sampleCount = typeof payload.sample_count === "number" ? payload.sample_count : 0;
+  const style = recordValue(payload.style) ?? payload;
+  const sampleCount = typeof style.sample_count === "number" ? style.sample_count : 0;
   const lines = [`Work communication samples: ${sampleCount}`];
-  const styleNotes = Array.isArray(payload.style_notes)
-    ? payload.style_notes.filter((note): note is string => typeof note === "string" && note.trim().length > 0)
+  const guardrail = recordValue(payload.approval_guardrail);
+  if (guardrail) {
+    const requiresApproval = guardrail.requires_explicit_approval === true;
+    const readyToPost = guardrail.ready_to_post === true;
+    lines.push(
+      `External write: ready_to_post=${readyToPost ? "yes" : "no"}, approval_required=${
+        requiresApproval ? "yes" : "no"
+      }`,
+    );
+  }
+  const styleNotes = Array.isArray(style.style_notes)
+    ? style.style_notes.filter((note): note is string => typeof note === "string" && note.trim().length > 0)
     : [];
   if (styleNotes.length > 0) {
     lines.push(`Style notes: ${styleNotes.slice(0, 8).join(", ")}`);
   }
-  const guidance = Array.isArray(payload.guidance)
-    ? payload.guidance.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+  const checklist = Array.isArray(payload.checklist)
+    ? payload.checklist.filter(
+        (item): item is Record<string, unknown> =>
+          !!item && typeof item === "object" && !Array.isArray(item),
+      )
+    : [];
+  for (const item of checklist.slice(0, 4)) {
+    const status = stringValue(item.status) || "required";
+    const step = stringValue(item.step);
+    if (step) {
+      lines.push(`- [${status}] ${step}`);
+    }
+  }
+  const guidancePayload = Array.isArray(payload.guidance) ? payload.guidance : style.guidance;
+  const guidance = Array.isArray(guidancePayload)
+    ? guidancePayload.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     : [];
   for (const item of guidance.slice(0, 5)) {
     lines.push(`- ${item}`);
@@ -515,6 +541,12 @@ function formatWorkApprovals(payload: Record<string, unknown>): string {
 
 function stringValue(value: unknown): string {
   return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function getMountPointSelection(selection: unknown): MountPointSelection | undefined {

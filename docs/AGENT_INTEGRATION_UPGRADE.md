@@ -62,8 +62,8 @@ An AFS-aware harness should do this at session start:
    spans turns, agents, or tools.
 7. Run `afs work --path . --json` when the task involves docs, sheets, tickets,
    planning, people, or review routing.
-8. For work-context writing, inspect `afs work communication guide` or MCP
-   `work.communication.guide` before matching the user's tone.
+8. For work-context writing, run `afs work communication preflight` or MCP
+   `work.communication.preflight` before matching the user's tone.
 9. For external writes, create or reuse an AFS work approval request and execute
    exactly one approved action with `afs work approvals execute`.
 
@@ -78,6 +78,7 @@ Keep the default MCP set small:
 - `afs.session.bootstrap`
 - `context.status`
 - `context.query`
+- `work.communication.preflight`
 - `work.communication.guide`
 - `work.approvals.list`
 - `context.read`
@@ -176,6 +177,7 @@ surface. Upgrade agents by teaching them the small command contract:
 scripts/afs work --path .
 scripts/afs work communication list --path .
 scripts/afs work communication guide --path .
+scripts/afs work communication preflight --path .
 scripts/afs work approvals list --path .
 scripts/afs work approvals request --path . ...
 scripts/afs work approvals approve <approval-id> --path . --by human
@@ -187,4 +189,4 @@ Use `docs/WORK_ASSISTANT_UPGRADE.md` as the copy-paste guide for harness
 instructions and connector setup. `afs-client-session` also exports
 `AFS_SESSION_WORK_HINT` and `AFS_SESSION_WORK_APPROVALS_HINT` so wrappers can
 show the exact commands at startup. `AFS_SESSION_WORK_COMMUNICATION_HINT`
-points editor and harness surfaces at the communication style guide command.
+points editor and harness surfaces at the communication preflight command.

@@ -173,7 +173,7 @@ def test_session_prepare_client_command_outputs_artifacts(
     assert payload["cli_hints"]["work_approvals"] == f"afs work approvals list --path {tmp_path.resolve()}"
     assert (
         payload["cli_hints"]["work_communication"]
-        == f"afs work communication guide --path {tmp_path.resolve()}"
+        == f"afs work communication preflight --path {tmp_path.resolve()}"
     )
     assert payload["cli_hints"]["verify_plan"].startswith("afs verify plan --payload-file ")
     assert payload["cli_hints"]["verify_run"].startswith("afs verify run --payload-file ")

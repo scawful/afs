@@ -554,7 +554,7 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
           <code>${this.esc(cliHints.workApprovals)}</code>
         </div>
         <div class="hint-block">
-          <div class="hint-label">Work Style Samples</div>
+          <div class="hint-label">Work Communication Preflight</div>
           <code>${this.esc(cliHints.workCommunication)}</code>
         </div>
         ${notes ? `<ul>${notes}</ul>` : ""}
@@ -562,7 +562,7 @@ export class AfsDashboardProvider implements vscode.WebviewViewProvider {
           <button onclick="post('queryIndex')">Query More</button>
           <button onclick="post('copyText', { text: ${JSON.stringify(cliHints.queryShortcut)}, label: 'query command' })">Copy Query Command</button>
           <button onclick="post('copyText', { text: ${JSON.stringify(cliHints.indexRebuild)}, label: 'index rebuild command' })">Copy Rebuild Command</button>
-          <button onclick="post('copyText', { text: ${JSON.stringify(cliHints.workCommunication)}, label: 'work communication command' })">Copy Work Style Command</button>
+          <button onclick="post('copyText', { text: ${JSON.stringify(cliHints.workCommunication)}, label: 'work communication command' })">Copy Work Preflight Command</button>
         </div>
       </div>`;
   }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sqlite3
 import uuid
 from collections.abc import Iterable
@@ -17,6 +18,13 @@ from .models import MountType
 from .schema import AFSConfig
 
 DEFAULT_DB_FILENAME = "work_assistant.sqlite3"
+COMMUNICATION_PREFLIGHT_STEPS = (
+    "Load opt-in personal work context when a mode is provided.",
+    "Inspect stored work communication samples before drafting.",
+    "Inspect relevant scratchpad/history/context hits for the concrete topic.",
+    "Draft locally and state missing style evidence instead of inventing preferences.",
+    "Create an AFS work approval before any external post, send, submit, or edit.",
+)
 EXTERNAL_WRITE_ACTIONS = frozenset(
     {
         "add_doc_comment",
@@ -82,6 +90,49 @@ def _str_list(value: Any) -> list[str]:
         if text and text not in items:
             items.append(text)
     return items
+
+
+def _truncate_text(value: Any, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _personal_context_summary(personal_context: Any | None) -> dict[str, Any]:
+    if personal_context is None:
+        return {
+            "loaded": False,
+            "mode": "",
+            "work_context": False,
+            "tone": "",
+            "bias_warning": None,
+            "style_instructions": [],
+            "communication_sources": [],
+            "posting_policy": "",
+            "files": [],
+            "missing": [],
+        }
+
+    files: list[dict[str, str]] = []
+    for item in _as_list(getattr(personal_context, "files", [])):
+        if not isinstance(item, tuple) or len(item) != 2:
+            continue
+        rel, content = item
+        files.append({"path": str(rel), "excerpt": _truncate_text(content, 800)})
+
+    return {
+        "loaded": True,
+        "mode": str(getattr(personal_context, "mode", "") or ""),
+        "work_context": bool(getattr(personal_context, "work_context", False)),
+        "tone": str(getattr(personal_context, "tone", "") or ""),
+        "bias_warning": getattr(personal_context, "bias_warning", None),
+        "style_instructions": _str_list(getattr(personal_context, "style_instructions", [])),
+        "communication_sources": _str_list(getattr(personal_context, "communication_sources", [])),
+        "posting_policy": str(getattr(personal_context, "posting_policy", "") or ""),
+        "files": files,
+        "missing": _str_list(getattr(personal_context, "missing", [])),
+    }
 
 
 def _merge_lists(*values: Iterable[Any]) -> list[Any]:
@@ -911,6 +962,129 @@ class WorkAssistantStore:
             "style_notes": notes,
             "samples": samples,
             "guidance": guidance,
+        }
+
+    def communication_preflight(
+        self,
+        *,
+        person_id: str | None = None,
+        purpose: str | None = None,
+        limit: int = 20,
+        approval_limit: int = 10,
+        personal_context: Any | None = None,
+        context_path: Path | None = None,
+    ) -> dict[str, Any]:
+        """Return the mandatory work-writing preflight context and guardrails."""
+        style = self.communication_style_summary(
+            person_id=person_id,
+            purpose=purpose,
+            limit=limit,
+        )
+        personal = _personal_context_summary(personal_context)
+        pending_approvals = self.list_approvals(status="pending", limit=approval_limit)
+
+        personal_style_items = [
+            *personal["style_instructions"],
+            *[entry.get("excerpt", "") for entry in personal["files"] if entry.get("excerpt")],
+        ]
+        has_personal_style = bool(personal["tone"] or personal_style_items)
+        missing_style_evidence = style["sample_count"] == 0 and not has_personal_style
+
+        guidance = list(style["guidance"])
+        if personal["loaded"]:
+            guidance.append(
+                f"Personal context mode '{personal['mode']}' was explicitly loaded; use it as opt-in work-style grounding."
+            )
+            if personal["tone"]:
+                guidance.append(f"Personal context tone: {personal['tone']}.")
+            if personal["style_instructions"]:
+                guidance.append(
+                    "Personal style instructions: "
+                    + ", ".join(personal["style_instructions"][:8])
+                    + "."
+                )
+            if personal["communication_sources"]:
+                guidance.append(
+                    "Required communication sources to inspect: "
+                    + ", ".join(personal["communication_sources"][:8])
+                    + "."
+                )
+            if personal["posting_policy"]:
+                guidance.append(f"Personal posting policy: {personal['posting_policy']}")
+        else:
+            guidance.append(
+                "No personal context mode was loaded; use --personal-mode only when the user opted into that context."
+            )
+        if missing_style_evidence:
+            guidance.append(
+                "Style evidence is missing; ask for samples or draft neutrally instead of imitating a voice."
+            )
+
+        commands: dict[str, str] = {}
+        if context_path is not None:
+            quoted_context = shlex.quote(str(context_path.expanduser().resolve()))
+            commands = {
+                "communication_preflight": f"afs work communication preflight --context-root {quoted_context}",
+                "communication_guide": f"afs work communication guide --context-root {quoted_context}",
+                "communication_list": f"afs work communication list --context-root {quoted_context}",
+                "approval_request": (
+                    "afs work approvals request --context-root "
+                    f"{quoted_context} --target-system <system> --target-id <id> "
+                    "--action <action> --summary <summary> --preview-json '<preview>'"
+                ),
+                "approvals_list": f"afs work approvals list --context-root {quoted_context}",
+            }
+
+        return {
+            "context_path": str(context_path) if context_path is not None else "",
+            "person_id": person_id or "",
+            "purpose": purpose or "",
+            "style": style,
+            "personal_context": personal,
+            "pending_approvals": pending_approvals,
+            "pending_approval_count": len(pending_approvals),
+            "missing_style_evidence": missing_style_evidence,
+            "approval_guardrail": {
+                "requires_explicit_approval": True,
+                "ready_to_post": False,
+                "policy": (
+                    "Do not post, send, submit, or edit an external work system unless "
+                    "the user explicitly approves the exact target, action, and preview."
+                ),
+            },
+            "checklist": [
+                {
+                    "step": COMMUNICATION_PREFLIGHT_STEPS[0],
+                    "status": "done" if personal["loaded"] else "not_loaded",
+                    "detail": (
+                        f"Loaded mode {personal['mode']}."
+                        if personal["loaded"]
+                        else "Personal context is opt-in and was not requested."
+                    ),
+                },
+                {
+                    "step": COMMUNICATION_PREFLIGHT_STEPS[1],
+                    "status": "done" if style["sample_count"] else "missing",
+                    "detail": f"{style['sample_count']} communication sample(s) available.",
+                },
+                {
+                    "step": COMMUNICATION_PREFLIGHT_STEPS[2],
+                    "status": "required",
+                    "detail": "Run context.query/session pack against the concrete doc, ticket, PR, or comment thread.",
+                },
+                {
+                    "step": COMMUNICATION_PREFLIGHT_STEPS[3],
+                    "status": "required",
+                    "detail": "Keep the draft local until the user reviews it.",
+                },
+                {
+                    "step": COMMUNICATION_PREFLIGHT_STEPS[4],
+                    "status": "required",
+                    "detail": "Use work.approvals.request for the proposed external write; this preflight never executes it.",
+                },
+            ],
+            "guidance": guidance,
+            "commands": commands,
         }
 
     def summary(self) -> dict[str, Any]:

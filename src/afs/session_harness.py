@@ -222,7 +222,7 @@ def _build_cli_hints(
         "agent_jobs_inbox": f"afs agent-jobs inbox --path {quoted_workspace}",
         "work_summary": f"afs work --path {quoted_workspace}",
         "work_approvals": f"afs work approvals list --path {quoted_workspace}",
-        "work_communication": f"afs work communication guide --path {quoted_workspace}",
+        "work_communication": f"afs work communication preflight --path {quoted_workspace}",
         "notes": notes,
     }
 

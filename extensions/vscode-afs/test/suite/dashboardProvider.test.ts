@@ -29,7 +29,7 @@ describe("AfsDashboardProvider", () => {
         indexRebuild: "afs index rebuild --path /tmp/workspace",
         workSummary: "afs work --path /tmp/workspace",
         workApprovals: "afs work approvals list --path /tmp/workspace",
-        workCommunication: "afs work communication guide --path /tmp/workspace",
+        workCommunication: "afs work communication preflight --path /tmp/workspace",
         notes: ["Indexed retrieval may be stale."],
       },
     };
@@ -68,11 +68,11 @@ describe("AfsDashboardProvider", () => {
     assert.match(html, /afs index rebuild --path \/tmp\/workspace/);
     assert.match(html, /afs work --path \/tmp\/workspace/);
     assert.match(html, /afs work approvals list --path \/tmp\/workspace/);
-    assert.match(html, /afs work communication guide --path \/tmp\/workspace/);
+    assert.match(html, /afs work communication preflight --path \/tmp\/workspace/);
     assert.match(html, /Query More/);
     assert.match(html, /Copy Query Command/);
     assert.match(html, /Copy Rebuild Command/);
-    assert.match(html, /Copy Work Style Command/);
+    assert.match(html, /Copy Work Preflight Command/);
     assert.match(html, /Indexed retrieval may be stale\./);
   });
 
@@ -92,7 +92,7 @@ describe("AfsDashboardProvider", () => {
         indexRebuild: "afs index rebuild --path /tmp/workspace",
         workSummary: "afs work --path /tmp/workspace",
         workApprovals: "afs work approvals list --path /tmp/workspace",
-        workCommunication: "afs work communication guide --path /tmp/workspace",
+        workCommunication: "afs work communication preflight --path /tmp/workspace",
         notes: [],
       },
     };
@@ -132,7 +132,7 @@ describe("AfsDashboardProvider", () => {
         indexRebuild: "afs index rebuild --path /tmp/workspace-one",
         workSummary: "afs work --path /tmp/workspace-one",
         workApprovals: "afs work approvals list --path /tmp/workspace-one",
-        workCommunication: "afs work communication guide --path /tmp/workspace-one",
+        workCommunication: "afs work communication preflight --path /tmp/workspace-one",
         notes: [],
       },
     };

@@ -150,6 +150,9 @@ Communication samples:
   --style-note "evidence-backed" \
   --text "Short, concrete reply with exact file evidence."
 ./scripts/afs work communication guide --path . --purpose responding_to_comments
+./scripts/afs work communication preflight --path . \
+  --purpose responding_to_comments \
+  --personal-mode work
 ```
 
 Session startup:
@@ -159,19 +162,19 @@ Session startup:
 - `afs-client-session` exports `AFS_SESSION_WORK_HINT` and
   `AFS_SESSION_WORK_APPROVALS_HINT` for harness wrappers.
 - `AFS_SESSION_WORK_COMMUNICATION_HINT` points editor/harness surfaces at the
-  communication style guide command.
-- VS Code and Antigravity hosts get `AFS: Work Communication Guidance`,
+  work communication preflight command.
+- VS Code and Antigravity hosts get `AFS: Work Communication Preflight`,
   `AFS: Work Approvals`, and the `@afs /work` chat command when the bundled
   extension is installed.
 
 ## Work Communication Rule
 
 For docs, design docs, technical requirements, and replies/comments, an agent
-should first inspect available communication samples (`afs work communication
-guide` or MCP `work.communication.guide`), personal-context mode content,
-scratchpad, and relevant history before matching the user's voice. If there is
-not enough evidence, it should say what is missing instead of inventing a
-style.
+should first run the preflight (`afs work communication preflight` or MCP
+`work.communication.preflight`). The preflight combines stored communication
+samples, optional opt-in personal-context mode content, pending approvals, and a
+hard external-write guardrail before matching the user's voice. If there is not
+enough evidence, it should say what is missing instead of inventing a style.
 
 External posts remain approval-gated: the agent may draft locally, but must ask
 for explicit permission before posting, sending, submitting, or editing on the

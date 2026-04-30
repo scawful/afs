@@ -110,6 +110,7 @@ def test_tools_list_returns_preferred_and_compatibility_file_tools(tmp_path: Pat
         "work.communication.list",
         "work.communication.add",
         "work.communication.guide",
+        "work.communication.preflight",
         "work.approvals.list",
         "work.approvals.show",
         "work.approvals.request",
@@ -291,6 +292,32 @@ def test_work_mcp_tools_capture_style_and_request_approval(tmp_path: Path) -> No
     assert guide["sample_count"] == 1
     assert guide["style_notes"] == ["findings-first", "direct"]
     assert any("explicit approval" in line for line in guide["guidance"])
+
+    preflight_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 245,
+            "method": "tools/call",
+            "params": {
+                "name": "work.communication.preflight",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "purpose": "responding_to_comments",
+                    "approval_limit": 5,
+                },
+            },
+        },
+        manager,
+    )
+    assert preflight_response is not None
+    preflight = preflight_response["result"]["structuredContent"]
+    assert preflight["style"]["sample_count"] == 1
+    assert preflight["approval_guardrail"]["requires_explicit_approval"] is True
+    assert preflight["approval_guardrail"]["ready_to_post"] is False
+    assert any(
+        item["status"] == "required" and "external post" in item["step"]
+        for item in preflight["checklist"]
+    )
 
     request_response = _handle_request(
         {

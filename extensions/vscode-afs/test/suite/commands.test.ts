@@ -208,7 +208,7 @@ describe("registerCommands", () => {
         indexRebuild: "afs index rebuild --path /tmp/workspace",
         workSummary: "afs work --path /tmp/workspace",
         workApprovals: "afs work approvals list --path /tmp/workspace",
-        workCommunication: "afs work communication guide --path /tmp/workspace",
+        workCommunication: "afs work communication preflight --path /tmp/workspace",
         notes: ["Indexed retrieval may be stale."],
       },
     };
@@ -241,19 +241,32 @@ describe("registerCommands", () => {
     assert.match(infoMessages[0], /Index hint: afs index rebuild --path \/tmp\/workspace/);
     assert.match(infoMessages[0], /Work hint: afs work --path \/tmp\/workspace/);
     assert.match(infoMessages[0], /Work approvals hint: afs work approvals list --path \/tmp\/workspace/);
-    assert.match(infoMessages[0], /Work communication hint: afs work communication guide --path \/tmp\/workspace/);
+    assert.match(infoMessages[0], /Work communication hint: afs work communication preflight --path \/tmp\/workspace/);
     assert.match(infoMessages[0], /Note: Indexed retrieval may be stale\./);
   });
 
-  it("shows work communication guidance and approvals from editor commands", async () => {
+  it("shows work communication preflight and approvals from editor commands", async () => {
     const transport = new MockTransport();
     const infoMessages: string[] = [];
     const workspaceRoot = "/tmp/afs-vscode-workspace";
 
     workspace.workspaceFolders = [{ name: "demo", uri: { fsPath: workspaceRoot } }];
-    transport.toolResponses["work.communication.guide"] = {
-      sample_count: 1,
-      style_notes: ["direct", "evidence-backed"],
+    transport.toolResponses["work.communication.preflight"] = {
+      style: {
+        sample_count: 1,
+        style_notes: ["direct", "evidence-backed"],
+        guidance: ["Use stored samples before drafting.", "Never post externally without approval."],
+      },
+      approval_guardrail: {
+        requires_explicit_approval: true,
+        ready_to_post: false,
+      },
+      checklist: [
+        {
+          step: "Inspect stored work communication samples before drafting.",
+          status: "done",
+        },
+      ],
       guidance: ["Use stored samples before drafting.", "Never post externally without approval."],
     };
     transport.toolResponses["work.approvals.list"] = {
@@ -289,6 +302,7 @@ describe("registerCommands", () => {
     await commands.executeCommand("afs.work.approvals");
 
     assert.match(infoMessages[0], /Work communication samples: 1/);
+    assert.match(infoMessages[0], /approval_required=yes/);
     assert.match(infoMessages[0], /direct, evidence-backed/);
     assert.match(infoMessages[1], /Pending AFS work approvals: 1/);
     assert.match(infoMessages[1], /approval_1: github\/post_pr_comment - Post drafted PR response/);
@@ -296,7 +310,7 @@ describe("registerCommands", () => {
       transport.toolCalls
         .filter((call) => call.name.startsWith("work."))
         .map((call) => call.name),
-      ["work.communication.guide", "work.approvals.list"],
+      ["work.communication.preflight", "work.approvals.list"],
     );
   });
 });

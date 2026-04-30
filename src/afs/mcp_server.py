@@ -452,6 +452,35 @@ def _tool_work_communication_guide(arguments: dict[str, Any], manager: AFSManage
     return summary
 
 
+def _load_personal_context_for_work(arguments: dict[str, Any]) -> Any | None:
+    personal_mode = arguments.get("personal_mode")
+    if not isinstance(personal_mode, str) or not personal_mode.strip():
+        return None
+    from .personal_context import load_personal_context
+
+    raw_root = arguments.get("personal_context_root")
+    return load_personal_context(
+        personal_mode.strip(),
+        context_root=Path(raw_root).expanduser() if isinstance(raw_root, str) and raw_root.strip() else None,
+    )
+
+
+def _tool_work_communication_preflight(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    store, context_path = _work_store(arguments, manager)
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    approval_limit = _coerce_int(arguments.get("approval_limit"), default=10, minimum=1, maximum=100)
+    person_id = arguments.get("person_id")
+    purpose = arguments.get("purpose")
+    return store.communication_preflight(
+        person_id=person_id if isinstance(person_id, str) and person_id.strip() else None,
+        purpose=purpose if isinstance(purpose, str) and purpose.strip() else None,
+        limit=limit,
+        approval_limit=approval_limit,
+        personal_context=_load_personal_context_for_work(arguments),
+        context_path=context_path,
+    )
+
+
 def _tool_work_approvals_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     store, context_path = _work_store(arguments, manager)
     limit = _coerce_int(arguments.get("limit"), default=50, minimum=1, maximum=100)
@@ -2443,6 +2472,28 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_work_communication_guide,
+        ),
+        MCPToolDefinition(
+            name="work.communication.preflight",
+            description=(
+                "Run the mandatory work-writing preflight: style evidence, optional opt-in "
+                "personal context, pending approvals, and explicit approval guardrails. "
+                "This never executes an external write."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "person_id": {"type": "string"},
+                    "purpose": {"type": "string"},
+                    "limit": {"type": "integer", "default": 20},
+                    "approval_limit": {"type": "integer", "default": 10},
+                    "personal_mode": {"type": "string"},
+                    "personal_context_root": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_work_communication_preflight,
         ),
         MCPToolDefinition(
             name="work.approvals.list",

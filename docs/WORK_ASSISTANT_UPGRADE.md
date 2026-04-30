@@ -67,10 +67,12 @@ compact work-assistant summary. Client wrappers also export:
 
 Keep the default tool surface small. Agents should use AFS context and work
 commands first; domain MCPs and connector tools are opt-in for the active task.
-For work-context writing, inspect `afs work communication guide --path .` (or
-MCP `work.communication.guide`) plus personal-context/scratchpad evidence
-before matching the user's tone. Draft locally first and ask for explicit
-approval before posting or submitting externally on the user's behalf.
+For work-context writing, run `afs work communication preflight --path .` (or
+MCP `work.communication.preflight`) so agents inspect stored communication
+samples, optional opt-in personal context, scratchpad/history evidence, and
+pending approvals before matching the user's tone. Draft locally first and ask
+for explicit approval before posting or submitting externally on the user's
+behalf.
 Successfully applied approved communication writes automatically seed future
 communication samples; dry-runs and failed executions do not.
 
