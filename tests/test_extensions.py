@@ -29,6 +29,9 @@ def test_discover_and_load_extension_manifest(tmp_path: Path) -> None:
         "model_registries = []\n"
         "agent_modules = [\"workspace_adapter_test.agents\"]\n"
         "\n"
+        "[manager]\n"
+        "actions = [\"afs status\"]\n"
+        "\n"
         "[mcp_tools]\n"
         "module = \"workspace_adapter_test.mcp\"\n"
         "factory = \"register_mcp_tools\"\n"
@@ -50,6 +53,7 @@ def test_discover_and_load_extension_manifest(tmp_path: Path) -> None:
     assert (ext / "knowledge").resolve() in manifest.knowledge_mounts
     assert (ext / "skills").resolve() in manifest.skill_roots
     assert manifest.agent_modules == ["workspace_adapter_test.agents"]
+    assert manifest.manager_actions == ["afs status"]
     assert manifest.mcp_tools_module == "workspace_adapter_test.mcp"
     assert manifest.mcp_tools_factory == "register_mcp_tools"
     assert manifest.mcp_server_module == "workspace_adapter_test.server"

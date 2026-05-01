@@ -1088,6 +1088,14 @@ def test_context_status_and_diff_tools(tmp_path: Path, monkeypatch) -> None:
     assert status_structured["index"]["enabled"] is True
     assert status_structured["index"]["has_entries"] is True
     assert status_structured["index"]["total_entries"] >= 1
+    assert status_structured["discovery_path"]["default_mcp_tools"] == [
+        "context.status",
+        "context.query",
+        "context.read",
+        "context.list",
+        "context.write",
+    ]
+    assert "session.pack" in status_structured["discovery_path"]["do_not_default"]
 
     note_path.write_text("updated note", encoding="utf-8")
     added_path = notes_dir / "extra.md"

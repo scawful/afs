@@ -20,6 +20,7 @@ _TOP_LEVEL_ORDER = [
     "session",
     "setup",
     "guide",
+    "manager",
     "work",
     "workspace",
     "graph",
@@ -52,6 +53,7 @@ _TOP_LEVEL_COLORS = {
     "session": "1;32",
     "setup": "1;36",
     "guide": "1;36",
+    "manager": "1;36",
     "work": "1;36",
     "workspace": "1;32",
     "graph": "1;32",
@@ -172,6 +174,7 @@ def render_default_help(parser: argparse.ArgumentParser, config: AFSConfig | Non
         _format_list(
             [
                 _cmd("afs status"),
+                _cmd("afs manager"),
                 _cmd("afs setup"),
                 _cmd("afs guide context"),
                 _cmd("afs work"),
@@ -203,6 +206,7 @@ def render_default_help(parser: argparse.ArgumentParser, config: AFSConfig | Non
     lines.extend(
         _format_list(
             [
+                f"{_cmd('afs-manager')}  # Python GUI manager",
                 f"{_cmd('afs-studio')}  # build + run",
                 f"{_cmd('afs-studio-build')}  # build only",
                 f"Use {_cmd('afs studio alias')} to print shell aliases.",

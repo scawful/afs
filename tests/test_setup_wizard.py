@@ -96,6 +96,7 @@ def test_setup_command_json_is_noninteractive(monkeypatch, tmp_path: Path, capsy
     assert '"workspace"' in out
     assert '"steps"' in out
     assert "install-shell" in out
+    assert "manager open" in out
 
 
 def test_parser_registers_setup_and_guide(monkeypatch, tmp_path: Path) -> None:
@@ -117,3 +118,13 @@ def test_parser_registers_setup_and_guide(monkeypatch, tmp_path: Path) -> None:
     assert guide.command == "guide"
     assert guide.topic == "shell"
     assert hasattr(guide, "func")
+
+    manager = parser.parse_args(["manager", "snapshot", "--json"])
+    assert manager.command == "manager"
+    assert manager.manager_command == "snapshot"
+    assert hasattr(manager, "func")
+
+    manager_open = parser.parse_args(["manager", "--json"])
+    assert manager_open.command == "manager"
+    assert manager_open.manager_command is None
+    assert manager_open._allow_missing_subcommand is True

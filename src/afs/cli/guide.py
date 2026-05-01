@@ -21,8 +21,9 @@ GUIDES: dict[str, GuideTopic] = {
     "start": GuideTopic(
         name="start",
         title="Getting Started",
-        summary="Set up AFS, check health, and learn where context lives.",
+        summary="Open the manager, set up AFS, and learn where context lives.",
         commands=[
+            ("afs manager", "open the friendly Python GUI manager"),
             ("afs setup", "guided setup wizard"),
             ("afs status", "show the active context, mounts, and index state"),
             ("afs guide context", "context root and mount workflow"),
@@ -51,6 +52,22 @@ GUIDES: dict[str, GuideTopic] = {
             "Use a shared context root when a managed workspace cannot contain .context.",
         ],
     ),
+    "manager": GuideTopic(
+        name="manager",
+        title="AFS Manager",
+        summary="Use the Python GUI for setup, tasks, clients, and extension hooks.",
+        commands=[
+            ("afs manager", "open the GUI for the current workspace"),
+            ("afs manager snapshot --json", "print the same read model without a GUI"),
+            ("afs manager open --path ~/src/project", "open the manager for a project"),
+            ("afs-manager", "launcher shortcut installed from the repo scripts directory"),
+        ],
+        notes=[
+            "The manager is the normie-friendly setup surface; advanced harnesses can stay opinionated.",
+            "Project .gemini/.claude/.codex/.opencode files are inspected without requiring agents to know every config format.",
+            "Extensions can expose manager actions with a [manager] actions list in extension.toml.",
+        ],
+    ),
     "shell": GuideTopic(
         name="shell",
         title="Shell Integration",
@@ -77,13 +94,14 @@ GUIDES: dict[str, GuideTopic] = {
         title="MCP Setup",
         summary="Expose AFS context tools to MCP-aware clients.",
         commands=[
+            ("afs manager", "inspect .gemini/.claude/.codex project setup"),
             ("afs mcp serve", "run the AFS stdio MCP server"),
             ("afs gemini setup --scope project", "register AFS for Gemini CLI"),
             ("afs claude setup --path .", "register AFS for Claude-compatible settings"),
             ("afs guide google-workspace", "optional Google Workspace helper setup"),
         ],
         notes=[
-            "Keep the default MCP surface small: context, query, status, read/write/list, diff, rebuild, handoff.",
+            "Keep the default MCP surface small: status, query, read, write, and list.",
             "Add organization-specific MCP servers in the client config that owns those credentials.",
         ],
     ),
@@ -108,6 +126,7 @@ GUIDES: dict[str, GuideTopic] = {
         title="Agents and Background Work",
         summary="Use background jobs when the output is independently reviewable.",
         commands=[
+            ("afs manager", "browse tasks, client config, and extension hooks"),
             ("afs agent-hooks status --path .", "show hooks, worker status, and next commands"),
             ("afs agent-jobs status --path .", "queue and watchdog summary"),
             ("afs agent-jobs inbox --path .", "review completed, failed, and blocked jobs"),
@@ -124,6 +143,7 @@ ALIASES = {
     "getting-started": "start",
     "workspace": "context",
     "contexts": "context",
+    "gui": "manager",
     "completion": "shell",
     "autocomplete": "shell",
     "google": "google-workspace",
@@ -185,6 +205,7 @@ def _render_menu() -> str:
             "",
             _section("Examples"),
             f"  {_cmd('afs guide context')}",
+            f"  {_cmd('afs manager')}",
             f"  {_cmd('afs guide shell')}",
             f"  {_cmd('afs setup')}",
         ]
@@ -207,5 +228,9 @@ def guide_command(args: argparse.Namespace) -> int:
 
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("guide", help="Show friendly workflow guides.")
-    parser.add_argument("topic", nargs="?", help="Topic: start, context, shell, mcp, google-workspace, agents.")
+    parser.add_argument(
+        "topic",
+        nargs="?",
+        help="Topic: start, manager, context, shell, mcp, google-workspace, agents.",
+    )
     parser.set_defaults(func=guide_command)

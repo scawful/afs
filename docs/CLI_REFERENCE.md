@@ -13,6 +13,7 @@ Also supported once installed into the active environment:
 ## Quickstart
 
 - `./scripts/afs`
+- `./scripts/afs manager`
 - `./scripts/afs setup`
 - `./scripts/afs guide`
 - `./scripts/afs help context`
@@ -135,6 +136,33 @@ unless `AFS_CLIENT_RECORD_RUNS=0` is set. MCP exposes the same surfaces through
 `agent.manifest.show`, `agent.run.*`, and `agent.job.*` tools, including
 `agent.job.status` for the watchdog payload, `agent.job.inbox/review/promote/archive`
 for review handling, and `agent.job.seed` for safe maintenance job seeding.
+
+## GUI Manager
+
+```bash
+./scripts/afs manager
+./scripts/afs manager open --path ~/src/project-a
+./scripts/afs manager snapshot --path ~/src/project-a --json
+./scripts/afs-manager
+```
+
+`manager` launches the friendly Python GUI surface for normal users. It
+summarizes context health, mount counts, task queue state, project client
+config like `.gemini/settings.json`, enabled extensions, extension hooks, and
+suggested setup commands. The `snapshot` form returns the same read model
+without opening a window.
+
+The manager and `context.status` both expose the same deterministic agent
+discovery path: status, query, exact read/list, scratchpad write, then named
+CLI/slash-command routes for heavier flows. This keeps agents proactive without
+forcing the whole AFS catalog into their first tool choice.
+
+Extensions can add manager-visible commands with:
+
+```toml
+[manager]
+actions = ["afs status", "afs tasks list --path ."]
+```
 
 ## Guided Setup
 

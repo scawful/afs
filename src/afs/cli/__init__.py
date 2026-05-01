@@ -36,6 +36,7 @@ from . import (
     gemini,
     guide,
     gws_cli,
+    manager_gui,
     mcp,
     personal,
     profile,
@@ -215,6 +216,7 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
     # Register guided setup and workflow guides early so they are easy to find.
     setup_wizard.register_parsers(subparsers)
     guide.register_parsers(subparsers)
+    manager_gui.register_parsers(subparsers)
 
     # Register approvals commands
     approvals.register_parsers(subparsers)

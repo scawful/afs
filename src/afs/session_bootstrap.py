@@ -29,6 +29,73 @@ _MAX_TEXT_CHARS = 1500
 _MAX_LIST_ITEMS = 8
 
 
+def build_agent_discovery_path(context_path: Path) -> dict[str, Any]:
+    """Return the deterministic, low-noise AFS discovery path for agents."""
+    context = context_path.expanduser().resolve()
+    return {
+        "principle": "Start with the smallest read-only context surface, then route richer intents through named CLI or slash-command flows.",
+        "default_mcp_tools": [
+            "context.status",
+            "context.query",
+            "context.read",
+            "context.list",
+            "context.write",
+        ],
+        "steps": [
+            {
+                "step": "status",
+                "tool": "context.status",
+                "when": "first AFS touch in a workspace",
+                "next": "continue if mounts are healthy; repair only when health reports a concrete issue",
+            },
+            {
+                "step": "query",
+                "tool": "context.query",
+                "when": "the user asks for context, history, scratchpad notes, or prior decisions",
+                "next": "read exact sources only when the query result points to them",
+            },
+            {
+                "step": "read",
+                "tool": "context.read/context.list",
+                "when": "a specific scratchpad, handoff, knowledge, or .context file is relevant",
+                "next": "keep memory and knowledge read-only unless explicitly requested",
+            },
+            {
+                "step": "scratchpad",
+                "tool": "context.write",
+                "when": "a local note, checkpoint, or handoff draft is explicitly useful",
+                "next": f"default writes under {context / 'scratchpad'}; keep memory/knowledge deliberate",
+            },
+            {
+                "step": "route",
+                "tool": "CLI/slash command",
+                "when": "tasks, handoffs, work preflight, verification, refresh, repair, or session packs are needed",
+                "next": "use the named command instead of expanding the MCP catalog",
+            },
+        ],
+        "routed_flows": {
+            "tasks": "afs tasks list --path <workspace>",
+            "handoff": "afs session handoff list --path <workspace> --json",
+            "work_preflight": "afs work communication preflight --path <workspace> --json",
+            "verify": "afs verify plan --path <workspace> --json",
+            "refresh": "afs context repair --path <workspace> --dry-run --json",
+            "pack": "afs session pack --path <workspace> --json",
+            "human_manager": "afs manager open --path <workspace>",
+        },
+        "do_not_default": [
+            "session.pack",
+            "context.diff",
+            "context.freshness",
+            "task.*",
+            "handoff.*",
+            "memory.*",
+            "agent.*",
+            "events.*",
+            "embeddings.*",
+        ],
+    }
+
+
 def _estimate_tokens(text: str) -> int:
     """Approximate token count cheaply for bootstrap budgeting."""
     if not text or not text.strip():
@@ -99,6 +166,7 @@ def collect_context_status(manager: AFSManager, context_path: Path) -> dict[str,
         "mount_health": mount_health,
         "actions": list(mount_health.get("suggested_actions", [])),
         "index": index_info,
+        "discovery_path": build_agent_discovery_path(context_path),
     }
 
 

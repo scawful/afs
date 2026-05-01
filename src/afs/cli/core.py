@@ -1849,6 +1849,7 @@ def status_command(args: argparse.Namespace) -> int:
     from ..health.afs_status import _maintenance_health
     from ..manager import AFSManager
     from ..models import MountType
+    from ..session_bootstrap import build_agent_discovery_path
 
     start_dir = Path(args.start_dir).expanduser().resolve() if args.start_dir else None
     root = find_root(start_dir)
@@ -1908,6 +1909,7 @@ def status_command(args: argparse.Namespace) -> int:
             "mount_health": mount_health,
             "index": index_stats,
             "maintenance": maintenance,
+            "discovery_path": build_agent_discovery_path(context_root),
         }
         print(json.dumps(payload, indent=2))
         return 0
@@ -2010,6 +2012,9 @@ def status_command(args: argparse.Namespace) -> int:
         print()
         for hint in hints:
             print(_hint(hint))
+
+    print()
+    print(_hint("discovery: context.status -> context.query -> context.read/list -> routed CLI flows"))
 
     return 0
 

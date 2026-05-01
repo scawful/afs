@@ -57,6 +57,20 @@ extension_repo_roots = ["~/src/lab"]
 `src/` is added to the import path automatically when present, so src-layout
 packages do not need to be copied into `lab/afs/extensions/`.
 
+Extensions can also expose manager-visible actions without becoming part of
+core AFS:
+
+```toml
+[manager]
+actions = [
+  "afs gws status",
+  "afs work communication preflight --path .",
+]
+```
+
+The Python `afs manager` GUI lists those actions next to the extension and
+keeps execution explicit.
+
 ## Current Scawful/Zelda Boundary
 
 - Core docs/code: `lab/afs/`

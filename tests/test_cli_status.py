@@ -100,6 +100,8 @@ def test_status_command_json_reports_index_and_mount_counts(
     assert payload["index"]["has_entries"] is True
     assert payload["index"]["total_entries"] >= 1
     assert "maintenance" in payload
+    assert payload["discovery_path"]["steps"][0]["tool"] == "context.status"
+    assert payload["discovery_path"]["routed_flows"]["human_manager"].startswith("afs manager")
 
 
 def test_context_index_rebuild_is_visible_to_fresh_connections(tmp_path: Path) -> None:

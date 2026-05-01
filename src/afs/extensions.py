@@ -29,6 +29,7 @@ class ExtensionManifest:
     agent_modules: list[str] = field(default_factory=list)
     policies: list[str] = field(default_factory=list)
     hooks: dict[str, list[str]] = field(default_factory=dict)
+    manager_actions: list[str] = field(default_factory=list)
     mcp_tools_module: str = ""
     mcp_tools_factory: str = "register_mcp_tools"
     mcp_server_module: str = ""
@@ -299,6 +300,11 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
             if isinstance(event, str):
                 hooks[event] = _as_str_list(commands)
 
+    manager_raw = raw.get("manager")
+    manager_actions: list[str] = []
+    if isinstance(manager_raw, dict):
+        manager_actions = _as_str_list(manager_raw.get("actions"))
+
     mcp_tools_module = ""
     mcp_tools_factory = "register_mcp_tools"
     mcp_tools_raw = raw.get("mcp_tools")
@@ -342,6 +348,7 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
         agent_modules=_as_str_list(raw.get("agent_modules")),
         policies=_as_str_list(raw.get("policies")),
         hooks=hooks,
+        manager_actions=manager_actions,
         mcp_tools_module=mcp_tools_module,
         mcp_tools_factory=mcp_tools_factory,
         mcp_server_module=mcp_server_module,
