@@ -209,20 +209,16 @@ WORKFLOW_DEFINITIONS = {
 TOOL_PROFILE_DEFINITIONS = {
     "default": SessionToolProfileDefinition(
         name="default",
-        summary="Balanced AFS surface for normal repo work.",
+        summary="Minimal context bridge for normal repo work.",
         preferred_surfaces=(
-            "session.bootstrap",
-            "session.pack",
-            "operator.digest",
             "context.status",
-            "context.diff",
             "context.query",
             "context.read",
             "context.list",
-            "handoff.create",
+            "context.write",
         ),
         notes=(
-            "Escalate to narrower tool profiles when the task is clearly read-only or repair-oriented.",
+            "Use the CLI, prompts, and session framework for packs, work preflight, handoffs, repair, and verification instead of exposing them as default tools.",
         ),
     ),
     "context_readonly": SessionToolProfileDefinition(

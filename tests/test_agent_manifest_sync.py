@@ -81,3 +81,69 @@ def test_agent_manifest_sync_replaces_skill_symlink_with_copy(tmp_path: Path) ->
     copied = skill_root / "handoff-writer"
     assert not copied.is_symlink()
     assert (copied / "SKILL.md").exists()
+
+
+def test_agent_manifest_sync_copies_slash_command_pack(tmp_path: Path) -> None:
+    canonical = tmp_path / "commands"
+    canonical.mkdir()
+    (canonical / "afs-status.md").write_text(
+        "---\ndescription: status\n---\n\nUse context.status.\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "opencode" / "command"
+    data = {
+        "version": 1,
+        "paths": {},
+        "harnesses": [{"name": "hcode", "command_roots": [str(root)], "mcp_servers": []}],
+        "slash_command_packs": [
+            {
+                "name": "afs-opencode",
+                "canonical_path": str(canonical),
+                "targets": ["hcode"],
+            }
+        ],
+        "mcp_servers": [],
+    }
+
+    dry = sync_manifest(data)
+    assert dry[0].action == "copy_slash_command_pack"
+    assert dry[0].status == "would_create"
+    assert not (root / "afs-status.md").exists()
+
+    applied = sync_manifest(data, apply=True)
+    assert applied[0].status == "synced"
+    assert (root / "afs-status.md").read_text(encoding="utf-8").endswith("Use context.status.\n")
+
+    current = sync_manifest(data)
+    assert current[0].status == "up_to_date"
+
+
+def test_agent_manifest_sync_preserves_custom_slash_commands(tmp_path: Path) -> None:
+    canonical = tmp_path / "commands"
+    canonical.mkdir()
+    (canonical / "afs-status.md").write_text("canonical\n", encoding="utf-8")
+    root = tmp_path / "opencode" / "command"
+    root.mkdir(parents=True)
+    existing = root / "afs-status.md"
+    existing.write_text("custom\n", encoding="utf-8")
+    data = {
+        "version": 1,
+        "paths": {},
+        "harnesses": [{"name": "hcode", "command_roots": [str(root)], "mcp_servers": []}],
+        "slash_command_packs": [
+            {
+                "name": "afs-opencode",
+                "canonical_path": str(canonical),
+                "targets": ["hcode"],
+                "overwrite": False,
+            }
+        ],
+        "mcp_servers": [],
+    }
+
+    dry = sync_manifest(data)
+    assert dry[0].status == "customized"
+
+    applied = sync_manifest(data, apply=True)
+    assert applied[0].status == "customized"
+    assert existing.read_text(encoding="utf-8") == "custom\n"

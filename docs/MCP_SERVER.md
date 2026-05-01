@@ -170,19 +170,32 @@ In Antigravity, open `MCP Servers -> Manage MCP Servers -> View raw config`, the
 
 ## Tools
 
-Recommended default MCP/profile surface:
+Default `tools/list` is intentionally tiny. It exposes only the core context
+bridge; everything else should come from prompts, CLI hints, or an explicit
+full-catalog/debug launch:
 
-- `afs.session.bootstrap`
 - `context.status`
 - `context.query`
-- `work.communication.preflight`
-- `work.approvals.list`
 - `context.read`
 - `context.write`
 - `context.list`
-- `context.diff`
-- `context.index.rebuild`
-- `handoff.create`
+
+`afs.session.bootstrap`, `afs.session.pack`, and `afs.scratchpad.review` remain
+available as prompts from `prompts/list`, not as tools. Work preflight,
+approvals, repair, handoff, and verification should normally route through the
+AFS CLI/framework hints rather than the default MCP tool catalog. For debugging,
+migration, or a client that really needs every registered tool, start the MCP
+server with the full catalog:
+
+```bash
+<afs-root>/scripts/afs mcp serve --tool-catalog full
+# or:
+AFS_MCP_TOOL_CATALOG=full <afs-root>/scripts/afs mcp serve
+```
+
+`AFS_ALLOWED_TOOLS` and `AFS_TOOL_PROFILE` are still stricter permission
+filters. They narrow both `tools/list` and `tools/call`, even when the catalog
+mode is `full`.
 
 Preferred agent-facing file operations:
 
@@ -207,7 +220,6 @@ Optional tools for explicit workflows:
 - `context.mount`
 - `context.unmount`
 - `context.repair`
-- `session.pack`
 - `work.communication.list`
 - `work.communication.add`
 - `work.communication.guide`
@@ -231,6 +243,9 @@ Optional tools for explicit workflows:
 
 `context.query` uses a SQLite index with FTS ranking when available, and falls
 back to `LIKE` matching if FTS is unavailable on the host SQLite build.
+`context.query` and the `context.*`/`fs.*` file tools enforce configured
+`never_index`/`never_export` sensitivity rules before touching or exporting
+matching paths or file contents.
 `context.write`/`fs.write`, `context.delete`/`fs.delete`, and
 `context.move`/`fs.move` attempt incremental index sync so query results stay
 fresh without a full rebuild. With `auto_index=true` (default),
@@ -275,10 +290,11 @@ project tree before `.context` exists yet.
 
 `session.pack` / `afs.session.pack` is the explicit follow-on surface for
 model-specific working context. It builds a token-budgeted pack for Gemini,
-Claude, Codex, or generic clients, respects `never_export` sensitivity rules
-when including indexed content, and reuses the stored pack artifact on repeated
-calls when the bootstrap snapshot and pack inputs have not changed. The prompt
-and tool forms also accept optional `task`, `workflow`, and `tool_profile`
+Claude, Codex, or generic clients, respects `never_index`/`never_export`
+sensitivity rules when including indexed content, applies `never_embed` to
+embedding hits, and reuses the stored pack artifact on repeated calls when the
+bootstrap snapshot, pack inputs, and sensitivity rules have not changed. The
+prompt and tool forms also accept optional `task`, `workflow`, and `tool_profile`
 arguments so callers can encode a short execution contract and put the explicit
 task at the end of the rendered pack. Returned pack JSON includes
 `cache.prefix_hash` for stable-prefix cache experiments in adapters. `pack_mode`
@@ -286,7 +302,9 @@ supports `focused`, `retrieval`, and `full_slice` shaping for query-first vs
 broader long-context packs. The `execution_profile` block now also carries a
 prompt-only loop policy plus retry guidance so the host CLI keeps session
 control while AFS still suggests narrower retries, schema-bound reruns, or
-model escalation paths.
+model escalation paths. Guidance is rendered once as fixed pack overhead, not
+again as a selectable section, so query/embedding hits can displace generic
+session boilerplate in tight budgets.
 
 `afs://schemas/<name>` exposes compact response contracts for structured agent
 workflows. Built-in names currently include:

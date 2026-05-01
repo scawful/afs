@@ -59,6 +59,7 @@ def validate_manifest(data: dict[str, Any], *, check_paths: bool = False) -> lis
     harnesses = _as_list(data.get("harnesses"))
     skills = _as_list(data.get("skills"))
     mcp_servers = _as_list(data.get("mcp_servers"))
+    command_packs = _as_list(data.get("slash_command_packs"))
     harness_names = _name_set(harnesses)
     skill_names = _name_set(skills)
     mcp_names = _name_set(mcp_servers)
@@ -94,6 +95,21 @@ def validate_manifest(data: dict[str, Any], *, check_paths: bool = False) -> lis
                     ManifestIssue("warning", f"skill {name or index} targets unknown harness {target}")
                 )
 
+    for index, pack in enumerate(command_packs, start=1):
+        if not isinstance(pack, dict):
+            issues.append(ManifestIssue("error", f"slash command pack entry {index} must be a table"))
+            continue
+        name = str(pack.get("name", "")).strip()
+        if not name:
+            issues.append(ManifestIssue("error", f"slash command pack entry {index} is missing name"))
+        if not str(pack.get("canonical_path", "")).strip():
+            issues.append(ManifestIssue("error", f"slash command pack {name or index} is missing canonical_path"))
+        for target in _as_list(pack.get("targets")):
+            if str(target) not in harness_names:
+                issues.append(
+                    ManifestIssue("warning", f"slash command pack {name or index} targets unknown harness {target}")
+                )
+
     if check_paths:
         path_values: list[str] = []
         for value in paths.values():
@@ -103,10 +119,14 @@ def validate_manifest(data: dict[str, Any], *, check_paths: bool = False) -> lis
             if isinstance(harness, dict):
                 path_values.extend(str(p) for p in _as_list(harness.get("instructions")))
                 path_values.extend(str(p) for p in _as_list(harness.get("skill_roots")))
+                path_values.extend(str(p) for p in _as_list(harness.get("command_roots")))
                 path_values.extend(str(p) for p in _as_list(harness.get("manifest_exports")))
         for skill in skills:
             if isinstance(skill, dict) and isinstance(skill.get("canonical_path"), str):
                 path_values.append(str(skill["canonical_path"]))
+        for pack in command_packs:
+            if isinstance(pack, dict) and isinstance(pack.get("canonical_path"), str):
+                path_values.append(str(pack["canonical_path"]))
         for raw in path_values:
             if raw.startswith("afs ") or raw.startswith("source "):
                 continue
@@ -121,6 +141,7 @@ def summarize_manifest(data: dict[str, Any]) -> dict[str, Any]:
     harnesses = _as_list(data.get("harnesses"))
     skills = _as_list(data.get("skills"))
     mcp_servers = _as_list(data.get("mcp_servers"))
+    command_packs = _as_list(data.get("slash_command_packs"))
     return {
         "version": data.get("version"),
         "last_reviewed": data.get("last_reviewed"),
@@ -128,6 +149,7 @@ def summarize_manifest(data: dict[str, Any]) -> dict[str, Any]:
         "paths": data.get("paths") if isinstance(data.get("paths"), dict) else {},
         "harnesses": [item.get("name") for item in harnesses if isinstance(item, dict)],
         "skills": [item.get("name") for item in skills if isinstance(item, dict)],
+        "slash_command_packs": [item.get("name") for item in command_packs if isinstance(item, dict)],
         "mcp_servers": [item.get("name") for item in mcp_servers if isinstance(item, dict)],
     }
 
@@ -136,6 +158,7 @@ def export_for_harness(data: dict[str, Any], harness_name: str) -> dict[str, Any
     target = harness_name.strip()
     harnesses = [h for h in _as_list(data.get("harnesses")) if isinstance(h, dict)]
     skills = [s for s in _as_list(data.get("skills")) if isinstance(s, dict)]
+    command_packs = [p for p in _as_list(data.get("slash_command_packs")) if isinstance(p, dict)]
     mcp_servers = [m for m in _as_list(data.get("mcp_servers")) if isinstance(m, dict)]
     harness = next((h for h in harnesses if str(h.get("name", "")) == target), None)
     if harness is None:
@@ -148,6 +171,11 @@ def export_for_harness(data: dict[str, Any], harness_name: str) -> dict[str, Any
             skill
             for skill in skills
             if target in {str(name) for name in _as_list(skill.get("targets"))}
+        ],
+        "slash_command_packs": [
+            pack
+            for pack in command_packs
+            if target in {str(name) for name in _as_list(pack.get("targets"))}
         ],
         "mcp_servers": [
             server for server in mcp_servers if str(server.get("name", "")) in server_names

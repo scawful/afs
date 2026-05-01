@@ -19,6 +19,16 @@ cd ~/src/lab/afs
 scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
 ```
 
+For a work-machine refresh, keep the default catalog slim and let the setup
+script sync hcode/OpenCode commands plus the usual Codex/Claude/Gemini harness
+state:
+
+```bash
+cd ~/src/lab/afs
+scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode
+scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode --apply
+```
+
 The script keeps dry-run mode as the default. `--apply --all` performs the
 normal local upgrade:
 
@@ -30,6 +40,8 @@ normal local upgrade:
   `claude`, `gemini`, and `hcode`
 - installs the background agent-job LaunchAgent
 - writes project-scoped Claude and Gemini MCP setup
+- syncs the default hcode/OpenCode AFS slash-command pack when hcode setup is
+  requested
 - prints the exact status, inbox, and bootstrap commands to run next
 
 Narrow examples:
@@ -44,6 +56,9 @@ scripts/afs-upgrade-agent-setup --workspace ~/src/project-a --apply \
 
 # Inspect hooks and context health without writing anything.
 scripts/afs-upgrade-agent-setup --workspace ~/src/project-a --skip-venv
+
+# Preview hcode/OpenCode command sync and bootstrap smoke.
+scripts/afs-upgrade-agent-setup --workspace ~/src/project-a --setup-hcode
 ```
 
 ## Minimal Agent Contract
@@ -52,18 +67,19 @@ An AFS-aware harness should do this at session start:
 
 1. Run `afs session bootstrap --json`, or call MCP prompt
    `afs.session.bootstrap`.
-2. If bootstrap is unavailable, read MCP `context.status`, `context.diff`, and
-   then query with `context.query`.
+2. If bootstrap is unavailable, read MCP `context.status`, then query with
+   `context.query`; use `context.read`/`context.list` for scratchpad follow-up.
 3. Prefer `context.query` before asking the user for context that may already be
    in `scratchpad`, `memory`, or `knowledge`.
 4. Write routine working notes to `scratchpad` only.
 5. Treat `memory` and `knowledge` as deliberate durable updates.
-6. Create a handoff with `handoff.create` or a scratchpad handoff file when work
-   spans turns, agents, or tools.
+6. Create a scratchpad handoff file when work spans turns, agents, or tools.
+   Use `handoff.create` only in a full-catalog/client-specific flow.
 7. Run `afs work --path . --json` when the task involves docs, sheets, tickets,
    planning, people, or review routing.
-8. For work-context writing, run `afs work communication preflight` or MCP
-   `work.communication.preflight` before matching the user's tone.
+8. For work-context writing, run `afs work communication preflight` before
+   matching the user's tone. Use MCP `work.communication.preflight` only when a
+   full-catalog client explicitly exposes it.
 9. For external writes, create or reuse an AFS work approval request and execute
    exactly one approved action with `afs work approvals execute`.
 
@@ -75,18 +91,17 @@ surfaces for tasks that explicitly need them.
 
 Keep the default MCP set small:
 
-- `afs.session.bootstrap`
 - `context.status`
 - `context.query`
-- `work.communication.preflight`
-- `work.communication.guide`
-- `work.approvals.list`
 - `context.read`
 - `context.write`
 - `context.list`
-- `context.diff`
-- `context.index.rebuild`
-- `handoff.create`
+
+`afs.session.bootstrap`, `afs.session.pack`, and scratchpad review are prompts,
+not default `tools/list` entries. Work preflight, approvals, repair, handoff,
+and verification should route through CLI/framework hints unless a client is
+explicitly launched with `afs mcp serve --tool-catalog full` or
+`AFS_MCP_TOOL_CATALOG=full`.
 
 Optional surfaces should be profile-gated or harness-specific:
 
@@ -104,12 +119,20 @@ Optional surfaces should be profile-gated or harness-specific:
 roots. It intentionally does not rely on symlinks, because not every harness
 loads symlinked skill folders consistently.
 
+The same manifest sync can copy default OpenCode slash-command packs into
+harness command roots such as `~/src/lab/halext-code/.opencode/command`. These
+commands keep models on the slim MCP surface by default and route heavier
+actions through CLI/framework commands. Command packs are additive by default:
+existing customized command files are reported as `customized` and left
+untouched unless a pack explicitly sets `overwrite = true`.
+
 Current shared skills are declared in `configs/agent_manifest.toml`. Refresh
 them with:
 
 ```bash
 cd ~/src/lab/afs
 scripts/afs agent-manifest sync --apply
+scripts/afs agent-manifest sync --harness hcode --apply
 ```
 
 Validate after editing skills or manifest entries:

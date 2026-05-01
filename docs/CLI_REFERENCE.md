@@ -55,8 +55,11 @@ Also supported once installed into the active environment:
 ./scripts/afs agent-manifest validate
 ./scripts/afs agent-manifest export codex
 ./scripts/afs agent-manifest sync --apply
+./scripts/afs agent-manifest sync --harness hcode --apply
 ./scripts/afs-upgrade-agent-setup --workspace ~/src
 ./scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
+./scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode
+./scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode --apply
 
 ./scripts/afs agent-hooks show
 ./scripts/afs agent-hooks install-shell --apply
@@ -80,12 +83,19 @@ job_id="$(./scripts/afs agent-jobs create "Review stale instructions" --prompt "
 ```
 
 `agent-manifest` reads `configs/agent_manifest.toml`, the repo-owned source of
-truth for harnesses, shared skills, MCP servers, and startup hints.
+truth for harnesses, shared skills, slash-command packs, MCP servers, and
+startup hints.
 `afs-upgrade-agent-setup` wraps the common local upgrade path and stays dry-run
-unless `--apply` is provided.
+unless `--apply` is provided. Use `--work --setup-hcode` to preview or apply
+the work-machine path that syncs Codex/Claude/Gemini/hcode manifest state,
+OpenCode slash commands, shell hooks, and index freshness without making the
+MCP catalog noisy.
 `agent-manifest sync` copies manifest-declared shared skills into harness skill
-roots and writes per-harness export JSON. It uses real copied directories, not
-symlinks.
+roots, copies slash-command packs into harness command roots, and writes
+per-harness export JSON. It uses real copied directories/files, not symlinks.
+Slash-command packs are additive by default: existing customized command files
+are reported as `customized` and are not overwritten unless the manifest pack
+opts into `overwrite = true`.
 `agent-hooks install-shell` adds an idempotent block to the shell profile that
 sources `afs-shell-init.sh` and `afs-agent-hooks.sh`, making normal generic
 harness commands such as `codex`, `claude`, `gemini`, and `hcode` route
@@ -113,8 +123,8 @@ stale running jobs, and destructive opt-in blockers. Use `agent-jobs review
 `agent-jobs seed` idempotently queues safe report-only background jobs. The
 `repo-maintenance` profile creates daily-deduped stale docs/reference, skill
 drift, MCP/tool drift, TODO/FIXME, verification suggestion, and uncommitted
-change review jobs. Client-session wrappers call this automatically by default;
-set `AFS_CLIENT_SEED_JOBS=0` or pass `--no-seed-jobs` to disable.
+change review jobs. Client-session wrappers do not seed these jobs by default;
+set `AFS_CLIENT_SEED_JOBS=1` or pass `--seed-jobs` to opt in.
 `agent-jobs work` claims queued jobs, runs a local command with
 `AFS_AGENT_JOB_*` environment variables, moves jobs to `done` or `failed`, and
 records an `agent-runs` entry.
@@ -351,10 +361,16 @@ durable memory, and indexed retrieval hits, then writes or reuses:
 - `.context/scratchpad/afs_agents/session_pack_<model>.json`
 - `.context/scratchpad/afs_agents/session_pack_<model>.md`
 
-`never_export` sensitivity rules are applied to indexed content included in the
-pack, so blocked paths do not leak into session exports. When the bootstrap
-snapshot and pack inputs have not changed, repeated calls reuse the stored
+`never_index`/`never_export` sensitivity rules are applied to indexed content
+included in the pack, and `never_embed` is applied to embedding hits, so blocked
+paths do not leak into session exports. When the bootstrap snapshot, pack
+inputs, and sensitivity rules have not changed, repeated calls reuse the stored
 artifact instead of rebuilding from scratch.
+
+Rendered packs keep model-control guidance as a single top-level block instead
+of duplicating it as a normal section. The selectable section budget accounts
+for that fixed guidance, and query/embedding hits are prioritized ahead of
+generic session boilerplate when a query is present.
 
 `session pack` now also accepts:
 
@@ -433,11 +449,11 @@ around the client process.
 - `AFS_SESSION_WORK_APPROVALS_HINT`
 - `AFS_SESSION_WORK_COMMUNICATION_HINT`
 
-Client-session wrappers also call `agent-jobs seed --profile repo-maintenance`
-by default. This queues report-only maintenance jobs with daily dedupe keys and
-skips existing open jobs. Set `AFS_CLIENT_SEED_JOBS=0`, a client-specific
-`AFS_<CLIENT>_SEED_JOBS=0`, or pass `--no-seed-jobs` to disable it.
-They also print the agent job inbox command at startup so completed background
+Client-session wrappers can call `agent-jobs seed --profile repo-maintenance`
+when opted in with `AFS_CLIENT_SEED_JOBS=1`, a client-specific
+`AFS_<CLIENT>_SEED_JOBS=1`, or `--seed-jobs`. This queues report-only
+maintenance jobs with daily dedupe keys and skips existing open jobs. Wrappers
+still print the agent job inbox command at startup so completed background
 output has an obvious review path.
 
 ## Training
@@ -652,17 +668,23 @@ AFS heuristic for avoiding explicit cache creation on tiny prefixes.
 ## MCP
 
 ```bash
-./scripts/afs mcp serve
+./scripts/afs mcp serve                             # slim tools/list catalog
+./scripts/afs mcp serve --tool-catalog full         # expose all registered tools
 ```
 
 Useful Gemini-oriented MCP operations:
 
 - `afs.session.bootstrap` for the full session-start packet
 - `context.query` for indexed path/content search
-- `context.diff` for “what changed since the last index build”
 - `context.status` for mount counts, mount health, profile, and index health
-- `context.repair` for provenance seeding, conservative source remapping, and stale index repair
-- `training.antigravity.status` for Antigravity capture/export readiness in editor integrations
+- `context.read`, `context.write`, and `context.list` for context file access
+
+The default MCP `tools/list` response is deliberately tiny so models do not
+have to choose among every administrative surface. Use the CLI/framework for
+session packs, work preflight, approvals, repair, handoff, verification,
+training, and diagnostics. Set `AFS_MCP_TOOL_CATALOG=full` or pass
+`--tool-catalog full` when debugging, migrating, or using a client that needs
+the legacy all-tools catalog.
 
 Workspace-root override:
 

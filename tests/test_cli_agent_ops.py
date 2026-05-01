@@ -83,10 +83,11 @@ def test_build_parser_includes_agent_ops_commands() -> None:
     assert args.command == "agent-manifest"
     assert hasattr(args, "func")
 
-    sync = parser.parse_args(["agent-manifest", "sync", "--apply", "--harness", "claude"])
+    sync = parser.parse_args(["agent-manifest", "sync", "--apply", "--harness", "claude", "--no-slash-commands"])
     assert sync.command == "agent-manifest"
     assert sync.apply is True
     assert sync.harness == ["claude"]
+    assert sync.no_slash_commands is True
 
     hooks = parser.parse_args(["agent-hooks", "install-shell", "--apply", "--helpers-only"])
     assert hooks.command == "agent-hooks"

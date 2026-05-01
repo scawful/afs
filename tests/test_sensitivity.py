@@ -8,7 +8,7 @@ from afs.embeddings import build_embedding_index
 from afs.manager import AFSManager
 from afs.models import MountType
 from afs.schema import AFSConfig, GeneralConfig, SensitivityConfig
-from afs.sensitivity import filtered_tree_copy, matches_path_rules
+from afs.sensitivity import SensitivityRuleSet, filtered_tree_copy, matches_path_rules
 
 
 def test_matches_path_rules_supports_relative_and_absolute(tmp_path: Path) -> None:
@@ -31,6 +31,30 @@ def test_matches_path_rules_supports_relative_and_absolute(tmp_path: Path) -> No
         relative_path="knowledge/private/note.md",
         patterns=["knowledge/public/*"],
     )
+
+
+def test_sensitivity_rule_set_reports_first_matching_relative_path(tmp_path: Path) -> None:
+    candidate = tmp_path / "knowledge" / "private" / "note.md"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("secret", encoding="utf-8")
+    rules = SensitivityRuleSet.from_patterns(["knowledge/private/*", "**/*.secret.md"])
+
+    match = rules.match(
+        candidate,
+        relative_paths=("private/note.md", "knowledge/private/note.md"),
+    )
+
+    assert match is not None
+    assert match.relative_path == "knowledge/private/note.md"
+    assert match.pattern == "knowledge/private/*"
+
+
+def test_sensitivity_rule_set_keeps_absolute_fallback(tmp_path: Path) -> None:
+    candidate = tmp_path / "note.secret.md"
+    candidate.write_text("secret", encoding="utf-8")
+    rules = SensitivityRuleSet.from_patterns(["*.secret.md"])
+
+    assert rules.blocked(candidate)
 
 
 def test_context_index_respects_never_index_rules(tmp_path: Path) -> None:

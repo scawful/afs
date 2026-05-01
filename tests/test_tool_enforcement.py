@@ -8,7 +8,12 @@ import pytest
 
 from afs.agent_scope import allowed_tools, assert_tool_allowed, is_tool_allowed
 from afs.manager import AFSManager
-from afs.mcp_server import _handle_request, build_mcp_registry
+from afs.mcp_server import (
+    DEFAULT_MCP_TOOL_CATALOG,
+    MCP_TOOL_CATALOG_ENV,
+    _handle_request,
+    build_mcp_registry,
+)
 from afs.schema import AFSConfig, GeneralConfig
 from afs.session_workflows import (
     TOOL_PROFILE_DEFINITIONS,
@@ -124,6 +129,7 @@ def _make_manager(tmp_path: Path) -> AFSManager:
 
 def test_tools_list_filtered_by_tool_profile(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("AFS_ALLOWED_TOOLS", raising=False)
+    monkeypatch.delenv(MCP_TOOL_CATALOG_ENV, raising=False)
     monkeypatch.setenv("AFS_TOOL_PROFILE", "context_readonly")
     manager = _make_manager(tmp_path)
     registry = build_mcp_registry(manager)
@@ -148,9 +154,13 @@ def test_tools_list_filtered_by_tool_profile(tmp_path: Path, monkeypatch) -> Non
     assert "context.write" not in tool_names
 
 
-def test_tools_list_unfiltered_without_profile(tmp_path: Path, monkeypatch) -> None:
+def test_tools_list_defaults_to_slim_catalog_without_profile(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     monkeypatch.delenv("AFS_ALLOWED_TOOLS", raising=False)
     monkeypatch.delenv("AFS_TOOL_PROFILE", raising=False)
+    monkeypatch.delenv(MCP_TOOL_CATALOG_ENV, raising=False)
     manager = _make_manager(tmp_path)
     registry = build_mcp_registry(manager)
 
@@ -162,9 +172,29 @@ def test_tools_list_unfiltered_without_profile(tmp_path: Path, monkeypatch) -> N
     tools = response["result"]["tools"]
     tool_names = {t["name"] for t in tools}
 
-    # Without a profile, all registered tools should appear
+    assert tool_names == DEFAULT_MCP_TOOL_CATALOG
+    assert "context.repair" not in tool_names
+    assert "session.pack" not in tool_names
+
+
+def test_tools_list_full_catalog_without_profile(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("AFS_ALLOWED_TOOLS", raising=False)
+    monkeypatch.delenv("AFS_TOOL_PROFILE", raising=False)
+    monkeypatch.setenv(MCP_TOOL_CATALOG_ENV, "full")
+    manager = _make_manager(tmp_path)
+    registry = build_mcp_registry(manager)
+
+    response = _handle_request(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        manager,
+        registry=registry,
+    )
+    tools = response["result"]["tools"]
+    tool_names = {t["name"] for t in tools}
+
     assert "context.repair" in tool_names
     assert "session.pack" in tool_names
+    assert "agent.spawn" in tool_names
 
 
 def test_tool_call_rejected_by_profile(tmp_path: Path, monkeypatch) -> None:

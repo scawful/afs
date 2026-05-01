@@ -16,7 +16,7 @@ from afs.context_pack import (
 )
 from afs.manager import AFSManager
 from afs.models import MountType
-from afs.schema import AFSConfig, GeneralConfig, SensitivityConfig
+from afs.schema import AFSConfig, GeneralConfig, SensitivityConfig, SessionPackCacheConfig
 
 
 # ---------------------------------------------------------------------------
@@ -29,6 +29,7 @@ def _make_manager(tmp_path: Path) -> AFSManager:
     config = AFSConfig(
         general=GeneralConfig(context_root=context_root),
         sensitivity=SensitivityConfig(never_export=[]),
+        session_pack_cache=SessionPackCacheConfig(cache_dir=tmp_path / "cache"),
     )
     manager = AFSManager(config=config)
     project_path = tmp_path / "project"
@@ -182,6 +183,55 @@ def test_cache_invalidation_when_bootstrap_content_changes(tmp_path: Path) -> No
         token_budget=400,
     )
     assert second["cache"]["hit"] is False
+
+
+def test_session_cache_invalidates_when_sensitivity_changes(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    cache_dir = tmp_path / "cache"
+    base_general = GeneralConfig(context_root=context_root)
+    cache_config = SessionPackCacheConfig(cache_dir=cache_dir)
+    manager = AFSManager(
+        config=AFSConfig(
+            general=base_general,
+            sensitivity=SensitivityConfig(never_export=[]),
+            session_pack_cache=cache_config,
+        )
+    )
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path, context_root=context_root)
+    knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    (knowledge_root / "private").mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "private" / "secret.md").write_text(
+        "private cache leak marker",
+        encoding="utf-8",
+    )
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE],
+        include_content=True,
+    )
+
+    kwargs = dict(
+        query="private cache",
+        task="Check sensitivity cache invalidation.",
+        model="codex",
+        token_budget=1000,
+        include_content=True,
+    )
+    first = build_context_pack(manager, context_root, **kwargs)
+    assert first["cache"]["hit"] is False
+    assert "private cache leak marker" in json.dumps(first)
+
+    restricted_manager = AFSManager(
+        config=AFSConfig(
+            general=base_general,
+            sensitivity=SensitivityConfig(never_index=["knowledge/private/*"]),
+            session_pack_cache=cache_config,
+        )
+    )
+    second = build_context_pack(restricted_manager, context_root, **kwargs)
+    assert second["cache"]["hit"] is False
+    assert "private cache leak marker" not in json.dumps(second)
 
 
 # ---------------------------------------------------------------------------

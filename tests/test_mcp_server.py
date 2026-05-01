@@ -8,7 +8,14 @@ from unittest.mock import patch
 from afs.agents.supervisor import AgentSupervisor
 from afs.history import append_history_event
 from afs.manager import AFSManager
-from afs.mcp_server import PROTOCOL_VERSION, _handle_request, _read_message, build_mcp_registry
+from afs.mcp_server import (
+    DEFAULT_MCP_TOOL_CATALOG,
+    MCP_TOOL_CATALOG_ENV,
+    PROTOCOL_VERSION,
+    _handle_request,
+    _read_message,
+    build_mcp_registry,
+)
 from afs.models import MountType
 from afs.schema import (
     AFSConfig,
@@ -18,6 +25,7 @@ from afs.schema import (
     GeneralConfig,
     ProfileConfig,
     ProfilesConfig,
+    SensitivityConfig,
     WorkspaceDirectory,
     default_directory_configs,
 )
@@ -34,6 +42,29 @@ def _make_manager(tmp_path: Path) -> AFSManager:
     project_path.mkdir()
     manager.ensure(path=project_path, context_root=context_root)
     return manager
+
+
+def _call_tool(
+    manager: AFSManager,
+    name: str,
+    arguments: dict[str, object],
+    *,
+    request_id: int = 900,
+) -> dict[str, object]:
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "arguments": arguments,
+            },
+        },
+        manager,
+    )
+    assert response is not None
+    return response
 
 
 def _remap_directories(**overrides: str) -> list[DirectoryConfig]:
@@ -89,7 +120,25 @@ COMPATIBILITY_FILE_TOOL_ALIASES = {
 }
 
 
-def test_tools_list_returns_preferred_and_compatibility_file_tools(tmp_path: Path) -> None:
+def test_tools_list_defaults_to_slim_catalog(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("AFS_ALLOWED_TOOLS", raising=False)
+    monkeypatch.delenv("AFS_TOOL_PROFILE", raising=False)
+    monkeypatch.delenv(MCP_TOOL_CATALOG_ENV, raising=False)
+    manager = _make_manager(tmp_path)
+    response = _handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, manager)
+    assert response is not None
+    tools = response["result"]["tools"]
+    names = {tool["name"] for tool in tools}
+    assert names == DEFAULT_MCP_TOOL_CATALOG
+    assert "context.repair" not in names
+    assert "agent.spawn" not in names
+    assert not COMPATIBILITY_FILE_TOOL_ALIASES.intersection(names)
+
+
+def test_tools_list_can_expose_full_catalog(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("AFS_ALLOWED_TOOLS", raising=False)
+    monkeypatch.delenv("AFS_TOOL_PROFILE", raising=False)
+    monkeypatch.setenv(MCP_TOOL_CATALOG_ENV, "full")
     manager = _make_manager(tmp_path)
     response = _handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, manager)
     assert response is not None
@@ -100,19 +149,9 @@ def test_tools_list_returns_preferred_and_compatibility_file_tools(tmp_path: Pat
         "context.init",
         "context.mount",
         "context.unmount",
-        "context.index.rebuild",
-        "context.query",
-        "context.diff",
-        "context.status",
-        "operator.digest",
         "context.repair",
         "session.pack",
-        "work.communication.list",
         "work.communication.add",
-        "work.communication.guide",
-        "work.communication.preflight",
-        "work.approvals.list",
-        "work.approvals.show",
         "work.approvals.request",
         "events.analytics",
         "events.replay",
@@ -795,6 +834,124 @@ def test_context_query_tool_auto_indexes(tmp_path: Path) -> None:
     assert structured["count"] >= 1
     assert any(entry["relative_path"] == "gemini_notes.md" for entry in structured["entries"])
     assert "index_rebuild" in structured
+
+
+def test_context_tools_block_never_export_paths(tmp_path: Path) -> None:
+    context_root = tmp_path / "context"
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            sensitivity=SensitivityConfig(never_export=["knowledge/private/*"]),
+        )
+    )
+    manager.ensure(context_root=context_root)
+    knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    (knowledge_root / "private").mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "public").mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "public" / "guide.md").write_text(
+        "shared-token public guide",
+        encoding="utf-8",
+    )
+    private_note = knowledge_root / "private" / "secret.md"
+    private_note.write_text("shared-token private secret", encoding="utf-8")
+
+    query_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 501,
+            "method": "tools/call",
+            "params": {
+                "name": "context.query",
+                "arguments": {
+                    "context_path": str(context_root),
+                    "query": "shared-token",
+                    "mount_types": ["knowledge"],
+                    "include_content": True,
+                    "refresh": True,
+                    "limit": 1,
+                },
+            },
+        },
+        manager,
+    )
+    entries = query_response["result"]["structuredContent"]["entries"]
+    assert [entry["relative_path"] for entry in entries] == ["public/guide.md"]
+    assert "private secret" not in json.dumps(query_response)
+
+    read_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 502,
+            "method": "tools/call",
+            "params": {
+                "name": "context.read",
+                "arguments": {"path": str(private_note)},
+            },
+        },
+        manager,
+    )
+    assert "error" in read_response
+    assert "Blocked by sensitivity rule" in read_response["error"]["message"]
+
+
+def test_context_file_mutations_respect_sensitivity_rules(tmp_path: Path) -> None:
+    context_root = tmp_path / "context"
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            sensitivity=SensitivityConfig(never_export=["knowledge/private/*"]),
+        )
+    )
+    manager.ensure(context_root=context_root)
+    knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    private_root = knowledge_root / "private"
+    public_root = knowledge_root / "public"
+    private_root.mkdir(parents=True, exist_ok=True)
+    public_root.mkdir(parents=True, exist_ok=True)
+    private_note = private_root / "secret.md"
+    private_note.write_text("secret", encoding="utf-8")
+    public_note = public_root / "guide.md"
+    public_note.write_text("guide", encoding="utf-8")
+
+    list_response = _call_tool(
+        manager,
+        "context.list",
+        {"path": str(knowledge_root), "max_depth": 2},
+        request_id=510,
+    )
+    listed_paths = [
+        entry["path"]
+        for entry in list_response["result"]["structuredContent"]["entries"]
+    ]
+    assert str(public_note) in listed_paths
+    assert str(private_note) not in listed_paths
+
+    write_response = _call_tool(
+        manager,
+        "context.write",
+        {"path": str(private_root / "new.md"), "content": "new secret"},
+        request_id=511,
+    )
+    assert "error" in write_response
+    assert "Blocked by sensitivity rule" in write_response["error"]["message"]
+
+    delete_response = _call_tool(
+        manager,
+        "context.delete",
+        {"path": str(private_note)},
+        request_id=512,
+    )
+    assert "error" in delete_response
+    assert private_note.exists()
+
+    move_into_private_response = _call_tool(
+        manager,
+        "context.move",
+        {"source": str(public_note), "destination": str(private_root / "moved.md")},
+        request_id=513,
+    )
+    assert "error" in move_into_private_response
+    assert public_note.exists()
 
 
 def test_context_query_tool_resolves_parent_context_from_nested_path(
@@ -2726,7 +2883,8 @@ def test_profile_mcp_tools_modules_are_loaded_into_registry(
     assert prompt_response["result"]["messages"][0]["content"]["text"] == "Profile review: ready"
 
 
-def test_tools_list_includes_agent_tools(tmp_path: Path) -> None:
+def test_full_tools_list_includes_agent_tools(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv(MCP_TOOL_CATALOG_ENV, "full")
     manager = _make_manager(tmp_path)
     response = _handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, manager)
     assert response is not None

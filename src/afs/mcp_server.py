@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .agent_scope import is_tool_allowed
+from .agent_scope import allowed_tools, is_tool_allowed
 from .codebase_explorer import build_codebase_summary, render_codebase_summary
 from .config import load_config_model
 from .context_index import (
@@ -79,6 +79,7 @@ from .response_schemas import (
     list_response_schema_specs,
 )
 from .schema import ContextIndexConfig
+from .sensitivity import SensitivityRuleSet
 from .session_bootstrap import (
     build_session_bootstrap,
     collect_context_diff,
@@ -100,6 +101,18 @@ _read_message = _read_message_fn
 _write_message = _write_message_fn
 _error_response = _error_response_fn
 _success_response = _success_response_fn
+
+MCP_TOOL_CATALOG_ENV = "AFS_MCP_TOOL_CATALOG"
+FULL_MCP_TOOL_CATALOG_VALUES = frozenset({"all", "full", "legacy"})
+DEFAULT_MCP_TOOL_CATALOG = frozenset(
+    {
+        "context.status",
+        "context.query",
+        "context.read",
+        "context.list",
+        "context.write",
+    }
+)
 
 
 def _allowed_roots(manager: AFSManager) -> list[Path]:
@@ -302,6 +315,76 @@ def _context_candidates_for_path(path: Path, manager: AFSManager) -> list[Path]:
     return candidates
 
 
+def _sensitivity_export_rules(manager: AFSManager) -> SensitivityRuleSet:
+    sensitivity = manager.config.sensitivity
+    return SensitivityRuleSet.from_patterns(
+        [*sensitivity.never_index, *sensitivity.never_export]
+    )
+
+
+def _sensitivity_relative_paths(path: Path, manager: AFSManager) -> list[str]:
+    """Return context-relative path variants used by sensitivity globs."""
+    resolved = path.expanduser().resolve()
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: str) -> None:
+        cleaned = value.replace("\\", "/").strip().lstrip("./")
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            values.append(cleaned)
+
+    for context_path in _context_candidates_for_path(resolved, manager):
+        for mount_type in MountType:
+            try:
+                mount_root = manager.resolve_mount_root(context_path, mount_type)
+            except Exception:
+                continue
+            try:
+                rel = resolved.relative_to(mount_root.expanduser().resolve()).as_posix()
+            except ValueError:
+                continue
+            _add(rel)
+            _add(f"{mount_type.value}/{rel}")
+    return values
+
+
+def _sensitivity_block_match(path: Path, manager: AFSManager) -> tuple[str, str] | None:
+    rules = _sensitivity_export_rules(manager)
+    if not rules.enabled:
+        return None
+    resolved = path.expanduser().resolve()
+    relative_values = _sensitivity_relative_paths(resolved, manager)
+    if not relative_values:
+        relative_values = [resolved.name]
+    match = rules.match(resolved, relative_paths=relative_values)
+    return (match.relative_path, match.pattern) if match is not None else None
+
+
+def _assert_sensitivity_allowed(path: Path, manager: AFSManager, *, operation: str) -> None:
+    match = _sensitivity_block_match(path, manager)
+    if match is None:
+        return
+    relative_path, pattern = match
+    raise PermissionError(
+        f"Blocked by sensitivity rule during {operation}: "
+        f"path '{relative_path}' matches pattern '{pattern}'"
+    )
+
+
+def _entry_blocked_by_sensitivity(entry: dict[str, Any], manager: AFSManager) -> bool:
+    rules = _sensitivity_export_rules(manager)
+    if not rules.enabled:
+        return False
+    absolute_path = Path(str(entry.get("absolute_path", "")))
+    relative_path = (
+        f"{entry.get('mount_type', '')}/{entry.get('relative_path', '')}"
+        .replace("\\", "/")
+        .strip("/")
+    )
+    return rules.blocked(absolute_path, relative_paths=(relative_path,))
+
+
 def _sync_context_index_for_path(path: Path, manager: AFSManager) -> bool:
     settings = _context_index_settings(manager)
     if not settings.enabled:
@@ -364,13 +447,19 @@ def _query_context_index(
         )
         rebuild_summary = summary.to_dict()
 
+    query_limit = 500 if _sensitivity_export_rules(manager).enabled else limit_value
     entries = index.query(
         query=query,
         mount_types=mount_types,
         relative_prefix=relative_prefix,
-        limit=limit_value,
+        limit=query_limit,
         include_content=include_content,
     )
+    entries = [
+        entry
+        for entry in entries
+        if not _entry_blocked_by_sensitivity(entry, manager)
+    ][:limit_value]
     payload: dict[str, Any] = {
         "context_path": str(context_path),
         "db_path": str(index.db_path),
@@ -531,6 +620,7 @@ def _tool_fs_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str, A
     if not isinstance(path_value, str):
         raise ValueError("path must be a string")
     path = _assert_allowed(Path(path_value), manager)
+    _assert_sensitivity_allowed(path, manager, operation="read")
     if not path.exists():
         raise FileNotFoundError(f"Path not found: {path}")
     if path.is_dir():
@@ -550,6 +640,7 @@ def _tool_fs_write(arguments: dict[str, Any], manager: AFSManager) -> dict[str, 
         raise ValueError("path and content must be strings")
 
     path = _assert_allowed(Path(path_value), manager)
+    _assert_sensitivity_allowed(path, manager, operation="write")
     if not path.parent.exists():
         if not mkdirs:
             raise FileNotFoundError(f"Parent directory missing: {path.parent}")
@@ -574,6 +665,7 @@ def _tool_fs_delete(arguments: dict[str, Any], manager: AFSManager) -> dict[str,
         raise ValueError("path must be a string")
 
     path = _assert_allowed(Path(path_value), manager)
+    _assert_sensitivity_allowed(path, manager, operation="delete")
     if not path.exists() and not path.is_symlink():
         raise FileNotFoundError(f"Path not found: {path}")
 
@@ -610,6 +702,8 @@ def _tool_fs_move(arguments: dict[str, Any], manager: AFSManager) -> dict[str, A
 
     source = _assert_allowed(Path(source_value), manager)
     destination = _assert_allowed(Path(destination_value), manager)
+    _assert_sensitivity_allowed(source, manager, operation="move")
+    _assert_sensitivity_allowed(destination, manager, operation="move")
 
     if not source.exists() and not source.is_symlink():
         raise FileNotFoundError(f"Source path not found: {source}")
@@ -649,6 +743,7 @@ def _tool_fs_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, A
         max_depth = 1
 
     root = _assert_allowed(Path(path_value), manager)
+    _assert_sensitivity_allowed(root, manager, operation="list")
     if not root.exists():
         raise FileNotFoundError(f"Path not found: {root}")
 
@@ -662,6 +757,8 @@ def _tool_fs_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, A
             except Exception:
                 continue
             if max_depth >= 0 and depth > max_depth:
+                continue
+            if _sensitivity_block_match(candidate, manager) is not None:
                 continue
             entries.append({"path": str(candidate), "is_dir": candidate.is_dir()})
     return {"path": str(root), "entries": entries}
@@ -4086,7 +4183,27 @@ def _tool_specs(registry: MCPToolRegistry | None = None) -> list[dict[str, Any]]
         specs = [tool.to_spec() for tool in _builtin_tool_definitions()]
     else:
         specs = registry.specs()
-    return [spec for spec in specs if is_tool_allowed(spec["name"])]
+    return [spec for spec in specs if _should_list_tool(str(spec["name"]))]
+
+
+def _should_list_tool(tool_name: str) -> bool:
+    """Return whether *tool_name* belongs in MCP ``tools/list``.
+
+    AFS has more operational tools than a model should see by default.  Keep
+    call-time permissions separate from discoverability: explicit
+    ``AFS_ALLOWED_TOOLS`` / ``AFS_TOOL_PROFILE`` still constrain both listing
+    and calls, while the default catalog only narrows ``tools/list``.
+    """
+    if not is_tool_allowed(tool_name):
+        return False
+
+    if allowed_tools() is not None:
+        return True
+
+    catalog = os.environ.get(MCP_TOOL_CATALOG_ENV, "slim").strip().lower() or "slim"
+    if catalog in FULL_MCP_TOOL_CATALOG_VALUES:
+        return True
+    return tool_name in DEFAULT_MCP_TOOL_CATALOG
 
 
 def get_mcp_status(config_path: Path | None = None) -> dict[str, Any]:

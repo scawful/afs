@@ -94,6 +94,8 @@ Harness upgrade and setup:
 <afs-root>/scripts/afs guide shell
 <afs-root>/scripts/afs-upgrade-agent-setup --workspace ~/src
 <afs-root>/scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
+<afs-root>/scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode
+<afs-root>/scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode --apply
 ```
 
 Training commands are intentionally not part of the default agent startup path.
@@ -140,19 +142,30 @@ Run the built-in stdio MCP server:
 
 Built-in tools:
 
-Recommended default MCP/profile surface:
+Default `tools/list` is intentionally tiny. It exposes only the core context
+bridge; everything else should come from prompts, CLI hints, or an explicit
+full-catalog/debug launch:
 
-- `afs.session.bootstrap`
 - `context.status`
 - `context.query`
-- `work.communication.preflight`
-- `work.approvals.list`
 - `context.read`
 - `context.write`
 - `context.list`
-- `context.diff`
-- `context.index.rebuild`
-- `handoff.create`
+
+`afs.session.bootstrap`, `afs.session.pack`, and `afs.scratchpad.review` are
+prompts from `prompts/list`, not tools. Work preflight, approvals, repair,
+handoff, and verification should normally route through the AFS CLI/framework
+hints rather than the default MCP tool catalog. Use a full catalog only for
+debugging, migration, or clients that need optional administration tools:
+
+```bash
+<afs-root>/scripts/afs mcp serve --tool-catalog full
+# or:
+AFS_MCP_TOOL_CATALOG=full <afs-root>/scripts/afs mcp serve
+```
+
+`AFS_ALLOWED_TOOLS` and `AFS_TOOL_PROFILE` remain stricter permission filters
+and narrow both `tools/list` and `tools/call`.
 
 Preferred agent-facing file operations:
 
@@ -177,7 +190,6 @@ Optional tools for explicit workflows:
 - `context.mount`
 - `context.unmount`
 - `context.repair`
-- `session.pack`
 - `events.query`
 - `events.tail`
 - `events.analytics`
@@ -200,6 +212,10 @@ Paths are scoped to:
 - configured `general.mcp_allowed_roots`
 - `AFS_MCP_ALLOWED_ROOTS`
 - local project `.context`
+
+`context.query` and the `context.*`/`fs.*` file tools enforce configured
+`never_index`/`never_export` sensitivity rules before touching or exporting
+matching paths or file contents.
 
 `context.init` is intended for Gemini-style project bootstrap:
 
@@ -250,15 +266,20 @@ The CLI also refreshes:
 - `.context/scratchpad/afs_agents/session_skills_<client>.json`
 
 `session pack` is an explicit follow-on step, not the default startup path.
-When the bootstrap snapshot and pack inputs have not changed, repeated calls
-reuse the stored pack artifact instead of rebuilding all sections. Packs now
-also carry an `execution_profile` block, a task-at-end suffix via `--task`, and
-a stable `cache.prefix_hash` for adapter-side cache reuse work. `--pack-mode`
-lets callers choose between the normal focused pack, a query-first retrieval
-pack, and a broader full-slice pack for long-context models. The
+When the bootstrap snapshot, pack inputs, and sensitivity rules have not
+changed, repeated calls reuse the stored pack artifact instead of rebuilding all
+sections. Packs apply `never_index`/`never_export` to exported indexed content
+and `never_embed` to embedding hits. Packs now also carry an
+`execution_profile` block, a task-at-end suffix via `--task`, and a stable
+`cache.prefix_hash` for adapter-side cache reuse work. `--pack-mode` lets
+callers choose between the normal focused pack, a query-first retrieval pack,
+and a broader full-slice pack for long-context models. The
 `execution_profile` now also spells out that `afs.workflow.structured` is a
 prompt-only rail and includes retry guidance so the host loop stays in Gemini
 CLI or Claude Code instead of moving into core AFS.
+The rendered pack keeps guidance in one top-level block, counts it against the
+fixed prompt overhead, and lets query/embedding hits outrank generic session
+boilerplate when the caller provides a query.
 The rendered guidance also points back at the human CLI surfaces:
 `afs query` / `afs context query` for follow-on retrieval and `afs index rebuild`
 when indexed search needs a refresh.
@@ -486,14 +507,14 @@ Each wrapper:
 - exports bootstrap, pack, skills, and combined session payload artifact paths
 - refreshes the prepared session payload before launching the client
 - runs `session_start` / `session_end` hooks around the client lifecycle
-- seeds safe report-only `agent-jobs` maintenance work by default, deduped by profile and cadence
+- can seed safe report-only `agent-jobs` maintenance work when explicitly opted in
 - never infers workspace roots on its own
 - maps `AFS_<CLIENT>_MCP_ALLOWED_ROOTS` or `AFS_CLIENT_MCP_ALLOWED_ROOTS` into `AFS_MCP_ALLOWED_ROOTS` when you set them
+- exports an effective `AFS_TOOL_PROFILE` for non-default workflow/tool profiles so MCP tool lists match the declared read/write surface
 
-Set `AFS_CLIENT_SEED_JOBS=0` or pass `--no-seed-jobs` to disable automatic
-maintenance job seeding. Use `AFS_CLIENT_SEED_PROFILE` and
-`AFS_CLIENT_SEED_CADENCE` to tune the default `repo-maintenance` / `daily`
-behavior.
+Set `AFS_CLIENT_SEED_JOBS=1` or pass `--seed-jobs` to enable maintenance job
+seeding. Use `AFS_CLIENT_SEED_PROFILE` and `AFS_CLIENT_SEED_CADENCE` to tune the
+default `repo-maintenance` / `daily` behavior.
 
 Gemini registration helper:
 

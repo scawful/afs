@@ -18,7 +18,16 @@ def test_agent_manifest_exports_harness_slice() -> None:
     assert payload["harness"]["name"] == "codex"
     assert "paths" in payload
     assert any(skill["name"] == "focused-verification" for skill in payload["skills"])
+    assert payload["slash_command_packs"] == []
     assert any(server["name"] == "afs" for server in payload["mcp_servers"])
+
+
+def test_agent_manifest_exports_hcode_slash_commands() -> None:
+    data = load_manifest(Path("configs/agent_manifest.toml"))
+    payload = export_for_harness(data, "hcode")
+    assert payload["harness"]["name"] == "hcode"
+    assert any(pack["name"] == "afs-opencode" for pack in payload["slash_command_packs"])
+    assert payload["harness"]["command_roots"]
 
 
 def test_doctor_agent_manifest_check_accepts_synced_skill(tmp_path: Path, monkeypatch) -> None:

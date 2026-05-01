@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import plistlib
 from pathlib import Path
+
+import pytest
 
 from afs.agent_hooks import (
     SHELL_BLOCK_BEGIN,
@@ -11,6 +12,17 @@ from afs.agent_hooks import (
     render_shell_profile_block,
     shell_hooks_installed,
 )
+
+
+def _load_plistlib():
+    pytest.importorskip(
+        "pyexpat",
+        reason="plistlib requires a working pyexpat module",
+        exc_type=ImportError,
+    )
+    import plistlib
+
+    return plistlib
 
 
 def test_shell_profile_hook_install_is_idempotent(tmp_path: Path) -> None:
@@ -44,6 +56,7 @@ def test_render_shell_profile_block_can_skip_agent_routing(tmp_path: Path) -> No
 
 
 def test_render_launchd_plist_runs_agent_job_worker(tmp_path: Path) -> None:
+    plistlib = _load_plistlib()
     payload = plistlib.loads(
         render_launchd_plist(
             afs_root=tmp_path / "afs",

@@ -127,6 +127,7 @@ def manifest_sync_command(args: argparse.Namespace) -> int:
         apply=args.apply,
         harnesses=selected,
         sync_skills=not args.no_skills,
+        sync_commands=not getattr(args, "no_slash_commands", False),
         sync_exports=not args.no_exports,
     )
     payload = {
@@ -532,11 +533,12 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     export.add_argument("--file", help="Manifest TOML path.")
     export.set_defaults(func=manifest_export_command)
 
-    sync = manifest_sub.add_parser("sync", help="Copy shared skills and write harness manifest exports.")
+    sync = manifest_sub.add_parser("sync", help="Copy shared skills/commands and write harness manifest exports.")
     sync.add_argument("--file", help="Manifest TOML path.")
     sync.add_argument("--harness", action="append", help="Limit sync to one harness; repeatable.")
     sync.add_argument("--apply", action="store_true", help="Apply changes. Default is dry-run.")
     sync.add_argument("--no-skills", action="store_true", help="Skip skill directory copies.")
+    sync.add_argument("--no-slash-commands", action="store_true", help="Skip slash-command pack copies.")
     sync.add_argument("--no-exports", action="store_true", help="Skip per-harness manifest exports.")
     sync.add_argument("--json", action="store_true", help="Output JSON.")
     sync.set_defaults(func=manifest_sync_command)

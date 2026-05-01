@@ -9,12 +9,14 @@ from afs.cli.core import session_pack_command
 from afs.context_index import ContextSQLiteIndex
 from afs.context_pack import (
     build_context_pack,
+    estimate_tokens,
     render_context_pack,
     write_context_pack_artifacts,
 )
+from afs.embeddings import build_embedding_index
 from afs.manager import AFSManager
 from afs.models import MountType
-from afs.schema import AFSConfig, GeneralConfig, SensitivityConfig
+from afs.schema import AFSConfig, ContextIndexConfig, GeneralConfig, SensitivityConfig
 
 
 def _make_manager(tmp_path: Path) -> AFSManager:
@@ -83,6 +85,141 @@ def test_build_context_pack_respects_sensitivity_and_budget(tmp_path: Path) -> N
     assert any(section["title"] == "Scratchpad State" for section in pack["sections"])
     assert any("guide.md" in source for source in pack["sources"])
     assert all("secret.md" not in source for source in pack["sources"])
+
+
+def test_full_slice_knowledge_inventory_respects_mount_prefixed_never_export(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    (knowledge_root / "public").mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "private").mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "public" / "guide.md").write_text("public guide", encoding="utf-8")
+    (knowledge_root / "private" / "secret.md").write_text("private guide", encoding="utf-8")
+
+    pack = build_context_pack(
+        manager,
+        context_root,
+        task="Build a full slice.",
+        model="codex",
+        pack_mode="full_slice",
+        token_budget=1200,
+    )
+
+    rendered = render_context_pack(pack)
+    assert "public/guide.md" in rendered
+    assert "private/secret.md" not in rendered
+
+
+def test_query_hits_overfetch_after_sensitive_filtering(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    (knowledge_root / "public").mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "private").mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "public" / "guide.md").write_text(
+        "shared-token public guide",
+        encoding="utf-8",
+    )
+    (knowledge_root / "private" / "secret.md").write_text(
+        "shared-token private guide",
+        encoding="utf-8",
+    )
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE],
+        include_content=True,
+    )
+
+    pack = build_context_pack(
+        manager,
+        context_root,
+        query="shared-token",
+        task="Find the visible guide.",
+        model="codex",
+        token_budget=1200,
+        include_content=True,
+        max_query_results=1,
+    )
+
+    rendered = render_context_pack(pack)
+    assert "public/guide.md" in rendered
+    assert "private/secret.md" not in rendered
+
+
+def test_embedding_hits_respect_never_embed_rules(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            context_index=ContextIndexConfig(enabled=False),
+            sensitivity=SensitivityConfig(never_embed=["private/*"]),
+        )
+    )
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path, context_root=context_root)
+    knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    (knowledge_root / "public").mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "private").mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "public" / "guide.md").write_text(
+        "embed-only public marker",
+        encoding="utf-8",
+    )
+    (knowledge_root / "private" / "secret.md").write_text(
+        "embed-only secret marker",
+        encoding="utf-8",
+    )
+    build_embedding_index([knowledge_root], knowledge_root)
+
+    pack = build_context_pack(
+        manager,
+        context_root,
+        query="embed-only secret",
+        task="Check embedding sensitivity.",
+        model="codex",
+        token_budget=1400,
+        max_embedding_results=1,
+    )
+
+    rendered = render_context_pack(pack)
+    assert "Embedding Hits" in rendered
+    assert "embed-only public marker" in rendered
+    assert "embed-only secret marker" not in rendered
+    assert "private/secret.md" not in rendered
+
+
+def test_embedding_hits_trim_previews_for_tight_packs(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            context_index=ContextIndexConfig(enabled=False),
+        )
+    )
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path, context_root=context_root)
+    knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "long.md").write_text(
+        "embed-long " + ("x " * 450) + "TAIL_MARKER",
+        encoding="utf-8",
+    )
+    build_embedding_index([knowledge_root], knowledge_root)
+
+    pack = build_context_pack(
+        manager,
+        context_root,
+        query="embed-long",
+        model="codex",
+        pack_mode="retrieval",
+        token_budget=1200,
+        max_embedding_results=1,
+    )
+
+    rendered = render_context_pack(pack)
+    assert "Embedding Hits" in rendered
+    assert "TAIL_MARKER" not in rendered
+    assert pack["estimated_tokens"] <= 1200
 
 
 def test_session_pack_command_outputs_json_and_writes_artifacts(
@@ -319,6 +456,28 @@ def test_rendered_context_pack_places_task_at_end(tmp_path: Path) -> None:
     assert "afs query <text> --path <workspace>" in rendered
     assert "afs index rebuild --path <workspace>" in rendered
     assert rendered.rstrip().endswith("Review the service guide and propose the smallest fix.")
+
+
+def test_context_pack_renders_guidance_once_and_counts_it(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+
+    pack = build_context_pack(
+        manager,
+        context_root,
+        query="service guide",
+        task="Review the service guide.",
+        model="codex",
+        token_budget=500,
+    )
+
+    rendered = render_context_pack(pack)
+    guidance_tokens = estimate_tokens("Guidance") + estimate_tokens(pack["guidance"])
+    section_tokens = sum(section["estimated_tokens"] for section in pack["sections"])
+
+    assert rendered.count("Treat all pack sections") == 1
+    assert all(section["title"] != "Model Usage Notes" for section in pack["sections"])
+    assert pack["estimated_tokens"] >= section_tokens + guidance_tokens
 
 
 def test_context_pack_prefix_hash_stays_stable_when_only_task_changes(tmp_path: Path) -> None:

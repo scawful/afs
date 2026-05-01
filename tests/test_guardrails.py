@@ -25,6 +25,14 @@ from afs.agents.guardrails import (
 )
 
 
+def _require_xml_expat() -> None:
+    pytest.importorskip(
+        "pyexpat",
+        reason="XML/plist parsing requires a working pyexpat module",
+        exc_type=ImportError,
+    )
+
+
 # ---------------------------------------------------------------------------
 # QuotaTracker
 # ---------------------------------------------------------------------------
@@ -464,6 +472,7 @@ class TestFileLocking:
 
 class TestLaunchAgentPlist:
     def test_plist_is_valid_xml(self) -> None:
+        _require_xml_expat()
         import xml.etree.ElementTree as ET
         plist_path = Path(__file__).parent.parent / "scripts" / "com.afs.supervisor.plist"
         if not plist_path.exists():
@@ -473,6 +482,7 @@ class TestLaunchAgentPlist:
         assert root.tag == "plist"
 
     def test_plist_has_required_keys(self) -> None:
+        _require_xml_expat()
         import plistlib
         plist_path = Path(__file__).parent.parent / "scripts" / "com.afs.supervisor.plist"
         if not plist_path.exists():

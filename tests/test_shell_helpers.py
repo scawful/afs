@@ -178,6 +178,8 @@ def _write_fake_client(path: Path, log_path: Path) -> Path:
         "    'AFS_SESSION_RECOMMENDED_SCHEMA': os.environ.get('AFS_SESSION_RECOMMENDED_SCHEMA'),\n"
         "    'AFS_SESSION_FOLLOWUP_SCHEMA': os.environ.get('AFS_SESSION_FOLLOWUP_SCHEMA'),\n"
         "    'AFS_SESSION_REPAIR_LOOP_HINT': os.environ.get('AFS_SESSION_REPAIR_LOOP_HINT'),\n"
+        "    'AFS_SESSION_EFFECTIVE_TOOL_PROFILE': os.environ.get('AFS_SESSION_EFFECTIVE_TOOL_PROFILE'),\n"
+        "    'AFS_TOOL_PROFILE': os.environ.get('AFS_TOOL_PROFILE'),\n"
         "    'AFS_SESSION_EVENT_BIN': os.environ.get('AFS_SESSION_EVENT_BIN'),\n"
         "    'AFS_SESSION_DEFAULT_TURN_ID': os.environ.get('AFS_SESSION_DEFAULT_TURN_ID'),\n"
         "    'AFS_ACTIVE_CONTEXT_ROOT': os.environ.get('AFS_ACTIVE_CONTEXT_ROOT'),\n"
@@ -819,59 +821,53 @@ def test_afs_client_session_preserves_explicit_allowed_roots(tmp_path: Path) -> 
     assert payload["AFS_MCP_ALLOWED_ROOTS"] == "/already/set"
 
 
-def test_afs_client_session_waits_for_session_agents_by_default(tmp_path: Path) -> None:
+def test_afs_client_session_avoids_background_noise_by_default(tmp_path: Path) -> None:
     payload = _run_client_session(tmp_path)
 
     assert payload["AFS_SESSION_ID"]
     assert any(call.startswith("session prepare-client --client gemini ") for call in payload["_afs_calls"])
     assert any(call.startswith("session hook session_start --client gemini ") for call in payload["_afs_calls"])
-    assert any(call.startswith("agent-jobs seed --path ") for call in payload["_afs_calls"])
+    assert not any(call.startswith("agent-jobs seed --path ") for call in payload["_afs_calls"])
     assert not any(call.startswith("session event ") for call in payload["_afs_calls"])
-    assert any(
-        call == f"agents monitor --session-id {payload['AFS_SESSION_ID']}"
-        for call in payload["_afs_calls"]
-    )
-    assert any(
-        call.startswith(f"agents wait --all --session-id {payload['AFS_SESSION_ID']} --timeout ")
-        for call in payload["_afs_calls"]
-    )
+    assert not any(call.startswith("agents monitor ") for call in payload["_afs_calls"])
+    assert not any(call.startswith("agents wait ") for call in payload["_afs_calls"])
     assert any(call.startswith("session hook session_end --client gemini ") for call in payload["_afs_calls"])
 
 
-def test_afs_client_session_can_disable_agent_drain(tmp_path: Path) -> None:
+def test_afs_client_session_can_enable_agent_drain(tmp_path: Path) -> None:
     payload = _run_client_session(
         tmp_path,
-        env_overrides={"AFS_CLIENT_WAIT_FOR_AGENTS": "0"},
+        env_overrides={"AFS_CLIENT_WAIT_FOR_AGENTS": "1"},
     )
 
     assert any(call.startswith("session hook session_start ") for call in payload["_afs_calls"])
-    assert any(call.startswith("agents monitor ") for call in payload["_afs_calls"])
-    assert not any(call.startswith("agents wait ") for call in payload["_afs_calls"])
-
-
-def test_afs_client_session_can_disable_live_monitor(tmp_path: Path) -> None:
-    payload = _run_client_session(
-        tmp_path,
-        env_overrides={"AFS_CLIENT_MONITOR_AGENTS": "0"},
-    )
-
     assert not any(call.startswith("agents monitor ") for call in payload["_afs_calls"])
     assert any(call.startswith("agents wait ") for call in payload["_afs_calls"])
 
 
-def test_afs_client_session_can_disable_safe_job_seeding(tmp_path: Path) -> None:
+def test_afs_client_session_can_enable_live_monitor(tmp_path: Path) -> None:
     payload = _run_client_session(
         tmp_path,
-        env_overrides={"AFS_CLIENT_SEED_JOBS": "0"},
+        env_overrides={"AFS_CLIENT_MONITOR_AGENTS": "1"},
     )
 
-    assert not any(call.startswith("agent-jobs seed ") for call in payload["_afs_calls"])
+    assert any(call.startswith("agents monitor ") for call in payload["_afs_calls"])
+    assert not any(call.startswith("agents wait ") for call in payload["_afs_calls"])
+
+
+def test_afs_client_session_can_enable_safe_job_seeding(tmp_path: Path) -> None:
+    payload = _run_client_session(
+        tmp_path,
+        env_overrides={"AFS_CLIENT_SEED_JOBS": "1"},
+    )
+
+    assert any(call.startswith("agent-jobs seed ") for call in payload["_afs_calls"])
 
 
 def test_afs_client_session_passes_seed_profile_and_cadence(tmp_path: Path) -> None:
     payload = _run_client_session(
         tmp_path,
-        wrapper_args=["--seed-profile", "repo-maintenance", "--seed-cadence", "weekly"],
+        wrapper_args=["--seed-jobs", "--seed-profile", "repo-maintenance", "--seed-cadence", "weekly"],
     )
 
     seed_call = next(call for call in payload["_afs_calls"] if call.startswith("agent-jobs seed "))
@@ -879,6 +875,26 @@ def test_afs_client_session_passes_seed_profile_and_cadence(tmp_path: Path) -> N
     assert "--cadence weekly" in seed_call
     assert "--created-by afs-client-session:gemini" in seed_call
     assert "--quiet" in seed_call
+
+
+def test_afs_client_session_exports_effective_readonly_tool_profile(tmp_path: Path) -> None:
+    payload = _run_client_session(
+        tmp_path,
+        wrapper_args=["--workflow", "review_deep"],
+    )
+
+    assert payload["AFS_SESSION_EFFECTIVE_TOOL_PROFILE"] == "context_readonly"
+    assert payload["AFS_TOOL_PROFILE"] == "context_readonly"
+
+
+def test_afs_client_session_normalizes_unknown_tool_profile(tmp_path: Path) -> None:
+    payload = _run_client_session(
+        tmp_path,
+        wrapper_args=["--workflow", "review_deep", "--tool-profile", "not-real"],
+    )
+
+    assert payload["AFS_SESSION_EFFECTIVE_TOOL_PROFILE"] == "context_readonly"
+    assert payload["AFS_TOOL_PROFILE"] == "context_readonly"
 
 
 def test_afs_client_session_can_disable_session_pack_and_skill_match(tmp_path: Path) -> None:

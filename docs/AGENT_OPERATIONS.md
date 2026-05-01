@@ -18,24 +18,31 @@ These surfaces are visible in:
 ./scripts/afs agent-manifest validate
 ./scripts/afs agent-manifest export codex
 ./scripts/afs agent-manifest sync --apply
+./scripts/afs agent-manifest sync --harness hcode --apply
 ./scripts/afs agent-hooks install-shell --apply
 ./scripts/afs agent-hooks install-worker --apply --load
 ./scripts/afs agent-hooks status --path "$PWD"
 ./scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
+./scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode --apply
 ```
 
-Use this before editing Codex, Claude, Gemini, hcode, or another harness-specific
-config. Harness-specific files can still exist, but they should point back to
-this manifest or derive their local view from it.
+Use this before editing Codex, Claude, Gemini, hcode, or another
+harness-specific config. Harness-specific files can still exist, but they
+should point back to this manifest or derive their local view from it.
 
 `scripts/afs-upgrade-agent-setup` is the operator wrapper for a full local
 refresh. It defaults to dry-run, then with `--apply` can update the venv, copy
-skills, write manifest exports, repair/rebuild context state, install hooks,
-and write Claude/Gemini MCP setup.
+skills and slash-command packs, write manifest exports, repair/rebuild context
+state, install hooks, run hcode bootstrap smoke, and write Claude/Gemini MCP
+setup. `--work --setup-hcode` is the convenient work-machine path; it keeps the
+MCP default catalog slim and routes richer flows through commands/framework
+hints.
 
 `sync` copies manifest-declared shared skill directories into harness skill
-roots and writes per-harness JSON export files. It deliberately uses copied
-directories rather than symlinks.
+roots, copies slash-command packs into command roots, and writes per-harness
+JSON export files. It deliberately uses copied files/directories rather than
+symlinks. Slash-command packs are additive by default and leave existing
+customized commands untouched unless a pack explicitly opts into overwrite.
 
 `agent-hooks install-shell` adds a marked, idempotent block to the shell profile
 that sources AFS shell helpers. Use `--helpers-only` for aliases, colors, and
@@ -64,7 +71,9 @@ MCP:
 
 Doctor:
 
-- `afs doctor` validates the manifest, checks declared paths, compares copied skills against canonical skills, and confirms declared MCP server names appear in known harness/client config.
+- `afs doctor` validates the manifest, checks declared paths, compares copied
+  skills against canonical skills, and confirms declared MCP server names appear
+  in known harness/client config.
 
 ## Run Recorder
 
@@ -128,8 +137,8 @@ tool-name drift, TODO/FIXME summaries, focused verification suggestions, and
 uncommitted-change review. Seeded jobs use daily dedupe keys and skip existing
 open jobs, so shell/session hooks can call the command without creating
 duplicates. Use `--dry-run` to preview, `--force` to intentionally reseed, and
-`AFS_CLIENT_SEED_JOBS=0` or wrapper `--no-seed-jobs` to disable automatic
-client-session seeding.
+`AFS_CLIENT_SEED_JOBS=1` or wrapper `--seed-jobs` to opt client-session wrappers
+into seeding.
 
 The worker command claims queued jobs, writes the prompt to
 `scratchpad/agent_job_prompts/`, runs the configured local command with

@@ -58,17 +58,17 @@ def _harness_map(data: dict[str, Any], harnesses: set[str] | None) -> dict[str, 
     }
 
 
-def _skill_state(source: Path, target: Path) -> tuple[str, str]:
+def _tree_state(source: Path, target: Path, *, noun: str) -> tuple[str, str]:
     if not source.exists():
-        return "error", "canonical skill path missing"
+        return "error", f"canonical {noun} path missing"
     if not source.is_dir():
-        return "error", "canonical skill path is not a directory"
+        return "error", f"canonical {noun} path is not a directory"
     if target.is_symlink():
         return "would_replace_symlink", "target is a symlink"
     if target.exists() and not target.is_dir():
         return "error", "target exists and is not a directory"
     if not target.exists():
-        return "would_create", "target skill directory missing"
+        return "would_create", f"target {noun} directory missing"
     for source_file in sorted(path for path in source.rglob("*") if path.is_file()):
         relative = source_file.relative_to(source)
         target_file = target / relative
@@ -79,7 +79,7 @@ def _skill_state(source: Path, target: Path) -> tuple[str, str]:
     return "up_to_date", "canonical files already copied"
 
 
-def _copy_skill_tree(source: Path, target: Path) -> None:
+def _copy_tree(source: Path, target: Path) -> None:
     if target.is_symlink():
         target.unlink()
     if target.exists() and not target.is_dir():
@@ -91,6 +91,56 @@ def _copy_skill_tree(source: Path, target: Path) -> None:
         if item.is_dir():
             destination.mkdir(parents=True, exist_ok=True)
         elif item.is_file():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, destination)
+
+
+def _skill_state(source: Path, target: Path) -> tuple[str, str]:
+    return _tree_state(source, target, noun="skill")
+
+
+def _command_pack_state(source: Path, target: Path, *, overwrite: bool) -> tuple[str, str]:
+    if overwrite:
+        return _tree_state(source, target, noun="slash command")
+    if not source.exists():
+        return "error", "canonical slash command path missing"
+    if not source.is_dir():
+        return "error", "canonical slash command path is not a directory"
+    if target.is_symlink():
+        return "would_replace_symlink", "target is a symlink"
+    if target.exists() and not target.is_dir():
+        return "error", "target exists and is not a directory"
+    if not target.exists():
+        return "would_create", "target slash command directory missing"
+    for source_file in sorted(path for path in source.rglob("*") if path.is_file()):
+        relative = source_file.relative_to(source)
+        target_file = target / relative
+        if not target_file.exists():
+            return "would_update", f"missing file: {relative}"
+        if not filecmp.cmp(source_file, target_file, shallow=False):
+            return "customized", f"existing file differs: {relative}"
+    return "up_to_date", "canonical files already copied"
+
+
+def _copy_skill_tree(source: Path, target: Path) -> None:
+    _copy_tree(source, target)
+
+
+def _copy_command_pack(source: Path, target: Path, *, overwrite: bool) -> None:
+    if overwrite:
+        _copy_tree(source, target)
+        return
+    if target.is_symlink():
+        target.unlink()
+    if target.exists() and not target.is_dir():
+        raise FileExistsError(f"target exists and is not a directory: {target}")
+    target.mkdir(parents=True, exist_ok=True)
+    for item in sorted(source.rglob("*")):
+        relative = item.relative_to(source)
+        destination = target / relative
+        if item.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+        elif item.is_file() and not destination.exists():
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(item, destination)
 
@@ -115,12 +165,13 @@ def sync_manifest(
     apply: bool = False,
     harnesses: set[str] | None = None,
     sync_skills: bool = True,
+    sync_commands: bool = True,
     sync_exports: bool = True,
 ) -> list[ManifestSyncAction]:
     """Plan or apply manifest sync actions.
 
-    Skill sync copies canonical skill directories into harness skill roots. It
-    does not use symlinks and it leaves extra destination files alone.
+    Skill and slash-command sync copy canonical trees into harness roots. They
+    do not use symlinks and they leave extra destination files alone.
     """
     actions: list[ManifestSyncAction] = []
     selected = _harness_map(data, harnesses)
@@ -150,6 +201,33 @@ def sync_manifest(
                             harness=target_name,
                             source=str(canonical),
                             target=str(target),
+                            status=status,
+                            detail=detail,
+                        )
+                    )
+
+    if sync_commands:
+        for pack in _as_list(data.get("slash_command_packs")):
+            if not isinstance(pack, dict):
+                continue
+            canonical = Path(str(pack.get("canonical_path", ""))).expanduser()
+            overwrite = bool(pack.get("overwrite", False))
+            for target_name in {str(item) for item in _as_list(pack.get("targets"))}:
+                harness = selected.get(target_name)
+                if harness is None:
+                    continue
+                for raw_root in _as_list(harness.get("command_roots")):
+                    root = Path(str(raw_root)).expanduser()
+                    status, detail = _command_pack_state(canonical, root, overwrite=overwrite)
+                    if apply and status.startswith("would_"):
+                        _copy_command_pack(canonical, root, overwrite=overwrite)
+                        status = "synced"
+                    actions.append(
+                        ManifestSyncAction(
+                            action="copy_slash_command_pack",
+                            harness=target_name,
+                            source=str(canonical),
+                            target=str(root),
                             status=status,
                             detail=detail,
                         )
