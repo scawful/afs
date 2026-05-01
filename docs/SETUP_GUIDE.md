@@ -4,6 +4,7 @@ AFS has a guided setup flow for new machines and new workspaces:
 
 ```bash
 afs manager
+afs next --intent setup
 afs setup
 ```
 
@@ -66,7 +67,7 @@ GUI manager:
 ## Agent discovery path
 
 Agents should not browse the entire AFS surface up front. Use this deterministic
-ladder instead:
+ladder instead, or ask the router with `afs next --intent <intent> --json`:
 
 1. `context.status`
 2. `context.query`
@@ -77,6 +78,8 @@ ladder instead:
 
 `context.status` includes this discovery path in JSON/MCP output so clients can
 surface it without expanding the default MCP catalog.
+`afs next report --json` summarizes recent router use and flags heavy MCP calls
+that bypassed the slim default path.
 
 ## Friendly Guides
 
@@ -84,6 +87,7 @@ Use `afs guide` for a menu of workflow-oriented help:
 
 ```bash
 afs guide
+afs guide next
 afs guide manager
 afs guide context
 afs guide shell

@@ -13,6 +13,7 @@ Also supported once installed into the active environment:
 ## Quickstart
 
 - `./scripts/afs`
+- `./scripts/afs next --intent continue`
 - `./scripts/afs manager`
 - `./scripts/afs setup`
 - `./scripts/afs guide`
@@ -156,6 +157,25 @@ The manager and `context.status` both expose the same deterministic agent
 discovery path: status, query, exact read/list, scratchpad write, then named
 CLI/slash-command routes for heavier flows. This keeps agents proactive without
 forcing the whole AFS catalog into their first tool choice.
+
+## Next Action Router
+
+```bash
+./scripts/afs next --intent continue --json
+./scripts/afs next --intent work-writing --json
+./scripts/afs next --intent verify --json
+./scripts/afs next report --json
+```
+
+`next` is the deterministic funnel for agents. It turns a common intent into
+the first cheap MCP step, the exact CLI/slash-command route, a stop condition,
+and a short list of surfaces to avoid. Supported intents include `continue`,
+`context`, `review`, `ship`, `work-writing`, `verify`, `handoff`, `setup`,
+`refresh`, and `pack`.
+
+Every `afs next` route records a small `afs.next` history event. `next report`
+summarizes recent route use, MCP tool calls, and any heavy MCP calls that
+bypassed the default funnel.
 
 Extensions can add manager-visible commands with:
 

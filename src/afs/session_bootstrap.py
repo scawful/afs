@@ -74,10 +74,11 @@ def build_agent_discovery_path(context_path: Path) -> dict[str, Any]:
             },
         ],
         "routed_flows": {
+            "next": "afs next --intent <intent> --path <workspace> --json",
             "tasks": "afs tasks list --path <workspace>",
             "handoff": "afs session handoff list --path <workspace> --json",
             "work_preflight": "afs work communication preflight --path <workspace> --json",
-            "verify": "afs verify plan --path <workspace> --json",
+            "verify": "afs verify plan --cwd <workspace> --json",
             "refresh": "afs context repair --path <workspace> --dry-run --json",
             "pack": "afs session pack --path <workspace> --json",
             "human_manager": "afs manager open --path <workspace>",

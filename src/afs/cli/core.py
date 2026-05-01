@@ -2015,6 +2015,7 @@ def status_command(args: argparse.Namespace) -> int:
 
     print()
     print(_hint("discovery: context.status -> context.query -> context.read/list -> routed CLI flows"))
+    print(_hint("router: afs next --intent continue --path .  # exact next AFS action"))
 
     return 0
 

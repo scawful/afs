@@ -38,6 +38,7 @@ from . import (
     gws_cli,
     manager_gui,
     mcp,
+    next_action,
     personal,
     profile,
     review,
@@ -217,6 +218,7 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
     setup_wizard.register_parsers(subparsers)
     guide.register_parsers(subparsers)
     manager_gui.register_parsers(subparsers)
+    next_action.register_parsers(subparsers)
 
     # Register approvals commands
     approvals.register_parsers(subparsers)

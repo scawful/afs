@@ -337,6 +337,7 @@ def build_setup_plan(
         )
 
     next_commands = [
+        [*afs, "next", "--intent", "setup", "--path", str(workspace)],
         [*afs, "manager", "open", "--path", str(workspace)],
         [*afs, "status", "--start-dir", str(workspace)],
         [*afs, "guide", "context"],

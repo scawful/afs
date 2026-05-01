@@ -246,6 +246,7 @@ def collect_manager_snapshot(workspace: Path | str = Path("."), *, home: Path | 
     quoted = shlex.quote(str(root))
     commands = {
         "open_manager": f"{afs} manager open --path {quoted}",
+        "next_continue": f"{afs} next --intent continue --path {quoted}",
         "setup_preview": f"{afs} setup --workspace {quoted} --dry-run",
         "setup_apply": f"{afs} setup --workspace {quoted} --apply",
         "gemini_setup": f"{afs} gemini setup --scope project --project-path {quoted}",

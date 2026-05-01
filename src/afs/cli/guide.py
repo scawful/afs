@@ -24,6 +24,7 @@ GUIDES: dict[str, GuideTopic] = {
         summary="Open the manager, set up AFS, and learn where context lives.",
         commands=[
             ("afs manager", "open the friendly Python GUI manager"),
+            ("afs next --intent continue", "ask AFS for the next deterministic action"),
             ("afs setup", "guided setup wizard"),
             ("afs status", "show the active context, mounts, and index state"),
             ("afs guide context", "context root and mount workflow"),
@@ -66,6 +67,22 @@ GUIDES: dict[str, GuideTopic] = {
             "The manager is the normie-friendly setup surface; advanced harnesses can stay opinionated.",
             "Project .gemini/.claude/.codex/.opencode files are inspected without requiring agents to know every config format.",
             "Extensions can expose manager actions with a [manager] actions list in extension.toml.",
+        ],
+    ),
+    "next": GuideTopic(
+        name="next",
+        title="Next Action Router",
+        summary="Route common agent intents without exposing the full AFS catalog.",
+        commands=[
+            ("afs next --intent continue --json", "catch up from status/query/read"),
+            ("afs next --intent work-writing --json", "find the work preflight path"),
+            ("afs next --intent verify --json", "find the verification path"),
+            ("afs next report --json", "measure recent AFS funnel usage"),
+        ],
+        notes=[
+            "Use this when an agent might otherwise browse tools or docs to decide what AFS surface to touch.",
+            "The router returns the first MCP step, exact CLI/slash route, stop condition, and avoided heavy surfaces.",
+            "History records afs.next route events, so usage can be inspected later with `afs next report`.",
         ],
     ),
     "shell": GuideTopic(
@@ -144,6 +161,7 @@ ALIASES = {
     "workspace": "context",
     "contexts": "context",
     "gui": "manager",
+    "router": "next",
     "completion": "shell",
     "autocomplete": "shell",
     "google": "google-workspace",
@@ -205,6 +223,7 @@ def _render_menu() -> str:
             "",
             _section("Examples"),
             f"  {_cmd('afs guide context')}",
+            f"  {_cmd('afs next --intent continue')}",
             f"  {_cmd('afs manager')}",
             f"  {_cmd('afs guide shell')}",
             f"  {_cmd('afs setup')}",
@@ -231,6 +250,6 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "topic",
         nargs="?",
-        help="Topic: start, manager, context, shell, mcp, google-workspace, agents.",
+        help="Topic: start, next, manager, context, shell, mcp, google-workspace, agents.",
     )
     parser.set_defaults(func=guide_command)
