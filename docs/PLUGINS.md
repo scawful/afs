@@ -6,7 +6,7 @@ AFS supports two opt-in extension mechanisms:
 - Manifest-based extensions for repo-owned context, commands, agents, and MCP surfaces
 
 Core AFS stays neutral. Personal, work, or domain-specific behavior should live in
-a companion extension repo such as `afs_google`, `afs_company`, or
+a companion extension repo such as `afs_example`, `afs_company`, or
 `afs_scawful` instead of being hardcoded into `lab/afs`.
 
 ## Python Plugins
@@ -62,9 +62,9 @@ Companion repo discovery:
 That means a user can create a sibling repo like this:
 
 ```text
-~/src/lab/afs_google/
+~/src/lab/afs_example/
   extension.toml
-  src/afs_google/
+  src/afs_example/
     __init__.py
     cli.py
     agents.py
@@ -76,7 +76,7 @@ Then enable it from core AFS without copying implementation code:
 ```toml
 [extensions]
 auto_discover = false
-enabled_extensions = ["afs_google"]
+enabled_extensions = ["afs_example"]
 extension_repo_roots = ["~/src/lab"]
 # optional overrides:
 extension_repo_prefixes = ["afs_", "team_"]
@@ -87,7 +87,7 @@ Or with environment variables:
 
 ```bash
 export AFS_EXTENSION_REPO_ROOTS="$HOME/src/lab"
-export AFS_ENABLED_EXTENSIONS="afs_google"
+export AFS_ENABLED_EXTENSIONS="afs_example"
 ```
 
 Config and env:
@@ -116,17 +116,17 @@ Manifest fields:
 Example `extension.toml`:
 
 ```toml
-name = "afs_google"
-description = "Google Workspace context and approval helpers"
+name = "afs_example"
+description = "Example context and approval helpers"
 
 knowledge_mounts = ["knowledge"]
 skill_roots = ["skills"]
 python_paths = ["src"]
-cli_modules = ["afs_google.cli"]
-agent_modules = ["afs_google.agents"]
+cli_modules = ["afs_example.cli"]
+agent_modules = ["afs_example.agents"]
 
 [mcp_server]
-module = "afs_google.mcp_surface"
+module = "afs_example.mcp_surface"
 factory = "register_mcp_server"
 ```
 
@@ -180,3 +180,8 @@ addition to copying `knowledge/` and `skills/`, it can generate:
 
 That keeps bundles portable without requiring manual extension glue after
 install.
+
+
+## Context Source Providers
+
+Extensions can declare provider-neutral context source adapters with `[[context_sources]]`. See `docs/CONTEXT_SOURCES.md` for the record schema and CLI flow.

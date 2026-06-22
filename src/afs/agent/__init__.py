@@ -2,7 +2,7 @@
 
 This module provides a consistent interface for running models (Ollama, Gemini,
 Anthropic, OpenAI) with tool access and AFS integration, regardless of whether
-the code is running through Claude Code, Gemini CLI, or standalone.
+the code is running through Claude Code, Antigravity/Gemini compatibility, or standalone.
 
 Key components:
     - AgentHarness: Core runtime with tool loop

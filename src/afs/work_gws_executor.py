@@ -1,4 +1,4 @@
-"""Google Workspace executor for approved AFS work-assistant actions."""
+"""Google Workspace executor for approved AFS actions."""
 
 from __future__ import annotations
 

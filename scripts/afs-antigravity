@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export AGY_CMD="${AGY_CMD:-agy}"
+exec "${SCRIPT_DIR}/afs-client-session" antigravity "${AGY_CMD}" AGY_CMD --session-model gemini "$@"

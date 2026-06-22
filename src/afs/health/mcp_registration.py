@@ -8,7 +8,7 @@ from typing import Any
 
 import tomllib
 
-SUPPORTED_MCP_CLIENTS = ("gemini", "claude", "codex")
+SUPPORTED_MCP_CLIENTS = ("gemini", "antigravity", "claude", "codex")
 
 _JSON_CONFIG_CANDIDATES: dict[str, tuple[str, ...]] = {
     "gemini": (
@@ -16,6 +16,10 @@ _JSON_CONFIG_CANDIDATES: dict[str, tuple[str, ...]] = {
         ".config/gemini/settings.json",
         ".gemini/mcp.json",
         ".gemini/settings.json",
+    ),
+    "antigravity": (
+        ".gemini/antigravity-cli/settings.json",
+        ".config/antigravity/settings.json",
     ),
     "claude": (
         ".claude/settings.json",
@@ -47,6 +51,13 @@ def discover_mcp_config_paths(
             for project_candidate in (
                 cwd_dir / ".gemini" / "settings.json",
                 cwd_dir / ".gemini" / "mcp.json",
+            ):
+                if project_candidate not in paths:
+                    paths.append(project_candidate)
+        if client == "antigravity":
+            for project_candidate in (
+                cwd_dir / ".antigravity" / "settings.json",
+                cwd_dir / ".gemini" / "antigravity-cli" / "settings.json",
             ):
                 if project_candidate not in paths:
                     paths.append(project_candidate)

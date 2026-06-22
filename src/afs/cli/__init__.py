@@ -22,6 +22,7 @@ from ..history import log_cli_invocation
 from ..profiles import resolve_active_profile
 from . import (
     agent_ops,
+    antigravity,
     approvals,
     briefing,
     bundle,
@@ -44,6 +45,7 @@ from . import (
     review,
     setup_wizard,
     skills,
+    sources,
     training,
     verify,
     watch,
@@ -241,8 +243,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
     # Register embedding commands
     embeddings.register_parsers(subparsers)
 
-    # Register Gemini integration commands
+    # Register Gemini/Antigravity integration commands
     gemini.register_parsers(subparsers)
+    antigravity.register_parsers(subparsers)
 
     # Register MCP server commands
     mcp.register_parsers(subparsers)
@@ -264,6 +267,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
 
     # Register skill metadata commands
     skills.register_parsers(subparsers)
+
+    # Register generic context source provider commands
+    sources.register_parsers(subparsers)
 
     # Register bundle commands
     bundle.register_parsers(subparsers)

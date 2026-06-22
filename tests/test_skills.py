@@ -10,7 +10,7 @@ def test_parse_skill_frontmatter() -> None:
     metadata = parse_skill_metadata(path)
 
     assert metadata.name == "gemini-work"
-    assert metadata.triggers == ["gemini-cli", "agent studio"]
+    assert metadata.triggers == ["antigravity-cli", "agent studio"]
     assert metadata.requires == ["knowledge/work", "gemini mcp"]
     assert metadata.profiles == ["work", "general"]
     assert metadata.enforcement == [
@@ -53,5 +53,5 @@ def test_discover_skills_profile_filter(tmp_path: Path) -> None:
 def test_score_skill_relevance() -> None:
     path = Path(__file__).parent / "fixtures" / "skill_frontmatter" / "SKILL.md"
     metadata = parse_skill_metadata(path)
-    score = score_skill_relevance("Need gemini-cli setup for agent studio", metadata)
+    score = score_skill_relevance("Need antigravity setup for agent studio", metadata)
     assert score >= 1

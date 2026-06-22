@@ -129,14 +129,14 @@ def test_extensions_config_from_dict_supports_companion_repos() -> None:
 
     config = ExtensionsConfig.from_dict(
         {
-            "enabled_extensions": ["afs_google"],
+            "enabled_extensions": ["afs_example"],
             "extension_repo_roots": ["/tmp/workspaces"],
             "extension_repo_prefixes": ["afs_", "team_"],
             "manifest_filenames": ["extension.toml", "afs-extension.toml"],
         }
     )
 
-    assert config.enabled_extensions == ["afs_google"]
+    assert config.enabled_extensions == ["afs_example"]
     assert config.extension_repo_roots == [Path("/tmp/workspaces").resolve()]
     assert config.extension_repo_prefixes == ["afs_", "team_"]
     assert config.manifest_filenames == ["extension.toml", "afs-extension.toml"]

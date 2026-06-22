@@ -34,6 +34,7 @@ class ExtensionManifest:
     mcp_tools_factory: str = "register_mcp_tools"
     mcp_server_module: str = ""
     mcp_server_factory: str = "register_mcp_server"
+    context_sources: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def import_roots(self) -> list[Path]:
@@ -62,6 +63,35 @@ def _as_str_list(items: Any) -> list[str]:
         return []
     return [str(entry) for entry in items if isinstance(entry, str)]
 
+
+def _as_context_source_specs(items: Any) -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+    specs: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        module = item.get("module")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(module, str) or not module.strip():
+            continue
+        spec = {
+            "name": name.strip(),
+            "module": module.strip(),
+        }
+        factory = item.get("factory")
+        if isinstance(factory, str) and factory.strip():
+            spec["factory"] = factory.strip()
+        description = item.get("description")
+        if isinstance(description, str) and description.strip():
+            spec["description"] = description.strip()
+        kinds = item.get("kinds")
+        if isinstance(kinds, list):
+            spec["kinds"] = [kind for kind in kinds if isinstance(kind, str) and kind.strip()]
+        specs.append(spec)
+    return specs
 
 def _env_extension_dirs() -> list[Path]:
     raw = os.environ.get("AFS_EXTENSION_DIRS", "").strip()
@@ -353,6 +383,7 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
         mcp_tools_factory=mcp_tools_factory,
         mcp_server_module=mcp_server_module,
         mcp_server_factory=mcp_server_factory,
+        context_sources=_as_context_source_specs(raw.get("context_sources")),
     )
 
 

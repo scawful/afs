@@ -373,7 +373,7 @@ def test_afs_agent_hooks_route_harness_commands(tmp_path: Path) -> None:
     scripts = fake_root / "scripts"
     scripts.mkdir(parents=True)
     log = tmp_path / "hook-log.txt"
-    for name in ("afs-codex", "afs-claude", "afs-gemini", "afs-hcode", "afs-z3cli"):
+    for name in ("afs-codex", "afs-claude", "afs-gemini", "afs-antigravity", "afs-hcode", "afs-z3cli"):
         target = scripts / name
         target.write_text(
             "#!/usr/bin/env bash\n"
@@ -389,7 +389,7 @@ def test_afs_agent_hooks_route_harness_commands(tmp_path: Path) -> None:
             (
                 f"export AFS_ROOT={shlex.quote(str(fake_root))}; "
                 f"source {shlex.quote(str(AFS_AGENT_HOOKS))} && "
-                "codex one && claude two && gemini three && hcode four && z3cli five"
+                "codex one && claude two && gemini three && antigravity four && hcode five && z3cli six"
             ),
         ],
         capture_output=True,
@@ -402,8 +402,9 @@ def test_afs_agent_hooks_route_harness_commands(tmp_path: Path) -> None:
         "afs-codex one",
         "afs-claude two",
         "afs-gemini three",
-        "afs-hcode four",
-        "afs-z3cli five",
+        "afs-antigravity four",
+        "afs-hcode five",
+        "afs-z3cli six",
     ]
 
 
@@ -451,7 +452,7 @@ def test_afs_agent_hooks_expose_raw_bypass_functions(tmp_path: Path) -> None:
             (
                 f"export AFS_ROOT={shlex.quote(str(fake_root))}; "
                 f"source {shlex.quote(str(AFS_AGENT_HOOKS))} && "
-                "type codex-raw && type claude-raw && type gemini-raw && type hcode-raw && type z3cli-raw"
+                "type codex-raw && type claude-raw && type gemini-raw && type antigravity-raw && type hcode-raw && type z3cli-raw"
             ),
         ],
         capture_output=True,
@@ -462,6 +463,7 @@ def test_afs_agent_hooks_expose_raw_bypass_functions(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr or result.stdout
     assert "codex-raw is a function" in result.stdout
     assert "claude-raw is a function" in result.stdout
+    assert "antigravity-raw is a function" in result.stdout
 
 
 def test_afs_session_notify_has_valid_bash_syntax() -> None:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute one approved AFS work action through Google Workspace CLI."""
+"""Execute one approved AFS action through Google Workspace CLI."""
 
 from __future__ import annotations
 

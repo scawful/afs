@@ -212,8 +212,8 @@ def test_companion_repo_cli_module_uses_src_layout(
     tmp_path: Path,
 ) -> None:
     workspace_root = tmp_path / "lab"
-    repo = workspace_root / "afs_google"
-    package = repo / "src" / "afs_google"
+    repo = workspace_root / "afs_example"
+    package = repo / "src" / "afs_example"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
     (package / "cli.py").write_text(
@@ -223,8 +223,8 @@ def test_companion_repo_cli_module_uses_src_layout(
         encoding="utf-8",
     )
     (repo / "extension.toml").write_text(
-        "name = \"afs_google\"\n"
-        "cli_modules = [\"afs_google.cli\"]\n",
+        "name = \"afs_example\"\n"
+        "cli_modules = [\"afs_example.cli\"]\n",
         encoding="utf-8",
     )
 
@@ -237,7 +237,7 @@ def test_companion_repo_cli_module_uses_src_layout(
     )
 
     monkeypatch.setenv("AFS_CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("AFS_ENABLED_EXTENSIONS", "afs_google")
+    monkeypatch.setenv("AFS_ENABLED_EXTENSIONS", "afs_example")
     monkeypatch.delenv("AFS_EXTENSION_DIRS", raising=False)
     monkeypatch.delenv("AFS_EXTENSION_REPO_ROOTS", raising=False)
     monkeypatch.delenv("AFS_EXTENSION_REPO_PREFIXES", raising=False)

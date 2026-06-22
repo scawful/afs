@@ -60,8 +60,8 @@ Also supported once installed into the active environment:
 ./scripts/afs agent-manifest sync --harness hcode --apply
 ./scripts/afs-upgrade-agent-setup --workspace ~/src
 ./scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
-./scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode
-./scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode --apply
+./scripts/afs-upgrade-agent-setup --workspace ~/src --full --setup-hcode
+./scripts/afs-upgrade-agent-setup --workspace ~/src --full --setup-hcode --apply
 
 ./scripts/afs agent-hooks show
 ./scripts/afs agent-hooks install-shell --apply
@@ -88,8 +88,8 @@ job_id="$(./scripts/afs agent-jobs create "Review stale instructions" --prompt "
 truth for harnesses, shared skills, slash-command packs, MCP servers, and
 startup hints.
 `afs-upgrade-agent-setup` wraps the common local upgrade path and stays dry-run
-unless `--apply` is provided. Use `--work --setup-hcode` to preview or apply
-the work-machine path that syncs Codex/Claude/Gemini/hcode manifest state,
+unless `--apply` is provided. Use `--full --setup-hcode` to preview or apply
+the full local path that syncs Codex/Claude/Gemini/Antigravity/hcode manifest state,
 OpenCode slash commands, shell hooks, and index freshness without making the
 MCP catalog noisy.
 `agent-manifest sync` copies manifest-declared shared skills into harness skill
@@ -100,10 +100,10 @@ are reported as `customized` and are not overwritten unless the manifest pack
 opts into `overwrite = true`.
 `agent-hooks install-shell` adds an idempotent block to the shell profile that
 sources `afs-shell-init.sh` and `afs-agent-hooks.sh`, making normal generic
-harness commands such as `codex`, `claude`, `gemini`, and `hcode` route
+harness commands such as `codex`, `claude`, `gemini`, `antigravity`, and `hcode` route
 through AFS wrappers. Companion extension repos can add more local harnesses.
 Raw bypass functions are also exposed for installed wrappers, such as
-`codex-raw`, `claude-raw`, `gemini-raw`, and `hcode-raw`.
+`codex-raw`, `claude-raw`, `gemini-raw`, `antigravity-raw`, and `hcode-raw`.
 `agent-hooks install-worker` writes a user LaunchAgent that runs
 `agent-jobs work --loop` for automatic queued-job execution. The worker skips
 obvious destructive prompts unless the job or worker uses `--allow-destructive`.
@@ -197,7 +197,7 @@ actions = ["afs status", "afs tasks list --path ."]
 ```
 
 `setup` asks for config scope, context placement, shell integration level,
-optional MCP registration, optional Google Workspace handling, and background
+optional MCP registration, optional Google Workspace public API handling, and background
 worker installation. It prints a plan before writing. `--shell helpers` installs
 aliases, colors, and zsh completion without routing AI harness commands;
 `--shell agent-hooks` enables the full wrapper routing.
@@ -623,6 +623,30 @@ For Gemini, the system auto-selects the correct task type: `RETRIEVAL_DOCUMENT` 
 indexing, `RETRIEVAL_QUERY` for search queries (asymmetric retrieval). Override with
 `--gemini-task-type`.
 
+## Context Sources
+
+```bash
+./scripts/afs sources list --json
+./scripts/afs sources status --path . --json
+./scripts/afs sources sync --provider example_tasks --path . --json
+./scripts/afs sources sync --provider example_tasks --path . --apply
+```
+
+Context-source providers are extension-owned and provider-neutral. See
+`docs/CONTEXT_SOURCES.md`.
+
+## Antigravity CLI
+
+```bash
+./scripts/afs antigravity status --json
+./scripts/afs antigravity setup --scope project --project-path .
+./scripts/afs antigravity setup --scope project --project-path . --apply
+./scripts/afs antigravity models
+```
+
+`setup` is dry-run by default and does not install `agy`. See
+`docs/ANTIGRAVITY_CLI.md`.
+
 ## Gemini
 
 ```bash
@@ -650,7 +674,7 @@ indexing, `RETRIEVAL_QUERY` for search queries (asymmetric retrieval). Override 
 ./scripts/afs gemini context --knowledge-path ~/.context/knowledge/afs "hooks"
 ```
 
-`afs gemini setup` writes the AFS MCP server entry into Gemini CLI settings so
+`afs antigravity setup` previews or writes the AFS MCP entry for Antigravity CLI. `afs gemini setup` remains as Gemini CLI compatibility/API-key setup and writes settings so
 Gemini can discover AFS tools automatically. The default launch target is the
 repo-local `scripts/afs mcp serve` wrapper, which preserves AFS runtime env and
 repo-config preference automatically. Use `--scope project` for repo-local

@@ -15,7 +15,7 @@ actions.
 
 The setup wizard asks where configuration should live, where context files
 should live, whether shell helpers should be installed, and whether optional
-MCP or Google Workspace helpers should be configured. It prints the plan before
+MCP, Antigravity, or optional Google Workspace public API helpers should be configured. It prints the plan before
 writing anything.
 
 For a noninteractive preview:
@@ -52,7 +52,7 @@ Shell mode:
 Optional integrations:
 
 - `--mcp claude`, `--mcp gemini`, or `--mcp both`
-- `--google-workspace check` or `--google-workspace setup`
+- `--google-workspace check` or `--google-workspace setup` for optional public API helpers
 - `--worker` for the background agent-job worker
 
 GUI manager:
@@ -93,6 +93,7 @@ afs guide context
 afs guide shell
 afs guide mcp
 afs guide google-workspace
+afs antigravity setup --scope project
 afs guide agents
 ```
 

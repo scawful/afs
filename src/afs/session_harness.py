@@ -14,6 +14,7 @@ from .chat_registry import load_chat_registry
 from .context_pack import build_context_pack, write_context_pack_artifacts
 from .context_paths import resolve_agent_output_root
 from .manager import AFSManager
+from .model_profiles import profile_for_client_model
 from .model_prompts import build_model_system_prompt
 from .profiles import resolve_active_profile
 from .repo_policy import evaluate_repo_policy, load_repo_policy
@@ -250,6 +251,7 @@ def _default_client_session_payload(
         "repo_policy": {"available": False},
         "verification_plan": {"available": False},
         "structured_guidance": {},
+        "model_profile": profile_for_client_model(client, client).to_dict(),
         "cli_hints": _build_cli_hints(workspace_path=resolved_cwd),
         "integration": _integration_contract(),
         "activity": _initial_activity_state(),
@@ -294,6 +296,13 @@ def _ensure_client_session_payload_shape(payload: dict[str, Any]) -> dict[str, A
     normalized.setdefault("repo_policy", {"available": False})
     normalized.setdefault("verification_plan", {"available": False})
     normalized.setdefault("structured_guidance", {})
+    normalized.setdefault(
+        "model_profile",
+        profile_for_client_model(
+            str(normalized.get("client", "generic")),
+            str((normalized.get("pack") if isinstance(normalized.get("pack"), dict) else {}).get("model", normalized.get("client", "generic"))),
+        ).to_dict(),
+    )
     cli_hints = normalized.get("cli_hints")
     merged_cli_hints = _build_cli_hints(workspace_path=resolved_cwd)
     if isinstance(cli_hints, dict):
@@ -1315,10 +1324,12 @@ def build_client_session_payload(
         client=client,
         write_artifacts=write_artifacts,
     )
+    model_profile = profile_for_client_model(client, model).to_dict()
     payload: dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "client": client,
         "session_id": session_id,
+        "model_profile": model_profile,
         "context_path": str(resolved_context),
         "config_path": str(config_path) if config_path else "",
         "cwd": str(resolved_cwd),

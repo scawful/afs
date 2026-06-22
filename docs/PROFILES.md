@@ -9,7 +9,7 @@ Profiles control what context is injected for a given environment.
 auto_discover = true
 enabled_extensions = ["workspace_adapter"]
 extension_dirs = ["./extensions"]
-# Optional sibling companion repos, e.g. ~/src/lab/afs_google.
+# Optional sibling companion repos, e.g. ~/src/lab/afs_example.
 extension_repo_roots = ["~/src/lab"]
 extension_repo_prefixes = ["afs_", "afs-"]
 manifest_filenames = ["extension.toml"]
@@ -60,16 +60,16 @@ task_completed = []
 that call the shared chat registry loader.
 
 Companion repos use the same profile and extension controls as `extensions/`.
-For example, a work setup can keep Google Workspace glue in `~/src/lab/afs_google`
+For example, a work setup can keep extension glue in `~/src/lab/afs_example`
 and enable only that repo in the active profile:
 
 ```toml
 [extensions]
-enabled_extensions = ["afs_google"]
+enabled_extensions = ["afs_example"]
 extension_repo_roots = ["~/src/lab"]
 
 [profiles.work]
-enabled_extensions = ["afs_google"]
+enabled_extensions = ["afs_example"]
 policies = ["deny_keywords:customer-secret"]
 ```
 

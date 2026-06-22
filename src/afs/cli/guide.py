@@ -113,9 +113,10 @@ GUIDES: dict[str, GuideTopic] = {
         commands=[
             ("afs manager", "inspect .gemini/.claude/.codex project setup"),
             ("afs mcp serve", "run the AFS stdio MCP server"),
-            ("afs gemini setup --scope project", "register AFS for Gemini CLI"),
+            ("afs antigravity setup --scope project", "preview Antigravity CLI MCP setup"),
+            ("afs gemini setup --scope project", "compatibility setup for Gemini CLI/API-key workflows"),
             ("afs claude setup --path .", "register AFS for Claude-compatible settings"),
-            ("afs guide google-workspace", "optional Google Workspace helper setup"),
+            ("afs guide google-workspace", "optional Google Workspace public API helper setup"),
         ],
         notes=[
             "Keep the default MCP surface small: status, query, read, write, and list.",
@@ -125,7 +126,7 @@ GUIDES: dict[str, GuideTopic] = {
     "google-workspace": GuideTopic(
         name="google-workspace",
         title="Google Workspace",
-        summary="Connect optional Google Workspace helpers without making it core AFS.",
+        summary="Connect optional Google Workspace public API helpers without making them required for core AFS.",
         commands=[
             ("scripts/setup_gws.sh --dry-run", "preview install/auth steps"),
             ("scripts/setup_gws.sh", "install/check gws and authenticate"),
@@ -134,8 +135,8 @@ GUIDES: dict[str, GuideTopic] = {
             ("afs gws unread", "show unread primary inbox snippets"),
         ],
         notes=[
-            "Keep credentials in the Google Workspace tool's config directory.",
-            "Use work-approved OAuth/client setup and scopes.",
+            "Keep credentials in the Google Workspace tool's config directory; do not commit them.",
+            "Use user-provided OAuth/client setup and scopes.",
         ],
     ),
     "agents": GuideTopic(

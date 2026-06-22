@@ -358,7 +358,7 @@ def test_write_config_round_trips_extended_sections(tmp_path) -> None:
             },
             "extensions": {
                 "auto_discover": False,
-                "enabled_extensions": ["afs_google"],
+                "enabled_extensions": ["afs_example"],
                 "extension_dirs": [str(tmp_path / "extensions")],
                 "extension_repo_roots": [str(tmp_path / "lab")],
                 "extension_repo_prefixes": ["afs_", "team_"],
@@ -400,7 +400,7 @@ def test_write_config_round_trips_extended_sections(tmp_path) -> None:
     assert roundtrip.context_index.decay_hours == 72.0
     assert roundtrip.sensitivity.never_embed == ["**/*.secret.md"]
     assert roundtrip.extensions.auto_discover is False
-    assert roundtrip.extensions.enabled_extensions == ["afs_google"]
+    assert roundtrip.extensions.enabled_extensions == ["afs_example"]
     assert roundtrip.extensions.extension_repo_roots == [(tmp_path / "lab").resolve()]
     assert roundtrip.extensions.extension_repo_prefixes == ["afs_", "team_"]
     assert roundtrip.extensions.manifest_filenames == [
