@@ -82,9 +82,17 @@ jobs:
 
     - name: Run integration tests
       run: |
+        set +e
         pytest tests/ -v \
           -m "integration and not requires_gpu" \
           --timeout=300
+        status=$?
+        set -e
+        if [ "$status" -eq 5 ]; then
+          echo "No integration tests selected; treating as skipped."
+          exit 0
+        fi
+        exit "$status"
 
   build-docs:
     name: Build Documentation
