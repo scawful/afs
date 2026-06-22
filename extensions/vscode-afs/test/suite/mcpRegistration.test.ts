@@ -1,214 +1,114 @@
 import * as assert from "node:assert";
-import { describe, it } from "node:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "fs";
-import { join } from "path";
-import { tmpdir } from "os";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, it } from "node:test";
+import { __resetTestState, __setConfiguration } from "vscode";
+import {
+  buildServerEntry,
+  checkRegistration,
+  mergeMcpServerConfig,
+} from "../../src/mcp/registration";
 
-describe("MCP Registration JSON merge", () => {
-  const testDir = join(tmpdir(), `afs-test-${Date.now()}`);
+const tempDirs: string[] = [];
 
-  // Test the JSON merge logic that registration.ts uses
-  it("merges AFS entry into empty config", () => {
-    const existing: Record<string, unknown> = {};
-    const newConfig = {
-      ...existing,
-      mcpServers: {
-        ...(existing as { mcpServers?: Record<string, unknown> }).mcpServers ?? {},
-        afs: { command: "afs", args: ["mcp", "serve"] },
+describe("MCP registration helpers", () => {
+  beforeEach(() => {
+    __resetTestState();
+  });
+
+  afterEach(() => {
+    for (const tempDir of tempDirs.splice(0)) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("builds an MCP server entry using configured args and env", () => {
+    __setConfiguration("afs.server.args", ["--verbose"]);
+    __setConfiguration("afs.server.env", { AFS_LOG_LEVEL: "debug" });
+
+    const entry = buildServerEntry({
+      command: "python3",
+      args: ["-m", "afs"],
+      env: { AFS_ROOT: "/tmp/workspace" },
+    });
+
+    assert.deepStrictEqual(entry, {
+      command: "python3",
+      args: ["-m", "afs", "mcp", "serve", "--verbose"],
+      env: {
+        AFS_ROOT: "/tmp/workspace",
+        AFS_LOG_LEVEL: "debug",
       },
-    };
-    assert.deepStrictEqual(newConfig, {
-      mcpServers: { afs: { command: "afs", args: ["mcp", "serve"] } },
     });
   });
 
-  it("merges AFS entry preserving existing servers", () => {
-    const existing = {
-      mcpServers: {
-        other: { command: "other-server", args: [] },
+  it("merges the AFS entry while preserving other MCP servers", () => {
+    const merged = mergeMcpServerConfig(
+      {
+        version: "1.0",
+        mcpServers: {
+          other: { command: "other-server", args: [] },
+          afs: { command: "old-afs", args: ["old"] },
+        },
       },
-    };
-    const newConfig = {
-      ...existing,
-      mcpServers: {
-        ...existing.mcpServers,
-        afs: { command: "afs", args: ["mcp", "serve"] },
-      },
-    };
-    assert.strictEqual(Object.keys(newConfig.mcpServers).length, 2);
-    assert.deepStrictEqual(newConfig.mcpServers.other, {
+      { command: "new-afs", args: ["mcp", "serve"], env: { AFS_ROOT: "/tmp/workspace" } },
+    );
+
+    assert.strictEqual(merged.version, "1.0");
+    assert.deepStrictEqual(merged.mcpServers?.other, {
       command: "other-server",
       args: [],
     });
-    assert.deepStrictEqual(newConfig.mcpServers.afs, {
-      command: "afs",
+    assert.deepStrictEqual(merged.mcpServers?.afs, {
+      command: "new-afs",
       args: ["mcp", "serve"],
+      env: { AFS_ROOT: "/tmp/workspace" },
     });
   });
 
-  it("overwrites existing AFS entry on re-register", () => {
-    const existing = {
+  it("reports the registered AFS entry for an override config path", () => {
+    const configPath = writeTempConfig({
       mcpServers: {
-        afs: { command: "old-afs", args: ["old"] },
-        other: { command: "other", args: [] },
+        afs: {
+          command: "python3",
+          args: ["-m", "afs", "mcp", "serve"],
+          env: { AFS_ROOT: "/tmp/workspace" },
+        },
       },
-    };
-    const newConfig = {
-      ...existing,
-      mcpServers: {
-        ...existing.mcpServers,
-        afs: { command: "new-afs", args: ["mcp", "serve"] },
-      },
-    };
-    assert.strictEqual(newConfig.mcpServers.afs.command, "new-afs");
-    assert.strictEqual(Object.keys(newConfig.mcpServers).length, 2);
-  });
-
-  it("removes AFS entry on unregister", () => {
-    const config: { mcpServers: Record<string, { command: string; args?: string[] }> } = {
-      mcpServers: {
-        afs: { command: "afs", args: ["mcp", "serve"] },
-        other: { command: "other", args: [] },
-      },
-    };
-    delete config.mcpServers.afs;
-    assert.strictEqual(Object.keys(config.mcpServers).length, 1);
-    assert.strictEqual(config.mcpServers.afs, undefined);
-    assert.deepStrictEqual(config.mcpServers.other, {
-      command: "other",
-      args: [],
     });
-  });
+    __setConfiguration("afs.mcp.configPath", configPath);
 
-  it("handles config with no mcpServers key", () => {
-    const existing: Record<string, unknown> = { someOtherKey: true };
-    const newConfig = {
-      ...existing,
-      mcpServers: {
-        ...(existing as { mcpServers?: Record<string, unknown> }).mcpServers ?? {},
-        afs: { command: "afs", args: ["mcp", "serve"] },
-      },
-    };
-    assert.strictEqual(newConfig.someOtherKey, true);
-    assert.deepStrictEqual(newConfig.mcpServers.afs, {
-      command: "afs",
-      args: ["mcp", "serve"],
-    });
-  });
+    const status = checkRegistration();
 
-  it("preserves non-mcpServers keys in config", () => {
-    const existing = {
-      version: "1.0",
-      editor: { theme: "dark" },
-      mcpServers: {
-        existing: { command: "foo" },
-      },
-    };
-    const newConfig = {
-      ...existing,
-      mcpServers: {
-        ...existing.mcpServers,
-        afs: { command: "afs", args: ["mcp", "serve"] },
-      },
-    };
-    assert.strictEqual(newConfig.version, "1.0");
-    assert.deepStrictEqual(newConfig.editor, { theme: "dark" });
-    assert.strictEqual(Object.keys(newConfig.mcpServers).length, 2);
-  });
-
-  it("backup and write creates valid JSON", () => {
-    mkdirSync(testDir, { recursive: true });
-    const configPath = join(testDir, "mcp.json");
-    const original = { mcpServers: { existing: { command: "foo" } } };
-    writeFileSync(configPath, JSON.stringify(original, null, 2), "utf-8");
-
-    // Simulate backup
-    const backupPath = `${configPath}.backup`;
-    const originalContent = readFileSync(configPath, "utf-8");
-    writeFileSync(backupPath, originalContent, "utf-8");
-
-    // Simulate merge and write
-    const parsed = JSON.parse(originalContent);
-    const merged = {
-      ...parsed,
-      mcpServers: {
-        ...parsed.mcpServers,
-        afs: { command: "afs", args: ["mcp", "serve"] },
-      },
-    };
-    writeFileSync(configPath, JSON.stringify(merged, null, 2), "utf-8");
-
-    // Verify
-    const result = JSON.parse(readFileSync(configPath, "utf-8"));
-    assert.strictEqual(Object.keys(result.mcpServers).length, 2);
-    assert.ok(result.mcpServers.afs);
-    assert.ok(result.mcpServers.existing);
-
-    // Verify backup
-    const backup = JSON.parse(readFileSync(backupPath, "utf-8"));
-    assert.strictEqual(Object.keys(backup.mcpServers).length, 1);
-    assert.ok(!backup.mcpServers.afs);
-
-    // Cleanup
-    rmSync(testDir, { recursive: true, force: true });
-  });
-
-  it("handles missing config file gracefully", () => {
-    const missingPath = join(tmpdir(), `afs-missing-${Date.now()}`, "mcp.json");
-    assert.strictEqual(existsSync(missingPath), false);
-
-    // Simulate what registration does: create new config when file missing
-    const newConfig = {
-      mcpServers: {
-        afs: { command: "afs", args: ["mcp", "serve"] },
-      },
-    };
-    const json = JSON.stringify(newConfig, null, 2);
-    const parsed = JSON.parse(json);
-    assert.deepStrictEqual(parsed.mcpServers.afs, {
-      command: "afs",
-      args: ["mcp", "serve"],
-    });
-  });
-
-  it("round-trips JSON with custom args and env", () => {
-    const entry = {
+    assert.strictEqual(status.registered, true);
+    assert.strictEqual(status.configPath, configPath);
+    assert.deepStrictEqual(status.entry, {
       command: "python3",
-      args: ["-m", "afs", "mcp", "serve", "--verbose"],
-      env: { AFS_LOG_LEVEL: "debug", PYTHONPATH: "/custom/path" },
-    };
-    const config = { mcpServers: { afs: entry } };
-    const json = JSON.stringify(config, null, 2);
-    const parsed = JSON.parse(json);
-
-    assert.strictEqual(parsed.mcpServers.afs.command, "python3");
-    assert.deepStrictEqual(parsed.mcpServers.afs.args, [
-      "-m", "afs", "mcp", "serve", "--verbose",
-    ]);
-    assert.strictEqual(parsed.mcpServers.afs.env.AFS_LOG_LEVEL, "debug");
-    assert.strictEqual(parsed.mcpServers.afs.env.PYTHONPATH, "/custom/path");
+      args: ["-m", "afs", "mcp", "serve"],
+      env: { AFS_ROOT: "/tmp/workspace" },
+    });
   });
 
-  it("merge is idempotent", () => {
-    const base = {
-      mcpServers: {
-        other: { command: "other" },
-      },
-    };
-    const afsEntry = { command: "afs", args: ["mcp", "serve"] };
+  it("surfaces parse errors for invalid MCP config files", () => {
+    const tempDir = mkdtempSync(path.join(os.tmpdir(), "afs-mcp-invalid-"));
+    tempDirs.push(tempDir);
+    const configPath = path.join(tempDir, "mcp.json");
+    writeFileSync(configPath, "{not-json", "utf-8");
+    __setConfiguration("afs.mcp.configPath", configPath);
 
-    // First merge
-    const first = {
-      ...base,
-      mcpServers: { ...base.mcpServers, afs: afsEntry },
-    };
+    const status = checkRegistration();
 
-    // Second merge (same entry)
-    const second = {
-      ...first,
-      mcpServers: { ...first.mcpServers, afs: afsEntry },
-    };
-
-    assert.deepStrictEqual(first, second);
+    assert.strictEqual(status.registered, false);
+    assert.strictEqual(status.configPath, configPath);
+    assert.match(status.parseError ?? "", /Could not parse MCP config/);
   });
 });
+
+function writeTempConfig(contents: Record<string, unknown>): string {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), "afs-mcp-config-"));
+  tempDirs.push(tempDir);
+  const configPath = path.join(tempDir, "mcp.json");
+  writeFileSync(configPath, JSON.stringify(contents, null, 2), "utf-8");
+  return configPath;
+}

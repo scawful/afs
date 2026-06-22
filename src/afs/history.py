@@ -174,6 +174,22 @@ def _redact_payload(payload: Any) -> Any:
     return payload
 
 
+def _maybe_enrich_work_assistant(
+    context_root: Path | None,
+    event: dict[str, Any],
+) -> None:
+    if context_root is None:
+        return
+    try:
+        from .work_assistant import enrich_logged_event
+
+        enrich_logged_event(context_root, event)
+    except Exception:
+        # Work-assistant enrichment is a best-effort background side effect of
+        # logging. A failure here must never block the canonical history event.
+        return
+
+
 def append_history_event(
     history_root: Path,
     event_type: str,
@@ -270,8 +286,11 @@ def append_history_event(
         payload_preview=payload_preview,
     )
 
+    event_payload = event.to_dict()
     with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+        handle.write(json.dumps(event_payload, ensure_ascii=False) + "\n")
+
+    _maybe_enrich_work_assistant(context_value, event_payload)
 
     return event_id
 
@@ -364,8 +383,11 @@ def log_event(
         payload_preview=payload_preview,
     )
 
+    event_payload = event.to_dict()
     with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+        handle.write(json.dumps(event_payload, ensure_ascii=False) + "\n")
+
+    _maybe_enrich_work_assistant(resolved_root, event_payload)
 
     return event_id
 

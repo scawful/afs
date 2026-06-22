@@ -35,7 +35,7 @@ def _ns(approvals_file: Path, **kwargs) -> Namespace:
 def _sample_request(
     agent: str = "scout",
     action: str = "git_push",
-    detail: str = "push to origin/main",
+    detail: str = "push to origin/development",
     status: str = "pending",
 ) -> ApprovalRequest:
     return ApprovalRequest(

@@ -34,7 +34,7 @@ def test_resolve_profile_with_extension(tmp_path: Path) -> None:
         "knowledge_mounts = [\"knowledge\"]\n"
         "skill_roots = [\"skills\"]\n"
         "model_registries = [\"registry\"]\n"
-        "policies = [\"no_zelda\"]\n",
+        "policies = [\"deny_keywords:restricted\"]\n",
         encoding="utf-8",
     )
 
@@ -62,16 +62,18 @@ def test_resolve_profile_with_extension(tmp_path: Path) -> None:
 
     resolved = resolve_active_profile(config)
     assert resolved.name == "work"
-    assert "no_zelda" in resolved.policies
+    assert "deny_keywords:restricted" in resolved.policies
     assert work_knowledge.resolve() in resolved.knowledge_mounts
     assert work_skills.resolve() in resolved.skill_roots
     assert work_registry.resolve() in resolved.model_registries
 
 
 def test_manager_applies_profile_mounts(tmp_path: Path) -> None:
+    memory_src = tmp_path / "memory-src"
     knowledge_src = tmp_path / "knowledge-src"
     skill_src = tmp_path / "skills-src"
     registry_src = tmp_path / "registry-src"
+    memory_src.mkdir()
     knowledge_src.mkdir()
     skill_src.mkdir()
     registry_src.mkdir()
@@ -86,6 +88,7 @@ def test_manager_applies_profile_mounts(tmp_path: Path) -> None:
         auto_apply=True,
         profiles={
             "work": ProfileConfig(
+                memory_mounts=[memory_src],
                 knowledge_mounts=[knowledge_src],
                 skill_roots=[skill_src],
                 model_registries=[registry_src],
@@ -99,10 +102,12 @@ def test_manager_applies_profile_mounts(tmp_path: Path) -> None:
     project.mkdir()
     context = manager.ensure(path=project, context_root=context_root, profile="work")
 
+    memory_mounts = context.get_mounts(MountType.MEMORY)
     knowledge_mounts = context.get_mounts(MountType.KNOWLEDGE)
     tool_mounts = context.get_mounts(MountType.TOOLS)
     global_mounts = context.get_mounts(MountType.GLOBAL)
 
+    assert any(m.name.startswith("profile-memory-work") for m in memory_mounts)
     assert any(m.name.startswith("profile-knowledge-work") for m in knowledge_mounts)
     assert any(m.name.startswith("profile-skill-work") for m in tool_mounts)
     assert any(m.name.startswith("profile-registry-work") for m in global_mounts)

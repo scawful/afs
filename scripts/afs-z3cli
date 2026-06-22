@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export Z3CLI_CMD="${Z3CLI_CMD:-${SCRIPT_DIR}/afs-z3cli-exec}"
+exec "${SCRIPT_DIR}/afs-client-session" z3cli "${Z3CLI_CMD}" Z3CLI_CMD "$@"

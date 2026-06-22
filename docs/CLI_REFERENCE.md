@@ -13,6 +13,10 @@ Also supported once installed into the active environment:
 ## Quickstart
 
 - `./scripts/afs`
+- `./scripts/afs next --intent continue`
+- `./scripts/afs manager`
+- `./scripts/afs setup`
+- `./scripts/afs guide`
 - `./scripts/afs help context`
 - `./scripts/afs init --context-root ~/.context --workspace-name src`
 - `./scripts/afs status`
@@ -46,16 +50,192 @@ Also supported once installed into the active environment:
 - generated MCP/agent shims when the bundled profile defines `mcp_tools` or `agent_configs`
 - `profile-snippet.toml` you can merge into `afs.toml` to re-enable the bundled profile semantics safely
 
+## Agent Operations
+
+```bash
+./scripts/afs agent-manifest show
+./scripts/afs agent-manifest validate
+./scripts/afs agent-manifest export codex
+./scripts/afs agent-manifest sync --apply
+./scripts/afs agent-manifest sync --harness hcode --apply
+./scripts/afs-upgrade-agent-setup --workspace ~/src
+./scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
+./scripts/afs-upgrade-agent-setup --workspace ~/src --full --setup-hcode
+./scripts/afs-upgrade-agent-setup --workspace ~/src --full --setup-hcode --apply
+
+./scripts/afs agent-hooks show
+./scripts/afs agent-hooks install-shell --apply
+./scripts/afs agent-hooks install-worker --apply --load
+./scripts/afs agent-hooks status --path "$PWD"
+
+run_id="$(./scripts/afs agent-runs start "Fix settings drift" --harness codex)"
+./scripts/afs agent-runs event "$run_id" verification --summary "pytest passed"
+./scripts/afs agent-runs finish "$run_id" --summary "patched" --verify "pytest=passed"
+
+job_id="$(./scripts/afs agent-jobs create "Review stale instructions" --prompt "Scan docs and report stale model aliases.")"
+./scripts/afs agent-jobs claim "$job_id" --agent reviewer
+./scripts/afs agent-jobs move "$job_id" done --result "No stale aliases found."
+./scripts/afs agent-jobs status
+./scripts/afs agent-jobs inbox
+./scripts/afs agent-jobs review "$job_id"
+./scripts/afs agent-jobs promote "$job_id" --to-handoff
+./scripts/afs agent-jobs archive "$job_id"
+./scripts/afs agent-jobs seed --profile repo-maintenance
+./scripts/afs agent-jobs work --agent local-worker --command 'codex exec < "$AFS_AGENT_JOB_PROMPT_FILE"'
+```
+
+`agent-manifest` reads `configs/agent_manifest.toml`, the repo-owned source of
+truth for harnesses, shared skills, slash-command packs, MCP servers, and
+startup hints.
+`afs-upgrade-agent-setup` wraps the common local upgrade path and stays dry-run
+unless `--apply` is provided. Use `--full --setup-hcode` to preview or apply
+the full local path that syncs Codex/Claude/Gemini/Antigravity/hcode manifest state,
+OpenCode slash commands, shell hooks, and index freshness without making the
+MCP catalog noisy.
+`agent-manifest sync` copies manifest-declared shared skills into harness skill
+roots, copies slash-command packs into harness command roots, and writes
+per-harness export JSON. It uses real copied directories/files, not symlinks.
+Slash-command packs are additive by default: existing customized command files
+are reported as `customized` and are not overwritten unless the manifest pack
+opts into `overwrite = true`.
+`agent-hooks install-shell` adds an idempotent block to the shell profile that
+sources `afs-shell-init.sh` and `afs-agent-hooks.sh`, making normal generic
+harness commands such as `codex`, `claude`, `gemini`, `antigravity`, and `hcode` route
+through AFS wrappers. Companion extension repos can add more local harnesses.
+Raw bypass functions are also exposed for installed wrappers, such as
+`codex-raw`, `claude-raw`, `gemini-raw`, `antigravity-raw`, and `hcode-raw`.
+`agent-hooks install-worker` writes a user LaunchAgent that runs
+`agent-jobs work --loop` for automatic queued-job execution. The worker skips
+obvious destructive prompts unless the job or worker uses `--allow-destructive`.
+`agent-hooks status --path <workspace>` prints exact next commands for missing
+hook setup, watchdog status, and the agent job review inbox.
+`agent-runs` writes replayable run records under `scratchpad/agent_runs/`.
+`agent-jobs` writes markdown prompt jobs under
+`items/agent_jobs/{queue,running,done,failed,archived}/`.
+`agent-jobs status` provides a read-only watchdog summary of queue counts,
+runnable jobs, destructive opt-in blockers, stale running jobs, recent run
+failures, and LaunchAgent state. It exits successfully by default so it can be
+used for visibility without blocking agents; use `--strict` for scripts that
+should fail when watchdog checks need attention.
+`agent-jobs inbox` is the review surface for completed reports, failed jobs,
+stale running jobs, and destructive opt-in blockers. Use `agent-jobs review
+<job-id>` to inspect a job with its linked run record, `agent-jobs promote
+<job-id> --to-handoff` to save a useful result under `scratchpad/handoffs/`, and
+`agent-jobs archive <job-id>` after handling it.
+`agent-jobs seed` idempotently queues safe report-only background jobs. The
+`repo-maintenance` profile creates daily-deduped stale docs/reference, skill
+drift, MCP/tool drift, TODO/FIXME, verification suggestion, and uncommitted
+change review jobs. Client-session wrappers do not seed these jobs by default;
+set `AFS_CLIENT_SEED_JOBS=1` or pass `--seed-jobs` to opt in.
+`agent-jobs work` claims queued jobs, runs a local command with
+`AFS_AGENT_JOB_*` environment variables, moves jobs to `done` or `failed`, and
+records an `agent-runs` entry.
+
+`session bootstrap` includes the manifest summary, open agent jobs, and recent
+run records. AFS client wrappers start and finish run records automatically
+unless `AFS_CLIENT_RECORD_RUNS=0` is set. MCP exposes the same surfaces through
+`agent.manifest.show`, `agent.run.*`, and `agent.job.*` tools, including
+`agent.job.status` for the watchdog payload, `agent.job.inbox/review/promote/archive`
+for review handling, and `agent.job.seed` for safe maintenance job seeding.
+
+## GUI Manager
+
+```bash
+./scripts/afs manager
+./scripts/afs manager open --path ~/src/project-a
+./scripts/afs manager snapshot --path ~/src/project-a --json
+./scripts/afs-manager
+```
+
+`manager` launches the friendly Python GUI surface for normal users. It
+summarizes context health, mount counts, task queue state, project client
+config like `.gemini/settings.json`, enabled extensions, extension hooks, and
+suggested setup commands. The `snapshot` form returns the same read model
+without opening a window.
+
+The manager and `context.status` both expose the same deterministic agent
+discovery path: status, query, exact read/list, scratchpad write, then named
+CLI/slash-command routes for heavier flows. This keeps agents proactive without
+forcing the whole AFS catalog into their first tool choice.
+
+## Next Action Router
+
+```bash
+./scripts/afs next --intent continue --json
+./scripts/afs next --intent work-writing --json
+./scripts/afs next --intent verify --json
+./scripts/afs next report --json
+```
+
+`next` is the deterministic funnel for agents. It turns a common intent into
+the first cheap MCP step, the exact CLI/slash-command route, a stop condition,
+and a short list of surfaces to avoid. Supported intents include `continue`,
+`context`, `review`, `ship`, `work-writing`, `verify`, `handoff`, `setup`,
+`refresh`, and `pack`.
+
+Every `afs next` route records a small `afs.next` history event. `next report`
+summarizes recent route use, MCP tool calls, and any heavy MCP calls that
+bypassed the default funnel.
+
+Extensions can add manager-visible commands with:
+
+```toml
+[manager]
+actions = ["afs status", "afs tasks list --path ."]
+```
+
+## Guided Setup
+
+```bash
+./scripts/afs setup
+./scripts/afs setup --yes --dry-run --shell helpers --mcp none --google-workspace skip
+./scripts/afs setup --yes --apply --shell helpers --mcp none --google-workspace skip
+./scripts/afs guide
+./scripts/afs guide context
+./scripts/afs guide shell
+./scripts/afs guide mcp
+```
+
+`setup` asks for config scope, context placement, shell integration level,
+optional MCP registration, optional Google Workspace public API handling, and background
+worker installation. It prints a plan before writing. `--shell helpers` installs
+aliases, colors, and zsh completion without routing AI harness commands;
+`--shell agent-hooks` enables the full wrapper routing.
+
 ## Context
 
 ```bash
 ./scripts/afs context init
 ./scripts/afs context ensure
 ./scripts/afs context list
+./scripts/afs context overview --path "<afs-root>"
 ./scripts/afs context validate
 ./scripts/afs context repair --dry-run
+./scripts/afs context query "startup guidance"
+./scripts/afs query "startup guidance"
 ./scripts/afs context mount knowledge ~/src/docs --alias docs
 ./scripts/afs context unmount knowledge docs
+./scripts/afs index rebuild --mount scratchpad
+```
+
+Indexed query usage:
+
+- `./scripts/afs query <text> --path <workspace>` is the fast top-level shortcut.
+- `./scripts/afs context query <text> --path <workspace>` is the canonical form.
+- `./scripts/afs context overview --path <workspace>` gives a cheap structural repo summary before deeper grep/query passes.
+- `context overview` also works on a raw project path before `.context` exists, which is useful for new repos such as training/eval workspaces.
+- Use `--mount` repeatedly to narrow search to specific mounts such as `scratchpad`, `knowledge`, or `tools`.
+- Use `--prefix` to keep search under a relative subtree like `docs/sqlite/` or `public/`.
+- `--include-content --json` returns full indexed content for each hit; plain text mode shows a compact excerpt.
+- JSON output includes `count`, `entries`, and `index_rebuild` when the command auto-built or auto-refreshed the SQLite index.
+
+Examples:
+
+```bash
+./scripts/afs query sqlite --path "<afs-root>"
+./scripts/afs context query sqlite --path "<afs-root>" --mount scratchpad --mount knowledge
+./scripts/afs context query sqlite --path "<afs-root>" --prefix docs/sqlite/ --limit 10 --include-content --json
+./scripts/afs index rebuild --path "<afs-root>" --mount scratchpad
 ```
 
 ## Review
@@ -78,6 +258,87 @@ For compatibility, `./scripts/afs review approve project-a draft.md` still
 works when `project-a` can be resolved from configured
 `general.workspace_directories`.
 
+## Work Assistant
+
+`work` manages non-technical work-assistant state in the active context:
+people, project relationships, review routes, communication samples, approval
+requests, and activity.
+This state is native to AFS and backed by `.context/global/work_assistant.sqlite3`.
+It is intentionally not exposed as a broad MCP CRUD surface.
+
+```bash
+./scripts/afs work --path .
+./scripts/afs work people list --path .
+./scripts/afs work relationships list --path .
+./scripts/afs work reviewers --path . --target-type docs
+./scripts/afs work approvals list --path .
+./scripts/afs work approvals show <approval-id> --path .
+./scripts/afs work approvals request \
+  --path . \
+  --target-system zendesk \
+  --target-id ticket-123 \
+  --action post_ticket_comment \
+  --summary "Send drafted support reply" \
+  --preview "Thanks for the report..." \
+  --permission-required "ticket comment approval"
+./scripts/afs work approvals request \
+  --path . \
+  --target-system gmail \
+  --target-id "email:person@example.com" \
+  --action send_email \
+  --summary "Send approved follow-up email" \
+  --preview-json '{"to":"person@example.com","subject":"Follow-up","body":"Thanks for the update."}'
+./scripts/afs work approvals approve <approval-id> --path . --by human
+./scripts/afs work approvals execute <approval-id> --path . --dry-run --json
+./scripts/afs work approvals execute <approval-id> --path . \
+  --executor "python3 scripts/afs-work-approval-echo.py"
+./scripts/afs work approvals execute <approval-id> --path . \
+  --executor "python3 scripts/afs-work-gws-executor.py"
+./scripts/afs work communication list --path .
+./scripts/afs work communication list --path . --purpose responding_to_comments --json
+./scripts/afs work communication add --path . \
+  --purpose responding_to_comments \
+  --style-note "direct" \
+  --text "Short, concrete reply with exact file evidence."
+./scripts/afs work communication guide --path . --purpose responding_to_comments
+./scripts/afs work communication preflight --path . \
+  --purpose responding_to_comments \
+  --personal-mode work
+./scripts/afs work activity list --path .
+```
+
+When context/history events include work metadata such as `owner`,
+`reviewers`, `relationships`, `review_routes`, `communication_sample`,
+`approval_request`, or `requires_approval`, AFS enriches the work-assistant
+database automatically.
+External writes should be executed only from one approved action at a time.
+`approvals execute` passes an approved request JSON file to an explicit local
+connector command and marks the request `applied` only when that command exits
+successfully.
+Applied communication actions also seed `communication_samples` from the
+approved preview/body so future work-writing guidance learns only from text the
+user permitted to send or post.
+
+See `docs/WORK_ASSISTANT.md` and `docs/WORK_ASSISTANT_UPGRADE.md`.
+Google Workspace connector examples are in `docs/WORK_ASSISTANT_CONNECTORS.md`.
+
+## Personal Context
+
+`personal` loads an explicit personal-context mode from
+`$AFS_PERSONAL_CONTEXT_ROOT` or `~/.config/afs/personal`.
+
+```bash
+./scripts/afs personal modes
+./scripts/afs personal load work
+./scripts/afs personal load work --json
+```
+
+For work modes, `manifest.toml` may include `work_context = true`,
+`style_instructions`, `communication_sources`, and `posting_policy`. Rendered
+context then tells agents to inspect the user's actual communication samples
+before matching tone and to ask for explicit permission before posting on the
+user's behalf.
+
 ## Memory
 
 ```bash
@@ -96,20 +357,17 @@ metadata-first history events, writes durable summaries into
 ## Journal Agent
 
 ```bash
-# Daily routine: carry yesterday's TODOs into tomorrow's template + stale alert
+# Draft this week's review
 ./scripts/afs agents run journal-agent
 
-# Generate tomorrow's entry only
-./scripts/afs agents run journal-agent -- --task template-gen
+# Draft a specific week (overwrite existing AI draft section)
+./scripts/afs agents run journal-agent -- --week 2026-W11 --overwrite
 
-# Check for stuck TODOs (3+ consecutive days unchecked)
-./scripts/afs agents run journal-agent -- --task stale-check --pretty
-
-# Draft this week's review
-./scripts/afs agents run journal-agent -- --task weekly-review
-
-# Draft a specific past week (overwrite)
-./scripts/afs agents run journal-agent -- --task weekly-review --week 2026-W11 --overwrite
+# Override paths explicitly
+./scripts/afs agents run journal-agent -- \
+  --thoughts ~/notes/thoughts.org \
+  --active-tasks ~/notes/tasks/active.md \
+  --weekly-dir ~/notes/weekly
 ```
 
 See `docs/JOURNAL_AGENT.md` for full argument reference and JSON output shape.
@@ -131,8 +389,10 @@ See `docs/JOURNAL_AGENT.md` for full argument reference and JSON output shape.
 
 - `context.status`
 - `context.diff`
+- cheap codebase orientation from `context overview`
 - scratchpad state and deferred notes
 - queued tasks from `items/`
+- work-assistant people, activity, and pending approval-gated external writes
 - recent `hivemind/` messages
 - latest durable memory summary
 
@@ -149,10 +409,16 @@ durable memory, and indexed retrieval hits, then writes or reuses:
 - `.context/scratchpad/afs_agents/session_pack_<model>.json`
 - `.context/scratchpad/afs_agents/session_pack_<model>.md`
 
-`never_export` sensitivity rules are applied to indexed content included in the
-pack, so blocked paths do not leak into session exports. When the bootstrap
-snapshot and pack inputs have not changed, repeated calls reuse the stored
+`never_index`/`never_export` sensitivity rules are applied to indexed content
+included in the pack, and `never_embed` is applied to embedding hits, so blocked
+paths do not leak into session exports. When the bootstrap snapshot, pack
+inputs, and sensitivity rules have not changed, repeated calls reuse the stored
 artifact instead of rebuilding from scratch.
+
+Rendered packs keep model-control guidance as a single top-level block instead
+of duplicating it as a normal section. The selectable section budget accounts
+for that fixed guidance, and query/embedding hits are prioritized ahead of
+generic session boilerplate when a query is present.
 
 `session pack` now also accepts:
 
@@ -164,6 +430,12 @@ artifact instead of rebuilding from scratch.
 - `--pack-mode` to choose `focused`, `retrieval`, or `full_slice` context
   shaping depending on whether Gemini needs a narrow query-first pack or a
   broader long-context slice
+
+The rendered pack guidance now points at the human CLI surfaces too:
+
+- `afs query <text> --path <workspace>` for cheap follow-on indexed retrieval
+- `afs context query <text> --path <workspace>` as the canonical equivalent
+- `afs index rebuild --path <workspace>` when the pack warns that indexed search may be stale
 
 Pack JSON now includes `execution_profile` metadata and `cache.prefix_hash` so
 Gemini-side adapters can distinguish a stable context prefix from a changing
@@ -203,9 +475,44 @@ and Gemini via `GEMINI_SYSTEM_MD`. Set `AFS_CLIENT_NATIVE_PROMPT=0` or
 `user_prompt_submit`, `turn_started`, and `turn_completed` / `turn_failed`
 around the client process.
 
+`session prepare-client` payloads now also include a `cli_hints` block with:
+
+- `workspace_path`
+- `query_shortcut`
+- `query_canonical`
+- `index_rebuild`
+- `agent_jobs_inbox`
+- `work_summary`
+- `work_approvals`
+- `work_communication`
+- `notes`
+
+`afs-client-session` exports the same follow-up hints as:
+
+- `AFS_SESSION_QUERY_HINT`
+- `AFS_SESSION_CONTEXT_QUERY_HINT`
+- `AFS_SESSION_INDEX_REBUILD_HINT`
+- `AFS_SESSION_AGENT_JOBS_INBOX_HINT`
+- `AFS_SESSION_WORK_HINT`
+- `AFS_SESSION_WORK_APPROVALS_HINT`
+- `AFS_SESSION_WORK_COMMUNICATION_HINT`
+
+Client-session wrappers can call `agent-jobs seed --profile repo-maintenance`
+when opted in with `AFS_CLIENT_SEED_JOBS=1`, a client-specific
+`AFS_<CLIENT>_SEED_JOBS=1`, or `--seed-jobs`. This queues report-only
+maintenance jobs with daily dedupe keys and skips existing open jobs. Wrappers
+still print the agent job inbox command at startup so completed background
+output has an obvious review path.
+
 ## Training
 
 ```bash
+./scripts/afs training dataset stats ./data/output/tooling
+./scripts/afs training dataset outliers ./data/output/tooling --limit 5
+./scripts/afs training run start ./training/jobs/qwen35-tools-local.toml
+./scripts/afs training run status <run-id>
+./scripts/afs training run stop <run-id>
+
 ./scripts/afs training freshness-gate --path ~/src/project-a
 ./scripts/afs training freshness-gate --path ~/src/project-a --warn-only --json
 ./scripts/afs training antigravity-status --json
@@ -213,6 +520,22 @@ around the client process.
 ./scripts/afs training generate-router-data --config ~/src/project-a/afs.toml --output ./router_from_capabilities.jsonl
 ./scripts/training_watch.sh --debounce 45
 ```
+
+`training dataset stats` writes dataset summary artifacts under the active
+context scratchpad and reports split counts, average row size, max row size,
+role counts, and tool-call counts.
+
+`training dataset outliers` writes the largest rows into scratchpad artifacts so
+operators and agents can prune disruptive samples before launching a run.
+
+`training run start` launches a detached job from a JSON/TOML spec and writes
+status, event, artifact, and log paths under `scratchpad/training/runs/<run-id>`.
+
+See `docs/examples/training_run.example.toml` for a minimal spec layout.
+
+`training run status` refreshes the stored status snapshot against the live
+process table. `training run stop` terminates the recorded process group and
+updates the run artifact.
 
 `training freshness-gate` checks per-mount context freshness before training and
 returns a blocking or warning-only readiness report.
@@ -263,6 +586,11 @@ and `AFS_PREFER_REPO_CONFIG=1` so Claude uses the repo-local AFS config.
 ```bash
 ./scripts/afs skills list --profile work
 ./scripts/afs skills match "mcp context mount" --profile work
+./scripts/afs skills mine --path ~/src/project-a
+./scripts/afs skills review --path ~/src/project-a --status pending
+./scripts/afs skills promote --path ~/src/project-a --candidate workflow-example
+./scripts/afs skills reject --path ~/src/project-a --candidate workflow-example
+./scripts/afs skills archive --path ~/src/project-a --candidate workflow-example
 ```
 
 ## Embeddings
@@ -295,6 +623,31 @@ For Gemini, the system auto-selects the correct task type: `RETRIEVAL_DOCUMENT` 
 indexing, `RETRIEVAL_QUERY` for search queries (asymmetric retrieval). Override with
 `--gemini-task-type`.
 
+## Context Sources
+
+```bash
+./scripts/afs sources list --json
+./scripts/afs sources status --path . --json
+./scripts/afs sources sync --provider example_tasks --path . --json
+./scripts/afs sources sync --provider example_tasks --path . --apply
+```
+
+Context-source providers are extension-owned and provider-neutral. See
+`docs/CONTEXT_SOURCES.md`.
+
+## Antigravity CLI
+
+```bash
+./scripts/afs antigravity status --json
+./scripts/afs antigravity setup --scope project --project-path .
+./scripts/afs antigravity setup --scope project --project-path . --apply
+./scripts/afs antigravity models
+./scripts/afs antigravity models --json
+```
+
+`setup` is dry-run by default and does not install `agy`. See
+`docs/ANTIGRAVITY_CLI.md`.
+
 ## Gemini
 
 ```bash
@@ -310,7 +663,7 @@ indexing, `RETRIEVAL_QUERY` for search queries (asymmetric retrieval). Override 
 ./scripts/afs gemini status --json
 ./scripts/afs gemini status --skip-ping               # skip live embedding test
 ./scripts/afs gemini status --project afs             # inspect one project subtree
-./scripts/afs gemini status --context-root ~/src/lab/.context
+./scripts/afs gemini status --context-root "<workspace-root>/.context"
 
 # Generate context from knowledge base
 ./scripts/afs gemini context                           # dump full INDEX.md
@@ -322,11 +675,11 @@ indexing, `RETRIEVAL_QUERY` for search queries (asymmetric retrieval). Override 
 ./scripts/afs gemini context --knowledge-path ~/.context/knowledge/afs "hooks"
 ```
 
-`afs gemini setup` writes the AFS MCP server entry into Gemini CLI settings so
+`afs antigravity setup` previews or writes the AFS MCP entry for Antigravity CLI. New `agy` builds use `~/.gemini/config/mcp_config.json` for MCP config by default. `afs gemini setup` remains as Gemini CLI compatibility/API-key setup and writes settings so
 Gemini can discover AFS tools automatically. The default launch target is the
 repo-local `scripts/afs mcp serve` wrapper, which preserves AFS runtime env and
 repo-config preference automatically. Use `--scope project` for repo-local
-`./.gemini/settings.json` and `--python-module` only when you explicitly want
+`./.gemini/config/mcp_config.json` and `--python-module` only when you explicitly want
 the direct Python module entrypoint.
 
 `afs gemini status` checks: API key, google-genai SDK, settings.json, MCP registration,
@@ -377,6 +730,8 @@ AFS heuristic for avoiding explicit cache creation on tiny prefixes.
 ## GWS
 
 ```bash
+./scripts/setup_gws.sh --dry-run                     # preview install/auth
+./scripts/setup_gws.sh --credentials ~/Downloads/client_secret.json
 ./scripts/afs gws status                               # gws auth status
 ./scripts/afs gws agenda                               # today's calendar agenda
 ./scripts/afs gws unread                               # unread primary inbox
@@ -386,17 +741,23 @@ AFS heuristic for avoiding explicit cache creation on tiny prefixes.
 ## MCP
 
 ```bash
-./scripts/afs mcp serve
+./scripts/afs mcp serve                             # slim tools/list catalog
+./scripts/afs mcp serve --tool-catalog full         # expose all registered tools
 ```
 
 Useful Gemini-oriented MCP operations:
 
 - `afs.session.bootstrap` for the full session-start packet
 - `context.query` for indexed path/content search
-- `context.diff` for “what changed since the last index build”
 - `context.status` for mount counts, mount health, profile, and index health
-- `context.repair` for provenance seeding, conservative source remapping, and stale index repair
-- `training.antigravity.status` for Antigravity capture/export readiness in editor integrations
+- `context.read`, `context.write`, and `context.list` for context file access
+
+The default MCP `tools/list` response is deliberately tiny so models do not
+have to choose among every administrative surface. Use the CLI/framework for
+session packs, work preflight, approvals, repair, handoff, verification,
+training, and diagnostics. Set `AFS_MCP_TOOL_CATALOG=full` or pass
+`--tool-catalog full` when debugging, migrating, or using a client that needs
+the legacy all-tools catalog.
 
 Workspace-root override:
 
@@ -412,9 +773,11 @@ Gemini brief agent:
 ./scripts/afs agents ps --all --json
 ./scripts/afs services start gemini-workspace-brief
 ./scripts/afs services start agent-supervisor
-./scripts/afs agents run claude-orchestrator --prompt "Summarize this repo"
 ./scripts/afs services start context-warm
 ```
+
+Extension-owned agents, including local domain orchestrators, appear here only
+after their companion repo is enabled via `[extensions]`.
 
 `context-warm` now audits each discovered context for broken symlink mounts,
 duplicate mount targets, missing profile-managed mounts, untracked/stale mount
@@ -473,7 +836,7 @@ config:
 
 ```toml
 [services.services.context-watch]
-context_filters = ["~/src/lab"]
+context_filters = ["~/workspaces"]
 ```
 
 Codex MCP config:

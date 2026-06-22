@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .codebase_explorer import build_codebase_summary, render_codebase_summary
 from .context_freshness import (
     MountFreshness,
     context_diff_since_session,
@@ -27,6 +29,74 @@ _MAX_TEXT_CHARS = 1500
 _MAX_LIST_ITEMS = 8
 
 
+def build_agent_discovery_path(context_path: Path) -> dict[str, Any]:
+    """Return the deterministic, low-noise AFS discovery path for agents."""
+    context = context_path.expanduser().resolve()
+    return {
+        "principle": "Start with the smallest read-only context surface, then route richer intents through named CLI or slash-command flows.",
+        "default_mcp_tools": [
+            "context.status",
+            "context.query",
+            "context.read",
+            "context.list",
+            "context.write",
+        ],
+        "steps": [
+            {
+                "step": "status",
+                "tool": "context.status",
+                "when": "first AFS touch in a workspace",
+                "next": "continue if mounts are healthy; repair only when health reports a concrete issue",
+            },
+            {
+                "step": "query",
+                "tool": "context.query",
+                "when": "the user asks for context, history, scratchpad notes, or prior decisions",
+                "next": "read exact sources only when the query result points to them",
+            },
+            {
+                "step": "read",
+                "tool": "context.read/context.list",
+                "when": "a specific scratchpad, handoff, knowledge, or .context file is relevant",
+                "next": "keep memory and knowledge read-only unless explicitly requested",
+            },
+            {
+                "step": "scratchpad",
+                "tool": "context.write",
+                "when": "a local note, checkpoint, or handoff draft is explicitly useful",
+                "next": f"default writes under {context / 'scratchpad'}; keep memory/knowledge deliberate",
+            },
+            {
+                "step": "route",
+                "tool": "CLI/slash command",
+                "when": "tasks, handoffs, work preflight, verification, refresh, repair, or session packs are needed",
+                "next": "use the named command instead of expanding the MCP catalog",
+            },
+        ],
+        "routed_flows": {
+            "next": "afs next --intent <intent> --path <workspace> --json",
+            "tasks": "afs tasks list --path <workspace>",
+            "handoff": "afs session handoff list --path <workspace> --json",
+            "work_preflight": "afs work communication preflight --path <workspace> --json",
+            "verify": "afs verify plan --cwd <workspace> --json",
+            "refresh": "afs context repair --path <workspace> --dry-run --json",
+            "pack": "afs session pack --path <workspace> --json",
+            "human_manager": "afs manager open --path <workspace>",
+        },
+        "do_not_default": [
+            "session.pack",
+            "context.diff",
+            "context.freshness",
+            "task.*",
+            "handoff.*",
+            "memory.*",
+            "agent.*",
+            "events.*",
+            "embeddings.*",
+        ],
+    }
+
+
 def _estimate_tokens(text: str) -> int:
     """Approximate token count cheaply for bootstrap budgeting."""
     if not text or not text.strip():
@@ -39,11 +109,16 @@ def _estimate_tokens(text: str) -> int:
 _SECTION_PRIORITY = [
     "handoff",          # critical: what happened last session
     "scratchpad",       # high: current working state
+    "agent_manifest",   # high: shared harness/source-of-truth state
+    "agent_jobs",       # high: file-backed background work queue
     "tasks",            # high: pending work items
+    "work_assistant",   # high: external-write approvals and people context
+    "codebase",         # high: quick repo orientation
     "session_changes",  # medium-high: what changed since last session
     "diff",             # medium: recent index drift
     "mount_freshness",  # medium: per-mount freshness scores
     "memory",           # medium: durable context
+    "agent_runs",       # medium-low: recent recorded agent activity
     "hivemind",         # low: cross-agent messages
     "agent_reports",    # low: background agent status
 ]
@@ -76,7 +151,7 @@ def collect_context_status(manager: AFSManager, context_path: Path) -> dict[str,
                 index_info["built"] = True
                 index_info["has_entries"] = has_entries
                 index_info["total_entries"] = index.total_entries
-                index_info["stale"] = index.needs_refresh() if has_entries else False
+                index_info["stale"] = index.needs_health_refresh() if has_entries else False
                 index_info["db_size_bytes"] = db_path.stat().st_size
                 index_info["db_path"] = str(db_path)
             except Exception:
@@ -92,6 +167,7 @@ def collect_context_status(manager: AFSManager, context_path: Path) -> dict[str,
         "mount_health": mount_health,
         "actions": list(mount_health.get("suggested_actions", [])),
         "index": index_info,
+        "discovery_path": build_agent_discovery_path(context_path),
     }
 
 
@@ -182,9 +258,14 @@ def build_session_bootstrap(
     diff = collect_context_diff(manager, context_path)
     scratchpad = _collect_scratchpad(manager, context_path)
     tasks = _collect_tasks(context_path, limit=task_limit)
+    agent_jobs = _collect_agent_jobs(context_path, limit=task_limit)
+    agent_runs = _collect_agent_runs(context_path, limit=task_limit)
+    agent_manifest = _collect_agent_manifest()
+    work_assistant = _collect_work_assistant(manager, context_path, limit=task_limit)
     hivemind = _collect_hivemind(context_path, limit=message_limit)
     memory = _collect_memory(manager, context_path)
     reports = _collect_agent_reports(manager, context_path)
+    codebase = build_codebase_summary(context_path)
 
     handoff = _collect_latest_handoff(context_path, config=manager.config)
 
@@ -237,15 +318,23 @@ def build_session_bootstrap(
         "profile": status["profile"],
         "startup_sequence": [
             "Review context health and recent drift first.",
+            "Check the agent manifest for shared harness, skill, and MCP routing before editing harness config.",
             "Read scratchpad state and deferred notes before editing.",
-            "Check pending tasks and recent hivemind messages for handoffs.",
-            "Use context.query before asking for context that may already be in memory or knowledge.",
+            "Check pending tasks, agent jobs, recent run records, and hivemind messages for handoffs.",
+            "Check `afs work` for people, review routes, activity, and pending approval-gated external writes.",
+            "Use `afs context overview` / `afs.context.overview` for a fast repo map before deeper grep/query passes.",
+            "Use `afs context query` / `context.query` before asking for context that may already be in memory or knowledge.",
             "Write updates back to scratchpad, tasks, or hivemind before handoff.",
         ],
         "status": status,
         "diff": diff,
         "scratchpad": scratchpad,
         "tasks": tasks,
+        "agent_manifest": agent_manifest,
+        "agent_jobs": agent_jobs,
+        "agent_runs": agent_runs,
+        "work_assistant": work_assistant,
+        "codebase": codebase,
         "hivemind": hivemind,
         "memory": memory,
         "agent_reports": reports,
@@ -329,6 +418,10 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
     diff = summary["diff"]
     scratchpad = summary["scratchpad"]
     tasks = summary["tasks"]
+    agent_manifest = summary.get("agent_manifest", {})
+    agent_jobs = summary.get("agent_jobs", {})
+    agent_runs = summary.get("agent_runs", {})
+    work_assistant = summary.get("work_assistant", {})
     hivemind = summary["hivemind"]
     memory = summary["memory"]
     reports = summary["agent_reports"]
@@ -392,6 +485,11 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
                 if parts:
                     lines.append(f"  - {mt_name}: {', '.join(parts)}")
 
+    codebase = summary.get("codebase", {})
+    if isinstance(codebase, dict) and codebase:
+        lines.extend(["", "## Codebase"])
+        lines.extend(_indent_block(render_codebase_summary(codebase)))
+
     lines.extend(["", "## Recent Drift"])
     if diff["available"]:
         lines.append(f"- total_changes: {diff['total_changes']}")
@@ -439,6 +537,93 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
             assigned = f" -> {item['assigned_to']}" if item.get("assigned_to") else ""
             lines.append(
                 f"  - [{item['status']}] p{item['priority']} {item['title']}{assigned}"
+            )
+
+    lines.extend(["", "## Work Assistant"])
+    if work_assistant.get("available", True):
+        summary_counts = work_assistant.get("summary") or {}
+        initialized = "yes" if work_assistant.get("initialized") else "no"
+        lines.append(f"- initialized: {initialized}")
+        lines.append(f"- database: {work_assistant.get('db_path', '')}")
+        lines.append(
+            "- counts: "
+            f"people={summary_counts.get('people', 0)}, "
+            f"relationships={summary_counts.get('relationships', 0)}, "
+            f"review_routes={summary_counts.get('review_routes', 0)}, "
+            f"approvals={summary_counts.get('approvals', 0)}, "
+            f"communication_samples={summary_counts.get('communication_samples', 0)}, "
+            f"activity={summary_counts.get('activity', 0)}"
+        )
+        pending = work_assistant.get("pending_approvals") or []
+        if pending:
+            lines.append("- pending_approvals:")
+            for approval in pending:
+                lines.append(
+                    f"  - {approval.get('approval_id')}: "
+                    f"{approval.get('target_system')}/{approval.get('action')} - "
+                    f"{approval.get('summary')}"
+                )
+        samples = work_assistant.get("communication_samples") or []
+        if samples:
+            lines.append("- communication_samples:")
+            for sample in samples[:3]:
+                label = sample.get("purpose") or sample.get("channel") or "work_communication"
+                excerpt = str(sample.get("text_excerpt") or "").strip().replace("\n", " ")
+                if len(excerpt) > 120:
+                    excerpt = excerpt[:117].rstrip() + "..."
+                lines.append(f"  - {label}: {excerpt}")
+        guidance = work_assistant.get("communication_guidance") or {}
+        guidance_lines = guidance.get("guidance") if isinstance(guidance, dict) else []
+        if guidance_lines:
+            lines.append("- communication_guidance:")
+            for item in guidance_lines[:3]:
+                lines.append(f"  - {item}")
+        commands = work_assistant.get("commands") or {}
+        if commands:
+            lines.append(f"- summary_command: `{commands.get('summary', '')}`")
+            lines.append(f"- approvals_command: `{commands.get('approvals', '')}`")
+            lines.append(f"- communication_command: `{commands.get('communication', '')}`")
+    else:
+        lines.append(f"- unavailable: {work_assistant.get('error', 'unknown error')}")
+
+    lines.extend(["", "## Agent Manifest"])
+    if agent_manifest.get("available"):
+        lines.append(f"- path: {agent_manifest.get('path', '')}")
+        lines.append(f"- harnesses: {', '.join(agent_manifest.get('harnesses', []))}")
+        lines.append(f"- skills: {', '.join(agent_manifest.get('skills', []))}")
+        lines.append(f"- mcp_servers: {', '.join(agent_manifest.get('mcp_servers', []))}")
+        if agent_manifest.get("issues"):
+            lines.append("- issues:")
+            for issue in agent_manifest["issues"]:
+                lines.append(f"  - [{issue.get('level')}] {issue.get('message')}")
+    else:
+        lines.append(f"- unavailable: {agent_manifest.get('error', 'not found')}")
+
+    lines.extend(["", "## Agent Jobs"])
+    lines.append(f"- total: {agent_jobs.get('total', 0)}")
+    if agent_jobs.get("counts"):
+        counts_line = ", ".join(
+            f"{name}={count}" for name, count in sorted(agent_jobs["counts"].items())
+        )
+        lines.append(f"- counts: {counts_line}")
+    if agent_jobs.get("inbox_attention_count", 0) > 0:
+        lines.append(f"- inbox_attention: {agent_jobs['inbox_attention_count']}")
+        lines.append(f"- inbox_command: `{agent_jobs.get('inbox_command', '')}`")
+    if agent_jobs.get("items"):
+        lines.append("- top_jobs:")
+        for item in agent_jobs["items"]:
+            assigned = f" -> {item['assigned_to']}" if item.get("assigned_to") else ""
+            lines.append(
+                f"  - [{item['status']}] p{item['priority']} {item['title']}{assigned}"
+            )
+
+    lines.extend(["", "## Agent Runs"])
+    lines.append(f"- recent_count: {agent_runs.get('recent_count', 0)}")
+    if agent_runs.get("items"):
+        lines.append("- recent:")
+        for item in agent_runs["items"]:
+            lines.append(
+                f"  - [{item['status']}] {item.get('harness') or '-'} {item['task']} ({item['id']})"
             )
 
     lines.extend(["", "## Hivemind"])
@@ -599,6 +784,151 @@ def _collect_tasks(context_path: Path, *, limit: int) -> dict[str, Any]:
         "counts": counts,
         "items": [task.to_dict() for task in tasks[: max(1, limit)]],
     }
+
+
+def _collect_agent_manifest() -> dict[str, Any]:
+    try:
+        from .agent_manifest import (
+            default_manifest_path,
+            load_manifest,
+            summarize_manifest,
+            validate_manifest,
+        )
+
+        path = default_manifest_path().expanduser()
+        data = load_manifest(path)
+        issues = validate_manifest(data)
+        summary = summarize_manifest(data)
+        return {
+            "available": True,
+            "path": str(path),
+            "issues": [issue.to_dict() for issue in issues],
+            **summary,
+        }
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "issues": []}
+
+
+def _collect_agent_jobs(context_path: Path, *, limit: int) -> dict[str, Any]:
+    try:
+        from .agent_job_inbox import build_agent_job_inbox
+        from .agent_jobs import AgentJobQueue
+
+        queue = AgentJobQueue(context_path)
+        jobs = [
+            job
+            for job in queue.list()
+            if job.status in {"queue", "running", "done", "failed"}
+        ]
+        inbox = build_agent_job_inbox(context_path, limit=max(1, limit))
+    except Exception as exc:
+        return {"total": 0, "counts": {}, "items": [], "error": str(exc)}
+
+    counts: dict[str, int] = {}
+    for job in jobs:
+        counts[job.status] = counts.get(job.status, 0) + 1
+    return {
+        "total": len(jobs),
+        "counts": counts,
+        "items": [job.to_dict() for job in jobs[: max(1, limit)]],
+        "inbox_attention_count": inbox.get("attention_count", 0),
+        "inbox_command": inbox.get("command", ""),
+        "inbox": inbox,
+    }
+
+
+def _collect_agent_runs(context_path: Path, *, limit: int) -> dict[str, Any]:
+    try:
+        from .agent_runs import AgentRunStore
+
+        runs = AgentRunStore(context_path).list(limit=max(1, limit))
+    except Exception as exc:
+        return {"recent_count": 0, "items": [], "error": str(exc)}
+
+    return {
+        "recent_count": len(runs),
+        "items": [run.to_dict() for run in runs],
+    }
+
+
+def _collect_work_assistant(
+    manager: AFSManager,
+    context_path: Path,
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    quoted_context = shlex.quote(str(context_path.expanduser().resolve()))
+    commands = {
+        "summary": f"afs work --context-root {quoted_context}",
+        "approvals": f"afs work approvals list --context-root {quoted_context}",
+        "communication": f"afs work communication preflight --context-root {quoted_context}",
+        "communication_guide": f"afs work communication guide --context-root {quoted_context}",
+        "communication_list": f"afs work communication list --context-root {quoted_context}",
+        "activity": f"afs work activity list --context-root {quoted_context}",
+    }
+    try:
+        from .work_assistant import DEFAULT_DB_FILENAME, WorkAssistantStore
+
+        global_root = resolve_mount_root(context_path, MountType.GLOBAL, config=manager.config)
+        db_path = global_root / DEFAULT_DB_FILENAME
+        empty_summary = {
+            "people": 0,
+            "relationships": 0,
+            "review_routes": 0,
+            "approvals": 0,
+            "activity": 0,
+            "communication_samples": 0,
+            "pending_approvals": 0,
+            "db_path": str(db_path),
+        }
+        if not db_path.exists():
+            return {
+                "available": True,
+                "initialized": False,
+                "db_path": str(db_path),
+                "summary": empty_summary,
+                "pending_approvals": [],
+                "communication_samples": [],
+                "communication_guidance": {},
+                "communication_preflight": {},
+                "recent_activity": [],
+                "commands": commands,
+            }
+
+        store = WorkAssistantStore(context_path, config=manager.config, db_path=db_path)
+        return {
+            "available": True,
+            "initialized": True,
+            "db_path": str(db_path),
+            "summary": store.summary(),
+            "pending_approvals": store.list_approvals(status="pending", limit=max(1, limit)),
+            "communication_samples": store.list_communication_samples(
+                limit=max(1, min(limit, _MAX_LIST_ITEMS))
+            ),
+            "communication_guidance": store.communication_style_summary(
+                limit=max(1, min(limit, _MAX_LIST_ITEMS))
+            ),
+            "communication_preflight": store.communication_preflight(
+                limit=max(1, min(limit, _MAX_LIST_ITEMS)),
+                approval_limit=max(1, min(limit, _MAX_LIST_ITEMS)),
+                context_path=context_path,
+            ),
+            "recent_activity": store.list_activity(limit=max(1, min(limit, _MAX_LIST_ITEMS))),
+            "commands": commands,
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "initialized": False,
+            "summary": {},
+            "pending_approvals": [],
+            "communication_samples": [],
+            "communication_guidance": {},
+            "communication_preflight": {},
+            "recent_activity": [],
+            "commands": commands,
+            "error": str(exc),
+        }
 
 
 def _collect_hivemind(context_path: Path, *, limit: int) -> dict[str, Any]:
@@ -774,6 +1104,10 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
     diff = summary["diff"]
     scratchpad = summary["scratchpad"]
     tasks = summary["tasks"]
+    agent_manifest = summary.get("agent_manifest", {})
+    agent_jobs = summary.get("agent_jobs", {})
+    agent_runs = summary.get("agent_runs", {})
+    work_assistant = summary.get("work_assistant", {})
     hivemind = summary["hivemind"]
     memory = summary["memory"]
 
@@ -785,9 +1119,9 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
     if not index_info.get("enabled", False):
         recommendations.append("Context indexing is disabled; rely on direct filesystem reads or enable the index.")
     elif not index_info.get("built", index_info.get("has_entries", False)):
-        recommendations.append("Build the SQLite index before relying on `context.query`.")
+        recommendations.append("Run `afs index rebuild --path <workspace>` before relying on `afs context query`.")
     elif index_info.get("stale", False):
-        recommendations.append("Refresh the stale SQLite index before trusting search results.")
+        recommendations.append("Refresh the stale SQLite index with `afs index rebuild --path <workspace>` before trusting `afs context query` results.")
 
     if diff.get("available") and diff.get("total_changes", 0) > 0:
         recommendations.append("Review `context.diff` before editing because the workspace has unreviewed drift.")
@@ -803,6 +1137,34 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
 
     if tasks.get("total", 0) > 0:
         recommendations.append("Check pending items tasks before creating parallel work.")
+
+    if agent_manifest.get("issues"):
+        recommendations.append("Run `afs agent-manifest validate --check-paths` before editing harness config.")
+
+    if agent_jobs.get("inbox_attention_count", 0) > 0:
+        recommendations.append(
+            f"Review agent job inbox with `{agent_jobs.get('inbox_command', 'afs agent-jobs inbox')}`."
+        )
+    elif agent_jobs.get("total", 0) > 0:
+        recommendations.append("Review `afs agent-jobs status` before spawning background work.")
+
+    if agent_runs.get("recent_count", 0) > 0:
+        recommendations.append("Review recent `afs agent-runs list` output for replayable prior agent state.")
+
+    pending_approvals = work_assistant.get("pending_approvals") or []
+    if pending_approvals:
+        command = (work_assistant.get("commands") or {}).get("approvals", "afs work approvals list")
+        recommendations.append(f"Review pending external-write approvals with `{command}`.")
+    work_summary = work_assistant.get("summary") if isinstance(work_assistant, dict) else {}
+    if isinstance(work_summary, dict) and work_summary.get("communication_samples", 0) == 0:
+        command = (work_assistant.get("commands") or {}).get(
+            "communication",
+            "afs work communication preflight",
+        )
+        recommendations.append(
+            "For work-context writing, inspect or capture user communication samples before "
+            f"matching tone (`{command}`)."
+        )
 
     if hivemind.get("recent_count", 0) > 0:
         recommendations.append("Review recent hivemind messages for cross-agent handoffs.")

@@ -8,7 +8,7 @@ surface for Gemini, Antigravity, and other MCP-aware clients.
 Use the repo wrapper during local development:
 
 ```bash
-~/src/lab/afs/scripts/afs status
+<afs-root>/scripts/afs status
 ```
 
 Why:
@@ -22,77 +22,102 @@ environment the agent actually runs in.
 
 Help:
 
-- `~/src/lab/afs/scripts/afs`
-- `~/src/lab/afs/scripts/afs help <command>`
-- `~/src/lab/afs/scripts/afs <command> --help`
+- `<afs-root>/scripts/afs`
+- `<afs-root>/scripts/afs setup`
+- `<afs-root>/scripts/afs guide`
+- `<afs-root>/scripts/afs help <command>`
+- `<afs-root>/scripts/afs <command> --help`
 
 ## Shell Setup
 
 For interactive shells:
 
 ```bash
-source ~/src/lab/afs/scripts/afs-shell-init.sh
+source <afs-root>/scripts/afs-shell-init.sh
 ```
 
 This exports:
 
 - `AFS_ROOT`
 - `AFS_CLI`
-- `PATH` including `~/src/lab/afs/scripts`
+- `PATH` including `<afs-root>/scripts`
 
 ## Venv Setup
 
 Bootstrap a repo-local venv:
 
 ```bash
-~/src/lab/afs/scripts/afs-venv
+<afs-root>/scripts/afs-venv
 ```
 
 Optional extras:
 
 ```bash
-AFS_VENV_EXTRAS=test ~/src/lab/afs/scripts/afs-venv
+AFS_VENV_EXTRAS=test <afs-root>/scripts/afs-venv
 ```
 
 For non-interactive agents:
 
 ```bash
-export AFS_CLI=~/src/lab/afs/scripts/afs
-export AFS_VENV=~/src/lab/afs/.venv
+export AFS_CLI=<afs-root>/scripts/afs
+export AFS_VENV=<afs-root>/.venv
 ```
 
 ## Useful Agent Commands
 
 ```bash
-~/src/lab/afs/scripts/afs context discover --path ~/src
-~/src/lab/afs/scripts/afs context ensure-all --path ~/src
-~/src/lab/afs/scripts/afs session bootstrap --json
-~/src/lab/afs/scripts/afs session prepare-client --client codex --json
-~/src/lab/afs/scripts/afs session hook session_start --client codex --session-id "$AFS_SESSION_ID"
-~/src/lab/afs/scripts/afs session event user_prompt_submit --client codex --session-id "$AFS_SESSION_ID" --prompt "current task"
-~/src/lab/afs/scripts/afs-session-notify task_created --task-id bg-1 --task-title "Index context"
-~/src/lab/afs/scripts/afs events tail --json
-~/src/lab/afs/scripts/afs claude setup --path ~/src/project-a
-~/src/lab/afs/scripts/afs claude setup --scope user
-~/src/lab/afs/scripts/afs claude doctor
-~/src/lab/afs/scripts/afs claude reap --limit 20
-~/src/lab/afs/scripts/afs doctor
-~/src/lab/afs/scripts/afs profile current
-~/src/lab/afs/scripts/afs skills list --profile work
-~/src/lab/afs/scripts/afs health
+<afs-root>/scripts/afs context discover --path ~/src
+<afs-root>/scripts/afs context ensure-all --path ~/src
+<afs-root>/scripts/afs session bootstrap --json
+<afs-root>/scripts/afs session prepare-client --client codex --json
+<afs-root>/scripts/afs session hook session_start --client codex --session-id "$AFS_SESSION_ID"
+<afs-root>/scripts/afs session event user_prompt_submit --client codex --session-id "$AFS_SESSION_ID" --prompt "current task"
+<afs-root>/scripts/afs-session-notify task_created --task-id bg-1 --task-title "Index context"
+<afs-root>/scripts/afs events tail --json
+<afs-root>/scripts/afs work --path .
+<afs-root>/scripts/afs work approvals list --path .
+<afs-root>/scripts/afs work approvals execute <approval-id> --path . --dry-run --json
+<afs-root>/scripts/afs claude setup --path ~/src/project-a
+<afs-root>/scripts/afs claude setup --scope user
+<afs-root>/scripts/afs claude doctor
+<afs-root>/scripts/afs claude reap --limit 20
+<afs-root>/scripts/afs doctor
+<afs-root>/scripts/afs profile current
+<afs-root>/scripts/afs skills list --profile work
+<afs-root>/scripts/afs health
 ```
+
+Harness upgrade and setup:
+
+```bash
+<afs-root>/scripts/afs setup
+<afs-root>/scripts/afs guide shell
+<afs-root>/scripts/afs-upgrade-agent-setup --workspace ~/src
+<afs-root>/scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
+<afs-root>/scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode
+<afs-root>/scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode --apply
+```
+
+Training commands are intentionally not part of the default agent startup path.
+Use `afs training ...` only for reusable training/eval work that explicitly
+needs those surfaces.
+
+Work-assistant commands are for non-technical documents, sheets, tickets,
+planning, people, review routing, communication-style samples, and approval
+queues. The state is native to AFS and should stay behind a thin command/tool
+surface.
 
 Warm context/cache:
 
 ```bash
-~/src/lab/afs/scripts/afs-warm
+<afs-root>/scripts/afs-warm
 ```
 
 Operational repair entrypoint:
 
 ```bash
-~/src/lab/afs/scripts/afs doctor
-~/src/lab/afs/scripts/afs doctor --fix
+<afs-root>/scripts/afs doctor
+<afs-root>/scripts/afs doctor --fix
 ```
 
 `afs doctor` is the operator-facing diagnostic surface. It checks config,
@@ -112,10 +137,35 @@ Agent contract:
 Run the built-in stdio MCP server:
 
 ```bash
-~/src/lab/afs/scripts/afs mcp serve
+<afs-root>/scripts/afs mcp serve
 ```
 
 Built-in tools:
+
+Default `tools/list` is intentionally tiny. It exposes only the core context
+bridge; everything else should come from prompts, CLI hints, or an explicit
+full-catalog/debug launch:
+
+- `context.status`
+- `context.query`
+- `context.read`
+- `context.write`
+- `context.list`
+
+`afs.session.bootstrap`, `afs.session.pack`, and `afs.scratchpad.review` are
+prompts from `prompts/list`, not tools. Work preflight, approvals, repair,
+handoff, and verification should normally route through the AFS CLI/framework
+hints rather than the default MCP tool catalog. Use a full catalog only for
+debugging, migration, or clients that need optional administration tools:
+
+```bash
+<afs-root>/scripts/afs mcp serve --tool-catalog full
+# or:
+AFS_MCP_TOOL_CATALOG=full <afs-root>/scripts/afs mcp serve
+```
+
+`AFS_ALLOWED_TOOLS` and `AFS_TOOL_PROFILE` remain stricter permission filters
+and narrow both `tools/list` and `tools/call`.
 
 Preferred agent-facing file operations:
 
@@ -132,24 +182,27 @@ Legacy compatibility aliases:
 - `fs.delete`
 - `fs.move`
 - `fs.list`
+
+Optional tools for explicit workflows:
+
 - `context.discover`
 - `context.init`
 - `context.mount`
 - `context.unmount`
-- `context.index.rebuild`
-- `context.query`
-- `context.diff`
-- `context.status`
 - `context.repair`
-- `session.pack`
 - `events.query`
 - `events.tail`
 - `events.analytics`
 - `events.replay`
 - `hivemind.reap`
-- `handoff.create`
 - `handoff.read`
 - `handoff.list`
+
+Work-assistant state should not be expanded into a broad MCP CRUD API. Prefer
+native AFS/background enrichment plus a small future surface for context
+overview, relevant people, communication samples for tone/style grounding,
+pending approvals, draft creation, approval status, and executing one approved
+action through an explicit connector command.
 
 Paths are scoped to:
 
@@ -159,6 +212,10 @@ Paths are scoped to:
 - configured `general.mcp_allowed_roots`
 - `AFS_MCP_ALLOWED_ROOTS`
 - local project `.context`
+
+`context.query` and the `context.*`/`fs.*` file tools enforce configured
+`never_index`/`never_export` sensitivity rules before touching or exporting
+matching paths or file contents.
 
 `context.init` is intended for Gemini-style project bootstrap:
 
@@ -184,17 +241,19 @@ Gemini-friendly prompts/resources are also exposed over MCP:
 The CLI equivalent is:
 
 ```bash
-~/src/lab/afs/scripts/afs session bootstrap
-~/src/lab/afs/scripts/afs session bootstrap --json
-~/src/lab/afs/scripts/afs session pack
-~/src/lab/afs/scripts/afs session prepare-client --client codex --json
-~/src/lab/afs/scripts/afs session event task_created --client codex --session-id "$AFS_SESSION_ID" --task-id bg-1 --task-title "Index context"
-~/src/lab/afs/scripts/afs session pack "sqlite" --model gemini --workflow scan_fast --task "Shortlist the relevant SQLite files"
-~/src/lab/afs/scripts/afs session pack "sqlite" --model gemini --pack-mode retrieval
-~/src/lab/afs/scripts/afs session pack --model gemini --pack-mode full_slice
-~/src/lab/afs/scripts/afs session pack "sqlite" --model codex --json
-~/src/lab/afs/scripts/afs events analytics --hours 24 --json
-~/src/lab/afs/scripts/afs events replay --session-id "$AFS_SESSION_ID"
+<afs-root>/scripts/afs session bootstrap
+<afs-root>/scripts/afs session bootstrap --json
+<afs-root>/scripts/afs session pack
+<afs-root>/scripts/afs session prepare-client --client codex --json
+<afs-root>/scripts/afs session event task_created --client codex --session-id "$AFS_SESSION_ID" --task-id bg-1 --task-title "Index context"
+<afs-root>/scripts/afs session pack "sqlite" --model gemini --workflow scan_fast --task "Shortlist the relevant SQLite files"
+<afs-root>/scripts/afs session pack "sqlite" --model gemini --pack-mode retrieval
+<afs-root>/scripts/afs session pack --model gemini --pack-mode full_slice
+<afs-root>/scripts/afs session pack "sqlite" --model codex --json
+<afs-root>/scripts/afs query sqlite --path <afs-root>
+<afs-root>/scripts/afs index rebuild --path <afs-root>
+<afs-root>/scripts/afs events analytics --hours 24 --json
+<afs-root>/scripts/afs events replay --session-id "$AFS_SESSION_ID"
 ```
 
 The CLI also refreshes:
@@ -207,15 +266,23 @@ The CLI also refreshes:
 - `.context/scratchpad/afs_agents/session_skills_<client>.json`
 
 `session pack` is an explicit follow-on step, not the default startup path.
-When the bootstrap snapshot and pack inputs have not changed, repeated calls
-reuse the stored pack artifact instead of rebuilding all sections. Packs now
-also carry an `execution_profile` block, a task-at-end suffix via `--task`, and
-a stable `cache.prefix_hash` for adapter-side cache reuse work. `--pack-mode`
-lets callers choose between the normal focused pack, a query-first retrieval
-pack, and a broader full-slice pack for long-context models. The
+When the bootstrap snapshot, pack inputs, and sensitivity rules have not
+changed, repeated calls reuse the stored pack artifact instead of rebuilding all
+sections. Packs apply `never_index`/`never_export` to exported indexed content
+and `never_embed` to embedding hits. Packs now also carry an
+`execution_profile` block, a task-at-end suffix via `--task`, and a stable
+`cache.prefix_hash` for adapter-side cache reuse work. `--pack-mode` lets
+callers choose between the normal focused pack, a query-first retrieval pack,
+and a broader full-slice pack for long-context models. The
 `execution_profile` now also spells out that `afs.workflow.structured` is a
 prompt-only rail and includes retry guidance so the host loop stays in Gemini
 CLI or Claude Code instead of moving into core AFS.
+The rendered pack keeps guidance in one top-level block, counts it against the
+fixed prompt overhead, and lets query/embedding hits outrank generic session
+boilerplate when the caller provides a query.
+The rendered guidance also points back at the human CLI surfaces:
+`afs query` / `afs context query` for follow-on retrieval and `afs index rebuild`
+when indexed search needs a refresh.
 
 `session prepare-client` packages the same bootstrap, pack, skill, and prompt
 surfaces into a single JSON artifact for wrappers and IDE adapters.
@@ -223,8 +290,14 @@ surfaces into a single JSON artifact for wrappers and IDE adapters.
 `AFS_SESSION_PACK_*`, `AFS_SESSION_SKILLS_JSON`,
 `AFS_SESSION_SYSTEM_PROMPT_*`, `AFS_SESSION_CLIENT_PAYLOAD_JSON`, and
 `AFS_SESSION_EVENT_BIN` variables, then fires `session_start` / `session_end`
-hooks around the client run. By default it also hands the prompt artifact to
-the native client surface when available: Codex via
+hooks around the client run. The JSON payload also carries a `cli_hints` block
+with the resolved workspace path plus `afs query`, `afs context query`, and
+`afs index rebuild`, `afs work`, and `afs work approvals list` follow-up
+commands, and the wrapper exports the same values via
+`AFS_SESSION_QUERY_HINT`, `AFS_SESSION_CONTEXT_QUERY_HINT`,
+`AFS_SESSION_INDEX_REBUILD_HINT`, `AFS_SESSION_WORK_HINT`, and
+`AFS_SESSION_WORK_APPROVALS_HINT`. By default it also hands the prompt artifact
+to the native client surface when available: Codex via
 `-c model_instructions_file=...`, Claude via `--append-system-prompt-file`,
 and Gemini via `GEMINI_SYSTEM_MD`. Set `AFS_CLIENT_NATIVE_PROMPT=0` or the
 client-specific `AFS_<CLIENT>_NATIVE_PROMPT=0` to disable that native handoff.
@@ -243,9 +316,10 @@ metadata so child scripts only need to provide the event-specific fields.
 
 For noisy command output, use MCP tool `operator.digest` before pasting raw
 logs back into a model turn. It can auto-detect and compress `pytest`,
-`traceback`, `grep`, and `git diff --stat` style output into a compact summary
-plus structured fields, and it is included in the default, readonly, repair,
-and edit-oriented tool bundles.
+`traceback`, `grep`, `git diff --stat`, and compiler/linter diagnostic output
+(`tsc`, ESLint, Ruff, mypy) into a compact summary plus structured fields, and
+it is included in the default, readonly, repair, and edit-oriented tool
+bundles.
 
 For schema-bound plan or verification work, use prompt `afs.workflow.structured`.
 It inlines one built-in response schema together with a normal `session.pack`
@@ -277,26 +351,26 @@ export AFS_MCP_ALLOWED_ROOTS=~/workspaces/company
 Gemini background agent surfaces:
 
 ```bash
-~/src/lab/afs/scripts/afs agents run gemini-workspace-brief --stdout
-~/src/lab/afs/scripts/afs agents run history-memory --stdout
-~/src/lab/afs/scripts/afs agents ps --all
-~/src/lab/afs/scripts/afs services start gemini-workspace-brief
-~/src/lab/afs/scripts/afs services start history-memory
-~/src/lab/afs/scripts/afs services start agent-supervisor
-~/src/lab/afs/scripts/afs agents run claude-orchestrator --prompt "Summarize this workspace"
+<afs-root>/scripts/afs agents run gemini-workspace-brief --stdout
+<afs-root>/scripts/afs agents run history-memory --stdout
+<afs-root>/scripts/afs agents ps --all
+<afs-root>/scripts/afs services start gemini-workspace-brief
+<afs-root>/scripts/afs services start history-memory
+<afs-root>/scripts/afs services start agent-supervisor
 ```
 
 The brief agent writes JSON and Markdown summaries under
 `.context/scratchpad/afs_agents/` and requires `GEMINI_API_KEY` or
-`GOOGLE_API_KEY`. `claude-orchestrator` is now a built-in agent surface and can
-be listed with `afs agents list`.
+`GOOGLE_API_KEY`. Domain-specific orchestration agents such as
+`claude-orchestrator` are extension-owned; enable the companion repo that
+registers them before expecting them in `afs agents list`.
 
 `context-warm` is the background maintenance surface for contexts:
 
 ```bash
-~/src/lab/afs/scripts/afs agents run context-warm --stdout
-~/src/lab/afs/scripts/afs services start context-warm
-~/src/lab/afs/scripts/afs services start context-watch
+<afs-root>/scripts/afs agents run context-warm --stdout
+<afs-root>/scripts/afs services start context-warm
+<afs-root>/scripts/afs services start context-watch
 ```
 
 Each run now audits discovered contexts for:
@@ -321,28 +395,28 @@ If you need service processes to use a repo-local or workspace-local config
 instead of `~/.config/afs/config.toml`, start them with an explicit config:
 
 ```bash
-~/src/lab/afs/scripts/afs services start --config /path/to/afs.toml context-warm
-~/src/lab/afs/scripts/afs services start --config /path/to/afs.toml agent-supervisor
+<afs-root>/scripts/afs services start --config /path/to/afs.toml context-warm
+<afs-root>/scripts/afs services start --config /path/to/afs.toml agent-supervisor
 ```
 
 Managed units can also be installed through the OS service adapter:
 
 ```bash
-~/src/lab/afs/scripts/afs services install context-warm --enable
-~/src/lab/afs/scripts/afs services status --system
-~/src/lab/afs/scripts/afs services logs context-warm
+<afs-root>/scripts/afs services install context-warm --enable
+<afs-root>/scripts/afs services status --system
+<afs-root>/scripts/afs services logs context-warm
 ```
 
 `afs services render|start|stop|status|restart` now preserve that explicit
 `AFS_CONFIG_PATH` for the spawned service process, so background maintenance can
-stay pinned to a repo-local `.context` such as `~/src/lab/.context`.
+stay pinned to a repo-local `.context` such as `<workspace-root>/.context`.
 
 For the built-in `context-warm` and `context-watch` services, you can scope the
 watched/audited contexts declaratively without replacing the whole command:
 
 ```toml
 [services.services.context-watch]
-context_filters = ["~/src/lab"]
+context_filters = ["~/workspaces"]
 ```
 
 `agent-supervisor` is the process reconciler for profile-defined background
@@ -366,8 +440,8 @@ than copying raw payloads into memory.
 Direct repair surface:
 
 ```bash
-~/src/lab/afs/scripts/afs context repair --dry-run
-~/src/lab/afs/scripts/afs context repair --rebuild-index
+<afs-root>/scripts/afs context repair --dry-run
+<afs-root>/scripts/afs context repair --rebuild-index
 ```
 
 ## Gemini / Claude / Codex Registration
@@ -375,7 +449,7 @@ Direct repair surface:
 Recommended command target:
 
 ```bash
-~/src/lab/afs/scripts/afs mcp serve
+<afs-root>/scripts/afs mcp serve
 ```
 
 Codex user config:
@@ -407,23 +481,23 @@ Claude JSON config:
 Or let AFS write the user-level config for you:
 
 ```bash
-~/src/lab/afs/scripts/afs claude setup --scope user
+<afs-root>/scripts/afs claude setup --scope user
 ```
 
 Claude session maintenance:
 
 ```bash
-~/src/lab/afs/scripts/afs claude doctor --json
-~/src/lab/afs/scripts/afs claude reap --limit 20          # dry-run
-~/src/lab/afs/scripts/afs claude reap --limit 20 --apply  # archive candidates
+<afs-root>/scripts/afs claude doctor --json
+<afs-root>/scripts/afs claude reap --limit 20          # dry-run
+<afs-root>/scripts/afs claude reap --limit 20 --apply  # archive candidates
 ```
 
 Client bootstrap wrappers:
 
 ```bash
-~/src/lab/afs/scripts/afs-gemini
-~/src/lab/afs/scripts/afs-claude
-~/src/lab/afs/scripts/afs-codex
+<afs-root>/scripts/afs-gemini
+<afs-root>/scripts/afs-claude
+<afs-root>/scripts/afs-codex
 ```
 
 Each wrapper:
@@ -433,14 +507,20 @@ Each wrapper:
 - exports bootstrap, pack, skills, and combined session payload artifact paths
 - refreshes the prepared session payload before launching the client
 - runs `session_start` / `session_end` hooks around the client lifecycle
+- can seed safe report-only `agent-jobs` maintenance work when explicitly opted in
 - never infers workspace roots on its own
 - maps `AFS_<CLIENT>_MCP_ALLOWED_ROOTS` or `AFS_CLIENT_MCP_ALLOWED_ROOTS` into `AFS_MCP_ALLOWED_ROOTS` when you set them
+- exports an effective `AFS_TOOL_PROFILE` for non-default workflow/tool profiles so MCP tool lists match the declared read/write surface
+
+Set `AFS_CLIENT_SEED_JOBS=1` or pass `--seed-jobs` to enable maintenance job
+seeding. Use `AFS_CLIENT_SEED_PROFILE` and `AFS_CLIENT_SEED_CADENCE` to tune the
+default `repo-maintenance` / `daily` behavior.
 
 Gemini registration helper:
 
 ```bash
-~/src/lab/afs/scripts/afs gemini setup
-~/src/lab/afs/scripts/afs gemini setup --scope project
+<afs-root>/scripts/afs gemini setup
+<afs-root>/scripts/afs gemini setup --scope project
 ```
 
 The default Gemini entry uses `scripts/afs mcp serve` with repo runtime env so
@@ -463,7 +543,8 @@ Antigravity raw config example:
 If the client requires a Python module entrypoint instead, use a Python
 environment where `afs` is installed and run `python3 -m afs.mcp_server`.
 
-For the VS Code extension, `AFS: Register MCP Server` checks the configured
+For the VS Code extension, `AFS: Register MCP Server` checks workspace
+`.cursor`, `.vscode`, and `.antigravity` MCP configs plus the configured
 Antigravity context-root candidates first. Set `afs.mcp.configPath` when your
 fork stores the raw MCP config in a nonstandard location.
 

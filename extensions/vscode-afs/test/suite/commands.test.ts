@@ -2,12 +2,15 @@ import * as assert from "node:assert";
 import * as path from "node:path";
 import { describe, it, beforeEach } from "node:test";
 import {
+  __setActiveTextEditor,
+  __setShowInformationMessage,
   __resetTestState,
   __setOpenTextDocument,
   __setShowErrorMessage,
   __setShowInputBox,
   __setShowQuickPick,
   __setShowTextDocument,
+  __setShowWarningMessage,
   commands,
   workspace,
 } from "vscode";
@@ -109,5 +112,205 @@ describe("registerCommands", () => {
     assert.strictEqual(transport.turnEvents[1].summary, "Context query failed for: broken query");
     assert.strictEqual(transport.turnEvents[1].error, "query exploded");
     assert.deepStrictEqual(errorMessages, ["Query failed: Error: query exploded"]);
+  });
+
+  it("prefers the active editor workspace for index.query in multi-root windows", async () => {
+    const transport = new MockTransport();
+    const workspaceA = "/tmp/afs-vscode-workspace-a";
+    const workspaceB = "/tmp/afs-vscode-workspace-b";
+
+    workspace.workspaceFolders = [
+      { name: "alpha", uri: { fsPath: workspaceA } },
+      { name: "beta", uri: { fsPath: workspaceB } },
+    ];
+    __setActiveTextEditor(path.join(workspaceB, "notes.md"));
+    __setShowInputBox(async () => "sprite state");
+    __setShowQuickPick(async (items) => (await Promise.resolve(items))[0]);
+
+    transport.toolResponses["context.query"] = {
+      entries: [],
+    };
+
+    registerCommands(
+      { subscriptions: [] } as never,
+      {
+        transport,
+        contextService: new ContextService(transport),
+        fileService: new FileService(transport),
+        indexService: new IndexService(transport),
+        treeProvider: { refresh() {} } as never,
+        binaryInfo: { command: "afs", args: [], env: {} },
+        logger: { appendLine() {}, dispose() {} } as never,
+      },
+    );
+
+    await commands.executeCommand("afs.index.query");
+
+    const queryCall = transport.toolCalls.find((call) => call.name === "context.query");
+    assert.ok(queryCall);
+    assert.strictEqual(queryCall.args.context_path, path.join(workspaceB, ".context"));
+  });
+
+  it("uses selected mount-point data for context unmount", async () => {
+    const transport = new MockTransport();
+    const infoMessages: string[] = [];
+
+    __setShowWarningMessage(async () => "Unmount");
+    __setShowInformationMessage(async (message) => {
+      infoMessages.push(String(message));
+      return undefined;
+    });
+    transport.toolResponses["context.unmount"] = { removed: true };
+
+    registerCommands(
+      { subscriptions: [] } as never,
+      {
+        transport,
+        contextService: new ContextService(transport),
+        fileService: new FileService(transport),
+        indexService: new IndexService(transport),
+        treeProvider: { refresh() {} } as never,
+        binaryInfo: { command: "afs", args: [], env: {} },
+        logger: { appendLine() {}, dispose() {} } as never,
+      },
+    );
+
+    await commands.executeCommand("afs.context.unmount", {
+      contextPath: "/tmp/workspace/.context",
+      mountType: "knowledge",
+      alias: "notes",
+    });
+
+    const unmountCall = transport.toolCalls.find((call) => call.name === "context.unmount");
+    assert.ok(unmountCall);
+    assert.deepStrictEqual(unmountCall.args, {
+      mount_type: "knowledge",
+      alias: "notes",
+      context_path: "/tmp/workspace/.context",
+    });
+    assert.deepStrictEqual(infoMessages, ["Unmounted notes from knowledge."]);
+  });
+
+  it("shows session hints in afs.mcp.status", async () => {
+    const transport = new MockTransport();
+    const infoMessages: string[] = [];
+    transport.sessionInfo = {
+      sessionId: "sess-vscode",
+      payloadFile: "/tmp/session_client_vscode.json",
+      contextPath: "/tmp/workspace/.context",
+      promptJson: "/tmp/session_system_prompt_vscode.json",
+      promptText: "/tmp/session_system_prompt_vscode.txt",
+      workspace: "/tmp/workspace",
+      cliHints: {
+        workspacePath: "/tmp/workspace",
+        queryShortcut: "afs query <text> --path /tmp/workspace",
+        queryCanonical: "afs context query <text> --path /tmp/workspace",
+        indexRebuild: "afs index rebuild --path /tmp/workspace",
+        workSummary: "afs work --path /tmp/workspace",
+        workApprovals: "afs work approvals list --path /tmp/workspace",
+        workCommunication: "afs work communication preflight --path /tmp/workspace",
+        notes: ["Indexed retrieval may be stale."],
+      },
+    };
+
+    __setShowInformationMessage(async (message) => {
+      infoMessages.push(String(message));
+      return undefined;
+    });
+
+    registerCommands(
+      { subscriptions: [] } as never,
+      {
+        transport,
+        contextService: new ContextService(transport),
+        fileService: new FileService(transport),
+        indexService: new IndexService(transport),
+        treeProvider: { refresh() {} } as never,
+        binaryInfo: { command: "afs", args: [], env: {} },
+        logger: { appendLine() {}, dispose() {} } as never,
+      },
+    );
+
+    await commands.executeCommand("afs.mcp.status");
+
+    assert.strictEqual(infoMessages.length, 1);
+    assert.match(infoMessages[0], /Connected: true/);
+    assert.match(infoMessages[0], /Session workspace: \/tmp\/workspace/);
+    assert.match(infoMessages[0], /Query hint: afs query <text> --path \/tmp\/workspace/);
+    assert.match(infoMessages[0], /Canonical query hint: afs context query <text> --path \/tmp\/workspace/);
+    assert.match(infoMessages[0], /Index hint: afs index rebuild --path \/tmp\/workspace/);
+    assert.match(infoMessages[0], /Work hint: afs work --path \/tmp\/workspace/);
+    assert.match(infoMessages[0], /Work approvals hint: afs work approvals list --path \/tmp\/workspace/);
+    assert.match(infoMessages[0], /Work communication hint: afs work communication preflight --path \/tmp\/workspace/);
+    assert.match(infoMessages[0], /Note: Indexed retrieval may be stale\./);
+  });
+
+  it("shows work communication preflight and approvals from editor commands", async () => {
+    const transport = new MockTransport();
+    const infoMessages: string[] = [];
+    const workspaceRoot = "/tmp/afs-vscode-workspace";
+
+    workspace.workspaceFolders = [{ name: "demo", uri: { fsPath: workspaceRoot } }];
+    transport.toolResponses["work.communication.preflight"] = {
+      style: {
+        sample_count: 1,
+        style_notes: ["direct", "evidence-backed"],
+        guidance: ["Use stored samples before drafting.", "Never post externally without approval."],
+      },
+      approval_guardrail: {
+        requires_explicit_approval: true,
+        ready_to_post: false,
+      },
+      checklist: [
+        {
+          step: "Inspect stored work communication samples before drafting.",
+          status: "done",
+        },
+      ],
+      guidance: ["Use stored samples before drafting.", "Never post externally without approval."],
+    };
+    transport.toolResponses["work.approvals.list"] = {
+      approvals: [
+        {
+          approval_id: "approval_1",
+          target_system: "github",
+          action: "post_pr_comment",
+          summary: "Post drafted PR response",
+        },
+      ],
+      count: 1,
+    };
+    __setShowInformationMessage(async (message) => {
+      infoMessages.push(String(message));
+      return undefined;
+    });
+
+    registerCommands(
+      { subscriptions: [] } as never,
+      {
+        transport,
+        contextService: new ContextService(transport),
+        fileService: new FileService(transport),
+        indexService: new IndexService(transport),
+        treeProvider: { refresh() {} } as never,
+        binaryInfo: { command: "afs", args: [], env: {} },
+        logger: { appendLine() {}, dispose() {} } as never,
+      },
+    );
+
+    await commands.executeCommand("afs.work.communication");
+    await commands.executeCommand("afs.work.approvals");
+
+    assert.match(infoMessages[0], /Work communication samples: 1/);
+    assert.match(infoMessages[0], /approval_required=yes/);
+    assert.match(infoMessages[0], /direct, evidence-backed/);
+    assert.match(infoMessages[1], /Pending AFS work approvals: 1/);
+    assert.match(infoMessages[1], /approval_1: github\/post_pr_comment - Post drafted PR response/);
+    assert.deepStrictEqual(
+      transport.toolCalls
+        .filter((call) => call.name.startsWith("work."))
+        .map((call) => call.name),
+      ["work.communication.preflight", "work.approvals.list"],
+    );
   });
 });

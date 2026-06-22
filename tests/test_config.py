@@ -8,6 +8,7 @@ from afs.schema import AFSConfig
 
 
 def test_load_config_merges_workspace_registry(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("AFS_CONFIG_PATH", raising=False)
     context_root = tmp_path / "context"
     context_root.mkdir()
     workspace_dir = tmp_path / "workspace"
@@ -47,6 +48,7 @@ def test_load_config_model_uses_explicit_path(tmp_path) -> None:
 
 
 def test_load_runtime_config_model_uses_nearest_repo_config(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("AFS_CONFIG_PATH", raising=False)
     repo_root = tmp_path / "repo"
     nested = repo_root / "a" / "b"
     nested.mkdir(parents=True)
@@ -77,11 +79,12 @@ def test_load_config_model_parses_profiles_extensions_hooks(tmp_path) -> None:
         "active_profile = \"work\"\n"
         "auto_apply = true\n\n"
         "[profiles.work]\n"
-        "knowledge_mounts = [\"~/Journal/logs\"]\n"
+        "memory_mounts = [\"~/memory\"]\n"
+        "knowledge_mounts = [\"~/work/logs\"]\n"
         "skill_roots = [\"~/skills\"]\n"
         "model_registries = [\"~/registry/chat_registry.toml\"]\n"
         "enabled_extensions = [\"workspace_adapter\"]\n"
-        "policies = [\"no_zelda\"]\n\n"
+        "policies = [\"deny_keywords:restricted\"]\n\n"
         "[hooks]\n"
         "before_context_read = [\"scripts/hooks/read.sh\"]\n"
         "session_start = [\"scripts/hooks/session_start.sh\"]\n"
@@ -96,7 +99,8 @@ def test_load_config_model_parses_profiles_extensions_hooks(tmp_path) -> None:
     assert model.profiles.active_profile == "work"
     assert "work" in model.profiles.profiles
     work = model.profiles.profiles["work"]
-    assert work.policies == ["no_zelda"]
+    assert work.memory_mounts == [(Path.home() / "memory").resolve()]
+    assert work.policies == ["deny_keywords:restricted"]
     assert model.hooks.before_context_read == ["scripts/hooks/read.sh"]
     assert model.hooks.session_start == ["scripts/hooks/session_start.sh"]
     assert model.hooks.session_end == ["scripts/hooks/session_end.sh"]
@@ -126,6 +130,38 @@ def test_load_config_model_parses_context_index_settings(tmp_path) -> None:
     assert model.context_index.include_content is False
     assert model.context_index.max_file_size_bytes == 8192
     assert model.context_index.max_content_chars == 1024
+
+
+def test_load_config_model_parses_verification_profiles(tmp_path) -> None:
+    config_path = tmp_path / "verification.toml"
+    config_path.write_text(
+        "[verification]\n"
+        "default_profile = \"repo\"\n\n"
+        "[verification.profiles.repo]\n"
+        "description = \"Repo checks\"\n\n"
+        "[[verification.profiles.repo.checks]]\n"
+        "name = \"python\"\n"
+        "paths = [\"**/*.py\", \"pyproject.toml\"]\n"
+        "commands = [\"ruff check .\", \"pytest -q\"]\n"
+        "skills = [\"python-quality\"]\n"
+        "workflows = [\"edit_fast\"]\n"
+        "tool_profiles = [\"edit_and_verify\"]\n",
+        encoding="utf-8",
+    )
+
+    model = load_config_model(config_path=config_path, merge_user=False)
+    assert model.verification.default_profile == "repo"
+    assert "repo" in model.verification.profiles
+    profile = model.verification.profiles["repo"]
+    assert profile.description == "Repo checks"
+    assert len(profile.checks) == 1
+    check = profile.checks[0]
+    assert check.name == "python"
+    assert check.paths == ["**/*.py", "pyproject.toml"]
+    assert check.commands == ["ruff check .", "pytest -q"]
+    assert check.skills == ["python-quality"]
+    assert check.workflows == ["edit_fast"]
+    assert check.tool_profiles == ["edit_and_verify"]
 
 
 def test_load_config_model_parses_mcp_allowed_roots(tmp_path) -> None:
@@ -320,6 +356,14 @@ def test_write_config_round_trips_extended_sections(tmp_path) -> None:
                 "never_embed": ["**/*.secret.md"],
                 "never_export": ["memory/raw/*"],
             },
+            "extensions": {
+                "auto_discover": False,
+                "enabled_extensions": ["afs_example"],
+                "extension_dirs": [str(tmp_path / "extensions")],
+                "extension_repo_roots": [str(tmp_path / "lab")],
+                "extension_repo_prefixes": ["afs_", "team_"],
+                "manifest_filenames": ["extension.toml", "afs-extension.toml"],
+            },
             "hivemind": {
                 "default_ttl_hours": 8,
                 "reaper_enabled": False,
@@ -355,4 +399,12 @@ def test_write_config_round_trips_extended_sections(tmp_path) -> None:
     assert roundtrip.memory_consolidation.entries_filename == "durable.jsonl"
     assert roundtrip.context_index.decay_hours == 72.0
     assert roundtrip.sensitivity.never_embed == ["**/*.secret.md"]
+    assert roundtrip.extensions.auto_discover is False
+    assert roundtrip.extensions.enabled_extensions == ["afs_example"]
+    assert roundtrip.extensions.extension_repo_roots == [(tmp_path / "lab").resolve()]
+    assert roundtrip.extensions.extension_repo_prefixes == ["afs_", "team_"]
+    assert roundtrip.extensions.manifest_filenames == [
+        "extension.toml",
+        "afs-extension.toml",
+    ]
     assert roundtrip.hivemind.default_ttl_hours == 8

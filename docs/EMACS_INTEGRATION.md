@@ -25,15 +25,16 @@ Static AFS buffers share a small UX contract:
 ## Load Path
 
 ```elisp
-(add-to-list 'load-path "~/src/lab/afs/contrib/emacs")
+;; Adjust to wherever you cloned AFS
+(add-to-list 'load-path "/path/to/afs/contrib/emacs")
 (require 'afs-emacs)
 ```
 
 ## Minimal Setup
 
 ```elisp
-(setq afs-emacs-cli-script "~/src/lab/afs/scripts/afs")
-(setq afs-emacs-capture-file "~/Journal/inbox.org")
+(setq afs-emacs-cli-script "/path/to/afs/scripts/afs")
+(setq afs-emacs-capture-file "~/notes/tasks.md")
 (setq afs-emacs-default-client "codex")
 
 (global-set-key (kbd "C-c a a") #'afs-emacs-dispatch)

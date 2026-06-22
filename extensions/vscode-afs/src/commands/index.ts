@@ -6,6 +6,8 @@ import type { ContextService } from "../services/contextService";
 import type { FileService } from "../services/fileService";
 import type { IndexService } from "../services/indexService";
 import { MountType } from "../types";
+import { getConfig } from "../utils/config";
+import { pickWorkspaceFolder } from "../utils/workspace";
 import type { ContextTreeProvider } from "../views/contextTreeProvider";
 import { registerAfs, unregisterAfs, checkRegistration } from "../mcp/registration";
 
@@ -20,6 +22,12 @@ interface CommandDeps {
 }
 
 type TurnAwareTransport = ITransportClient & TurnLifecycleClient;
+
+interface MountPointSelection {
+  contextPath: string;
+  mountType: string;
+  alias: string;
+}
 
 function isTurnAwareTransport(transport: ITransportClient): transport is TurnAwareTransport {
   return (
@@ -62,27 +70,11 @@ async function withRecordedTurn<T>(
   }
 }
 
-async function pickWorkspaceFolder(): Promise<vscode.WorkspaceFolder | undefined> {
-  const folders = vscode.workspace.workspaceFolders ?? [];
-  if (folders.length === 0) {
-    vscode.window.showWarningMessage("No workspace folder is open.");
-    return undefined;
-  }
-  if (folders.length === 1) {
-    return folders[0];
-  }
-  const picked = await vscode.window.showQuickPick(
-    folders.map((folder) => ({ label: folder.name, detail: folder.uri.fsPath, folder })),
-    { placeHolder: "Select workspace folder" },
-  );
-  return picked?.folder;
-}
-
 export function registerCommands(
   context: vscode.ExtensionContext,
   deps: CommandDeps,
 ): void {
-  const { transport, contextService, indexService, treeProvider, binaryInfo, logger } =
+  const { transport, contextService, fileService, indexService, treeProvider, binaryInfo, logger } =
     deps;
 
   context.subscriptions.push(
@@ -92,16 +84,23 @@ export function registerCommands(
 
     vscode.commands.registerCommand("afs.context.discover", async () => {
       try {
+        const searchPaths = getConfig<string[]>("discovery.searchPaths", [])
+          .map((value) => value.trim())
+          .filter(Boolean);
+        const maxDepth = Math.max(1, getConfig<number>("discovery.maxDepth", 3));
         const contexts = await withRecordedTurn(
           transport,
           "Discover AFS contexts for the open VS Code workspace.",
           "Discover AFS contexts",
-          async () => contextService.discover(),
+          async () => contextService.discover(
+            searchPaths.length > 0 ? searchPaths : undefined,
+            maxDepth,
+          ),
           {
             successSummary: (result) => `Discovered ${result.length} context(s)`,
           },
         );
-        treeProvider.refresh();
+        treeProvider.setManualDiscoveredContexts(contexts);
         vscode.window.showInformationMessage(`Found ${contexts.length} context(s)`);
       } catch (err) {
         vscode.window.showErrorMessage(`Discovery failed: ${err}`);
@@ -109,7 +108,7 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand("afs.context.init", async () => {
-      const folder = await pickWorkspaceFolder();
+      const folder = await pickWorkspaceFolder("Select workspace folder to initialize");
       if (!folder) return;
 
       const contextPath = path.join(folder.uri.fsPath, ".context");
@@ -148,7 +147,7 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand("afs.context.mount", async () => {
-      const folder = await pickWorkspaceFolder();
+      const folder = await pickWorkspaceFolder("Select workspace folder to mount into");
       if (!folder) return;
 
       const sourcePick = await vscode.window.showOpenDialog({
@@ -199,26 +198,51 @@ export function registerCommands(
       }
     }),
 
-    vscode.commands.registerCommand("afs.context.unmount", async () => {
-      const folder = await pickWorkspaceFolder();
-      if (!folder) return;
+    vscode.commands.registerCommand("afs.context.unmount", async (selection?: unknown) => {
+      const selectedMount = getMountPointSelection(selection);
 
-      const mountType = await vscode.window.showQuickPick(Object.values(MountType), {
-        placeHolder: "Select mount type",
-      });
-      if (!mountType) return;
+      let contextPath: string;
+      let mountType: string;
+      let alias: string;
 
-      const alias = await vscode.window.showInputBox({
-        prompt: `Alias to unmount from ${mountType}`,
-      });
-      if (!alias?.trim()) return;
+      if (selectedMount) {
+        const choice = await vscode.window.showWarningMessage(
+          `Unmount ${selectedMount.alias} from ${selectedMount.mountType}?`,
+          { modal: true },
+          "Unmount",
+          "Cancel",
+        );
+        if (choice !== "Unmount") {
+          return;
+        }
+        contextPath = selectedMount.contextPath;
+        mountType = selectedMount.mountType;
+        alias = selectedMount.alias;
+      } else {
+        const folder = await pickWorkspaceFolder("Select workspace folder to unmount from");
+        if (!folder) return;
+
+        contextPath = path.join(folder.uri.fsPath, ".context");
+        const pickedMountType = await vscode.window.showQuickPick(Object.values(MountType), {
+          placeHolder: "Select mount type",
+        });
+        if (!pickedMountType) return;
+
+        mountType = pickedMountType;
+        const pickedAlias = await pickMountAlias(
+          fileService,
+          contextPath,
+          pickedMountType as MountType,
+        );
+        if (!pickedAlias) return;
+        alias = pickedAlias;
+      }
 
       try {
-        const contextPath = path.join(folder.uri.fsPath, ".context");
         const trimmedAlias = alias.trim();
         const removed = await withRecordedTurn(
           transport,
-          `Unmount ${trimmedAlias} from ${mountType}`,
+          `Unmount ${trimmedAlias} from ${mountType} in ${contextPath}`,
           "Unmount AFS context source",
           async () =>
             contextService.unmount(
@@ -249,9 +273,9 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand("afs.index.rebuild", async () => {
-      const folders = vscode.workspace.workspaceFolders;
-      if (!folders?.length) return;
-      const contextPath = `${folders[0].uri.fsPath}/.context`;
+      const folder = await pickWorkspaceFolder("Select workspace folder to rebuild index for");
+      if (!folder) return;
+      const contextPath = path.join(folder.uri.fsPath, ".context");
       try {
         await withRecordedTurn(
           transport,
@@ -283,13 +307,14 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand("afs.index.query", async () => {
+      const folder = await pickWorkspaceFolder("Select workspace folder to query");
+      if (!folder) return;
+
       const query = await vscode.window.showInputBox({
         prompt: "Search context index",
       });
       if (!query) return;
-      const folders = vscode.workspace.workspaceFolders;
-      if (!folders?.length) return;
-      const contextPath = `${folders[0].uri.fsPath}/.context`;
+      const contextPath = path.join(folder.uri.fsPath, ".context");
       try {
         await withRecordedTurn(
           transport,
@@ -331,6 +356,59 @@ export function registerCommands(
       await vscode.commands.executeCommand("afs.index.query");
     }),
 
+    vscode.commands.registerCommand("afs.work.communication", async () => {
+      const folder = await pickWorkspaceFolder("Select workspace folder for work communication preflight");
+      if (!folder) return;
+      const contextPath = path.join(folder.uri.fsPath, ".context");
+      try {
+        const guidance = await withRecordedTurn(
+          transport,
+          "Inspect AFS work communication samples and approval guardrails.",
+          "Run AFS work communication preflight",
+          async () =>
+            transport.callTool("work.communication.preflight", {
+              context_path: contextPath,
+              limit: 8,
+              approval_limit: 8,
+            }),
+          {
+            successSummary: "Completed work communication preflight",
+          },
+        );
+        vscode.window.showInformationMessage(
+          formatWorkCommunicationGuidance(guidance),
+          { modal: true },
+        );
+      } catch (err) {
+        vscode.window.showErrorMessage(`Work communication preflight failed: ${err}`);
+      }
+    }),
+
+    vscode.commands.registerCommand("afs.work.approvals", async () => {
+      const folder = await pickWorkspaceFolder("Select workspace folder for work approvals");
+      if (!folder) return;
+      const contextPath = path.join(folder.uri.fsPath, ".context");
+      try {
+        const payload = await withRecordedTurn(
+          transport,
+          "Inspect pending AFS work approvals before external writes.",
+          "Review AFS work approvals",
+          async () =>
+            transport.callTool("work.approvals.list", {
+              context_path: contextPath,
+              status: "pending",
+              limit: 20,
+            }),
+          {
+            successSummary: "Reviewed pending work approvals",
+          },
+        );
+        vscode.window.showInformationMessage(formatWorkApprovals(payload), { modal: true });
+      } catch (err) {
+        vscode.window.showErrorMessage(`Work approvals failed: ${err}`);
+      }
+    }),
+
     vscode.commands.registerCommand("afs.mcp.register", async () => {
       await registerAfs(binaryInfo, logger);
     }),
@@ -342,12 +420,40 @@ export function registerCommands(
     vscode.commands.registerCommand("afs.mcp.status", async () => {
       const reg = checkRegistration();
       const caps = transport.capabilities();
+      const session = transport.getSessionInfo();
       const lines = [
         `Connected: ${transport.isReady()}`,
         `Capabilities: tools=${caps.tools}, resources=${caps.resources}, prompts=${caps.prompts}`,
         `MCP registered: ${reg.registered}`,
         `Config path: ${reg.configPath ?? "none"}`,
       ];
+      if (session) {
+        lines.push(`Session workspace: ${session.workspace || "unknown"}`);
+        lines.push(`Session payload: ${session.payloadFile || "none"}`);
+        if (session.cliHints.queryShortcut) {
+          lines.push(`Query hint: ${session.cliHints.queryShortcut}`);
+        }
+        if (session.cliHints.queryCanonical) {
+          lines.push(`Canonical query hint: ${session.cliHints.queryCanonical}`);
+        }
+        if (session.cliHints.indexRebuild) {
+          lines.push(`Index hint: ${session.cliHints.indexRebuild}`);
+        }
+        if (session.cliHints.workSummary) {
+          lines.push(`Work hint: ${session.cliHints.workSummary}`);
+        }
+        if (session.cliHints.workApprovals) {
+          lines.push(`Work approvals hint: ${session.cliHints.workApprovals}`);
+        }
+        if (session.cliHints.workCommunication) {
+          lines.push(`Work communication hint: ${session.cliHints.workCommunication}`);
+        }
+        for (const note of session.cliHints.notes) {
+          if (note.trim()) {
+            lines.push(`Note: ${note.trim()}`);
+          }
+        }
+      }
       vscode.window.showInformationMessage(lines.join("\n"), { modal: true });
     }),
 
@@ -367,4 +473,134 @@ export function registerCommands(
       logger.show(true);
     }),
   );
+}
+
+function formatWorkCommunicationGuidance(payload: Record<string, unknown>): string {
+  const style = recordValue(payload.style) ?? payload;
+  const sampleCount = typeof style.sample_count === "number" ? style.sample_count : 0;
+  const lines = [`Work communication samples: ${sampleCount}`];
+  const guardrail = recordValue(payload.approval_guardrail);
+  if (guardrail) {
+    const requiresApproval = guardrail.requires_explicit_approval === true;
+    const readyToPost = guardrail.ready_to_post === true;
+    lines.push(
+      `External write: ready_to_post=${readyToPost ? "yes" : "no"}, approval_required=${
+        requiresApproval ? "yes" : "no"
+      }`,
+    );
+  }
+  const styleNotes = Array.isArray(style.style_notes)
+    ? style.style_notes.filter((note): note is string => typeof note === "string" && note.trim().length > 0)
+    : [];
+  if (styleNotes.length > 0) {
+    lines.push(`Style notes: ${styleNotes.slice(0, 8).join(", ")}`);
+  }
+  const checklist = Array.isArray(payload.checklist)
+    ? payload.checklist.filter(
+        (item): item is Record<string, unknown> =>
+          !!item && typeof item === "object" && !Array.isArray(item),
+      )
+    : [];
+  for (const item of checklist.slice(0, 4)) {
+    const status = stringValue(item.status) || "required";
+    const step = stringValue(item.step);
+    if (step) {
+      lines.push(`- [${status}] ${step}`);
+    }
+  }
+  const guidancePayload = Array.isArray(payload.guidance) ? payload.guidance : style.guidance;
+  const guidance = Array.isArray(guidancePayload)
+    ? guidancePayload.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  for (const item of guidance.slice(0, 5)) {
+    lines.push(`- ${item}`);
+  }
+  return lines.join("\n");
+}
+
+function formatWorkApprovals(payload: Record<string, unknown>): string {
+  const approvals = Array.isArray(payload.approvals)
+    ? payload.approvals.filter(
+        (approval): approval is Record<string, unknown> =>
+          !!approval && typeof approval === "object" && !Array.isArray(approval),
+      )
+    : [];
+  if (approvals.length === 0) {
+    return "No pending AFS work approvals.";
+  }
+  const lines = [`Pending AFS work approvals: ${approvals.length}`];
+  for (const approval of approvals.slice(0, 10)) {
+    const id = stringValue(approval.approval_id) || "approval";
+    const system = stringValue(approval.target_system) || "external";
+    const action = stringValue(approval.action) || "write";
+    const summary = stringValue(approval.summary);
+    lines.push(`- ${id}: ${system}/${action}${summary ? ` - ${summary}` : ""}`);
+  }
+  return lines.join("\n");
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function getMountPointSelection(selection: unknown): MountPointSelection | undefined {
+  if (!selection || typeof selection !== "object") {
+    return undefined;
+  }
+
+  const candidate = selection as Partial<MountPointSelection>;
+  if (
+    typeof candidate.contextPath === "string" &&
+    typeof candidate.mountType === "string" &&
+    typeof candidate.alias === "string"
+  ) {
+    return {
+      contextPath: candidate.contextPath,
+      mountType: candidate.mountType,
+      alias: candidate.alias,
+    };
+  }
+
+  return undefined;
+}
+
+async function pickMountAlias(
+  fileService: FileService,
+  contextPath: string,
+  mountType: MountType,
+): Promise<string | undefined> {
+  const mountPath = path.join(contextPath, mountType);
+
+  try {
+    const entries = await fileService.list(mountPath, 1);
+    const aliases = Array.from(
+      new Set(
+        entries
+          .filter((entry) => entry.path !== mountPath)
+          .map((entry) => path.basename(entry.path))
+          .filter(Boolean),
+      ),
+    );
+
+    if (aliases.length > 0) {
+      const picked = await vscode.window.showQuickPick(
+        aliases.map((label) => ({ label })),
+        { placeHolder: `Select mount alias to unmount from ${mountType}` },
+      );
+      return picked?.label;
+    }
+  } catch {
+    // fall back to manual entry below
+  }
+
+  const alias = await vscode.window.showInputBox({
+    prompt: `Alias to unmount from ${mountType}`,
+  });
+  return alias?.trim() || undefined;
 }

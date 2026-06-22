@@ -1,308 +1,75 @@
 # AFS Knowledge System & Gemini Setup Guide
 
-Guide for agents maintaining the knowledge base, rebuilding embeddings, and
-setting up Gemini integration on a new machine.
+Guide for agents maintaining a generic AFS knowledge mount, rebuilding
+embeddings, and setting up Gemini integration on a new machine.
 
-## Part 1: Knowledge System Maintenance
+Domain-specific routing tables, game/ROM notes, persona model docs, and
+project-specific skills belong in a companion extension repo such as
+`afs_scawful`, not in core AFS docs.
 
-### Knowledge Base Location
+## Knowledge Mounts
 
-All knowledge docs live at `~/.context/knowledge/` organized by domain:
-
-```
-~/.context/knowledge/
-├── INDEX.md              ← master routing doc (start here)
-├── hobby/                ← ROM hacking projects
-├── alttp/                ← ALTTP game engine internals
-├── snes/                 ← SNES hardware reference
-├── models/               ← model training & serving
-└── oracle-of-secrets/    ← structured data (JSON)
-```
-
-The knowledge base is mounted into AFS via the active profile's
-`knowledge_mounts` in `~/.config/afs/config.toml`:
+AFS does not require a single global knowledge tree. Declare the knowledge roots
+that matter to the active profile:
 
 ```toml
 [profiles.dev]
-knowledge_mounts = ["$AFS_ROOT-scawful/knowledge", "~/.context/knowledge"]
+knowledge_mounts = ["~/work/knowledge", "~/.context/knowledge"]
+
+[profiles.personal]
+knowledge_mounts = ["~/personal/knowledge"]
 ```
 
-### Adding a New Knowledge Document
+A companion repo can also contribute knowledge through `extension.toml`:
 
-1. **Pick the right directory** based on domain:
-   - `hobby/` — project-specific (Oracle, YAZE, tools)
-   - `alttp/` — game engine (architecture, routines, data tables, sprites)
-   - `snes/` — hardware (CPU, PPU, DMA)
-   - `models/` — training pipeline, portfolio, serving, datasets
+```toml
+name = "afs_example"
+knowledge_mounts = ["knowledge"]
+skill_roots = ["skills"]
+```
 
-2. **Write the document** following the existing format:
-   ```markdown
-   # Title — Short Description
+## Adding a Knowledge Document
 
-   **Path**: `~/src/hobby/project/`
-   **Stage**: Alpha | **Language**: 65816 ASM | **Build**: Asar
+1. Pick the mount and directory that owns the topic.
+2. Write the document in a scannable format with concrete paths, commands, and
+   cross-references.
+3. Update the local index or routing file for that mount, if it has one.
+4. Rebuild embeddings after substantive changes.
 
-   Brief description paragraph.
+Suggested metadata block:
 
-   ## Section with Tables
+```markdown
+# Title — Short Description
 
-   | Column | Column | Column |
-   |--------|--------|--------|
-   | data   | data   | data   |
-   ```
+**Path**: `<workspace-root>/project/`
+**Scope**: work | personal | repo | domain
 
-   Style rules:
-   - Header block with Path, Stage, Language, Build metadata
-   - Use tables heavily — scannable beats prose
-   - Include concrete addresses, file paths, command examples
-   - Cross-reference other knowledge docs by relative path
-   - No emojis
+Brief description paragraph.
+```
 
-3. **Update INDEX.md** — add the doc to both sections:
-   - "By Task" table (if it maps to a common task)
-   - "By Directory" file listing
+Keep core knowledge generic. If the document depends on one user's projects,
+private corpora, model lineages, game-specific labels, or local machine paths,
+store it in the companion repo that owns that domain.
 
-4. **Update routing** — add "Also See" pointers in relevant places:
-   - Project's `CLAUDE.md` (Reference Knowledge table)
-   - Project's `.context/CONTEXT_INDEX.md` (if Oracle)
-   - Relevant AFS skills (Knowledge References section)
+## Updating or Removing Documents
 
-5. **Rebuild embeddings** (see Part 2)
+- Read the current document first.
+- Edit in place when the scope is unchanged.
+- Remove stale routing references when deleting a document.
+- Rebuild embeddings after significant additions, removals, or rewrites.
 
-### Updating an Existing Document
+## Embedding Index Management
 
-1. Read the current doc first
-2. Edit in place — don't create a new file
-3. Rebuild embeddings after significant changes
-4. No need to update INDEX.md unless the doc's scope changed
-
-### Removing a Document
-
-1. Delete the file
-2. Remove from INDEX.md
-3. Remove any routing references (CLAUDE.md, skills, CONTEXT_INDEX.md)
-4. Rebuild embeddings
-
-### Current Document Inventory
-
-Run this to see what's indexed:
+Keyword-only indexing works without an API key:
 
 ```bash
-afs embeddings search --knowledge-path ~/.context/knowledge --provider none "" --min-score 0.0 --top-k 100
-```
-
-Or just list the files:
-
-```bash
-find ~/.context/knowledge -name "*.md" | sort
-```
-
-### Routing Architecture
-
-Agents discover knowledge through three independent paths:
-
-```
-1. CLAUDE.md (auto-loaded by Claude Code)
-   └── "Reference Knowledge" table → specific docs by task
-
-2. CONTEXT_INDEX.md (Oracle project routing)
-   └── "Global Knowledge Base" section → docs by topic
-   └── Per-domain "Also See" columns → specific docs
-
-3. AFS Skills (invoked by task type)
-   └── "Knowledge References" section → relevant docs
-
-4. Embeddings search (programmatic)
-   └── afs embeddings search → semantic/keyword matching
-   └── afs gemini context → context generation for sessions
-```
-
-If you add a new doc, wire it into at least path 1 (CLAUDE.md) and path 4
-(rebuild embeddings). Paths 2 and 3 are nice-to-have for discoverability.
-
-### Files That Route to Knowledge
-
-| File | Location | What to update |
-|------|----------|----------------|
-| `INDEX.md` | `~/.context/knowledge/` | "By Task" + "By Directory" tables |
-| `CLAUDE.md` | `~/src/hobby/oracle-of-secrets/` | "Reference Knowledge" table |
-| `CLAUDE.md` | `~/src/hobby/yaze/` | "Reference Knowledge" table |
-| `CONTEXT_INDEX.md` | `~/src/hobby/oracle-of-secrets/.context/` | "Global Knowledge Base" + domain tables |
-| `mesen2-oos-debugging/SKILL.md` | `~/src/lab/afs-ext/skills/` | "Knowledge References" |
-| `alttp-disasm-labels/SKILL.md` | `~/src/lab/afs-ext/skills/` | "Knowledge References" |
-| `hyrule-navigator/SKILL.md` | `~/src/lab/afs-ext/skills/` | "Knowledge References" |
-| `zelda-model-manager/SKILL.md` | `~/src/lab/afs-ext/skills/` | "Knowledge References" |
-| `echo-persona/SKILL.md` | `~/src/lab/afs-ext/skills/` | "Knowledge References" |
-| `model-training-expert/SKILL.md` | `~/src/lab/afs-ext/skills/` | "Knowledge References" |
-
----
-
-## Part 2: Embedding Index Management
-
-### Building the Index
-
-```bash
-# Keyword-only (no API key needed, works anywhere)
 afs embeddings index \
   --knowledge-path ~/.context/knowledge \
   --provider none \
   --include "*.md"
-
-# With Gemini vectors (requires GEMINI_API_KEY)
-afs embeddings index \
-  --knowledge-path ~/.context/knowledge \
-  --provider gemini \
-  --include "*.md"
 ```
 
-The index is stored at:
-- `~/.context/knowledge/embedding_index.json` — doc ID → filename mapping
-- `~/.context/knowledge/embeddings/` — per-document JSON with vectors
-
-### When to Rebuild
-
-Rebuild after:
-- Adding or removing knowledge documents
-- Significantly rewriting a document's content
-- Switching embedding providers (e.g., keyword → Gemini)
-
-No rebuild needed for:
-- Minor typo fixes
-- Updating routing files (INDEX.md, CLAUDE.md, skills)
-
-### Verifying the Index
-
-```bash
-# Check doc count
-afs embeddings index --knowledge-path ~/.context/knowledge --provider none --include "*.md"
-# Should report: total=N indexed=N skipped=0 errors=0
-
-# Test search
-afs embeddings search --knowledge-path ~/.context/knowledge --provider none "sprite RAM tables"
-# Should return oracle-sprite-ram.md as top result
-```
-
-### Provider Comparison
-
-| Provider | Speed | Quality | Requires | Best for |
-|----------|-------|---------|----------|----------|
-| `none` | Instant | Keyword-only | Nothing | Offline, quick setup |
-| `gemini` | ~1s/doc | Best semantic | `GEMINI_API_KEY` | Production use |
-| `ollama` | ~0.5s/doc | Good semantic | Local Ollama server | Air-gapped/local |
-| `openai` | ~0.5s/doc | Good semantic | `OPENAI_API_KEY` | Alternative cloud |
-
-### Asymmetric Retrieval (Gemini)
-
-Gemini uses different task types for indexing vs searching:
-- Indexing: `RETRIEVAL_DOCUMENT` (how the doc should be found)
-- Searching: `RETRIEVAL_QUERY` (what the user is looking for)
-
-AFS handles this automatically. The CLI switches task type based on
-whether you're running `index` or `search`.
-
----
-
-## Part 3: Gemini Integration Setup (New Machine)
-
-### Prerequisites
-
-- Python 3.10+
-- AFS installed: `pip install -e .` from `~/src/lab/afs/`
-- Google API key with Gemini access
-
-### Step 1: Install AFS with Gemini Support
-
-```bash
-cd ~/src/lab/afs
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[gemini]"
-```
-
-If you only need HTTP-based embeddings (no SDK):
-
-```bash
-pip install -e ".[embeddings]"
-```
-
-### Step 2: Set API Key
-
-```bash
-export GEMINI_API_KEY="your-api-key-here"
-
-# Add to shell profile for persistence
-echo 'export GEMINI_API_KEY="your-api-key-here"' >> ~/.zshrc
-```
-
-The key is resolved in this order:
-1. `--gemini-api-key` CLI flag
-2. `GEMINI_API_KEY` environment variable
-3. `GOOGLE_API_KEY` environment variable
-
-### Step 3: Register AFS MCP Server
-
-```bash
-afs gemini setup
-```
-
-This writes the AFS MCP entry into `~/.gemini/settings.json`. Verify:
-
-```bash
-cat ~/.gemini/settings.json
-```
-
-Should contain:
-
-```json
-{
-  "mcpServers": {
-    "afs": {
-      "command": "/path/to/python3",
-      "args": ["-m", "afs.mcp_server"]
-    }
-  }
-}
-```
-
-### Step 4: Configure AFS
-
-Create or update `~/.config/afs/config.toml`:
-
-```toml
-[general]
-context_root = "/path/to/.context"
-mcp_allowed_roots = ["/path/to/src"]
-
-[[general.workspace_directories]]
-path = "/path/to/src"
-description = "Source code"
-
-[profiles]
-active_profile = "dev"
-
-[profiles.dev]
-knowledge_mounts = ["/path/to/.context/knowledge"]
-```
-
-Apply the profile:
-
-```bash
-afs context profile-apply
-```
-
-### Step 5: Sync Knowledge Base
-
-Copy or symlink the knowledge directory to the new machine:
-
-```bash
-# If using the same filesystem layout
-ln -s /shared/path/.context/knowledge ~/.context/knowledge
-
-# Or rsync from another machine
-rsync -av source-machine:~/.context/knowledge/ ~/.context/knowledge/
-```
-
-### Step 6: Build Embedding Index
+Gemini vectors require `GEMINI_API_KEY` or `GOOGLE_API_KEY`:
 
 ```bash
 afs embeddings index \
@@ -311,76 +78,54 @@ afs embeddings index \
   --include "*.md"
 ```
 
-### Step 7: Verify Everything
-
-```bash
-afs gemini status
-```
-
-Expected output (all OK):
-
-```
-  [     ok] API key: GEMINI_API_KEY or GOOGLE_API_KEY
-  [     ok] google-genai SDK: pip install google-genai
-  [     ok] settings.json: /Users/you/.gemini/settings.json
-  [     ok] MCP registered: /Users/you/.gemini/settings.json
-  [     ok] Embeddings indexed: 37 docs at /Users/you/.context/knowledge
-  [     ok] Embedding ping: 3072-dim vectors
-```
-
-Test search:
+Verify with a targeted search:
 
 ```bash
 afs embeddings search \
   --knowledge-path ~/.context/knowledge \
-  --provider gemini \
-  "how to debug a sprite"
+  --provider none \
+  "project handoff"
 ```
 
-Test context generation:
+## Provider Comparison
+
+| Provider | Speed | Quality | Requires | Best for |
+|----------|-------|---------|----------|----------|
+| `none` | Instant | Keyword-only | Nothing | Offline checks |
+| `gemini` | ~1s/doc | Strong semantic retrieval | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | Production semantic search |
+| `ollama` | Local-model dependent | Good with the right model | Local Ollama server | Air-gapped/local workflows |
+| `openai` | Cloud-model dependent | Strong semantic retrieval | `OPENAI_API_KEY` | Alternative cloud setup |
+
+AFS handles asymmetric retrieval task types for Gemini automatically when running
+`index` versus `search`.
+
+## Gemini Setup
 
 ```bash
-afs gemini context "sprite development"
-afs gemini context   # full index dump
+cd <afs-root>
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[gemini]"
+export GEMINI_API_KEY="..."
+afs embeddings index --knowledge-path ~/.context/knowledge --provider gemini --include "*.md"
 ```
 
-### Step 8: Test MCP Integration
+## Core vs Companion Responsibilities
 
-Start the MCP server manually to verify:
+Core AFS owns:
 
-```bash
-afs mcp serve
-```
+- mount configuration
+- indexing/search commands
+- generic profile and extension wiring
+- generic docs for maintaining knowledge mounts
 
-Or test via Gemini CLI if installed:
+Companion repos own:
 
-```bash
-gemini   # should auto-discover AFS MCP tools
-```
+- domain-specific routing tables
+- project-specific `CLAUDE.md` / `AGENTS.md` references
+- model/persona corpora
+- domain skills and MCP servers
+- private or machine-local knowledge inventories
 
-### Troubleshooting
-
-| Problem | Fix |
-|---------|-----|
-| `afs: command not found` | `pip install -e .` or use `./scripts/afs` |
-| `GEMINI_API_KEY not set` | `export GEMINI_API_KEY=...` |
-| `google-genai not installed` | `pip install -e ".[gemini]"` |
-| Embeddings index shows 0 files | Check `--include "*.md"` flag, verify knowledge path exists |
-| MCP not registered | Run `afs gemini setup` |
-| Search returns no results | Rebuild index, check `--min-score` threshold |
-| `settings.json` in wrong location | Use `afs gemini setup --settings-path /correct/path` |
-| SDK import error | `pip install google-genai>=1.0.0` |
-| HTTP fallback 404 | Check model name — use `gemini-embedding-001` not `text-embedding-004` |
-
-### Minimal Setup (Keyword-Only, No API Key)
-
-If you just need the knowledge system without cloud embeddings:
-
-```bash
-pip install -e .
-afs embeddings index --knowledge-path ~/.context/knowledge --provider none --include "*.md"
-afs embeddings search --knowledge-path ~/.context/knowledge --provider none "your query"
-```
-
-This uses keyword matching against document text — no API key, no network,
-works fully offline. Quality is lower than Gemini vectors but still useful.
+See `docs/EXTENSION_MIGRATION.md` and `docs/PLUGINS.md` for companion repo
+layout and discovery.

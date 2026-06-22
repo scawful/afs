@@ -1,6 +1,6 @@
 """Model-based generator for assembly code.
 
-Uses trained language models to generate ALTTP assembly code from
+Uses trained language models to generate assembly code from
 natural language instructions, with quality filtering via discriminator
 and syntax validation.
 """
@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from importlib.util import find_spec
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -136,11 +137,7 @@ class MLXBackend(ModelBackend):
         return response
 
     def is_available(self) -> bool:
-        try:
-            import mlx
-            return True
-        except ImportError:
-            return False
+        return find_spec("mlx") is not None
 
 
 class LlamaCppBackend(ModelBackend):
@@ -186,11 +183,7 @@ class LlamaCppBackend(ModelBackend):
         return response["choices"][0]["text"]
 
     def is_available(self) -> bool:
-        try:
-            import llama_cpp
-            return True
-        except ImportError:
-            return False
+        return find_spec("llama_cpp") is not None
 
 
 class HuggingFaceBackend(ModelBackend):
@@ -246,11 +239,7 @@ class HuggingFaceBackend(ModelBackend):
         return response[len(prompt):].strip()
 
     def is_available(self) -> bool:
-        try:
-            import transformers
-            return True
-        except ImportError:
-            return False
+        return find_spec("transformers") is not None
 
 
 class APIBackend(ModelBackend):
@@ -360,15 +349,15 @@ def _register_builtin_backends() -> None:
 
 
 # System prompt for ASM generation
-ASM_GENERATION_PROMPT = """You are an expert 65816 assembly programmer specializing in SNES/Super Nintendo game development, particularly for The Legend of Zelda: A Link to the Past (ALTTP).
+ASM_GENERATION_PROMPT = """You are an expert 65816 assembly programmer.
 
 When given a natural language instruction, generate clean, well-commented 65816 assembly code that accomplishes the task. Follow these guidelines:
 
 1. Use proper 65816 opcodes and addressing modes
 2. Include clear comments explaining the code
 3. Use meaningful labels when needed
-4. Reference ALTTP WRAM addresses when appropriate (e.g., $7EF36C for Link's health)
-5. Keep code efficient and idiomatic for SNES development
+4. Reference project-specific symbols only when the caller supplies them
+5. Keep code efficient and idiomatic for the target environment
 
 Generate ONLY the assembly code, without explanations or markdown formatting."""
 

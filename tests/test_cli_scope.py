@@ -205,3 +205,45 @@ def test_services_subcommands_accept_config_flag(
     assert args.command == "services"
     assert args.services_command == "render"
     assert str(args.config) == str(config_path)
+
+
+def test_companion_repo_cli_module_uses_src_layout(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "lab"
+    repo = workspace_root / "afs_example"
+    package = repo / "src" / "afs_example"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "cli.py").write_text(
+        "def register_parsers(subparsers):\n"
+        "    parser = subparsers.add_parser('google-demo', help='google demo command')\n"
+        "    parser.set_defaults(func=lambda _args: 0)\n",
+        encoding="utf-8",
+    )
+    (repo / "extension.toml").write_text(
+        "name = \"afs_example\"\n"
+        "cli_modules = [\"afs_example.cli\"]\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "afs.toml"
+    config_path.write_text(
+        "[extensions]\n"
+        "auto_discover = false\n"
+        f"extension_repo_roots = [\"{workspace_root}\"]\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("AFS_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("AFS_ENABLED_EXTENSIONS", "afs_example")
+    monkeypatch.delenv("AFS_EXTENSION_DIRS", raising=False)
+    monkeypatch.delenv("AFS_EXTENSION_REPO_ROOTS", raising=False)
+    monkeypatch.delenv("AFS_EXTENSION_REPO_PREFIXES", raising=False)
+    monkeypatch.delenv("AFS_EXTENSION_MANIFEST_FILENAMES", raising=False)
+
+    parser = build_parser()
+    commands = _command_choices(parser)
+
+    assert "google-demo" in commands

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,7 +12,6 @@ from afs.agents.llm_bridge import (
     _with_retries,
     query_llm,
 )
-
 
 # ---------------------------------------------------------------------------
 # _is_transient_error

@@ -6,7 +6,11 @@ import type {
   McpResourceContent,
   ToolSpec,
 } from "../../src/types";
-import type { ITransportClient, ServerCapabilities } from "../../src/transport/types";
+import type {
+  ITransportClient,
+  ServerCapabilities,
+  TransportSessionInfo,
+} from "../../src/transport/types";
 
 /** Minimal event emitter for tests (no vscode dependency). */
 class SimpleEventEmitter<T> {
@@ -31,9 +35,15 @@ export class MockTransport implements ITransportClient {
 
   public toolResponses: Record<string, Record<string, unknown>> = {};
   public toolErrors: Record<string, Error> = {};
+  public toolCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  public toolHandlers: Record<
+    string,
+    (args: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>
+  > = {};
   public resourceList: McpResource[] = [];
   public promptList: McpPrompt[] = [];
   public turnEvents: Array<Record<string, unknown>> = [];
+  public sessionInfo: TransportSessionInfo | undefined;
 
   async initialize(): Promise<void> {
     this.ready = true;
@@ -49,10 +59,14 @@ export class MockTransport implements ITransportClient {
 
   async callTool(
     name: string,
-    _args: Record<string, unknown>,
+    args: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    this.toolCalls.push({ name, args });
     if (this.toolErrors[name]) {
       throw this.toolErrors[name];
+    }
+    if (this.toolHandlers[name]) {
+      return await this.toolHandlers[name](args);
     }
     return this.toolResponses[name] ?? {};
   }
@@ -95,6 +109,10 @@ export class MockTransport implements ITransportClient {
       summary: summary ?? "",
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+
+  getSessionInfo(): TransportSessionInfo | undefined {
+    return this.sessionInfo;
   }
 
   dispose(): void {

@@ -32,13 +32,13 @@ class AgentSpec:
 
 
 CORE_AGENT_MODULES = (
-    "afs.agents.claude_orchestrator",
     "afs.agents.context_audit",
     "afs.agents.context_inventory",
     "afs.agents.context_warm",
     "afs.agents.dashboard_export",
     "afs.agents.gemini_workspace_brief",
     "afs.agents.history_memory",
+    "afs.agents.hivemind_capture",
     "afs.agents.journal_agent",
     "afs.agents.mission_runner",
     "afs.agents.scribe_draft",
@@ -143,7 +143,7 @@ def _load_extension_agents(config: object = None) -> dict[str, AgentSpec]:
     for extension in load_enabled_extensions(config=config).values():
         for module_name in extension.agent_modules:
             try:
-                with _extension_import_path(extension.root):
+                with _multi_extension_import_path(extension.import_roots):
                     module = importlib.import_module(module_name)
             except Exception as exc:
                 logger.warning("Failed to import agent module %s: %s", module_name, exc)
@@ -159,6 +159,19 @@ def _load_extension_agents(config: object = None) -> dict[str, AgentSpec]:
             for spec in specs:
                 loaded[spec.name] = spec
     return loaded
+
+
+@contextmanager
+def _multi_extension_import_path(extension_roots: list[Path]):
+    candidates: list[str] = []
+    for root in extension_roots:
+        candidates.extend([str(root), str(root.parent)])
+    original = list(sys.path)
+    sys.path = [entry for entry in candidates if Path(entry).exists()] + original
+    try:
+        yield
+    finally:
+        sys.path = original
 
 
 def get_agent_registry(config: object = None) -> dict[str, AgentSpec]:

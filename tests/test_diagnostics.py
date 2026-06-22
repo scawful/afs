@@ -176,6 +176,45 @@ def test_check_context_index_fix_rebuilds_missing_index_entries(tmp_path: Path) 
     assert healthy.status == "ok"
 
 
+def test_check_context_index_ignores_volatile_mount_drift(tmp_path: Path) -> None:
+    context_root = tmp_path / "context"
+    config_path = tmp_path / "afs.toml"
+    _write_config(config_path, context_root)
+    config = load_config_model(config_path=config_path, merge_user=False)
+    manager = AFSManager(config=config)
+    manager.ensure(context_root=context_root)
+    knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    scratchpad_root = manager.resolve_mount_root(context_root, MountType.SCRATCHPAD)
+    (knowledge_root / "guide.md").write_text("# Guide\n", encoding="utf-8")
+    (scratchpad_root / "note.md").write_text("draft\n", encoding="utf-8")
+
+    manager.rebuild_context_index(context_root)
+    (scratchpad_root / "note.md").write_text("draft updated\n", encoding="utf-8")
+
+    result = check_context_index(config_path)
+
+    assert result.status == "ok"
+
+
+def test_check_context_index_warns_when_stable_mount_changes(tmp_path: Path) -> None:
+    context_root = tmp_path / "context"
+    config_path = tmp_path / "afs.toml"
+    _write_config(config_path, context_root)
+    config = load_config_model(config_path=config_path, merge_user=False)
+    manager = AFSManager(config=config)
+    manager.ensure(context_root=context_root)
+    knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    (knowledge_root / "guide.md").write_text("# Guide\n", encoding="utf-8")
+
+    manager.rebuild_context_index(context_root)
+    (knowledge_root / "guide.md").write_text("# Guide\nupdated\n", encoding="utf-8")
+
+    result = check_context_index(config_path)
+
+    assert result.status == "warn"
+    assert "stale" in result.message
+
+
 def test_check_mcp_registration() -> None:
     result = check_mcp_registration()
     assert result.name == "mcp_registration"

@@ -23,7 +23,37 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONTEXT_ROOT = Path.home() / ".context"
 DEFAULT_WORKSPACE_ROOT = Path.home() / "src"
 DEFAULT_ASAR_PATH = Path.home() / "src/third_party/asar-repo/build/asar/bin/asar"
-DEFAULT_QUERY_TOOL_PATH = Path.home() / "src/lab/afs/tools/query_file.py"
+
+
+def _resolve_query_tool_path() -> Path:
+    """Resolve query_file.py relative to AFS_ROOT or this package.
+
+    Order: AFS_QUERY_TOOL_PATH env var, $AFS_ROOT/tools/query_file.py,
+    or the in-tree path discovered from this module's location.
+    """
+    import os as _os
+
+    explicit = _os.environ.get("AFS_QUERY_TOOL_PATH")
+    if explicit:
+        return Path(explicit).expanduser()
+
+    afs_root = _os.environ.get("AFS_ROOT")
+    if afs_root:
+        candidate = Path(afs_root).expanduser() / "tools" / "query_file.py"
+        if candidate.exists():
+            return candidate
+
+    # Walk up from this module to find a `tools/query_file.py` sibling.
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "tools" / "query_file.py"
+        if candidate.exists():
+            return candidate
+    # Last-resort: return the conventional layout under AFS_ROOT-style.
+    return Path(__file__).resolve().parents[3] / "tools" / "query_file.py"
+
+
+DEFAULT_QUERY_TOOL_PATH = _resolve_query_tool_path()
 
 
 @dataclass
@@ -385,10 +415,10 @@ async def fs_query_handler(args: dict[str, Any]) -> ToolResult:
 
 def _load_scawful_agent_tools():
     try:
-        from afs_ext import agent_tools
+        from afs_scawful import agent_tools
     except Exception as exc:  # pragma: no cover - compatibility path
         raise RuntimeError(
-            "Domain-specific agent tools moved to the afs-ext extension."
+            "Domain-specific agent tools moved to the afs_scawful extension repo."
         ) from exc
     return agent_tools
 
@@ -582,7 +612,7 @@ def _load_default_triforce_tools() -> list[Tool]:
     try:
         return create_triforce_tools()
     except RuntimeError:
-        logger.debug("afs-ext extension not available; TRIFORCE_TOOLS disabled")
+        logger.debug("afs_scawful extension repo not available; TRIFORCE_TOOLS disabled")
         return []
 
 

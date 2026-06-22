@@ -7,7 +7,7 @@ Pre-deployment validation system for model deployment with rigorous quality chec
 ### Validate a Model
 ```bash
 python -m afs.deployment.cli validate model.gguf \
-    --model-name majora \
+    --model-name sample-model \
     --version v5 \
     --baseline v4 \
     --json \
@@ -21,7 +21,7 @@ from pathlib import Path
 
 validator = PreDeploymentValidator(
     model_path=Path("model.gguf"),
-    model_name="majora",
+    model_name="sample-model",
     version="v5",
     baseline_version="v4"
 )
@@ -97,7 +97,7 @@ See `cli.py` for complete option documentation.
 ```json
 {
   "model_path": "...",
-  "model_name": "majora",
+  "model_name": "sample-model",
   "version": "v5",
   "timestamp": "2026-01-14T10:30:45.123456",
   "summary": {
@@ -115,7 +115,7 @@ See `cli.py` for complete option documentation.
 ```markdown
 # Pre-Deployment Validation Report
 
-**Model:** majora v5
+**Model:** sample-model v5
 **Status:** PASSED
 **Passed:** 8/8
 ```
@@ -188,7 +188,7 @@ from afs.registry.database import ModelRegistry
 from afs.deployment import PreDeploymentValidator
 
 registry = ModelRegistry()
-version = registry.get_version("majora", "v5")
+version = registry.get_version("sample-model", "v5")
 validator = PreDeploymentValidator(Path(version.gguf_path), ...)
 ```
 

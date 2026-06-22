@@ -56,6 +56,6 @@ This reports:
 4. Apply the repair with `./scripts/afs context repair --rebuild-index`, or let `./scripts/afs services start context-warm` handle it in the background.
 5. For continuous repo-local maintenance, start `./scripts/afs services start context-watch`.
 6. If you rely on profile-defined background agents, start `./scripts/afs services start agent-supervisor`.
-7. If SQLite index health is stale, rebuild with `./scripts/afs mcp serve` plus `context.index.rebuild`, or let `context-warm` / `context-watch` handle it.
+7. If SQLite index health is stale, rebuild with `./scripts/afs index rebuild --path "$PWD" --json`, or have an MCP client call `context.index.rebuild`.
 8. If monorepo bridge is stale, refresh `monorepo/active_workspace.toml` via workspace switch hook.
 9. If MCP tools look wrong, check `./scripts/afs mcp serve` and extension `[mcp_tools]` / `[mcp_server]` config.

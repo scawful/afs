@@ -1,7 +1,7 @@
 """Quality scoring for training samples.
 
 Provides minimal scoring primitives used by afs.continuous and other
-core modules. Domain-specific scoring logic belongs in afs-ext.
+core modules. Domain-specific scoring logic belongs in a companion extension repo.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ class QualityScorer:
     """Score training samples for quality.
 
     This base implementation uses heuristic length/structure checks.
-    Domain-specific scorers (LLM-based, embedding-based) belong in afs-ext.
+    Domain-specific scorers (LLM-based, embedding-based) belong in a companion extension repo.
     """
 
     def __init__(self, config: ScoringConfig | None = None):

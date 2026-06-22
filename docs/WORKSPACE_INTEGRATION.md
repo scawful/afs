@@ -5,9 +5,10 @@ generic here; refer to workspace docs for specifics.
 
 ## Source of Truth
 
-- Workspace infrastructure: `~/src/docs/NERV_INFRASTRUCTURE.md`
-- Source universe sync: `~/src/docs/SRC_UNIVERSE_NETWORK.md`
-- Windows workflow: `~/src/lab/afs-ext/docs/WINDOWS_WORKFLOW.md`
+- Workspace infrastructure: `<workspace-docs-root>/NERV_INFRASTRUCTURE.md`
+- Source universe sync: `<workspace-docs-root>/SRC_UNIVERSE_NETWORK.md`
+- Windows workflow: companion repo docs, for example
+  `<afs_scawful-root>/docs/WINDOWS_WORKFLOW.md` in this workspace
 
 ## Codenames (no IPs)
 
@@ -22,7 +23,7 @@ Use SSH host aliases rather than hardcoded IPs.
 - Use mount points (`~/Mounts/...`) to browse remote filesystems.
 - For Windows, prefer `/mnt/d/src` when working in WSL.
 - Keep `.context/` local to each machine.
-- For Gemini CLI workspaces under a managed root, add that root to
+- For Antigravity or Gemini compatibility workspaces under a managed root, add that root to
   `general.workspace_directories` and `general.mcp_allowed_roots` so MCP path
   validation matches your real workspace root.
 
@@ -43,11 +44,13 @@ Temporary shell override:
 export AFS_MCP_ALLOWED_ROOTS=~/workspaces/company
 ```
 
-If you want work-machine bundles or extensions to stay repo-local instead of
+If you want local harness bundles or extensions to stay repo-local instead of
 landing in a shared user directory, set `extensions.extension_dirs` to a path
-inside the workspace or context. AFS now prefers earlier extension roots over
-later defaults, so a work-local install can safely override an older
-`~/.config/afs/extensions/<name>` copy with the same extension name.
+inside the workspace/context or set `extensions.extension_repo_roots` to a
+parent that contains companion repos such as `afs_example` or `afs_scawful`. AFS
+prefers earlier extension roots over later defaults, so a work-local install can
+safely override an older `~/.config/afs/extensions/<name>` copy with the same
+extension name.
 
 When a workspace path under one of those roots moves, `afs context repair` and the
 background `context-warm` / `context-watch` services will try a conservative

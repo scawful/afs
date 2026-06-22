@@ -115,8 +115,8 @@ afs embeddings eval \
 Eval cases are JSONL with one case per line:
 
 ```json
-{"query": "sprite RAM tables", "expected": ["hobby/oracle-sprite-ram.md"]}
-{"query": "NMI vblank", "expected_doc_id": "alttp/architecture.md"}
+{"query": "release checklist", "expected": ["project/release-checklist.md"]}
+{"query": "api authentication", "expected_doc_id": "architecture/auth.md"}
 {"query": "train model", "expected_path_contains": "models/workflows"}
 ```
 

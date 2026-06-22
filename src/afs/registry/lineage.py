@@ -23,21 +23,21 @@ class LineageTracker:
 
         # Track a new version
         tracker.add_version(
-            model_name="majora",
+            model_name="sample-model",
             version="v2",
             parent_version="v1",
-            training_data=["oracle", "toolbench"],
+            training_data=["dataset-a", "dataset-b"],
             git_commit="abc123",
         )
 
         # Get lineage tree
-        tree = tracker.get_lineage("majora")
+        tree = tracker.get_lineage("sample-model")
 
         # Find all descendants of a version
-        descendants = tracker.get_descendants("majora", "v1")
+        descendants = tracker.get_descendants("sample-model", "v1")
 
         # Get training history
-        history = tracker.get_training_history("majora")
+        history = tracker.get_training_history("sample-model")
         ```
     """
 

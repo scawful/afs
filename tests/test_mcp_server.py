@@ -8,7 +8,14 @@ from unittest.mock import patch
 from afs.agents.supervisor import AgentSupervisor
 from afs.history import append_history_event
 from afs.manager import AFSManager
-from afs.mcp_server import PROTOCOL_VERSION, _handle_request, _read_message, build_mcp_registry
+from afs.mcp_server import (
+    DEFAULT_MCP_TOOL_CATALOG,
+    MCP_TOOL_CATALOG_ENV,
+    PROTOCOL_VERSION,
+    _handle_request,
+    _read_message,
+    build_mcp_registry,
+)
 from afs.models import MountType
 from afs.schema import (
     AFSConfig,
@@ -18,9 +25,11 @@ from afs.schema import (
     GeneralConfig,
     ProfileConfig,
     ProfilesConfig,
+    SensitivityConfig,
     WorkspaceDirectory,
     default_directory_configs,
 )
+from afs.work_assistant import WorkAssistantStore
 
 
 def _make_manager(tmp_path: Path) -> AFSManager:
@@ -33,6 +42,29 @@ def _make_manager(tmp_path: Path) -> AFSManager:
     project_path.mkdir()
     manager.ensure(path=project_path, context_root=context_root)
     return manager
+
+
+def _call_tool(
+    manager: AFSManager,
+    name: str,
+    arguments: dict[str, object],
+    *,
+    request_id: int = 900,
+) -> dict[str, object]:
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "arguments": arguments,
+            },
+        },
+        manager,
+    )
+    assert response is not None
+    return response
 
 
 def _remap_directories(**overrides: str) -> list[DirectoryConfig]:
@@ -88,7 +120,25 @@ COMPATIBILITY_FILE_TOOL_ALIASES = {
 }
 
 
-def test_tools_list_returns_preferred_and_compatibility_file_tools(tmp_path: Path) -> None:
+def test_tools_list_defaults_to_slim_catalog(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("AFS_ALLOWED_TOOLS", raising=False)
+    monkeypatch.delenv("AFS_TOOL_PROFILE", raising=False)
+    monkeypatch.delenv(MCP_TOOL_CATALOG_ENV, raising=False)
+    manager = _make_manager(tmp_path)
+    response = _handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, manager)
+    assert response is not None
+    tools = response["result"]["tools"]
+    names = {tool["name"] for tool in tools}
+    assert names == DEFAULT_MCP_TOOL_CATALOG
+    assert "context.repair" not in names
+    assert "agent.spawn" not in names
+    assert not COMPATIBILITY_FILE_TOOL_ALIASES.intersection(names)
+
+
+def test_tools_list_can_expose_full_catalog(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("AFS_ALLOWED_TOOLS", raising=False)
+    monkeypatch.delenv("AFS_TOOL_PROFILE", raising=False)
+    monkeypatch.setenv(MCP_TOOL_CATALOG_ENV, "full")
     manager = _make_manager(tmp_path)
     response = _handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, manager)
     assert response is not None
@@ -99,13 +149,10 @@ def test_tools_list_returns_preferred_and_compatibility_file_tools(tmp_path: Pat
         "context.init",
         "context.mount",
         "context.unmount",
-        "context.index.rebuild",
-        "context.query",
-        "context.diff",
-        "context.status",
-        "operator.digest",
         "context.repair",
         "session.pack",
+        "work.communication.add",
+        "work.approvals.request",
         "events.analytics",
         "events.replay",
         "hivemind.reap",
@@ -235,6 +282,138 @@ def test_fs_file_aliases_match_context_tool_behavior(tmp_path: Path) -> None:
     )
     assert delete_response is not None
     assert not moved.exists()
+
+
+def test_work_mcp_tools_capture_style_and_request_approval(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_path = manager.config.general.context_root
+
+    add_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 240,
+            "method": "tools/call",
+            "params": {
+                "name": "work.communication.add",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "text": "Findings first, exact file evidence, short follow-up.",
+                    "source_system": "github",
+                    "source_id": "comment-1",
+                    "channel": "pr_review",
+                    "purpose": "responding_to_comments",
+                    "style_notes": ["findings-first", "direct"],
+                },
+            },
+        },
+        manager,
+    )
+    assert add_response is not None
+    assert add_response["result"]["structuredContent"]["sample_id"]
+
+    guide_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 241,
+            "method": "tools/call",
+            "params": {
+                "name": "work.communication.guide",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "purpose": "responding_to_comments",
+                },
+            },
+        },
+        manager,
+    )
+    assert guide_response is not None
+    guide = guide_response["result"]["structuredContent"]
+    assert guide["sample_count"] == 1
+    assert guide["style_notes"] == ["findings-first", "direct"]
+    assert any("explicit approval" in line for line in guide["guidance"])
+
+    preflight_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 245,
+            "method": "tools/call",
+            "params": {
+                "name": "work.communication.preflight",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "purpose": "responding_to_comments",
+                    "approval_limit": 5,
+                },
+            },
+        },
+        manager,
+    )
+    assert preflight_response is not None
+    preflight = preflight_response["result"]["structuredContent"]
+    assert preflight["style"]["sample_count"] == 1
+    assert preflight["approval_guardrail"]["requires_explicit_approval"] is True
+    assert preflight["approval_guardrail"]["ready_to_post"] is False
+    assert any(
+        item["status"] == "required" and "external post" in item["step"]
+        for item in preflight["checklist"]
+    )
+
+    request_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 242,
+            "method": "tools/call",
+            "params": {
+                "name": "work.approvals.request",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "target_system": "github",
+                    "target_id": "PR-1",
+                    "action": "post_pr_comment",
+                    "summary": "Post drafted PR response",
+                    "preview": {"body": "Thanks, fixed in src/afs/work_assistant.py."},
+                },
+            },
+        },
+        manager,
+    )
+    assert request_response is not None
+    approval_id = request_response["result"]["structuredContent"]["approval_id"]
+    approval = WorkAssistantStore(context_path).get_approval(approval_id)
+    assert approval is not None
+    assert approval["status"] == "pending"
+
+    list_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 243,
+            "method": "tools/call",
+            "params": {
+                "name": "work.approvals.list",
+                "arguments": {"context_path": str(context_path)},
+            },
+        },
+        manager,
+    )
+    assert list_response is not None
+    approvals = list_response["result"]["structuredContent"]["approvals"]
+    assert approvals[0]["approval_id"] == approval_id
+    assert approvals[0]["status"] == "pending"
+
+    show_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 244,
+            "method": "tools/call",
+            "params": {
+                "name": "work.approvals.show",
+                "arguments": {"context_path": str(context_path), "approval_id": approval_id},
+            },
+        },
+        manager,
+    )
+    assert show_response is not None
+    assert show_response["result"]["structuredContent"]["approval"]["preview"]["body"].startswith("Thanks")
 
 
 def test_events_analytics_tool_reports_mcp_usage(tmp_path: Path) -> None:
@@ -657,6 +836,199 @@ def test_context_query_tool_auto_indexes(tmp_path: Path) -> None:
     assert "index_rebuild" in structured
 
 
+def test_context_tools_block_never_export_paths(tmp_path: Path) -> None:
+    context_root = tmp_path / "context"
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            sensitivity=SensitivityConfig(never_export=["knowledge/private/*"]),
+        )
+    )
+    manager.ensure(context_root=context_root)
+    knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    (knowledge_root / "private").mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "public").mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "public" / "guide.md").write_text(
+        "shared-token public guide",
+        encoding="utf-8",
+    )
+    private_note = knowledge_root / "private" / "secret.md"
+    private_note.write_text("shared-token private secret", encoding="utf-8")
+
+    query_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 501,
+            "method": "tools/call",
+            "params": {
+                "name": "context.query",
+                "arguments": {
+                    "context_path": str(context_root),
+                    "query": "shared-token",
+                    "mount_types": ["knowledge"],
+                    "include_content": True,
+                    "refresh": True,
+                    "limit": 1,
+                },
+            },
+        },
+        manager,
+    )
+    entries = query_response["result"]["structuredContent"]["entries"]
+    assert [entry["relative_path"] for entry in entries] == ["public/guide.md"]
+    assert "private secret" not in json.dumps(query_response)
+
+    read_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 502,
+            "method": "tools/call",
+            "params": {
+                "name": "context.read",
+                "arguments": {"path": str(private_note)},
+            },
+        },
+        manager,
+    )
+    assert "error" in read_response
+    assert "Blocked by sensitivity rule" in read_response["error"]["message"]
+
+
+def test_context_file_mutations_respect_sensitivity_rules(tmp_path: Path) -> None:
+    context_root = tmp_path / "context"
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            sensitivity=SensitivityConfig(never_export=["knowledge/private/*"]),
+        )
+    )
+    manager.ensure(context_root=context_root)
+    knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    private_root = knowledge_root / "private"
+    public_root = knowledge_root / "public"
+    private_root.mkdir(parents=True, exist_ok=True)
+    public_root.mkdir(parents=True, exist_ok=True)
+    private_note = private_root / "secret.md"
+    private_note.write_text("secret", encoding="utf-8")
+    public_note = public_root / "guide.md"
+    public_note.write_text("guide", encoding="utf-8")
+
+    list_response = _call_tool(
+        manager,
+        "context.list",
+        {"path": str(knowledge_root), "max_depth": 2},
+        request_id=510,
+    )
+    listed_paths = [
+        entry["path"]
+        for entry in list_response["result"]["structuredContent"]["entries"]
+    ]
+    assert str(public_note) in listed_paths
+    assert str(private_note) not in listed_paths
+
+    write_response = _call_tool(
+        manager,
+        "context.write",
+        {"path": str(private_root / "new.md"), "content": "new secret"},
+        request_id=511,
+    )
+    assert "error" in write_response
+    assert "Blocked by sensitivity rule" in write_response["error"]["message"]
+
+    delete_response = _call_tool(
+        manager,
+        "context.delete",
+        {"path": str(private_note)},
+        request_id=512,
+    )
+    assert "error" in delete_response
+    assert private_note.exists()
+
+    move_into_private_response = _call_tool(
+        manager,
+        "context.move",
+        {"source": str(public_note), "destination": str(private_root / "moved.md")},
+        request_id=513,
+    )
+    assert "error" in move_into_private_response
+    assert public_note.exists()
+
+
+def test_context_query_tool_resolves_parent_context_from_nested_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    general = GeneralConfig(
+        context_root=tmp_path / "shared-context",
+        mcp_allowed_roots=[tmp_path],
+    )
+    manager = AFSManager(config=AFSConfig(general=general))
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path)
+    context_root = project_path / ".context"
+    nested_path = project_path / "docs" / "dev"
+    nested_path.mkdir(parents=True)
+    (nested_path / "afs.toml").write_text("[project]\nname = 'docs-dev'\n", encoding="utf-8")
+    note_path = context_root / "scratchpad" / "nested_route.md"
+    note_path.write_text("nested path route marker", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    query_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "context.query",
+                "arguments": {
+                    "path": str(nested_path),
+                    "mount_types": ["scratchpad"],
+                    "query": "route marker",
+                    "limit": 10,
+                },
+            },
+        },
+        manager,
+    )
+    assert query_response is not None
+    structured = query_response["result"]["structuredContent"]
+    assert structured["context_path"] == str(context_root)
+    assert structured["count"] >= 1
+    assert any(entry["relative_path"] == "nested_route.md" for entry in structured["entries"])
+
+
+def test_context_query_tool_errors_when_no_existing_context(tmp_path: Path) -> None:
+    general = GeneralConfig(
+        context_root=tmp_path / "shared-context",
+        mcp_allowed_roots=[tmp_path],
+    )
+    manager = AFSManager(config=AFSConfig(general=general))
+    project_path = tmp_path / "orphan-project"
+    project_path.mkdir()
+
+    query_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "context.query",
+                "arguments": {
+                    "path": str(project_path),
+                    "mount_types": ["scratchpad"],
+                    "query": "missing",
+                    "limit": 10,
+                },
+            },
+        },
+        manager,
+    )
+    assert query_response is not None
+    assert "error" in query_response
+    assert str(project_path) in query_response["error"]["message"]
+    assert "context.ensure" in query_response["error"]["message"]
+
+
 def test_context_status_and_diff_tools(tmp_path: Path, monkeypatch) -> None:
     for name in (
         "AFS_PROFILE",
@@ -716,6 +1088,14 @@ def test_context_status_and_diff_tools(tmp_path: Path, monkeypatch) -> None:
     assert status_structured["index"]["enabled"] is True
     assert status_structured["index"]["has_entries"] is True
     assert status_structured["index"]["total_entries"] >= 1
+    assert status_structured["discovery_path"]["default_mcp_tools"] == [
+        "context.status",
+        "context.query",
+        "context.read",
+        "context.list",
+        "context.write",
+    ]
+    assert "session.pack" in status_structured["discovery_path"]["do_not_default"]
 
     note_path.write_text("updated note", encoding="utf-8")
     added_path = notes_dir / "extra.md"
@@ -1360,6 +1740,7 @@ def test_resources_list_returns_contexts_resource(tmp_path: Path) -> None:
     uris = [r["uri"] for r in resources]
     assert "afs://contexts" in uris
     assert "afs://schemas/plan" in uris
+    assert "afs://schemas/design-brief" in uris
     assert "afs://schemas/verification-summary" in uris
     assert f"afs://context/{manager.config.general.context_root}/bootstrap" in uris
 
@@ -1577,6 +1958,10 @@ def test_prompts_get_session_bootstrap(tmp_path: Path) -> None:
         "bootstrap state",
         encoding="utf-8",
     )
+    project_root = context_root.parent
+    (project_root / "README.md").write_text("# Demo\n", encoding="utf-8")
+    (project_root / "src").mkdir(exist_ok=True)
+    (project_root / "src" / "demo.py").write_text("def demo() -> int:\n    return 1\n", encoding="utf-8")
     response = _handle_request(
         {
             "jsonrpc": "2.0",
@@ -1594,6 +1979,93 @@ def test_prompts_get_session_bootstrap(tmp_path: Path) -> None:
     text = messages[0]["content"]["text"]
     assert "AFS Session Bootstrap" in text
     assert "bootstrap state" in text
+    assert "## Codebase" in text
+
+
+def test_prompts_get_context_overview_without_existing_context(tmp_path: Path) -> None:
+    project_path = tmp_path / "scawfulbot"
+    project_path.mkdir()
+    (project_path / "config").mkdir()
+    (project_path / "config" / "registry.json").write_text('{"models": []}\n', encoding="utf-8")
+    (project_path / "config" / "system_prompt.md").write_text("# Prompt\n", encoding="utf-8")
+    (project_path / "scripts").mkdir()
+    (project_path / "scripts" / "train.py").write_text("def train() -> None:\n    pass\n", encoding="utf-8")
+    (project_path / "training").mkdir()
+    (project_path / "training" / "dataset.py").write_text("def load_dataset() -> list[str]:\n    return []\n", encoding="utf-8")
+
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(
+                context_root=tmp_path / "context",
+                workspace_directories=[WorkspaceDirectory(path=tmp_path, description="tmp")],
+            )
+        )
+    )
+
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 126,
+            "method": "prompts/get",
+            "params": {
+                "name": "afs.context.overview",
+                "arguments": {"path": str(project_path)},
+            },
+        },
+        manager,
+    )
+
+    assert response is not None
+    text = response["result"]["messages"][0]["content"]["text"]
+    assert "Context available: no" in text
+    assert "## Codebase" in text
+    assert "workflow_roots: config, training" in text or "workflow_roots: training, config" in text
+    assert "script_roots: scripts" in text
+
+
+def test_prompts_get_context_overview_prefers_requested_project_over_ancestor_context(
+    tmp_path: Path,
+) -> None:
+    lab_path = tmp_path / "lab"
+    lab_path.mkdir()
+    project_path = lab_path / "scawfulbot"
+    project_path.mkdir()
+    (project_path / "config").mkdir()
+    (project_path / "config" / "registry.json").write_text('{"models": []}\n', encoding="utf-8")
+    (project_path / "scripts").mkdir()
+    (project_path / "scripts" / "train.py").write_text("def train() -> None:\n    pass\n", encoding="utf-8")
+    (project_path / "training").mkdir()
+    (project_path / "training" / "dataset.py").write_text("def load_dataset() -> list[str]:\n    return []\n", encoding="utf-8")
+
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(
+                context_root=tmp_path / "context",
+                workspace_directories=[WorkspaceDirectory(path=tmp_path, description="tmp")],
+            )
+        )
+    )
+    manager.ensure(path=lab_path)
+
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 127,
+            "method": "prompts/get",
+            "params": {
+                "name": "afs.context.overview",
+                "arguments": {"path": str(project_path)},
+            },
+        },
+        manager,
+    )
+
+    assert response is not None
+    text = response["result"]["messages"][0]["content"]["text"]
+    assert "Context available: yes" in text
+    assert f"Project path: {project_path}" in text
+    assert "Nearest context project: lab" in text
+    assert "workflow_roots: config, training" in text or "workflow_roots: training, config" in text
 
 
 def test_tool_session_pack(tmp_path: Path) -> None:
@@ -1714,6 +2186,14 @@ def test_prompts_get_session_pack(tmp_path: Path) -> None:
 def test_prompts_get_workflow_structured(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     context_root = manager.config.general.context_root
+    (tmp_path / ".afs").mkdir()
+    (tmp_path / ".afs" / "policy.toml").write_text(
+        "[review]\n"
+        "focus = [\"order findings by severity\"]\n\n"
+        "[design]\n"
+        "constraints = [\"preserve compatibility\"]\n",
+        encoding="utf-8",
+    )
     (context_root / "knowledge").mkdir(exist_ok=True)
     (context_root / "knowledge" / "guide.md").write_text(
         "gemini planning guide",
@@ -1752,6 +2232,8 @@ def test_prompts_get_workflow_structured(tmp_path: Path) -> None:
     assert '"completion_signal"' in text
     assert "Pack mode: retrieval" in text
     assert "Plan the guide update." in text
+    assert "## Repo Policy" in text
+    assert "- order findings by severity" in text
 
 
 def test_prompts_get_workflow_structured_rejects_unknown_schema(tmp_path: Path) -> None:
@@ -2409,7 +2891,8 @@ def test_profile_mcp_tools_modules_are_loaded_into_registry(
     assert prompt_response["result"]["messages"][0]["content"]["text"] == "Profile review: ready"
 
 
-def test_tools_list_includes_agent_tools(tmp_path: Path) -> None:
+def test_full_tools_list_includes_agent_tools(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv(MCP_TOOL_CATALOG_ENV, "full")
     manager = _make_manager(tmp_path)
     response = _handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, manager)
     assert response is not None
@@ -2418,6 +2901,12 @@ def test_tools_list_includes_agent_tools(tmp_path: Path) -> None:
     assert "agent.spawn" in names
     assert "agent.ps" in names
     assert "agent.stop" in names
+    assert "agent.job.status" in names
+    assert "agent.job.seed" in names
+    assert "agent.job.inbox" in names
+    assert "agent.job.review" in names
+    assert "agent.job.archive" in names
+    assert "agent.job.promote" in names
 
 
 def test_agent_ps_returns_empty_list(tmp_path: Path) -> None:
@@ -2547,6 +3036,274 @@ def test_hivemind_task_and_agent_logs_tools_use_context_path(tmp_path: Path) -> 
     assert list_response is not None
     assert len(list_response["result"]["structuredContent"]["tasks"]) == 1
 
+    manifest_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 71,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.manifest.show",
+                "arguments": {"harness": "codex", "validate": True},
+            },
+        },
+        manager,
+    )
+    assert manifest_response is not None
+    manifest_payload = manifest_response["result"]["structuredContent"]
+    assert manifest_payload["harness"]["name"] == "codex"
+
+    run_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 72,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.run.start",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "task": "Record MCP run",
+                    "harness": "codex",
+                },
+            },
+        },
+        manager,
+    )
+    assert run_response is not None
+    run_payload = run_response["result"]["structuredContent"]
+    assert run_payload["status"] == "running"
+
+    show_run_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 721,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.run.show",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "run_id": run_payload["id"],
+                },
+            },
+        },
+        manager,
+    )
+    assert show_run_response is not None
+    assert show_run_response["result"]["structuredContent"]["task"] == "Record MCP run"
+
+    finish_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 73,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.run.finish",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "run_id": run_payload["id"],
+                    "summary": "done",
+                    "verification": [{"command": "smoke", "status": "passed"}],
+                },
+            },
+        },
+        manager,
+    )
+    assert finish_response is not None
+    assert finish_response["result"]["structuredContent"]["status"] == "done"
+
+    job_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 74,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.create",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "title": "MCP queued job",
+                    "prompt": "Do it.",
+                    "allow_destructive": True,
+                },
+            },
+        },
+        manager,
+    )
+    assert job_response is not None
+    job_payload = job_response["result"]["structuredContent"]
+    assert job_payload["status"] == "queue"
+    assert job_payload["allow_destructive"] is True
+
+    job_status_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 742,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.status",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "stale_after_seconds": 60,
+                    "recent_runs": 3,
+                },
+            },
+        },
+        manager,
+    )
+    assert job_status_response is not None
+    job_status_payload = job_status_response["result"]["structuredContent"]
+    assert job_status_payload["counts"]["queue"] == 1
+    assert "watchdog" in job_status_payload
+
+    seed_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 743,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.seed",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "profile": "repo-maintenance",
+                    "dry_run": True,
+                },
+            },
+        },
+        manager,
+    )
+    assert seed_response is not None
+    seed_payload = seed_response["result"]["structuredContent"]
+    assert seed_payload["profile"] == "repo-maintenance"
+    assert seed_payload["would_create"] == 6
+
+    show_job_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 741,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.show",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "job_id": job_payload["id"],
+                },
+            },
+        },
+        manager,
+    )
+    assert show_job_response is not None
+    assert show_job_response["result"]["structuredContent"]["title"] == "MCP queued job"
+
+    claim_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 75,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.claim",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "job_id": job_payload["id"],
+                    "agent_name": "worker",
+                },
+            },
+        },
+        manager,
+    )
+    assert claim_response is not None
+    assert claim_response["result"]["structuredContent"]["status"] == "running"
+
+    move_job_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 751,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.move",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "job_id": job_payload["id"],
+                    "status": "done",
+                    "result": "done via MCP",
+                },
+            },
+        },
+        manager,
+    )
+    assert move_job_response is not None
+    assert move_job_response["result"]["structuredContent"]["status"] == "done"
+
+    inbox_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 752,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.inbox",
+                "arguments": {"context_path": str(context_path)},
+            },
+        },
+        manager,
+    )
+    assert inbox_response is not None
+    inbox_payload = inbox_response["result"]["structuredContent"]
+    assert inbox_payload["attention_count"] == 1
+    assert "afs agent-jobs inbox" in inbox_payload["command"]
+
+    review_job_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 753,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.review",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "job_id": job_payload["id"],
+                },
+            },
+        },
+        manager,
+    )
+    assert review_job_response is not None
+    assert review_job_response["result"]["structuredContent"]["job"]["result"] == "done via MCP"
+
+    promote_job_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 754,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.promote",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "job_id": job_payload["id"],
+                    "handoff_name": "mcp-job.md",
+                },
+            },
+        },
+        manager,
+    )
+    assert promote_job_response is not None
+    handoff_path = Path(promote_job_response["result"]["structuredContent"]["path"])
+    assert handoff_path.exists()
+
+    archive_job_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 755,
+            "method": "tools/call",
+            "params": {
+                "name": "agent.job.archive",
+                "arguments": {
+                    "context_path": str(context_path),
+                    "job_id": job_payload["id"],
+                },
+            },
+        },
+        manager,
+    )
+    assert archive_job_response is not None
+    assert archive_job_response["result"]["structuredContent"]["status"] == "archived"
+
     logs_response = _handle_request(
         {
             "jsonrpc": "2.0",
@@ -2593,3 +3350,57 @@ def test_review_tools_use_manager_config(tmp_path: Path) -> None:
     assert response is not None
     agents = response["result"]["structuredContent"]["agents"]
     assert [agent["name"] for agent in agents] == ["review-agent"]
+
+
+def test_companion_repo_mcp_server_uses_src_layout(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "lab"
+    repo = workspace_root / "afs_example"
+    package = repo / "src" / "afs_example"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "mcp_surface.py").write_text(
+        "def register_mcp_server(_manager):\n"
+        "    def echo(arguments):\n"
+        "        return {'echo': arguments.get('value', '')}\n"
+        "    return {'tools': [{'name': 'google.echo', 'description': 'echo', 'handler': echo}]}\n",
+        encoding="utf-8",
+    )
+    (repo / "extension.toml").write_text(
+        "name = \"afs_example\"\n"
+        "\n"
+        "[mcp_server]\n"
+        "module = \"afs_example.mcp_surface\"\n"
+        "factory = \"register_mcp_server\"\n",
+        encoding="utf-8",
+    )
+
+    context_root = tmp_path / "context"
+    context_root.mkdir(parents=True)
+    (context_root / "scratchpad").mkdir()
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            extensions=ExtensionsConfig(
+                enabled_extensions=["afs_example"],
+                extension_dirs=[],
+                extension_repo_roots=[workspace_root],
+                auto_discover=False,
+            ),
+        )
+    )
+
+    registry = build_mcp_registry(manager)
+    assert "google.echo" in registry.tools
+
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 98,
+            "method": "tools/call",
+            "params": {"name": "google.echo", "arguments": {"value": "ok"}},
+        },
+        manager,
+        registry=registry,
+    )
+    assert response is not None
+    assert response["result"]["structuredContent"]["echo"] == "ok"

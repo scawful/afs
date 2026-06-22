@@ -16,7 +16,7 @@ pilot_output/
 models/
 data/
 training_data/
-benchmarks/
+/benchmarks/
 benchmark_results/
 evaluations/
 VAST_INSTANCES.md

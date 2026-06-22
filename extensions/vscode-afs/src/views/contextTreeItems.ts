@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import * as vscode from "vscode";
 import type { PolicyType } from "../types";
 
@@ -44,12 +45,41 @@ export class MountTypeItem extends ContextTreeItem {
   }
 }
 
+export class MountPointItem extends ContextTreeItem {
+  constructor(
+    public readonly alias: string,
+    public readonly filePath: string,
+    public readonly isDir: boolean,
+    public readonly mountType: string,
+    public readonly contextPath: string,
+  ) {
+    super(
+      alias,
+      isDir
+        ? vscode.TreeItemCollapsibleState.Collapsed
+        : vscode.TreeItemCollapsibleState.None,
+    );
+    this.contextValue = "mountPoint";
+    this.resourceUri = vscode.Uri.file(filePath);
+    this.description = mountType;
+    this.tooltip = `${mountType}: ${filePath}`;
+    if (!isDir) {
+      this.command = {
+        command: "vscode.open",
+        title: "Open File",
+        arguments: [vscode.Uri.file(filePath)],
+      };
+    }
+    this.iconPath = isDir ? vscode.ThemeIcon.Folder : vscode.ThemeIcon.File;
+  }
+}
+
 export class ContextFileItem extends ContextTreeItem {
   constructor(
     public readonly filePath: string,
     public readonly isDir: boolean,
   ) {
-    const name = filePath.split("/").pop() ?? filePath;
+    const name = path.basename(filePath) || filePath;
     super(
       name,
       isDir

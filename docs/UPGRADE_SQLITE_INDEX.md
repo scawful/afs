@@ -29,7 +29,8 @@ Writes/Mounts ──> Filesystem (.context/)  ← source of truth
                    SQLite Index (context_index.sqlite3)
                               │
                               ▼
-            MCP tools: context.query, context.index.rebuild, context.diff, context.status, context.repair
+            CLI: afs query / afs index rebuild / afs status
+            MCP: context.query, context.index.rebuild, context.diff, context.status, context.repair
 ```
 
 If the index fails or is deleted, all primary AFS operations continue to work.
@@ -148,15 +149,15 @@ optionally rebuilding the index.
 
 3. **Build the initial index** (optional — it auto-builds on first query):
    ```bash
-   # Via MCP tool
-   afs mcp  # then call context.index.rebuild
+   ./scripts/afs index rebuild --path "$PWD" --json
 
-   # Or it happens automatically on the first context.query call
+   # MCP clients can call context.index.rebuild.
+   # It also happens automatically on the first context.query call when enabled.
    ```
 
 4. **Verify** the index was created:
    ```bash
-   ls -la .context/global/context_index.sqlite3
+   ./scripts/afs status --start-dir "$PWD" --json
    ```
 
 ## Deleting and rebuilding the index

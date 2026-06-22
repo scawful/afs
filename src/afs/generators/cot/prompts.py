@@ -1,22 +1,22 @@
 """LLM prompt templates for ASM analysis and CoT generation."""
 
-ASM_COT_SYSTEM_PROMPT = """You are an expert 65816 SNES assembly analyst specializing in Zelda: A Link to the Past.
+ASM_COT_SYSTEM_PROMPT = """You are an expert 65816 assembly analyst.
 Your task is to analyze assembly code samples and generate detailed, step-by-step reasoning about what the code does and why.
 
 Focus on:
 1. The purpose of the code based on the instruction/question
-2. Memory addressing modes and SNES hardware interactions
+2. Memory addressing modes and target hardware interactions
 3. Register usage patterns (A, X, Y, Direct Page, Stack)
 4. Cycle efficiency considerations
 5. Bank handling and long addressing ($00-$FF banks)
-6. DMA, VRAM, OAM, and PPU interactions where relevant
-7. Game-specific patterns (sprites, Link state, dungeon logic)
+6. Hardware interactions where relevant
+7. Project-specific patterns supplied by the caller
 
 Provide reasoning that would help a learner understand the code deeply.
 Be concise but thorough. Focus on teaching understanding, not just describing."""
 
 
-ASM_ANALYSIS_TEMPLATE = """Analyze this 65816 SNES assembly sample:
+ASM_ANALYSIS_TEMPLATE = """Analyze this 65816 assembly sample:
 
 ## Task/Instruction
 {instruction}
@@ -34,14 +34,14 @@ ASM_ANALYSIS_TEMPLATE = """Analyze this 65816 SNES assembly sample:
 Provide step-by-step reasoning about:
 1. What is being asked/accomplished?
 2. How does the code achieve this?
-3. What SNES-specific patterns are used?
+3. What target-specific patterns are used?
 4. What are the key memory/register operations?
 5. Are there optimization considerations?
 
 Format your response as clear, structured reasoning steps."""
 
 
-ASM_CODE_ONLY_TEMPLATE = """Analyze this 65816 SNES assembly routine:
+ASM_CODE_ONLY_TEMPLATE = """Analyze this 65816 assembly routine:
 
 ```asm
 {code}
@@ -51,7 +51,7 @@ Provide detailed reasoning about:
 1. Purpose and overall function
 2. Key instructions and their effects
 3. Memory and register flow
-4. SNES hardware interactions (if any)
+4. Hardware interactions (if any)
 5. Potential optimizations or concerns
 
 Be concise but thorough."""

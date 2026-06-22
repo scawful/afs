@@ -1,0 +1,17 @@
+name = "example-local-run"
+kind = "train"
+backend = "custom"
+description = "Example detached training/eval run spec for afs training run start."
+tags = ["example", "local"]
+
+command = [
+  "python3",
+  "-c",
+  "import time; print('example run started'); time.sleep(5); print('example run finished')",
+]
+
+# Relative paths are resolved from this spec file's directory.
+workdir = "."
+
+[env]
+PYTHONUNBUFFERED = "1"

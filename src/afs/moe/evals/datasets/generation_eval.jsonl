@@ -1,5 +1,5 @@
 {"id": "gen_001", "query": "Write a function to copy 256 bytes from $7E0000 to $7F0000", "expected_intent": "generation", "expected_contains": ["MVN", "MVP", "LDX", "LDY"], "notes": "Should use block move or loop"}
-{"id": "gen_002", "query": "Generate code to check if Link has the hookshot in ALTTP", "expected_intent": "generation", "expected_contains": ["$7EF342", "LDA", "BIT", "AND"], "notes": "Hookshot is at $7EF342"}
+{"id": "gen_002", "query": "Generate code to check whether an inventory flag is set", "expected_intent": "generation", "expected_contains": ["LDA", "BIT", "AND"], "notes": "Use a caller-supplied inventory flag address"}
 {"id": "gen_003", "query": "Create a subroutine that plays sound effect $1B", "expected_intent": "generation", "expected_contains": ["$012E", "STA", "LDA #$1B"], "notes": "SFX queue at $012E"}
 {"id": "gen_004", "query": "Implement a 16-bit addition of $10-$11 and $12-$13, store in $14-$15", "expected_intent": "generation", "expected_contains": ["REP", "ADC", "CLC", "SEP"], "notes": "16-bit math"}
 {"id": "gen_005", "query": "Write code to wait for VBlank", "expected_intent": "generation", "expected_contains": ["$4212", "BIT", "BPL", "BMI"], "notes": "Check $4212 bit 7"}

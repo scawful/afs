@@ -16,12 +16,17 @@ def discover_contexts(
     *,
     max_depth: int = 3,
     ignore_names: Iterable[str] | None = None,
+    include_nested: bool = False,
+    stop_at_root_context: bool | None = None,
     config: AFSConfig | None = None,
 ) -> list[ContextRoot]:
     config = config or load_config_model()
     manager = AFSManager(config=config)
     roots = _resolve_search_paths(search_paths, config)
     ignore_set = _normalize_ignore_names(ignore_names, config)
+    stop_at_root_context = (
+        search_paths is not None if stop_at_root_context is None else stop_at_root_context
+    )
 
     contexts: list[ContextRoot] = []
     seen: set[Path] = set()
@@ -29,7 +34,13 @@ def discover_contexts(
     for root in roots:
         if root.name.lower() in ignore_set:
             continue
-        for context_path in _find_context_dirs(root, max_depth, ignore_set):
+        for context_path in _find_context_dirs(
+            root,
+            max_depth,
+            ignore_set,
+            include_nested=include_nested,
+            stop_at_root_context=stop_at_root_context,
+        ):
             resolved = context_path.resolve()
             if resolved in seen:
                 continue
@@ -93,20 +104,35 @@ def _find_context_dirs(
     root: Path,
     max_depth: int,
     ignore_names: set[str],
+    *,
+    include_nested: bool,
+    stop_at_root_context: bool,
     current_depth: int = 0,
 ) -> Iterator[Path]:
     if current_depth > max_depth:
         return
 
+    context_path = root / ".context"
+    if context_path.is_dir():
+        yield context_path
+        should_stop = current_depth > 0 or stop_at_root_context
+        if should_stop and not include_nested:
+            return
+
     try:
         for entry in root.iterdir():
             if entry.name.lower() in ignore_names:
                 continue
-            if entry.name == ".context" and entry.is_dir():
-                yield entry
-            elif entry.is_dir() and not entry.name.startswith("."):
+            if entry.name == ".context":
+                continue
+            if entry.is_dir() and not entry.name.startswith("."):
                 yield from _find_context_dirs(
-                    entry, max_depth, ignore_names, current_depth + 1
+                    entry,
+                    max_depth,
+                    ignore_names,
+                    include_nested=include_nested,
+                    stop_at_root_context=stop_at_root_context,
+                    current_depth=current_depth + 1,
                 )
     except OSError:
         return

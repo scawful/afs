@@ -2,7 +2,7 @@
 
 Core provides generic benchmark infrastructure (BenchmarkRunner, BenchmarkSuite).
 Domain-specific runners (Din, Nayru, Farore, Veran) are extension-owned
-and available when afs-ext is installed.
+and available when a companion extension repo is installed.
 """
 
 from .base import (
@@ -33,7 +33,7 @@ __all__ = [
     "ComparisonResult",
 ]
 
-# Domain-specific runners (extension-owned, available with afs-ext)
+# Domain-specific runners (extension-owned, available with a companion extension repo)
 try:
     from .din import DinBenchmark
 

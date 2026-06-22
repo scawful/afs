@@ -16,26 +16,26 @@ Example:
 
     # Register a new model version
     version = registry.register_model(
-        model_name="majora",
+        model_name="sample-model",
         base_model="Qwen2.5-Coder-7B",
-        training_data=["oracle", "toolbench"],
+        training_data=["dataset-a", "dataset-b"],
         evaluation_scores={"accuracy": 0.85, "speed": 120},
-        lora_path="/path/to/majora-v1-lora",
-        gguf_path="/path/to/majora-v1-Q8_0.gguf",
+        lora_path="/path/to/sample-model-v1-lora",
+        gguf_path="/path/to/sample-model-v1-Q8_0.gguf",
     )
 
     # Get model info
-    model = registry.get_model("majora")
+    model = registry.get_model("sample-model")
     print(f"Latest version: {model.latest_version}")
 
     # List all versions
-    versions = registry.list_versions("majora")
+    versions = registry.list_versions("sample-model")
 
     # Compare versions
-    diff = registry.compare_versions("majora", "v1", "v2")
+    diff = registry.compare_versions("sample-model", "v1", "v2")
 
     # Rollback
-    registry.rollback("majora", "v1")
+    registry.rollback("sample-model", "v1")
     ```
 """
 

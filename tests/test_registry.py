@@ -385,6 +385,7 @@ class TestIntegration:
             samples=100,
             evaluation_scores={"accuracy": 0.80},
         )
+        assert v1.version == "v1"
 
         tracker.add_version(
             model_name="oracle",
@@ -404,6 +405,7 @@ class TestIntegration:
             parent_version="v1",
             evaluation_scores={"accuracy": 0.82},
         )
+        assert v2.version == "v2"
 
         tracker.add_version(
             model_name="oracle",

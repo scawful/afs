@@ -1111,6 +1111,7 @@ def session_prepare_client_command(args: argparse.Namespace) -> int:
     from ..session_harness import build_client_session_payload
 
     manager, context_path, config_path = _load_manager_context_and_config_path(args)
+    changed_paths_arg = vars(args).get("changed_path")
     skills_prompt = args.skills_prompt
     if skills_prompt is None:
         skills_prompt = args.query or ""
@@ -1136,6 +1137,8 @@ def session_prepare_client_command(args: argparse.Namespace) -> int:
         skills_prompt=skills_prompt,
         include_skills=not args.no_skills_match,
         skills_top_k=args.skills_top_k,
+        changed_paths=list(changed_paths_arg) if changed_paths_arg else None,
+        verification_profile=str(getattr(args, "verification_profile", "") or "").strip(),
         write_artifacts=not args.no_write_artifacts,
     )
 
@@ -1161,6 +1164,25 @@ def session_prepare_client_command(args: argparse.Namespace) -> int:
     payload_paths = payload.get("artifact_paths") or {}
     if payload_paths.get("json"):
         print(f"payload: {payload_paths['json']}")
+    cli_hints = payload.get("cli_hints") or {}
+    if cli_hints.get("query_shortcut"):
+        print(f"query_hint: {cli_hints['query_shortcut']}")
+    if cli_hints.get("query_canonical"):
+        print(f"canonical_query_hint: {cli_hints['query_canonical']}")
+    if cli_hints.get("index_rebuild"):
+        print(f"index_hint: {cli_hints['index_rebuild']}")
+    if cli_hints.get("agent_jobs_inbox"):
+        print(f"agent_jobs_inbox_hint: {cli_hints['agent_jobs_inbox']}")
+    if cli_hints.get("work_summary"):
+        print(f"work_hint: {cli_hints['work_summary']}")
+    if cli_hints.get("work_approvals"):
+        print(f"work_approvals_hint: {cli_hints['work_approvals']}")
+    if cli_hints.get("work_communication"):
+        print(f"work_communication_hint: {cli_hints['work_communication']}")
+    if cli_hints.get("verify_plan"):
+        print(f"verify_plan_hint: {cli_hints['verify_plan']}")
+    if cli_hints.get("verify_run"):
+        print(f"verify_run_hint: {cli_hints['verify_run']}")
     return 0
 
 
@@ -1197,12 +1219,17 @@ def _emit_session_event(
     status: str = "",
     reason: str = "",
     exit_code: int | None = None,
+    verification_status: str = "",
+    verification_command: str = "",
     seed_payload: dict[str, Any] | None = None,
     update_activity: bool = True,
 ) -> dict[str, Any]:
     from ..grounding_hooks import run_grounding_hooks
     from ..history import log_session_event
-    from ..session_harness import record_client_session_activity
+    from ..session_harness import (
+        build_session_activity_snapshot,
+        record_client_session_activity,
+    )
 
     payload = dict(seed_payload or {})
     payload["context_path"] = str(context_path)
@@ -1226,12 +1253,36 @@ def _emit_session_event(
         payload["reason"] = reason
     if exit_code is not None:
         payload["exit_code"] = exit_code
+    if verification_status:
+        payload["verification_status"] = verification_status
+    if verification_command:
+        payload["verification_command"] = verification_command
 
     run_grounding_hooks(
         event=event_name,
         payload=payload,
         config=manager.config,
     )
+
+    updated_payload = None
+    if update_activity and client:
+        updated_payload = record_client_session_activity(
+            manager,
+            context_path,
+            client=client,
+            event_name=event_name,
+            event_payload=payload,
+            payload_file=payload_file,
+            session_id=session_id,
+            config_path=config_path,
+            cwd=cwd,
+        )
+    activity_snapshot = build_session_activity_snapshot(
+        updated_payload,
+        event_name=event_name,
+    )
+    if activity_snapshot:
+        payload["workflow_snapshot"] = activity_snapshot
 
     metadata: dict[str, Any] = {
         "client": client,
@@ -1244,7 +1295,25 @@ def _emit_session_event(
         "summary": summary[:160] if summary else "",
         "prompt_preview": prompt[:180] if prompt else "",
     }
-    metadata = {key: value for key, value in metadata.items() if value not in ("", None)}
+    if activity_snapshot:
+        metadata.update(
+            {
+                "workflow": activity_snapshot.get("workflow", ""),
+                "tool_profile": activity_snapshot.get("tool_profile", ""),
+                "pack_mode": activity_snapshot.get("pack_mode", ""),
+                "workflow_steps": activity_snapshot.get("workflow_steps", []),
+                "matched_skills": activity_snapshot.get("matched_skills", []),
+                "outcome": activity_snapshot.get("outcome", ""),
+                "completed_events": activity_snapshot.get("completed_events", 0),
+                "failed_events": activity_snapshot.get("failed_events", 0),
+                "verification_status": activity_snapshot.get("verification_status", ""),
+                "verification_required": activity_snapshot.get("verification_required", False),
+                "verification_record_count": activity_snapshot.get("verification_record_count", 0),
+            }
+        )
+        if not metadata.get("prompt_preview"):
+            metadata["prompt_preview"] = str(activity_snapshot.get("prompt_preview", "")).strip()
+    metadata = {key: value for key, value in metadata.items() if value not in ("", None, [], {})}
     log_session_event(
         event_name,
         session_id=session_id or None,
@@ -1261,20 +1330,6 @@ def _emit_session_event(
         },
         context_root=context_path,
     )
-
-    updated_payload = None
-    if update_activity and client:
-        updated_payload = record_client_session_activity(
-            manager,
-            context_path,
-            client=client,
-            event_name=event_name,
-            event_payload=payload,
-            payload_file=payload_file,
-            session_id=session_id,
-            config_path=config_path,
-            cwd=cwd,
-        )
     payload_file_value = str(payload_file) if payload_file else ""
     if isinstance(updated_payload, dict):
         artifact_paths = updated_payload.get("artifact_paths")
@@ -1324,7 +1379,43 @@ def session_hook_command(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
+    updated_payload = result.get("updated_payload") or {}
+    activity = updated_payload.get("activity") if isinstance(updated_payload, dict) else {}
+    verification = activity.get("verification") if isinstance(activity, dict) else {}
+    verification = verification if isinstance(verification, dict) else {}
+    verification_mode = str(
+        getattr(args, "verification_mode", None)
+        or os.getenv("AFS_SESSION_VERIFICATION_MODE", "warn")
+    ).strip().lower()
+    if verification_mode not in {"off", "warn", "error"}:
+        verification_mode = "warn"
+    verification = dict(verification)
+    if verification_mode != "off":
+        verification["mode"] = verification_mode
+
+    gate_warning = (
+        args.event == "session_end"
+        and verification_mode != "off"
+        and bool(verification.get("required"))
+        and str(verification.get("status", "")).strip() in {"missing", "failed", "skipped"}
+    )
+    gate_error = (
+        args.event == "session_end"
+        and verification_mode == "error"
+        and bool(verification.get("required"))
+        and str(verification.get("status", "")).strip() in {"missing", "failed"}
+    )
+
+    if gate_warning:
+        message = str(verification.get("message", "")).strip() or "Verification gate warning."
+        print(f"verification gate: {message}", file=sys.stderr)
+
     if args.json:
+        response_status = "ok"
+        if gate_warning:
+            response_status = "warning"
+        if gate_error:
+            response_status = "error"
         print(
             json.dumps(
                 {
@@ -1332,17 +1423,19 @@ def session_hook_command(args: argparse.Namespace) -> int:
                     "client": result["client"],
                     "session_id": result["session_id"],
                     "payload_file": result["payload_file"],
-                    "status": "ok",
+                    "status": response_status,
+                    "verification": verification,
+                    "verification_mode": verification_mode,
                 },
                 indent=2,
             )
         )
-        return 0
+        return 2 if gate_error else 0
 
     print(
         f"{result['event']}: client={result['client']} session={result['session_id']}"
     )
-    return 0
+    return 2 if gate_error else 0
 
 
 def session_event_command(args: argparse.Namespace) -> int:
@@ -1365,6 +1458,8 @@ def session_event_command(args: argparse.Namespace) -> int:
     summary = str(args.summary or "").strip()
     status = str(args.status or "").strip()
     reason = str(args.reason or "").strip()
+    verification_status = str(getattr(args, "verification_status", "") or "").strip()
+    verification_command = str(getattr(args, "verification_command", "") or "").strip()
 
     try:
         result = _emit_session_event(
@@ -1384,6 +1479,8 @@ def session_event_command(args: argparse.Namespace) -> int:
             status=status,
             reason=reason,
             exit_code=args.exit_code,
+            verification_status=verification_status,
+            verification_command=verification_command,
             seed_payload=payload,
         )
     except Exception as exc:
@@ -1402,6 +1499,7 @@ def session_event_command(args: argparse.Namespace) -> int:
                     "payload_file": result["payload_file"],
                     "last_event": activity.get("last_event", {}),
                     "active_tasks": activity.get("active_tasks", []),
+                    "verification": activity.get("verification", {}),
                     "status": "ok",
                 },
                 indent=2,
@@ -1751,6 +1849,7 @@ def status_command(args: argparse.Namespace) -> int:
     from ..health.afs_status import _maintenance_health
     from ..manager import AFSManager
     from ..models import MountType
+    from ..session_bootstrap import build_agent_discovery_path
 
     start_dir = Path(args.start_dir).expanduser().resolve() if args.start_dir else None
     root = find_root(start_dir)
@@ -1789,7 +1888,7 @@ def status_command(args: argparse.Namespace) -> int:
                 "db_path": str(db_path),
                 "db_size": db_path.stat().st_size,
                 "has_entries": has_entries,
-                "stale": index.needs_refresh() if has_entries else False,
+                "stale": index.needs_health_refresh() if has_entries else False,
             }
             index_stats["total_entries"] = index.total_entries
         except Exception:
@@ -1810,6 +1909,7 @@ def status_command(args: argparse.Namespace) -> int:
             "mount_health": mount_health,
             "index": index_stats,
             "maintenance": maintenance,
+            "discovery_path": build_agent_discovery_path(context_root),
         }
         print(json.dumps(payload, indent=2))
         return 0
@@ -1903,15 +2003,19 @@ def status_command(args: argparse.Namespace) -> int:
     if not mount_counts:
         hints.append("afs context discover --path .  # index this project")
     if not index_stats.get("available"):
-        hints.append("afs context ensure-all --path .  # build context index")
+        hints.append("afs index rebuild --path .  # build context index")
     elif index_stats.get("stale"):
-        hints.append("afs context ensure-all --path .  # refresh stale index")
+        hints.append("afs index rebuild --path .  # refresh stale index")
     if counts.get("failed", 0) > 0:
         hints.append("afs agents ps --all  # check failed agents")
     if hints:
         print()
         for hint in hints:
             print(_hint(hint))
+
+    print()
+    print(_hint("discovery: context.status -> context.query -> context.read/list -> routed CLI flows"))
+    print(_hint("router: afs next --intent continue --path .  # exact next AFS action"))
 
     return 0
 
@@ -2309,6 +2413,16 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Maximum skill matches to retain.",
     )
     session_prepare.add_argument(
+        "--changed-path",
+        action="append",
+        default=[],
+        help="Explicit changed path relative to repo root. Repeat to override git auto-detection.",
+    )
+    session_prepare.add_argument(
+        "--verification-profile",
+        help="Verification profile name from afs.toml.",
+    )
+    session_prepare.add_argument(
         "--no-session-pack",
         action="store_true",
         help="Skip session-pack generation for this prepared payload.",
@@ -2345,6 +2459,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     session_hook.add_argument("--exit-code", type=int, help="Client exit code for session_end.")
     session_hook.add_argument("--reason", help="Optional end-of-session reason.")
+    session_hook.add_argument(
+        "--verification-mode",
+        choices=["off", "warn", "error"],
+        help="Session-end verification gate mode. Defaults to AFS_SESSION_VERIFICATION_MODE or warn.",
+    )
     session_hook.add_argument("--json", action="store_true", help="Output JSON.")
     session_hook.set_defaults(func=session_hook_command)
 
@@ -2366,6 +2485,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
             "task_progress",
             "task_completed",
             "task_failed",
+            "verification_recorded",
         ],
         help="Event name.",
     )
@@ -2382,6 +2502,15 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     session_event.add_argument("--summary", help="Short event summary or progress text.")
     session_event.add_argument("--status", help="Explicit status override.")
     session_event.add_argument("--reason", help="Optional failure/end reason.")
+    session_event.add_argument(
+        "--verification-status",
+        choices=["passed", "failed", "skipped"],
+        help="Structured verification result associated with this event.",
+    )
+    session_event.add_argument(
+        "--verification-command",
+        help="Verification command or check description associated with this event.",
+    )
     session_event.add_argument("--prompt", help="Prompt text for user_prompt_submit.")
     session_event.add_argument(
         "--prompt-file",

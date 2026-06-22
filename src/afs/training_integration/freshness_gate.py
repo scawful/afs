@@ -157,7 +157,7 @@ def check_training_readiness(
     if blocked:
         warnings.append(
             f"Stale mounts blocking training: {', '.join(blocked)}. "
-            f"Run 'afs context index rebuild' to refresh."
+            f"Run 'afs index rebuild --path <workspace>' to refresh."
         )
 
     return FreshnessReport(

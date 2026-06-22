@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from afs.agents.guardrails import GuardrailConfig, GuardrailedAgent
 from afs.agents.mission_runner import (
-    AGENT_NAME,
     Mission,
     MissionGuardrails,
     MissionPhase,
@@ -19,7 +19,6 @@ from afs.agents.mission_runner import (
     _run_phase_tools,
     main,
 )
-from afs.agents.guardrails import GuardrailConfig, GuardrailedAgent
 
 
 @pytest.fixture(autouse=True)
@@ -371,6 +370,7 @@ class TestRunMission:
         )
         result = _run_mission(mission_path, mission, context_root)
         result_file = context_root / "scratchpad" / "missions" / "output-test" / "result.json"
+        assert result["status"] == "ok"
         assert result_file.exists()
         data = json.loads(result_file.read_text(encoding="utf-8"))
         assert data["mission"] == "output-test"

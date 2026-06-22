@@ -10,7 +10,12 @@ import type {
   McpResourceContent,
   ToolSpec,
 } from "../types";
-import type { ITransportClient, ServerCapabilities } from "./types";
+import type {
+  ITransportClient,
+  ServerCapabilities,
+  SessionCliHints,
+  TransportSessionInfo,
+} from "./types";
 
 interface ExecOptions {
   includeSessionEnv?: boolean;
@@ -25,6 +30,7 @@ export class CliClient implements ITransportClient {
   private sessionPromptJson = "";
   private sessionPromptText = "";
   private sessionWorkspace = "";
+  private sessionCliHints: SessionCliHints = this.defaultCliHints("");
   private toolTaskCounter = 0;
   private turnCounter = 0;
   private activeTurnId = "";
@@ -91,8 +97,8 @@ export class CliClient implements ITransportClient {
         if (typeof args.max_depth === "number") {
           cliArgs.push("--max-depth", String(args.max_depth));
         }
-        const output = await this.exec(cliArgs);
-        return JSON.parse(output);
+        const output = await this.execJson(cliArgs);
+        return normalizeDiscoverPayload(output);
       }
       case "context.init": {
         const projectPath = this.projectPathFromArgs(args.project_path);
@@ -169,7 +175,8 @@ export class CliClient implements ITransportClient {
       }
       case "context.status": {
         const projectPath = this.projectPathFromContextArg(args.context_path);
-        return this.execJson(["status", "--start-dir", projectPath, "--json"]);
+        const output = await this.execJson(["status", "--start-dir", projectPath, "--json"]);
+        return normalizeContextStatusPayload(output);
       }
       case "context.freshness": {
         const projectPath = this.projectPathFromContextArg(args.context_path);
@@ -197,21 +204,6 @@ export class CliClient implements ITransportClient {
         const agents = await this.execJson(cliArgs);
         return Array.isArray(agents) ? { agents, count: agents.length } : agents;
       }
-      case "training.antigravity.status": {
-        const cliArgs = ["training", "antigravity-status", "--json"];
-        if (typeof args.db_path === "string" && args.db_path.trim()) {
-          cliArgs.push("--db-path", args.db_path.trim());
-        }
-        const stateKeys = args.state_keys;
-        if (Array.isArray(stateKeys)) {
-          for (const key of stateKeys) {
-            if (typeof key === "string" && key.trim()) {
-              cliArgs.push("--state-key", key.trim());
-            }
-          }
-        }
-        return this.execJson(cliArgs);
-      }
       case "context.index.rebuild": {
         const projectPath = this.projectPathFromContextArg(args.context_path);
         const cliArgs = ["index", "rebuild", "--path", projectPath, "--json"];
@@ -228,7 +220,7 @@ export class CliClient implements ITransportClient {
         const projectPath = this.projectPathFromContextArg(args.context_path);
         const query = args.query as string;
         if (!query) throw new Error("context.query requires a query string");
-        const cliArgs = ["index", "query", query, "--path", projectPath, "--json"];
+        const cliArgs = ["context", "query", query, "--path", projectPath, "--json"];
         if (Array.isArray(args.mount_types)) {
           for (const mt of args.mount_types) {
             if (typeof mt === "string" && mt.trim()) {
@@ -244,6 +236,204 @@ export class CliClient implements ITransportClient {
         }
         if (args.include_content === true) {
           cliArgs.push("--include-content");
+        }
+        return this.execJson(cliArgs);
+      }
+      case "work.communication.list": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const cliArgs = ["work", "communication", "list", "--path", projectPath, "--json"];
+        if (typeof args.person_id === "string" && args.person_id.trim()) {
+          cliArgs.push("--person-id", args.person_id.trim());
+        }
+        if (typeof args.purpose === "string" && args.purpose.trim()) {
+          cliArgs.push("--purpose", args.purpose.trim());
+        }
+        if (typeof args.limit === "number") {
+          cliArgs.push("--limit", String(args.limit));
+        }
+        const samples = await this.execJson(cliArgs);
+        return Array.isArray(samples) ? { samples, count: samples.length } : samples;
+      }
+      case "work.communication.add": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const text = args.text as string;
+        if (typeof text !== "string" || !text.trim()) {
+          throw new Error("work.communication.add requires text");
+        }
+        const cliArgs = ["work", "communication", "add", "--path", projectPath, "--text", text, "--json"];
+        for (const [argName, flag] of [
+          ["person_id", "--person-id"],
+          ["source_system", "--source-system"],
+          ["source_id", "--source-id"],
+          ["channel", "--channel"],
+          ["purpose", "--purpose"],
+          ["dedupe_key", "--dedupe-key"],
+        ] as Array<[string, string]>) {
+          const value = args[argName];
+          if (typeof value === "string" && value.trim()) {
+            cliArgs.push(flag, value.trim());
+          }
+        }
+        if (Array.isArray(args.style_notes)) {
+          for (const note of args.style_notes) {
+            if (typeof note === "string" && note.trim()) {
+              cliArgs.push("--style-note", note.trim());
+            }
+          }
+        }
+        if (typeof args.confidence === "number") {
+          cliArgs.push("--confidence", String(args.confidence));
+        }
+        return this.execJson(cliArgs);
+      }
+      case "work.communication.guide": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const cliArgs = ["work", "communication", "guide", "--path", projectPath, "--json"];
+        if (typeof args.person_id === "string" && args.person_id.trim()) {
+          cliArgs.push("--person-id", args.person_id.trim());
+        }
+        if (typeof args.purpose === "string" && args.purpose.trim()) {
+          cliArgs.push("--purpose", args.purpose.trim());
+        }
+        if (typeof args.limit === "number") {
+          cliArgs.push("--limit", String(args.limit));
+        }
+        return this.execJson(cliArgs);
+      }
+      case "work.communication.preflight": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const cliArgs = ["work", "communication", "preflight", "--path", projectPath, "--json"];
+        if (typeof args.person_id === "string" && args.person_id.trim()) {
+          cliArgs.push("--person-id", args.person_id.trim());
+        }
+        if (typeof args.purpose === "string" && args.purpose.trim()) {
+          cliArgs.push("--purpose", args.purpose.trim());
+        }
+        if (typeof args.limit === "number") {
+          cliArgs.push("--limit", String(args.limit));
+        }
+        if (typeof args.approval_limit === "number") {
+          cliArgs.push("--approval-limit", String(args.approval_limit));
+        }
+        if (typeof args.personal_mode === "string" && args.personal_mode.trim()) {
+          cliArgs.push("--personal-mode", args.personal_mode.trim());
+        }
+        if (typeof args.personal_context_root === "string" && args.personal_context_root.trim()) {
+          cliArgs.push("--personal-context-root", args.personal_context_root.trim());
+        }
+        return this.execJson(cliArgs);
+      }
+      case "work.approvals.list": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const cliArgs = ["work", "approvals", "list", "--path", projectPath, "--json"];
+        if (args.all === true) {
+          cliArgs.push("--all");
+        } else if (typeof args.status === "string" && args.status.trim()) {
+          cliArgs.push("--status", args.status.trim());
+        }
+        if (typeof args.limit === "number") {
+          cliArgs.push("--limit", String(args.limit));
+        }
+        const approvals = await this.execJson(cliArgs);
+        return Array.isArray(approvals) ? { approvals, count: approvals.length } : approvals;
+      }
+      case "work.approvals.show": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const approvalId = args.approval_id as string;
+        if (typeof approvalId !== "string" || !approvalId.trim()) {
+          throw new Error("work.approvals.show requires approval_id");
+        }
+        const approval = await this.execJson([
+          "work",
+          "approvals",
+          "show",
+          approvalId.trim(),
+          "--path",
+          projectPath,
+          "--json",
+        ]);
+        return { approval };
+      }
+      case "work.approvals.request": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const required = ["target_system", "target_id", "action", "summary"];
+        for (const name of required) {
+          if (typeof args[name] !== "string" || !String(args[name]).trim()) {
+            throw new Error(`work.approvals.request requires ${name}`);
+          }
+        }
+        const cliArgs = [
+          "work",
+          "approvals",
+          "request",
+          "--path",
+          projectPath,
+          "--target-system",
+          String(args.target_system).trim(),
+          "--target-id",
+          String(args.target_id).trim(),
+          "--action",
+          String(args.action).trim(),
+          "--summary",
+          String(args.summary).trim(),
+          "--json",
+        ];
+        if (args.preview && typeof args.preview === "object") {
+          cliArgs.push("--preview-json", JSON.stringify(args.preview));
+        } else if (typeof args.preview === "string" && args.preview.trim()) {
+          cliArgs.push("--preview", args.preview.trim());
+        }
+        if (Array.isArray(args.affected_people)) {
+          for (const person of args.affected_people) {
+            if (typeof person === "string" && person.trim()) {
+              cliArgs.push("--affected-person", person.trim());
+            }
+          }
+        }
+        for (const [argName, flag] of [
+          ["risk_level", "--risk-level"],
+          ["permission_required", "--permission-required"],
+          ["requested_by", "--requested-by"],
+        ] as Array<[string, string]>) {
+          const value = args[argName];
+          if (typeof value === "string" && value.trim()) {
+            cliArgs.push(flag, value.trim());
+          }
+        }
+        return this.execJson(cliArgs);
+      }
+      case "session.pack": {
+        const projectPath = this.projectPathFromContextArg(args.context_path);
+        const cliArgs = ["session", "pack", "--path", projectPath, "--json", "--no-write-artifacts"];
+        if (typeof args.query === "string" && args.query.trim()) {
+          cliArgs.push(args.query.trim());
+        }
+        if (typeof args.task === "string" && args.task.trim()) {
+          cliArgs.push("--task", args.task.trim());
+        }
+        if (typeof args.model === "string" && args.model.trim()) {
+          cliArgs.push("--model", args.model.trim());
+        }
+        if (typeof args.workflow === "string" && args.workflow.trim()) {
+          cliArgs.push("--workflow", args.workflow.trim());
+        }
+        if (typeof args.tool_profile === "string" && args.tool_profile.trim()) {
+          cliArgs.push("--tool-profile", args.tool_profile.trim());
+        }
+        if (typeof args.pack_mode === "string" && args.pack_mode.trim()) {
+          cliArgs.push("--pack-mode", args.pack_mode.trim());
+        }
+        if (typeof args.token_budget === "number") {
+          cliArgs.push("--token-budget", String(args.token_budget));
+        }
+        if (args.include_content === true) {
+          cliArgs.push("--include-content");
+        }
+        if (typeof args.max_query_results === "number") {
+          cliArgs.push("--max-query-results", String(args.max_query_results));
+        }
+        if (typeof args.max_embedding_results === "number") {
+          cliArgs.push("--max-embedding-results", String(args.max_embedding_results));
         }
         return this.execJson(cliArgs);
       }
@@ -365,8 +555,16 @@ export class CliClient implements ITransportClient {
       { name: "context.unmount", description: "Unmount an alias from context", inputSchema: {} },
       { name: "context.status", description: "Get context status", inputSchema: {} },
       { name: "context.freshness", description: "Get mount freshness scores", inputSchema: {} },
+      { name: "session.pack", description: "Build a context session pack", inputSchema: {} },
       { name: "context.index.rebuild", description: "Rebuild context index", inputSchema: {} },
       { name: "context.query", description: "Query context index", inputSchema: {} },
+      { name: "work.communication.list", description: "List work communication samples", inputSchema: {} },
+      { name: "work.communication.add", description: "Capture a work communication sample", inputSchema: {} },
+      { name: "work.communication.guide", description: "Summarize work communication style guidance", inputSchema: {} },
+      { name: "work.communication.preflight", description: "Run work communication preflight", inputSchema: {} },
+      { name: "work.approvals.list", description: "List work approval requests", inputSchema: {} },
+      { name: "work.approvals.show", description: "Show a work approval request", inputSchema: {} },
+      { name: "work.approvals.request", description: "Request approval for an external work write", inputSchema: {} },
       { name: "context.read", description: "Read a context-scoped file", inputSchema: {} },
       { name: "context.write", description: "Write a context-scoped file", inputSchema: {} },
       { name: "context.delete", description: "Delete a context-scoped file", inputSchema: {} },
@@ -374,7 +572,6 @@ export class CliClient implements ITransportClient {
       { name: "context.list", description: "List context-scoped files", inputSchema: {} },
       { name: "memory.status", description: "Get memory status", inputSchema: {} },
       { name: "agent.capabilities", description: "List agent capabilities", inputSchema: {} },
-      { name: "training.antigravity.status", description: "Get Antigravity training status", inputSchema: {} },
     ];
   }
 
@@ -467,6 +664,21 @@ export class CliClient implements ITransportClient {
     }
   }
 
+  getSessionInfo(): TransportSessionInfo | undefined {
+    if (!this.sessionId) {
+      return undefined;
+    }
+    return {
+      sessionId: this.sessionId,
+      payloadFile: this.sessionPayloadFile,
+      contextPath: this.sessionContextPath,
+      promptJson: this.sessionPromptJson,
+      promptText: this.sessionPromptText,
+      workspace: this.sessionWorkspace || this.workspaceRoot(),
+      cliHints: { ...this.sessionCliHints, notes: [...this.sessionCliHints.notes] },
+    };
+  }
+
   dispose(): void {
     if (this.activeTurnId) {
       const turnId = this.activeTurnId;
@@ -492,7 +704,9 @@ export class CliClient implements ITransportClient {
   }
 
   private workspaceRoot(): string {
-    const folder = vscode.workspace.workspaceFolders?.[0];
+    const activeUri = vscode.window.activeTextEditor?.document?.uri;
+    const activeFolder = activeUri ? vscode.workspace.getWorkspaceFolder(activeUri) : undefined;
+    const folder = activeFolder ?? vscode.workspace.workspaceFolders?.[0];
     return folder?.uri?.fsPath ? path.resolve(folder.uri.fsPath) : process.cwd();
   }
 
@@ -513,6 +727,22 @@ export class CliClient implements ITransportClient {
     if (this.sessionContextPath) env.AFS_ACTIVE_CONTEXT_ROOT = this.sessionContextPath;
     if (this.sessionPromptJson) env.AFS_SESSION_SYSTEM_PROMPT_JSON = this.sessionPromptJson;
     if (this.sessionPromptText) env.AFS_SESSION_SYSTEM_PROMPT_TEXT = this.sessionPromptText;
+    if (this.sessionCliHints.queryShortcut) env.AFS_SESSION_QUERY_HINT = this.sessionCliHints.queryShortcut;
+    if (this.sessionCliHints.queryCanonical) {
+      env.AFS_SESSION_CONTEXT_QUERY_HINT = this.sessionCliHints.queryCanonical;
+    }
+    if (this.sessionCliHints.indexRebuild) {
+      env.AFS_SESSION_INDEX_REBUILD_HINT = this.sessionCliHints.indexRebuild;
+    }
+    if (this.sessionCliHints.workSummary) {
+      env.AFS_SESSION_WORK_HINT = this.sessionCliHints.workSummary;
+    }
+    if (this.sessionCliHints.workApprovals) {
+      env.AFS_SESSION_WORK_APPROVALS_HINT = this.sessionCliHints.workApprovals;
+    }
+    if (this.sessionCliHints.workCommunication) {
+      env.AFS_SESSION_WORK_COMMUNICATION_HINT = this.sessionCliHints.workCommunication;
+    }
     if (this.activeTurnId) env.AFS_SESSION_DEFAULT_TURN_ID = this.activeTurnId;
     return env;
   }
@@ -524,6 +754,7 @@ export class CliClient implements ITransportClient {
 
     this.sessionId = randomUUID().replace(/-/g, "").slice(0, 12);
     this.sessionWorkspace = this.workspaceRoot();
+    this.sessionCliHints = this.defaultCliHints(this.sessionWorkspace);
 
     try {
       const payload = await this.execJson(
@@ -560,6 +791,7 @@ export class CliClient implements ITransportClient {
       const promptArtifacts = this.artifactPaths((payload.prompt as Record<string, unknown> | undefined) ?? {});
       this.sessionPromptJson = promptArtifacts.json ?? "";
       this.sessionPromptText = promptArtifacts.text ?? "";
+      this.sessionCliHints = this.parseCliHints(payload.cli_hints, this.sessionWorkspace);
     } catch (err) {
       this.logger.appendLine(`[cli harness] prepare-client failed: ${err}`);
       return;
@@ -677,6 +909,56 @@ export class CliClient implements ITransportClient {
     return typeof value === "string" ? value : "";
   }
 
+  private parseCliHints(value: unknown, workspace: string): SessionCliHints {
+    const fallback = this.defaultCliHints(workspace);
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return fallback;
+    }
+    const raw = value as Record<string, unknown>;
+    return {
+      workspacePath: this.stringValue(raw.workspace_path).trim() || fallback.workspacePath,
+      queryShortcut: this.stringValue(raw.query_shortcut).trim() || fallback.queryShortcut,
+      queryCanonical: this.stringValue(raw.query_canonical).trim() || fallback.queryCanonical,
+      indexRebuild: this.stringValue(raw.index_rebuild).trim() || fallback.indexRebuild,
+      workSummary: this.stringValue(raw.work_summary).trim() || fallback.workSummary,
+      workApprovals: this.stringValue(raw.work_approvals).trim() || fallback.workApprovals,
+      workCommunication: this.stringValue(raw.work_communication).trim() || fallback.workCommunication,
+      notes: Array.isArray(raw.notes)
+        ? raw.notes
+            .filter((entry): entry is string => typeof entry === "string")
+            .map((entry) => entry.trim())
+            .filter(Boolean)
+        : fallback.notes,
+    };
+  }
+
+  private defaultCliHints(workspace: string): SessionCliHints {
+    const resolvedWorkspace = (workspace || this.workspaceRoot()).trim();
+    const quotedWorkspace = this.shellQuote(resolvedWorkspace);
+    return {
+      workspacePath: resolvedWorkspace,
+      queryShortcut: resolvedWorkspace ? `afs query <text> --path ${quotedWorkspace}` : "",
+      queryCanonical: resolvedWorkspace
+        ? `afs context query <text> --path ${quotedWorkspace}`
+        : "",
+      indexRebuild: resolvedWorkspace ? `afs index rebuild --path ${quotedWorkspace}` : "",
+      workSummary: resolvedWorkspace ? `afs work --path ${quotedWorkspace}` : "",
+      workApprovals: resolvedWorkspace ? `afs work approvals list --path ${quotedWorkspace}` : "",
+      workCommunication: resolvedWorkspace ? `afs work communication preflight --path ${quotedWorkspace}` : "",
+      notes: [],
+    };
+  }
+
+  private shellQuote(value: string): string {
+    if (!value) {
+      return "''";
+    }
+    if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) {
+      return value;
+    }
+    return `'${value.replace(/'/g, `'\\''`)}'`;
+  }
+
   private hasArg(args: string[], flag: string): boolean {
     return args.includes(flag);
   }
@@ -736,7 +1018,7 @@ export class CliClient implements ITransportClient {
 
   private projectPathFromContextArg(rawContextPath: unknown): string {
     if (typeof rawContextPath !== "string" || !rawContextPath.trim()) {
-      return process.cwd();
+      return this.workspaceRoot();
     }
     const resolved = path.resolve(rawContextPath);
     const marker = `${path.sep}.context`;
@@ -750,6 +1032,111 @@ export class CliClient implements ITransportClient {
     if (typeof rawProjectPath === "string" && rawProjectPath.trim()) {
       return path.resolve(rawProjectPath);
     }
-    return process.cwd();
+    return this.workspaceRoot();
   }
+}
+
+function normalizeDiscoverPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const contexts = Array.isArray(payload.contexts)
+    ? payload.contexts
+        .map((entry) => normalizeDiscoveredContext(entry))
+        .filter((entry): entry is Record<string, unknown> => entry !== null)
+    : [];
+
+  return {
+    ...payload,
+    contexts,
+  };
+}
+
+function normalizeDiscoveredContext(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const raw = value as Record<string, unknown>;
+  const contextPath = stringValue(raw.path);
+  if (!contextPath) {
+    return null;
+  }
+
+  const project = stringValue(raw.project) || stringValue(raw.project_name) || path.basename(contextPath);
+  const valid = booleanValue(raw.valid) ?? booleanValue(raw.is_valid) ?? false;
+  const mounts = numberValue(raw.mounts) ?? numberValue(raw.total_mounts) ?? 0;
+
+  return {
+    ...raw,
+    project,
+    path: contextPath,
+    valid,
+    mounts,
+  };
+}
+
+function normalizeContextStatusPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const mountHealth = recordValue(payload.mount_health);
+  const rawIndex = recordValue(payload.index);
+
+  return {
+    ...payload,
+    context_path: stringValue(payload.context_path) || stringValue(payload.context_root),
+    profile: stringValue(payload.profile) || stringValue(payload.active_profile),
+    mount_counts: recordValue(payload.mount_counts) ?? {},
+    total_files: numberValue(payload.total_files) ?? 0,
+    mount_health: mountHealth ?? {},
+    actions: Array.from(
+      new Set([
+        ...stringArray(payload.actions),
+        ...stringArray(mountHealth?.suggested_actions),
+      ]),
+    ),
+    ...(rawIndex ? { index: normalizeStatusIndex(rawIndex) } : {}),
+  };
+}
+
+function normalizeStatusIndex(rawIndex: Record<string, unknown>): Record<string, unknown> {
+  const available = booleanValue(rawIndex.available);
+  const built = booleanValue(rawIndex.built) ?? available ?? false;
+  const totalEntries = numberValue(rawIndex.total_entries);
+  const hasEntries = booleanValue(rawIndex.has_entries)
+    ?? (totalEntries != null ? totalEntries > 0 : undefined);
+  const stale = booleanValue(rawIndex.stale);
+  const dbPath = stringValue(rawIndex.db_path);
+  const dbSizeBytes = numberValue(rawIndex.db_size_bytes) ?? numberValue(rawIndex.db_size);
+
+  return {
+    ...rawIndex,
+    enabled: booleanValue(rawIndex.enabled) ?? true,
+    built,
+    ...(hasEntries != null ? { has_entries: hasEntries } : {}),
+    ...(totalEntries != null ? { total_entries: totalEntries } : {}),
+    ...(stale != null ? { stale } : {}),
+    ...(dbPath ? { db_path: dbPath } : {}),
+    ...(dbSizeBytes != null ? { db_size_bytes: dbSizeBytes } : {}),
+  };
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function booleanValue(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
 }

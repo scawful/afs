@@ -24,6 +24,7 @@ class EmbeddingIndexResult:
     skipped: int = 0
     reused: int = 0
     removed: int = 0
+    chunks_written: int = 0
     mode: str = "full"
     errors: list[str] = field(default_factory=list)
 
@@ -34,6 +35,8 @@ class EmbeddingIndexResult:
         ]
         if self.mode == "incremental":
             parts.append(f"reused={self.reused} removed={self.removed}")
+        if self.chunks_written:
+            parts.append(f"chunks={self.chunks_written}")
         return " ".join(parts)
 
 
@@ -43,14 +46,30 @@ class SearchResult:
     score: float
     source_path: str
     text_preview: str
+    chunk_index: int | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    char_start: int | None = None
+    char_end: int | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "doc_id": self.doc_id,
             "score": self.score,
             "source_path": self.source_path,
             "text_preview": self.text_preview,
         }
+        if self.chunk_index is not None:
+            d["chunk_index"] = self.chunk_index
+        if self.line_start is not None:
+            d["line_start"] = self.line_start
+        if self.line_end is not None:
+            d["line_end"] = self.line_end
+        if self.char_start is not None:
+            d["char_start"] = self.char_start
+        if self.char_end is not None:
+            d["char_end"] = self.char_end
+        return d
 
 
 @dataclass
@@ -329,6 +348,7 @@ def _load_existing_index(output_dir: Path) -> tuple[dict[str, str], dict[str, di
             old_meta[doc_id] = {
                 "size_bytes": data.get("size_bytes", 0),
                 "modified_at": data.get("modified_at"),
+                "chunked": bool(data.get("chunked", False)),
             }
         except (json.JSONDecodeError, OSError):
             pass
@@ -350,6 +370,34 @@ def _file_changed(path: Path, old_size: int, old_mtime: str | None) -> bool:
     return False
 
 
+def _split_into_chunks(
+    text: str,
+    chunk_size: int,
+    overlap: int,
+) -> list[tuple[int, int, str]]:
+    """Split *text* into overlapping char-boundary chunks.
+
+    Returns a list of ``(char_start, char_end, chunk_text)`` tuples.
+    """
+    if not text:
+        return []
+    step = max(1, chunk_size - overlap)
+    chunks: list[tuple[int, int, str]] = []
+    start = 0
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        chunks.append((start, end, text[start:end]))
+        if end == len(text):
+            break
+        start += step
+    return chunks
+
+
+def _count_lines_before(text: str, char_offset: int) -> int:
+    """Return the 1-based line number at *char_offset* in *text*."""
+    return text[:char_offset].count("\n") + 1
+
+
 def build_embedding_index(
     sources: Iterable[Path],
     output_dir: Path,
@@ -364,6 +412,8 @@ def build_embedding_index(
     include_hidden: bool = False,
     skip_path: Callable[[Path, Path], bool] | None = None,
     incremental: bool = False,
+    chunk_size: int | None = None,
+    chunk_overlap: int = 200,
 ) -> EmbeddingIndexResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     embeddings_dir = output_dir / "embeddings"
@@ -412,6 +462,91 @@ def build_embedding_index(
         if text is None:
             result.skipped += 1
             continue
+
+        stat = None
+        if path.exists():
+            try:
+                stat = path.stat()
+            except OSError:
+                stat = None
+        size_bytes = stat.st_size if stat else 0
+        modified_at = (
+            datetime.fromtimestamp(stat.st_mtime).isoformat() if stat else None
+        )
+
+        # --- Chunked mode ---
+        if chunk_size is not None and len(text) > chunk_size:
+            base_hash = _hash_doc_id(doc_id)
+            chunks = _split_into_chunks(text, chunk_size, chunk_overlap)
+            chunk_filenames: list[str] = []
+            chunk_ok = True
+            for chunk_idx, (char_start, char_end, chunk_text) in enumerate(chunks):
+                chunk_doc_id = f"{doc_id}::chunk:{chunk_idx}"
+                chunk_filename = f"{base_hash}_c{chunk_idx}.json"
+                chunk_preview = chunk_text[:preview_chars].strip()
+                chunk_embedding: list[float] = []
+                if embed_fn:
+                    try:
+                        chunk_embedding = embed_fn(chunk_text[:embed_chars])
+                    except Exception as exc:
+                        result.errors.append(f"{path} chunk {chunk_idx}: embed failed ({exc})")
+                line_start = _count_lines_before(text, char_start)
+                line_end = _count_lines_before(text, char_end - 1) if char_end > char_start else line_start
+                chunk_payload = {
+                    "id": chunk_doc_id,
+                    "parent_doc_id": doc_id,
+                    "source_path": str(path),
+                    "chunk_index": chunk_idx,
+                    "line_start": line_start,
+                    "line_end": line_end,
+                    "char_start": char_start,
+                    "char_end": char_end,
+                    "text_preview": chunk_preview,
+                    "search_text": chunk_text[:embed_chars],
+                    "embedding": chunk_embedding,
+                    "size_bytes": size_bytes,
+                    "modified_at": modified_at,
+                }
+                try:
+                    (embeddings_dir / chunk_filename).write_text(
+                        json.dumps(chunk_payload, ensure_ascii=True) + "\n",
+                        encoding="utf-8",
+                    )
+                    chunk_filenames.append(chunk_filename)
+                    result.chunks_written += 1
+                except OSError as exc:
+                    result.errors.append(f"{path} chunk {chunk_idx}: write failed ({exc})")
+                    chunk_ok = False
+                    break
+
+            if not chunk_ok:
+                result.skipped += 1
+                continue
+
+            manifest_filename = f"{base_hash}_chunks.json"
+            chunk_manifest = {
+                "id": doc_id,
+                "source_path": str(path),
+                "size_bytes": size_bytes,
+                "modified_at": modified_at,
+                "chunked": True,
+                "chunk_count": len(chunk_filenames),
+                "chunks": chunk_filenames,
+            }
+            try:
+                (embeddings_dir / manifest_filename).write_text(
+                    json.dumps(chunk_manifest, ensure_ascii=True) + "\n",
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                result.skipped += 1
+                result.errors.append(f"{path}: chunk manifest write failed ({exc})")
+                continue
+            index[doc_id] = manifest_filename
+            result.indexed += 1
+            continue
+
+        # --- Single-file mode (original path) ---
         preview = text[:preview_chars].strip()
         embed_text = text[:embed_chars]
         embedding: list[float] = []
@@ -422,22 +557,14 @@ def build_embedding_index(
                 result.errors.append(f"{path}: embed failed ({exc})")
                 embedding = []
 
-        stat = None
-        if path.exists():
-            try:
-                stat = path.stat()
-            except OSError:
-                stat = None
         payload = {
             "id": doc_id,
             "source_path": str(path),
             "text_preview": preview,
             "search_text": embed_text,
             "embedding": embedding,
-            "size_bytes": stat.st_size if stat else 0,
-            "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat()
-            if stat
-            else None,
+            "size_bytes": size_bytes,
+            "modified_at": modified_at,
         }
         try:
             (embeddings_dir / filename).write_text(
@@ -531,6 +658,43 @@ def search_embedding_index(
             data = json.loads(entry_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+
+        # --- Chunked manifest: score each chunk, keep best ---
+        if data.get("chunked"):
+            best: SearchResult | None = None
+            for chunk_filename in data.get("chunks", []):
+                chunk_path = embeddings_dir / chunk_filename
+                try:
+                    chunk_data = json.loads(chunk_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                chunk_text_preview = chunk_data.get("text_preview", "")
+                chunk_source = str(chunk_data.get("source_path", ""))
+                chunk_embedding = chunk_data.get("embedding", [])
+                if query_embedding and chunk_embedding:
+                    score = _cosine_similarity(query_embedding, chunk_embedding)
+                else:
+                    search_text = chunk_data.get("search_text") or chunk_text_preview
+                    score = _keyword_score(query, search_text, doc_id)
+                if score >= min_score:
+                    candidate = SearchResult(
+                        doc_id=str(chunk_data.get("id", doc_id)),
+                        score=float(score),
+                        source_path=chunk_source,
+                        text_preview=str(chunk_text_preview),
+                        chunk_index=chunk_data.get("chunk_index"),
+                        line_start=chunk_data.get("line_start"),
+                        line_end=chunk_data.get("line_end"),
+                        char_start=chunk_data.get("char_start"),
+                        char_end=chunk_data.get("char_end"),
+                    )
+                    if best is None or candidate.score > best.score:
+                        best = candidate
+            if best is not None:
+                results.append(best)
+            continue
+
+        # --- Single-file entry ---
         text_preview = data.get("text_preview", "")
         source_path = str(data.get("source_path", ""))
         embedding = data.get("embedding", [])

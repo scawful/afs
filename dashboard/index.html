@@ -12,7 +12,7 @@
         <!-- Header -->
         <header class="dashboard-header">
             <div class="header-content">
-                <h1>AFS Training System Monitor</h1>
+                <h1>AFS Live Training Monitor</h1>
                 <div class="header-controls">
                     <button id="toggleTheme" class="theme-toggle" title="Toggle dark/light mode">
                         <svg class="icon" viewBox="0 0 24 24">
@@ -50,40 +50,40 @@
                     <!-- Key Metrics Cards -->
                     <div class="stats-grid">
                         <div class="stat-card">
-                            <div class="stat-label">Total Cost</div>
+                            <div class="stat-label">Accrued Cost</div>
                             <div class="stat-value" id="totalCost">$0.00</div>
-                            <div class="stat-unit">Session Budget</div>
+                            <div class="stat-unit">Visible Runs</div>
                         </div>
                         <div class="stat-card">
-                            <div class="stat-label">Completed Models</div>
+                            <div class="stat-label">Idle Runs</div>
                             <div class="stat-value" id="completedModels">0</div>
-                            <div class="stat-unit">/ 5 Total</div>
+                            <div class="stat-unit">Tracked</div>
                         </div>
                         <div class="stat-card">
-                            <div class="stat-label">In Progress</div>
+                            <div class="stat-label">Live Runs</div>
                             <div class="stat-value" id="inProgressModels">0</div>
-                            <div class="stat-unit">Training</div>
+                            <div class="stat-unit">Active</div>
                         </div>
                         <div class="stat-card">
                             <div class="stat-label">Session Time</div>
                             <div class="stat-value" id="sessionTime">--:--:--</div>
-                            <div class="stat-unit">Elapsed</div>
+                            <div class="stat-unit">Earliest Active Run</div>
                         </div>
                     </div>
 
                     <!-- Models Summary Table -->
                     <div class="section-card">
-                        <h2>Training Status</h2>
+                        <h2>Tracked Runs</h2>
                         <div class="table-container">
                             <table class="status-table">
                                 <thead>
                                     <tr>
-                                        <th>Model</th>
+                                        <th>Run</th>
+                                        <th>Backend</th>
                                         <th>Status</th>
-                                        <th>Progress</th>
-                                        <th>GPU/Hour</th>
-                                        <th>Total Cost</th>
-                                        <th>Samples</th>
+                                        <th>GPU</th>
+                                        <th>Cost</th>
+                                        <th>Note</th>
                                     </tr>
                                 </thead>
                                 <tbody id="modelsTableBody">
@@ -108,21 +108,21 @@
             <section id="costs" class="tab-content">
                 <div class="costs-section">
                     <div class="section-card">
-                        <h2>Cost Breakdown</h2>
+                        <h2>Live Cost Breakdown</h2>
                         <div class="chart-container">
                             <canvas id="costChart"></canvas>
                         </div>
                     </div>
                     <div class="section-card">
-                        <h2>Cost Details</h2>
+                        <h2>Run Cost Details</h2>
                         <div class="table-container">
                             <table class="cost-table">
                                 <thead>
                                     <tr>
-                                        <th>Model</th>
-                                        <th>GPU Hours</th>
+                                        <th>Run</th>
+                                        <th>Elapsed Hours</th>
                                         <th>Rate/Hour</th>
-                                        <th>Total Cost</th>
+                                        <th>Accrued Cost</th>
                                     </tr>
                                 </thead>
                                 <tbody id="costTableBody">

@@ -6,6 +6,9 @@ This docs set covers the **core AFS platform** in `lab/afs`.
 
 - [Home](index.md)
 - [Agent Surfaces](AGENT_SURFACES.md)
+- [Agent Operations](AGENT_OPERATIONS.md)
+- [Agent Integration Upgrade](AGENT_INTEGRATION_UPGRADE.md)
+- [Guided Setup](SETUP_GUIDE.md)
 - [Architecture](ARCHITECTURE.md)
 - [Profiles, Skills, and Hooks](PROFILES.md)
 - [MCP Server](MCP_SERVER.md)
@@ -16,6 +19,7 @@ This docs set covers the **core AFS platform** in `lab/afs`.
 - [Memory System](MEMORY_SYSTEM.md)
 - [Health Quick Start](HEALTH_QUICK_START.md)
 - [CLI Reference](CLI_REFERENCE.md)
+- [Training and Feedback RFC](TRAINING_FEEDBACK_RFC.md)
 - [Workspace Integration](WORKSPACE_INTEGRATION.md)
 
 ## API and Dev
@@ -25,6 +29,6 @@ This docs set covers the **core AFS platform** in `lab/afs`.
 
 ## Scope Note
 
-Model-training, persona, and domain-specific docs were intentionally moved out of core AFS.
-
-See [AFS Scawful Migration](SCAWFUL_MIGRATION.md).
+Model-training, persona, and domain-specific workflows still belong in
+extensions. Reusable dataset/run/eval/feedback infrastructure can remain in core
+AFS when it is generic.

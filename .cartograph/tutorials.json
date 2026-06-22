@@ -1,0 +1,105 @@
+{
+  "title": "AFS Atlas",
+  "summary": "Interactive guide to the AFS session harness, background agents, and editor integration surfaces.",
+  "tutorials": [
+    {
+      "id": "session-harness",
+      "title": "Session Harness and Prompt Loop",
+      "summary": "Follow how AFS prepares client payloads, records session activity, and composes model-facing prompts.",
+      "steps": [
+        {
+          "title": "Prepare-client CLI",
+          "path": "src/afs/cli/core.py",
+          "line": 1109,
+          "summary": "The main CLI entrypoint for building client payloads, packs, and prompt artifacts."
+        },
+        {
+          "title": "Session event CLI",
+          "path": "src/afs/cli/core.py",
+          "line": 1355,
+          "summary": "This is where live prompt, turn, and task lifecycle events are recorded."
+        },
+        {
+          "title": "Stable activity contract",
+          "path": "src/afs/session_harness.py",
+          "line": 129,
+          "summary": "The harness declares the supported session activity events here."
+        },
+        {
+          "title": "Live session activity updates",
+          "path": "src/afs/session_harness.py",
+          "line": 641,
+          "summary": "This function mutates the live client payload as prompt, turn, and task events arrive."
+        },
+        {
+          "title": "Dynamic system prompt builder",
+          "path": "src/afs/model_prompts.py",
+          "line": 28,
+          "summary": "AFS composes system prompts from base instructions plus the current session context here."
+        }
+      ]
+    },
+    {
+      "id": "agents-and-replay",
+      "title": "Background Agents and Replay",
+      "summary": "Use this path to understand how AFS tracks background agents and reconstructs session history.",
+      "steps": [
+        {
+          "title": "Agent process status",
+          "path": "src/afs/cli/core.py",
+          "line": 462,
+          "summary": "The CLI view of running, failed, and stopped background agents starts here."
+        },
+        {
+          "title": "Session replay",
+          "path": "src/afs/cli/core.py",
+          "line": 1518,
+          "summary": "The replay command bridges the CLI to the event timeline builder."
+        },
+        {
+          "title": "Event timeline builder",
+          "path": "src/afs/event_log.py",
+          "line": 354,
+          "summary": "This collects and summarizes chronological session events."
+        },
+        {
+          "title": "Health snapshot",
+          "path": "src/afs/health/afs_status.py",
+          "line": 47,
+          "summary": "The AFS health summary aggregates context, MCP, maintenance, and supervisor state."
+        }
+      ]
+    },
+    {
+      "id": "editor-surfaces",
+      "title": "Editor and Wrapper Surfaces",
+      "summary": "This walkthrough covers the wrapper and editor integrations that consume the session harness.",
+      "steps": [
+        {
+          "title": "Native client wrapper",
+          "path": "scripts/afs-client-session",
+          "line": 499,
+          "summary": "The shell wrapper launches session hooks and emits prompt and turn lifecycle events."
+        },
+        {
+          "title": "Emacs helper dispatch",
+          "path": "contrib/emacs/afs-emacs.el",
+          "line": 365,
+          "summary": "The Emacs command palette for AFS sessions, replay, and agent views starts here."
+        },
+        {
+          "title": "Emacs prepare-client view",
+          "path": "contrib/emacs/afs-emacs.el",
+          "line": 328,
+          "summary": "This command renders prepared client payloads and prompt artifacts inside Emacs."
+        },
+        {
+          "title": "VS Code turn lifecycle",
+          "path": "extensions/vscode-afs/src/transport/cliClient.ts",
+          "line": 403,
+          "summary": "The VS Code CLI transport begins tracked turns here and threads task events through them."
+        }
+      ]
+    }
+  ]
+}

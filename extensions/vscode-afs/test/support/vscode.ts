@@ -35,6 +35,45 @@ export interface OutputChannel {
   show?(preserveFocus?: boolean): void;
 }
 
+export interface StatusBarItem {
+  text: string;
+  tooltip: string;
+  command?: string;
+   visible?: boolean;
+  show(): void;
+  hide(): void;
+  dispose(): void;
+}
+
+export class ThemeIcon {
+  static readonly Folder = new ThemeIcon("folder");
+  static readonly File = new ThemeIcon("file");
+
+  constructor(public readonly id: string) {}
+}
+
+export const TreeItemCollapsibleState = {
+  None: 0,
+  Collapsed: 1,
+  Expanded: 2,
+};
+
+export class TreeItem {
+  label?: string;
+  collapsibleState?: number;
+  description?: string;
+  tooltip?: string;
+  contextValue?: string;
+  iconPath?: unknown;
+  resourceUri?: unknown;
+  command?: unknown;
+
+  constructor(label?: string, collapsibleState?: number) {
+    this.label = label;
+    this.collapsibleState = collapsibleState;
+  }
+}
+
 type CommandCallback = (...args: unknown[]) => unknown;
 
 const commandRegistry = new Map<string, CommandCallback>();
@@ -53,9 +92,18 @@ let showTextDocumentImpl: (document: unknown) => Promise<unknown> = async (docum
 let withProgressImpl: <T>(options: unknown, task: () => Promise<T>) => Promise<T> =
   async (_options, task) => task();
 let openTextDocumentImpl: (uri: { fsPath: string }) => Promise<unknown> = async (uri) => ({ uri });
+let clipboardText = "";
+let lastStatusBarItem: StatusBarItem | undefined;
+let activeTextEditor: { document: { uri: { fsPath: string } } } | undefined;
+const configurationValues = new Map<string, unknown>();
 
 export const ProgressLocation = {
   Notification: 15,
+};
+
+export const StatusBarAlignment = {
+  Left: 1,
+  Right: 2,
 };
 
 export const Uri = {
@@ -90,17 +138,39 @@ export const workspace = {
       throw new Error("ENOENT");
     },
   },
-  getConfiguration: () => ({
+  getConfiguration: (section?: string) => ({
     get<T>(_section: string, defaultValue: T): T {
-      return defaultValue;
+      const key = section ? `${section}.${_section}` : _section;
+      return (configurationValues.get(key) as T | undefined) ?? defaultValue;
     },
   }),
+  getWorkspaceFolder(uri: { fsPath: string }) {
+    return workspace.workspaceFolders.find((folder) => uri.fsPath.startsWith(folder.uri.fsPath));
+  },
   async openTextDocument(uri: { fsPath: string }): Promise<unknown> {
     return openTextDocumentImpl(uri);
   },
 };
 
 export const window = {
+  activeTextEditor,
+  createStatusBarItem(): StatusBarItem {
+    const item: StatusBarItem = {
+      text: "",
+      tooltip: "",
+      command: undefined,
+      visible: false,
+      show(): void {
+        item.visible = true;
+      },
+      hide(): void {
+        item.visible = false;
+      },
+      dispose(): void {},
+    };
+    lastStatusBarItem = item;
+    return item;
+  },
   createOutputChannel(): OutputChannel {
     return {
       appendLine(): void {},
@@ -137,6 +207,17 @@ export const window = {
   },
 };
 
+export const env = {
+  clipboard: {
+    async writeText(value: string): Promise<void> {
+      clipboardText = value;
+    },
+    async readText(): Promise<string> {
+      return clipboardText;
+    },
+  },
+};
+
 export function __resetTestState(): void {
   commandRegistry.clear();
   workspace.workspaceFolders = [];
@@ -152,6 +233,11 @@ export function __resetTestState(): void {
   showTextDocumentImpl = async (document) => document;
   withProgressImpl = async (_options, task) => task();
   openTextDocumentImpl = async (uri) => ({ uri });
+  clipboardText = "";
+  lastStatusBarItem = undefined;
+  activeTextEditor = undefined;
+  window.activeTextEditor = undefined;
+  configurationValues.clear();
 }
 
 export function __setShowInputBox(
@@ -206,4 +292,17 @@ export function __setOpenTextDocument(
   impl: (uri: { fsPath: string }) => Promise<unknown>,
 ): void {
   openTextDocumentImpl = impl;
+}
+
+export function __getLastStatusBarItem(): StatusBarItem | undefined {
+  return lastStatusBarItem;
+}
+
+export function __setActiveTextEditor(fsPath?: string): void {
+  activeTextEditor = fsPath ? { document: { uri: { fsPath } } } : undefined;
+  window.activeTextEditor = activeTextEditor;
+}
+
+export function __setConfiguration(key: string, value: unknown): void {
+  configurationValues.set(key, value);
 }

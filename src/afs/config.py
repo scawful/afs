@@ -6,9 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-import tomllib
-
 from .schema import AFSConfig
+from .toml_compat import tomllib
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -93,6 +92,10 @@ def _expand_config_paths(config_data: dict[str, Any]) -> None:
         config_data["extensions"]["extension_dirs"] = [
             _expand_path(p) for p in config_data["extensions"]["extension_dirs"]
         ]
+    if "extensions" in config_data and "extension_repo_roots" in config_data["extensions"]:
+        config_data["extensions"]["extension_repo_roots"] = [
+            _expand_path(p) for p in config_data["extensions"]["extension_repo_roots"]
+        ]
 
     for profile_root_key in ("profiles", "profile"):
         profile_root = config_data.get(profile_root_key)
@@ -103,7 +106,7 @@ def _expand_config_paths(config_data: dict[str, Any]) -> None:
                 continue
             if not isinstance(profile_data, dict):
                 continue
-            for key in ("knowledge_mounts", "skill_roots", "model_registries"):
+            for key in ("memory_mounts", "knowledge_mounts", "skill_roots", "model_registries"):
                 if key in profile_data and isinstance(profile_data[key], list):
                     profile_data[key] = [
                         _expand_path(p) for p in profile_data[key] if isinstance(p, (str, Path))
@@ -114,7 +117,7 @@ def _expand_config_paths(config_data: dict[str, Any]) -> None:
             for _name, profile_data in nested_profiles.items():
                 if not isinstance(profile_data, dict):
                     continue
-                for key in ("knowledge_mounts", "skill_roots", "model_registries"):
+                for key in ("memory_mounts", "knowledge_mounts", "skill_roots", "model_registries"):
                     if key in profile_data and isinstance(profile_data[key], list):
                         profile_data[key] = [
                             _expand_path(p) for p in profile_data[key] if isinstance(p, (str, Path))

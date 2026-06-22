@@ -15,6 +15,8 @@ class SkillMetadata:
     triggers: list[str] = field(default_factory=list)
     requires: list[str] = field(default_factory=list)
     profiles: list[str] = field(default_factory=list)
+    enforcement: list[str] = field(default_factory=list)
+    verification: list[str] = field(default_factory=list)
 
 
 def _clean_token(value: str) -> str:
@@ -143,6 +145,12 @@ def parse_skill_metadata(path: Path) -> SkillMetadata:
         triggers=_normalize_list(frontmatter.get("triggers")),
         requires=_normalize_list(frontmatter.get("requires")),
         profiles=_normalize_list(profile_value),
+        enforcement=_normalize_list(frontmatter.get("enforcement")),
+        verification=_normalize_list(
+            frontmatter.get("verification")
+            or frontmatter.get("checks")
+            or frontmatter.get("quality_gates")
+        ),
     )
 
 

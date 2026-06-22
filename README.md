@@ -21,11 +21,27 @@ Use the wrapper script for reliable agent invocation (sets `AFS_ROOT` and `PYTHO
 ## Quick Start
 
 ```bash
+./scripts/afs setup                   # Guided setup wizard
+./scripts/afs guide                   # Friendly workflow menu
 ./scripts/afs init                    # Initialize AFS configuration
 ./scripts/afs context init            # Create .context directory structure
+./scripts/afs status --start-dir "$PWD"  # Show context, mount, and index health
 ./scripts/afs doctor                  # Diagnose and auto-fix issues
 ./scripts/afs health                  # Health check
 ```
+
+Refresh local agent harnesses, MCP setup, copied skills, hooks, and context
+indexes with a dry-run first:
+
+```bash
+./scripts/afs-upgrade-agent-setup --workspace ~/src
+./scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
+```
+
+## Branching
+
+AFS uses a staged integration flow across `features`, `development`, and `main`.
+See `docs/development.md` for PR target and promotion guidance.
 
 ## Core Concepts
 
@@ -33,21 +49,29 @@ Use the wrapper script for reliable agent invocation (sets `AFS_ROOT` and `PYTHO
 
 **Session System** — Token-budgeted context packs, bootstrap summaries, and client harness for Gemini, Claude, and Codex integrations.
 
-**Agent Supervisor** — Background agent lifecycle management with dependency graphs, restart with exponential backoff, mutex groups, and agent-to-agent handoff.
+**Agent Operations** — Optional run records, safe background job queues, and
+handoffs for work that spans turns or harnesses.
 
-**Hivemind** — Inter-agent message bus for coordination, with pub/sub channels and structured message routing.
+**Workflow Assistant** — Context-local people, relationship, review-route,
+approval, and activity records for documents, sheets, tickets, planning, and
+other non-technical workflows.
+
+**Hivemind** — Optional inter-agent message bus for tasks that explicitly need
+cross-agent coordination.
 
 **Memory Consolidation** — Event history rolled up into durable memory entries, with optional LLM-assisted summarization.
 
 **Profiles & Extensions** — Profile-driven context injection via `afs.toml`. Extensions add domain-specific functionality without forking core.
+
+**Context Sources** — Provider-neutral adapters for tasks, tickets, reviews, docs, messages, tests, hooks, and traces. Core AFS owns the normalized records; concrete source connectors live in extensions.
 
 ## Architecture
 
 ```
 src/afs/
 ├── cli/              # 30+ CLI command groups
-├── agents/           # 17 background agents + supervisor
-├── mcp_server.py     # 40+ MCP tools for external clients
+├── agents/           # optional background agents + supervisor
+├── mcp_server.py     # MCP prompts/tools/resources for external clients
 ├── context_index.py  # SQLite-backed context indexing and search
 ├── context_pack.py   # Token-budgeted context packs with caching
 ├── session_*.py      # Session bootstrap, harness, workflows
@@ -68,10 +92,12 @@ src/afs/
 ```bash
 afs context discover                  # Find .context roots
 afs context mount <path>              # Mount a context directory
-afs context status                    # Show mount status and health
+afs status --start-dir "$PWD"         # Show mount status and index health
 afs context query "search term"       # Search the context index
+afs sources list                      # Extension-owned context source providers
+afs sources sync --provider NAME      # Preview provider records into .context/items
 afs context diff                      # Changes since last session
-afs context pack --model gemini       # Token-budgeted context export
+afs session pack --model gemini       # Token-budgeted context export
 ```
 
 ### Agents
@@ -81,7 +107,41 @@ afs agents list                       # Available agents
 afs agents ps                         # Running agents
 afs agents run <name> [--prompt ...]  # Run an agent
 afs agents capabilities               # Agent capability matrix
+afs agent-manifest validate           # Validate harness/skill/MCP manifest
+afs agent-manifest sync --apply       # Copy shared skills and write harness exports
+afs agent-hooks install-shell --apply # Route harness commands through AFS wrappers
+afs agent-hooks install-worker --apply --load  # Run queued jobs automatically
+afs agent-runs start "task"           # Record a replayable agent run
+afs agent-jobs create "task"          # Queue a markdown background job
+afs agent-jobs status                 # Queue, worker, run, and watchdog status
+afs agent-jobs inbox                  # Review completed, failed, stale, or blocked jobs
+afs agent-jobs review <job-id>        # Inspect one job and its linked run record
+afs agent-jobs promote <job-id> --to-handoff  # Save a job review into scratchpad/handoffs
+afs agent-jobs archive <job-id>       # Archive a handled job without deleting it
+afs agent-jobs seed                   # Idempotently queue safe maintenance jobs
+afs agent-jobs work --agent codex --command '...'  # Claim and execute queued jobs
 ```
+
+`session bootstrap` includes manifest, run, and job state; MCP clients can use
+`agent.manifest.show`, `agent.run.*`, and `agent.job.*` directly.
+
+### Work Assistant
+
+```bash
+afs work                              # People/review/approval summary
+afs work people list                  # Known work-scoped people
+afs work reviewers --target-type docs # Suggested reviewers
+afs work approvals list               # Pending external-write approvals
+afs work approvals execute <id> --dry-run
+afs work approvals execute <id> --executor "python3 scripts/afs-work-gws-executor.py"
+afs work activity list                # Recent work-assistant activity
+```
+
+Work-assistant state is native to AFS and backed by
+`.context/global/work_assistant.sqlite3`. It creates approval records for
+external writes instead of editing shared docs, sheets, tickets, or messages
+directly. Approved actions can be handed to explicit local connector commands
+with `afs work approvals execute`.
 
 ### Session
 
@@ -125,7 +185,9 @@ afs services status --system          # Service status
 
 ## MCP Server
 
-AFS exposes 40+ tools via MCP for use by Gemini, Claude, Codex, and other MCP clients.
+AFS exposes a small recommended MCP surface for normal agent work, with broader
+agent, hivemind, events, embeddings, and training tools available for harnesses
+that explicitly need them.
 
 ```bash
 afs mcp serve                         # Start MCP server
@@ -133,7 +195,12 @@ afs mcp serve                         # Start MCP server
 .venv/bin/python -m afs.mcp_server
 ```
 
-**Tool categories:** `fs.*`, `context.*`, `session.*`, `memory.*`, `handoff.*`, `agent.*`, `hivemind.*`, `task.*`, `review.*`, `events.*`
+Recommended default tools/prompts: `afs.session.bootstrap`, `context.status`,
+`context.query`, `context.read`, `context.write`, `context.list`,
+`context.diff`, `context.index.rebuild`, and `handoff.create`.
+
+Optional categories: `agent.*`, `hivemind.*`, `task.*`, `review.*`,
+`events.*`, `embeddings.*`, and `training.*`.
 
 See [docs/MCP_SERVER.md](docs/MCP_SERVER.md) for configuration and tool reference.
 
@@ -144,7 +211,7 @@ See [docs/MCP_SERVER.md](docs/MCP_SERVER.md) for configuration and tool referenc
 | `agent-supervisor` | Lifecycle management, dependency graph, restart with backoff |
 | `context-warm` | Background context warming and embedding indexing |
 | `mission-runner` | TOML mission definitions with OODA execution phases |
-| `journal-agent` | Daily templates, stale-TODO alerting, carry-forward |
+| `journal-agent` | Draft hybrid weekly reviews from thoughts and active tasks |
 | `workspace-analyst` | Codebase health, git drift, dependency scanning |
 | `gemini-workspace-brief` | Gemini-powered workspace briefings |
 | `dashboard-export` | Data export for status bar and dashboard surfaces |
@@ -158,7 +225,18 @@ See [docs/MCP_SERVER.md](docs/MCP_SERVER.md) for configuration and tool referenc
 ## Gemini Integration
 
 ```bash
-afs gemini setup                      # Register MCP for Gemini CLI
+afs antigravity setup --scope project    # Preview Antigravity CLI MCP setup
+afs gemini setup                         # Gemini CLI compatibility/API helper
+afs antigravity models --json            # Parse the installed agy model list
+```
+
+Gemini CLI compatibility is retained for API-key/enterprise workflows, but the
+individual/free/Pro/Ultra public path moved to Antigravity CLI (`agy`) on
+2026-06-18. AFS does not auto-install `agy`; run `afs antigravity status` or
+`afs antigravity setup --json` to inspect the local state. Current `agy` builds
+use `~/.gemini/config/mcp_config.json` as the migrated MCP config path.
+
+```
 afs gemini status                     # Check API key, SDK, embeddings
 afs gemini context "search query"     # Generate context for Gemini session
 afs gemini context --include-content  # With full file content
@@ -207,7 +285,9 @@ Domain-specific functionality (model training, persona configurations, deploymen
 
 - [docs/index.md](docs/index.md) — Documentation index
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — System architecture
+- [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md) — Guided setup, shell helpers, and approachable onboarding
 - [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) — Full CLI reference
+- [docs/AGENT_INTEGRATION_UPGRADE.md](docs/AGENT_INTEGRATION_UPGRADE.md) — Upgrade agent harnesses, MCP setup, hooks, and copied skills
 - [docs/AGENT_SURFACES.md](docs/AGENT_SURFACES.md) — Agent system design
 - [docs/MCP_SERVER.md](docs/MCP_SERVER.md) — MCP server setup and tools
 - [docs/PROFILES.md](docs/PROFILES.md) — Profile system

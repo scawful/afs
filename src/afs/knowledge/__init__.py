@@ -21,7 +21,7 @@ __all__ = [
 ]
 
 try:  # pragma: no cover - compatibility path
-    from afs_ext.knowledge.alttp_addresses import (
+    from afs_scawful.knowledge.alttp_addresses import (
         ALTTP_ADDRESSES,
         INVENTORY_ADDRESSES,
         LINK_STATE_ADDRESSES,
@@ -34,7 +34,7 @@ try:  # pragma: no cover - compatibility path
         get_addresses_by_category,
         lookup_by_address,
     )
-    from afs_ext.knowledge.entity_extractor import (
+    from afs_scawful.knowledge.entity_extractor import (
         EntityExtractor,
         ExtractedEntity,
         ExtractionResult,

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [ "$#" -lt 3 ]; then
-  echo "usage: afs-client-session <client-label> <default-command> <env-var> [--bootstrap-only] [--context-query <text>] [--session-task <text>] [--skills-prompt <text>] [--session-model <model>] [--workflow <name>] [--tool-profile <name>] [--pack-mode <name>] [--session-pack|--no-session-pack] [--skills-match|--no-skills-match] [--monitor-agents|--no-monitor-agents] [--wait-for-agents|--no-wait-for-agents] [--prompt <text>] [--prompt-file <path>] [--turn-id <id>] [--] [client-args...]" >&2
+  echo "usage: afs-client-session <client-label> <default-command> <env-var> [--bootstrap-only] [--context-query <text>] [--session-task <text>] [--skills-prompt <text>] [--session-model <model>] [--workflow <name>] [--tool-profile <name>] [--pack-mode <name>] [--session-pack|--no-session-pack] [--skills-match|--no-skills-match] [--monitor-agents|--no-monitor-agents] [--seed-jobs|--no-seed-jobs] [--seed-profile <name>] [--seed-cadence <name>] [--wait-for-agents|--no-wait-for-agents] [--prompt <text>] [--prompt-file <path>] [--turn-id <id>] [--] [client-args...]" >&2
   exit 2
 fi
 
@@ -23,6 +23,9 @@ TOOL_PROFILE_OVERRIDE=""
 PACK_MODE_OVERRIDE=""
 SESSION_PACK_OVERRIDE=""
 SKILLS_MATCH_OVERRIDE=""
+SEED_JOBS_OVERRIDE=""
+SEED_PROFILE_OVERRIDE=""
+SEED_CADENCE_OVERRIDE=""
 PROMPT_OVERRIDE=""
 PROMPT_FILE_OVERRIDE=""
 TURN_ID_OVERRIDE=""
@@ -76,6 +79,22 @@ while [ "$#" -gt 0 ]; do
       SKILLS_MATCH_OVERRIDE=0
       shift
       ;;
+    --seed-jobs)
+      SEED_JOBS_OVERRIDE=1
+      shift
+      ;;
+    --no-seed-jobs)
+      SEED_JOBS_OVERRIDE=0
+      shift
+      ;;
+    --seed-profile)
+      SEED_PROFILE_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --seed-cadence)
+      SEED_CADENCE_OVERRIDE="${2:-}"
+      shift 2
+      ;;
     --monitor-agents)
       MONITOR_OVERRIDE=1
       shift
@@ -120,7 +139,12 @@ AFS_CLI="${AFS_ROOT}/scripts/afs"
 
 export AFS_ROOT
 export AFS_CLI
-export AFS_SESSION_EVENT_BIN="${AFS_SESSION_EVENT_BIN:-${AFS_ROOT}/scripts/afs-session-notify}"
+DEFAULT_AFS_SESSION_EVENT_BIN="${AFS_ROOT}/scripts/afs-session-notify"
+AFS_SESSION_EVENT_BIN="${AFS_SESSION_EVENT_BIN:-${DEFAULT_AFS_SESSION_EVENT_BIN}}"
+if [ ! -x "${AFS_SESSION_EVENT_BIN}" ] && [ -x "${DEFAULT_AFS_SESSION_EVENT_BIN}" ]; then
+  AFS_SESSION_EVENT_BIN="${DEFAULT_AFS_SESSION_EVENT_BIN}"
+fi
+export AFS_SESSION_EVENT_BIN
 export AFS_SESSION_CLIENT="${CLIENT_LABEL}"
 if [ -z "${AFS_SESSION_ID:-}" ]; then
   export AFS_SESSION_ID="$(
@@ -162,9 +186,9 @@ if [ -n "${DEFAULT_CLIENT_ROOTS}" ] && [ -z "${AFS_MCP_ALLOWED_ROOTS:-}" ]; then
 fi
 
 CLIENT_WAIT_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_WAIT_FOR_AGENTS"
-WAIT_FOR_AGENTS="${WAIT_OVERRIDE:-${!CLIENT_WAIT_ENV_VAR:-${AFS_CLIENT_WAIT_FOR_AGENTS:-1}}}"
+WAIT_FOR_AGENTS="${WAIT_OVERRIDE:-${!CLIENT_WAIT_ENV_VAR:-${AFS_CLIENT_WAIT_FOR_AGENTS:-0}}}"
 CLIENT_MONITOR_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_MONITOR_AGENTS"
-MONITOR_AGENTS="${MONITOR_OVERRIDE:-${!CLIENT_MONITOR_ENV_VAR:-${AFS_CLIENT_MONITOR_AGENTS:-1}}}"
+MONITOR_AGENTS="${MONITOR_OVERRIDE:-${!CLIENT_MONITOR_ENV_VAR:-${AFS_CLIENT_MONITOR_AGENTS:-0}}}"
 CLIENT_NATIVE_PROMPT_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_NATIVE_PROMPT"
 NATIVE_PROMPT_ENABLED="${!CLIENT_NATIVE_PROMPT_ENV_VAR:-${AFS_CLIENT_NATIVE_PROMPT:-1}}"
 CLIENT_WAIT_TIMEOUT_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_WAIT_TIMEOUT_SECONDS"
@@ -172,11 +196,27 @@ WAIT_TIMEOUT_SECONDS="${AFS_CLIENT_WAIT_TIMEOUT_SECONDS:-30}"
 if [ -n "${!CLIENT_WAIT_TIMEOUT_ENV_VAR:-}" ]; then
   WAIT_TIMEOUT_SECONDS="${!CLIENT_WAIT_TIMEOUT_ENV_VAR}"
 fi
+CLIENT_VERIFICATION_MODE_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SESSION_VERIFICATION_MODE"
+SESSION_VERIFICATION_MODE="${!CLIENT_VERIFICATION_MODE_ENV_VAR:-${AFS_CLIENT_SESSION_VERIFICATION_MODE:-warn}}"
+CLIENT_RECORD_RUNS_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_RECORD_RUNS"
+RECORD_AGENT_RUNS="${!CLIENT_RECORD_RUNS_ENV_VAR:-${AFS_CLIENT_RECORD_RUNS:-1}}"
+CLIENT_SEED_JOBS_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SEED_JOBS"
+SEED_AGENT_JOBS="${SEED_JOBS_OVERRIDE:-${!CLIENT_SEED_JOBS_ENV_VAR:-${AFS_CLIENT_SEED_JOBS:-0}}}"
+CLIENT_SEED_PROFILE_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SEED_PROFILE"
+SEED_AGENT_JOB_PROFILE="${SEED_PROFILE_OVERRIDE:-${!CLIENT_SEED_PROFILE_ENV_VAR:-${AFS_CLIENT_SEED_PROFILE:-repo-maintenance}}}"
+CLIENT_SEED_CADENCE_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SEED_CADENCE"
+SEED_AGENT_JOB_CADENCE="${SEED_CADENCE_OVERRIDE:-${!CLIENT_SEED_CADENCE_ENV_VAR:-${AFS_CLIENT_SEED_CADENCE:-daily}}}"
 
 DEFAULT_SESSION_MODEL="generic"
 case "${CLIENT_LABEL}" in
   gemini|claude|codex)
     DEFAULT_SESSION_MODEL="${CLIENT_LABEL}"
+    ;;
+  antigravity|agy)
+    DEFAULT_SESSION_MODEL="gemini"
+    ;;
+  hcode|opencode)
+    DEFAULT_SESSION_MODEL="hcode"
     ;;
 esac
 CLIENT_SESSION_QUERY_ENV_VAR="AFS_${CLIENT_ENV_PREFIX}_SESSION_QUERY"
@@ -213,6 +253,36 @@ if [ -n "${SESSION_PROMPT_FILE}" ]; then
   SESSION_PROMPT_TEXT="$(cat "${SESSION_PROMPT_FILE}")"
 elif [ -n "${SESSION_PROMPT}" ]; then
   SESSION_PROMPT_TEXT="${SESSION_PROMPT}"
+fi
+
+workflow_default_tool_profile() {
+  case "$1" in
+    scan_fast|review_deep)
+      printf '%s\n' "context_readonly"
+      ;;
+    edit_fast|root_cause_deep)
+      printf '%s\n' "edit_and_verify"
+      ;;
+    *)
+      printf '%s\n' "default"
+      ;;
+  esac
+}
+
+case "${SESSION_TOOL_PROFILE}" in
+  context_readonly|context_repair|edit_and_verify|handoff_only)
+    EFFECTIVE_TOOL_PROFILE="${SESSION_TOOL_PROFILE}"
+    ;;
+  default|"")
+    EFFECTIVE_TOOL_PROFILE="$(workflow_default_tool_profile "${SESSION_WORKFLOW}")"
+    ;;
+  *)
+    EFFECTIVE_TOOL_PROFILE="$(workflow_default_tool_profile "${SESSION_WORKFLOW}")"
+    ;;
+esac
+export AFS_SESSION_EFFECTIVE_TOOL_PROFILE="${EFFECTIVE_TOOL_PROFILE}"
+if [ -z "${AFS_TOOL_PROFILE:-}" ] && [ "${EFFECTIVE_TOOL_PROFILE}" != "default" ]; then
+  export AFS_TOOL_PROFILE="${EFFECTIVE_TOOL_PROFILE}"
 fi
 
 if [ -z "${SESSION_QUERY}" ] && [ -n "${SESSION_PROMPT_TEXT}" ]; then
@@ -274,7 +344,7 @@ SESSION_PREPARE_ARGS+=(--json)
 SESSION_PREPARE_JSON_PAYLOAD="$("${AFS_CLI}" "${SESSION_PREPARE_ARGS[@]}" 2>/dev/null || true)"
 if [ -n "${SESSION_PREPARE_JSON_PAYLOAD}" ]; then
   readarray -t bootstrap_fields < <(
-    python3 - "${SESSION_PREPARE_JSON_PAYLOAD}" <<'PY'
+    python3 -c '
 import json
 import sys
 
@@ -293,7 +363,22 @@ print(skills.get("json", ""))
 print(prompt.get("json", ""))
 print(prompt.get("text", ""))
 print(artifacts.get("json", ""))
-PY
+cli_hints = payload.get("cli_hints") or {}
+print(cli_hints.get("query_shortcut", ""))
+print(cli_hints.get("query_canonical", ""))
+print(cli_hints.get("index_rebuild", ""))
+print(cli_hints.get("agent_jobs_inbox", ""))
+print(cli_hints.get("work_summary", ""))
+print(cli_hints.get("work_approvals", ""))
+print(cli_hints.get("work_communication", ""))
+print(cli_hints.get("verify_plan", ""))
+print(cli_hints.get("verify_run", ""))
+structured = payload.get("structured_guidance") or {}
+print(structured.get("recommended_schema", ""))
+print(structured.get("followup_schema", ""))
+repair_loop = structured.get("repair_loop") or []
+print(" | ".join(str(item) for item in repair_loop if str(item).strip()))
+' "${SESSION_PREPARE_JSON_PAYLOAD}"
   )
   export AFS_SESSION_BOOTSTRAP_JSON="${bootstrap_fields[0]:-}"
   export AFS_SESSION_BOOTSTRAP_MARKDOWN="${bootstrap_fields[1]:-}"
@@ -304,6 +389,18 @@ PY
   export AFS_SESSION_SYSTEM_PROMPT_JSON="${bootstrap_fields[6]:-}"
   export AFS_SESSION_SYSTEM_PROMPT_TEXT="${bootstrap_fields[7]:-}"
   export AFS_SESSION_CLIENT_PAYLOAD_JSON="${bootstrap_fields[8]:-}"
+  export AFS_SESSION_QUERY_HINT="${bootstrap_fields[9]:-}"
+  export AFS_SESSION_CONTEXT_QUERY_HINT="${bootstrap_fields[10]:-}"
+  export AFS_SESSION_INDEX_REBUILD_HINT="${bootstrap_fields[11]:-}"
+  export AFS_SESSION_AGENT_JOBS_INBOX_HINT="${bootstrap_fields[12]:-}"
+  export AFS_SESSION_WORK_HINT="${bootstrap_fields[13]:-}"
+  export AFS_SESSION_WORK_APPROVALS_HINT="${bootstrap_fields[14]:-}"
+  export AFS_SESSION_WORK_COMMUNICATION_HINT="${bootstrap_fields[15]:-}"
+  export AFS_SESSION_VERIFY_PLAN_HINT="${bootstrap_fields[16]:-}"
+  export AFS_SESSION_VERIFY_RUN_HINT="${bootstrap_fields[17]:-}"
+  export AFS_SESSION_RECOMMENDED_SCHEMA="${bootstrap_fields[18]:-}"
+  export AFS_SESSION_FOLLOWUP_SCHEMA="${bootstrap_fields[19]:-}"
+  export AFS_SESSION_REPAIR_LOOP_HINT="${bootstrap_fields[20]:-}"
 fi
 
 if [ -n "${AFS_SESSION_BOOTSTRAP_MARKDOWN:-}" ]; then
@@ -320,6 +417,39 @@ if [ -n "${AFS_SESSION_SYSTEM_PROMPT_TEXT:-}" ]; then
 fi
 if [ -n "${AFS_SESSION_CLIENT_PAYLOAD_JSON:-}" ]; then
   echo "AFS session payload (${CLIENT_LABEL}): ${AFS_SESSION_CLIENT_PAYLOAD_JSON}" >&2
+fi
+if [ -n "${AFS_SESSION_AGENT_JOBS_INBOX_HINT:-}" ]; then
+  echo "AFS agent jobs inbox (${CLIENT_LABEL}): ${AFS_SESSION_AGENT_JOBS_INBOX_HINT}" >&2
+fi
+if [ -n "${AFS_SESSION_WORK_HINT:-}" ]; then
+  echo "AFS work hint (${CLIENT_LABEL}): ${AFS_SESSION_WORK_HINT}" >&2
+fi
+if [ -n "${AFS_SESSION_WORK_APPROVALS_HINT:-}" ]; then
+  echo "AFS work approvals (${CLIENT_LABEL}): ${AFS_SESSION_WORK_APPROVALS_HINT}" >&2
+fi
+if [ -n "${AFS_SESSION_WORK_COMMUNICATION_HINT:-}" ]; then
+  echo "AFS work communication (${CLIENT_LABEL}): ${AFS_SESSION_WORK_COMMUNICATION_HINT}" >&2
+fi
+if [ -n "${AFS_SESSION_QUERY_HINT:-}" ]; then
+  echo "AFS query hint (${CLIENT_LABEL}): ${AFS_SESSION_QUERY_HINT}" >&2
+fi
+if [ -n "${AFS_SESSION_CONTEXT_QUERY_HINT:-}" ]; then
+  echo "AFS canonical query hint (${CLIENT_LABEL}): ${AFS_SESSION_CONTEXT_QUERY_HINT}" >&2
+fi
+if [ -n "${AFS_SESSION_INDEX_REBUILD_HINT:-}" ]; then
+  echo "AFS index hint (${CLIENT_LABEL}): ${AFS_SESSION_INDEX_REBUILD_HINT}" >&2
+fi
+if [ -n "${AFS_SESSION_VERIFY_PLAN_HINT:-}" ]; then
+  echo "AFS verify plan hint (${CLIENT_LABEL}): ${AFS_SESSION_VERIFY_PLAN_HINT}" >&2
+fi
+if [ -n "${AFS_SESSION_VERIFY_RUN_HINT:-}" ]; then
+  echo "AFS verify run hint (${CLIENT_LABEL}): ${AFS_SESSION_VERIFY_RUN_HINT}" >&2
+fi
+if [ -n "${AFS_SESSION_RECOMMENDED_SCHEMA:-}" ]; then
+  echo "AFS structured schema (${CLIENT_LABEL}): ${AFS_SESSION_RECOMMENDED_SCHEMA}" >&2
+fi
+if [ -n "${AFS_SESSION_REPAIR_LOOP_HINT:-}" ]; then
+  echo "AFS repair loop (${CLIENT_LABEL}): ${AFS_SESSION_REPAIR_LOOP_HINT}" >&2
 fi
 if [ -n "${AFS_SESSION_ID:-}" ]; then
   echo "AFS session (${CLIENT_LABEL}): ${AFS_SESSION_ID}" >&2
@@ -421,6 +551,72 @@ apply_native_prompt_handoff() {
   esac
 }
 
+start_agent_run_record() {
+  if [ "${RECORD_AGENT_RUNS}" = "0" ]; then
+    return 0
+  fi
+  local task_text="${SESSION_TASK:-${SESSION_QUERY:-client session: ${CLIENT_LABEL}}}"
+  local start_args=(
+    agent-runs start "${task_text}"
+    --harness "${CLIENT_LABEL}"
+    --workspace "${PWD}"
+  )
+  if [ -n "${AFS_ACTIVE_CONTEXT_ROOT:-}" ]; then
+    start_args+=(--context-root "${AFS_ACTIVE_CONTEXT_ROOT}")
+  fi
+  if [ -n "${SESSION_PROMPT_FILE:-}" ]; then
+    start_args+=(--prompt-file "${SESSION_PROMPT_FILE}")
+  elif [ -n "${SESSION_PROMPT_TEXT:-}" ]; then
+    start_args+=(--prompt "${SESSION_PROMPT_TEXT}")
+  fi
+  AFS_AGENT_RUN_ID="$("${AFS_CLI}" "${start_args[@]}" 2>/dev/null || true)"
+  AFS_AGENT_RUN_ID="${AFS_AGENT_RUN_ID%%$'\n'*}"
+  if [ -n "${AFS_AGENT_RUN_ID}" ]; then
+    export AFS_AGENT_RUN_ID
+    echo "AFS agent run (${CLIENT_LABEL}): ${AFS_AGENT_RUN_ID}" >&2
+  fi
+}
+
+seed_agent_jobs() {
+  if [ "${SEED_AGENT_JOBS}" = "0" ]; then
+    return 0
+  fi
+  local seed_args=(
+    agent-jobs seed
+    --path "${PWD}"
+    --profile "${SEED_AGENT_JOB_PROFILE}"
+    --cadence "${SEED_AGENT_JOB_CADENCE}"
+    --created-by "afs-client-session:${CLIENT_LABEL}"
+    --quiet
+  )
+  if [ -n "${AFS_ACTIVE_CONTEXT_ROOT:-}" ]; then
+    seed_args+=(--context-root "${AFS_ACTIVE_CONTEXT_ROOT}")
+  fi
+  "${AFS_CLI}" "${seed_args[@]}" >&2 || true
+}
+
+finish_agent_run_record() {
+  local run_status="$1"
+  local summary="$2"
+  if [ -z "${AFS_AGENT_RUN_ID:-}" ]; then
+    return 0
+  fi
+  local command_text
+  printf -v command_text '%q ' "${CLIENT_COMMAND}" "${CLIENT_EXTRA_ARGS[@]}" "${CLIENT_ARGS[@]}"
+  local finish_args=(
+    agent-runs finish "${AFS_AGENT_RUN_ID}"
+    --status "${run_status}"
+    --summary "${summary}"
+  )
+  if [ -n "${AFS_ACTIVE_CONTEXT_ROOT:-}" ]; then
+    finish_args+=(--context-root "${AFS_ACTIVE_CONTEXT_ROOT}")
+  fi
+  if [ -n "${command_text}" ]; then
+    finish_args+=(--command "${command_text% }")
+  fi
+  "${AFS_CLI}" "${finish_args[@]}" >&2 || true
+}
+
 MONITOR_PID=""
 cleanup_monitor() {
   if [ -n "${MONITOR_PID:-}" ]; then
@@ -481,6 +677,7 @@ fi
 trap cleanup_monitor EXIT
 
 run_session_hook session_start
+seed_agent_jobs
 
 if [ -n "${SESSION_PROMPT}" ] || [ -n "${SESSION_PROMPT_FILE}" ]; then
   prompt_event_args=()
@@ -500,6 +697,7 @@ if [ -n "${AFS_SESSION_DEFAULT_TURN_ID:-}" ]; then
 fi
 
 apply_native_prompt_handoff
+start_agent_run_record
 
 set +e
 "${CLIENT_COMMAND}" "${CLIENT_EXTRA_ARGS[@]}" "${CLIENT_ARGS[@]}"
@@ -521,6 +719,20 @@ if [ "${WAIT_FOR_AGENTS}" != "0" ] && [ -n "${AFS_SESSION_ID:-}" ]; then
   "${AFS_CLI}" agents wait --all --session-id "${AFS_SESSION_ID}" --timeout "${WAIT_TIMEOUT_SECONDS}" >&2 || true
 fi
 
-run_session_hook session_end --exit-code "${CLIENT_STATUS}" --reason client_exit || true
+SESSION_HOOK_STATUS=0
+run_session_hook session_end \
+  --verification-mode "${SESSION_VERIFICATION_MODE}" \
+  --exit-code "${CLIENT_STATUS}" \
+  --reason client_exit || SESSION_HOOK_STATUS=$?
+
+AGENT_RUN_FINAL_STATUS="done"
+if [ "${CLIENT_STATUS}" -ne 0 ] || { [ "${SESSION_VERIFICATION_MODE}" = "error" ] && [ "${SESSION_HOOK_STATUS}" -ne 0 ]; }; then
+  AGENT_RUN_FINAL_STATUS="failed"
+fi
+finish_agent_run_record "${AGENT_RUN_FINAL_STATUS}" "client_exit status=${CLIENT_STATUS} verification_hook=${SESSION_HOOK_STATUS}"
+
+if [ "${CLIENT_STATUS}" -eq 0 ] && [ "${SESSION_VERIFICATION_MODE}" = "error" ] && [ "${SESSION_HOOK_STATUS}" -ne 0 ]; then
+  exit "${SESSION_HOOK_STATUS}"
+fi
 
 exit "${CLIENT_STATUS}"

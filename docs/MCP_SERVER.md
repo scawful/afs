@@ -2,21 +2,27 @@
 
 AFS provides a lightweight stdio MCP server for context operations.
 
-For Gemini CLI, prefer the MCP server from the repo or project root you want to
+Work-assistant state for people, project relationships, review routes,
+approvals, and activity is native AFS state. Keep MCP thin: do not expose full
+people, docs, sheets, ticket, or permission administration through the default
+server. External writes should flow through an approved AFS work request and
+one explicit connector executor command.
+
+For Antigravity CLI and Gemini CLI compatibility, prefer the MCP server from the repo or project root you want to
 work in. That keeps repo-local `context.init` available while preserving the
 allowed-root guardrails on all file and context operations.
 
 ## Run
 
 ```bash
-~/src/lab/afs/scripts/afs mcp serve
+<afs-root>/scripts/afs mcp serve
 # or, from an environment where `afs` is installed
 afs mcp serve
 # or
 python3 -m afs.mcp_server
 ```
 
-## Gemini CLI Registration
+## Antigravity and Gemini CLI Registration
 
 Preferred — use the built-in setup command:
 
@@ -31,14 +37,17 @@ entry and preserves the repo runtime env (`AFS_ROOT`, `AFS_VENV`, `PYTHONPATH`,
 and `AFS_PREFER_REPO_CONFIG=1`) so Gemini uses the same import/config path as
 the rest of the AFS toolchain.
 
-Use `--scope project` when you want Gemini CLI to keep MCP registration inside
-the current repo at `./.gemini/settings.json`. `afs gemini status` detects both
-user-level and project-level Gemini configs.
+Use `afs antigravity setup --scope project` for the public `agy` CLI path. New
+`agy` builds use `~/.gemini/config/mcp_config.json` for migrated MCP config, and
+AFS detects the older Antigravity CLI/IDE paths as compatibility fallbacks. Use
+`--scope project` when you want the compatibility Gemini CLI setup to keep MCP
+registration inside the current repo at `./.gemini/settings.json`.
+`afs gemini status` detects both user-level and project-level Gemini configs.
 
 Manual alternative:
 
 ```bash
-gemini mcp add afs $AFS_ROOT/scripts/afs mcp serve
+gemini mcp add afs <afs-root>/scripts/afs mcp serve
 ```
 
 If Gemini is running inside an environment where `afs` is already installed,
@@ -89,9 +98,10 @@ been the most reliable path in practice.
 }
 ```
 
-For the bundled VS Code extension, `AFS: Register MCP Server` now checks the
-existing Antigravity context-root candidates before falling back to
-workspace `.cursor/mcp.json`. If your fork stores the raw config elsewhere, set
+For the bundled VS Code extension, `AFS: Register MCP Server` now checks
+workspace `.cursor`, `.vscode`, and `.antigravity` MCP configs plus existing
+Antigravity context-root candidates before falling back to workspace
+`.cursor/mcp.json`. If your fork stores the raw config elsewhere, set
 `afs.mcp.configPath` explicitly in editor settings and rerun the command.
 
 AFS can write the user-level Claude config automatically:
@@ -163,6 +173,33 @@ In Antigravity, open `MCP Servers -> Manage MCP Servers -> View raw config`, the
 
 ## Tools
 
+Default `tools/list` is intentionally tiny. It exposes only the core context
+bridge; everything else should come from prompts, CLI hints, or an explicit
+full-catalog/debug launch:
+
+- `context.status`
+- `context.query`
+- `context.read`
+- `context.write`
+- `context.list`
+
+`afs.session.bootstrap`, `afs.session.pack`, and `afs.scratchpad.review` remain
+available as prompts from `prompts/list`, not as tools. Work preflight,
+approvals, repair, handoff, and verification should normally route through the
+AFS CLI/framework hints rather than the default MCP tool catalog. For debugging,
+migration, or a client that really needs every registered tool, start the MCP
+server with the full catalog:
+
+```bash
+<afs-root>/scripts/afs mcp serve --tool-catalog full
+# or:
+AFS_MCP_TOOL_CATALOG=full <afs-root>/scripts/afs mcp serve
+```
+
+`AFS_ALLOWED_TOOLS` and `AFS_TOOL_PROFILE` are still stricter permission
+filters. They narrow both `tools/list` and `tools/call`, even when the catalog
+mode is `full`.
+
 Preferred agent-facing file operations:
 
 - `context.read`
@@ -178,16 +215,19 @@ Legacy compatibility aliases:
 - `fs.delete`
 - `fs.move`
 - `fs.list`
+
+Optional tools for explicit workflows:
+
 - `context.discover`
 - `context.init`
 - `context.mount`
 - `context.unmount`
-- `context.index.rebuild`
-- `context.query`
-- `context.diff`
-- `context.status`
 - `context.repair`
-- `session.pack`
+- `work.communication.list`
+- `work.communication.add`
+- `work.communication.guide`
+- `work.approvals.show`
+- `work.approvals.request`
 - `agent.spawn`
 - `agent.ps`
 - `agent.stop`
@@ -199,7 +239,6 @@ Legacy compatibility aliases:
 - `hivemind.subscribe`
 - `hivemind.unsubscribe`
 - `hivemind.reap`
-- `handoff.create`
 - `handoff.read`
 - `handoff.list`
 - `embeddings.index`
@@ -207,11 +246,22 @@ Legacy compatibility aliases:
 
 `context.query` uses a SQLite index with FTS ranking when available, and falls
 back to `LIKE` matching if FTS is unavailable on the host SQLite build.
+`context.query` and the `context.*`/`fs.*` file tools enforce configured
+`never_index`/`never_export` sensitivity rules before touching or exporting
+matching paths or file contents.
 `context.write`/`fs.write`, `context.delete`/`fs.delete`, and
 `context.move`/`fs.move` attempt incremental index sync so query results stay
 fresh without a full rebuild. With `auto_index=true` (default),
 `context.query` also auto-refreshes when it detects stale path/content metadata
 via mount fingerprints, including external renames that keep file counts stable.
+
+Work-context MCP tools stay deliberately narrow. `work.communication.preflight`
+combines stored tone/style evidence, optional opt-in personal context, pending
+approvals, and the approval rule for work writing. `work.communication.guide`
+remains available as the smaller style-only summary. `work.approvals.request`
+creates a local permission request for a drafted external write; it does not
+approve or execute the write. Approval and connector execution still happen
+through the explicit `afs work approvals ...` CLI flow.
 
 Gemini-facing MCP prompts:
 
@@ -233,15 +283,21 @@ Gemini-facing MCP resources:
 - `afs://context/<path>/index`
 
 `afs.session.bootstrap` is the recommended first call in a new session. It
-packages health, drift, scratchpad notes, task queue state, recent hivemind
-messages, and the latest durable memory summary into one startup packet.
+packages health, cheap codebase orientation, drift, scratchpad notes, task
+queue state, recent hivemind messages, and the latest durable memory summary
+into one startup packet.
+
+`afs.context.overview` now includes both mount structure and a cheap codebase
+summary. When callers pass `path`/`project_path`, it can also summarize a raw
+project tree before `.context` exists yet.
 
 `session.pack` / `afs.session.pack` is the explicit follow-on surface for
 model-specific working context. It builds a token-budgeted pack for Gemini,
-Claude, Codex, or generic clients, respects `never_export` sensitivity rules
-when including indexed content, and reuses the stored pack artifact on repeated
-calls when the bootstrap snapshot and pack inputs have not changed. The prompt
-and tool forms also accept optional `task`, `workflow`, and `tool_profile`
+Claude, Codex, or generic clients, respects `never_index`/`never_export`
+sensitivity rules when including indexed content, applies `never_embed` to
+embedding hits, and reuses the stored pack artifact on repeated calls when the
+bootstrap snapshot, pack inputs, and sensitivity rules have not changed. The
+prompt and tool forms also accept optional `task`, `workflow`, and `tool_profile`
 arguments so callers can encode a short execution contract and put the explicit
 task at the end of the rendered pack. Returned pack JSON includes
 `cache.prefix_hash` for stable-prefix cache experiments in adapters. `pack_mode`
@@ -249,7 +305,9 @@ supports `focused`, `retrieval`, and `full_slice` shaping for query-first vs
 broader long-context packs. The `execution_profile` block now also carries a
 prompt-only loop policy plus retry guidance so the host CLI keeps session
 control while AFS still suggests narrower retries, schema-bound reruns, or
-model escalation paths.
+model escalation paths. Guidance is rendered once as fixed pack overhead, not
+again as a selectable section, so query/embedding hits can displace generic
+session boilerplate in tight budgets.
 
 `afs://schemas/<name>` exposes compact response contracts for structured agent
 workflows. Built-in names currently include:
@@ -272,10 +330,11 @@ contract each time.
 
 For noisy command output, `operator.digest` provides a small compression step
 before the text goes back into model context. It accepts raw `text` plus an
-optional `kind` hint (`auto`, `pytest`, `traceback`, `grep`, `diffstat`, or
-`generic`) and returns both structured fields and a compact `digest_text`
-summary. This is intended for Gemini-style sessions where raw terminal output
-often costs more context than it is worth.
+optional `kind` hint (`auto`, `pytest`, `traceback`, `grep`, `diffstat`,
+`diagnostic`, or `generic`) and returns both structured fields and a compact
+`digest_text` summary. `diagnostic` is the compiler/linter family for `tsc`,
+ESLint, Ruff, and mypy-style output. This is intended for Gemini-style
+sessions where raw terminal output often costs more context than it is worth.
 
 Index behavior can be tuned in `afs.toml`:
 
@@ -413,12 +472,12 @@ rebuilds the index.
 Gemini background brief surfaces:
 
 ```bash
-~/src/lab/afs/scripts/afs agents run gemini-workspace-brief --stdout
-~/src/lab/afs/scripts/afs agents ps --all
-~/src/lab/afs/scripts/afs services start gemini-workspace-brief
-~/src/lab/afs/scripts/afs services start agent-supervisor
-~/src/lab/afs/scripts/afs services start context-warm
-~/src/lab/afs/scripts/afs services start context-watch
+<afs-root>/scripts/afs agents run gemini-workspace-brief --stdout
+<afs-root>/scripts/afs agents ps --all
+<afs-root>/scripts/afs services start gemini-workspace-brief
+<afs-root>/scripts/afs services start agent-supervisor
+<afs-root>/scripts/afs services start context-warm
+<afs-root>/scripts/afs services start context-watch
 ```
 
 The brief agent requires `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
@@ -426,9 +485,9 @@ The brief agent requires `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
 For interactive clients, prefer the launcher wrappers:
 
 ```bash
-~/src/lab/afs/scripts/afs-gemini
-~/src/lab/afs/scripts/afs-claude
-~/src/lab/afs/scripts/afs-codex
+<afs-root>/scripts/afs-gemini
+<afs-root>/scripts/afs-claude
+<afs-root>/scripts/afs-codex
 ```
 
 They find the nearest `afs.toml`, refresh the session bootstrap artifact, and
@@ -461,8 +520,8 @@ user config, start them with `--config`. The service layer preserves that
 explicit `AFS_CONFIG_PATH` when spawning the background process:
 
 ```bash
-~/src/lab/afs/scripts/afs services start --config /path/to/afs.toml context-warm
-~/src/lab/afs/scripts/afs services start --config /path/to/afs.toml agent-supervisor
+<afs-root>/scripts/afs services start --config /path/to/afs.toml context-warm
+<afs-root>/scripts/afs services start --config /path/to/afs.toml agent-supervisor
 ```
 
 `afs health` now reports AFS MCP registration across Gemini, Claude, and Codex

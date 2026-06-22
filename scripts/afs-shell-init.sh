@@ -30,6 +30,9 @@ case ":${PATH}:" in
 esac
 
 # --- Aliases ---
+# Keep `afs` on the user's installed/default command. Use `afs-dev` when the
+# current repo wrapper should win explicitly.
+alias afs-dev="${AFS_CLI}"
 alias a='afs'
 alias as='afs status'
 alias asj='afs status --json'
@@ -38,6 +41,9 @@ alias apa='afs agents ps --all'
 alias aw='afs agents watch'
 alias al='afs agents list'
 alias ab='afs session bootstrap'
+alias ag='afs guide'
+alias asetup='afs setup'
+alias awork='afs work'
 alias tl='afs tasks list'
 alias hm='afs hivemind list'
 alias sk='afs skills list'
@@ -245,11 +251,19 @@ print(f"  sent: {msg.id}")
 PY
 }
 
+# Run a verification command and record the result against the active session.
+afs-verify() {
+  "${AFS_ROOT}/scripts/afs-session-verify" "$@"
+}
+
 # --- Completions (zsh) ---
 if [ -n "${ZSH_VERSION-}" ]; then
   _afs_commands() {
     local commands=(
       'status:Show AFS status'
+      'setup:Guided setup wizard'
+      'guide:Friendly workflow guides'
+      'work:Work assistant people, reviews, approvals, and activity'
       'init:Initialize context root'
       'agents:Agent operations'
       'tasks:Task queue'

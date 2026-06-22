@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -13,14 +12,12 @@ import pytest
 from afs.agents.guardrails import ModelRoute
 from afs.agents.llm_bridge import (
     LLM_TIMEOUT,
-    OLLAMA_HOST,
     _query_claude,
     _query_codex,
     _query_gemini,
     _query_local,
     query_llm,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

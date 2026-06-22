@@ -29,6 +29,12 @@ fs.appendFileSync(
       AFS_SESSION_CLIENT_PAYLOAD_JSON: process.env.AFS_SESSION_CLIENT_PAYLOAD_JSON || "",
       AFS_SESSION_SYSTEM_PROMPT_JSON: process.env.AFS_SESSION_SYSTEM_PROMPT_JSON || "",
       AFS_SESSION_SYSTEM_PROMPT_TEXT: process.env.AFS_SESSION_SYSTEM_PROMPT_TEXT || "",
+      AFS_SESSION_QUERY_HINT: process.env.AFS_SESSION_QUERY_HINT || "",
+      AFS_SESSION_CONTEXT_QUERY_HINT: process.env.AFS_SESSION_CONTEXT_QUERY_HINT || "",
+      AFS_SESSION_INDEX_REBUILD_HINT: process.env.AFS_SESSION_INDEX_REBUILD_HINT || "",
+      AFS_SESSION_WORK_HINT: process.env.AFS_SESSION_WORK_HINT || "",
+      AFS_SESSION_WORK_APPROVALS_HINT: process.env.AFS_SESSION_WORK_APPROVALS_HINT || "",
+      AFS_SESSION_WORK_COMMUNICATION_HINT: process.env.AFS_SESSION_WORK_COMMUNICATION_HINT || "",
       AFS_SESSION_DEFAULT_TURN_ID: process.env.AFS_SESSION_DEFAULT_TURN_ID || "",
       AFS_ACTIVE_CONTEXT_ROOT: process.env.AFS_ACTIVE_CONTEXT_ROOT || "",
     },
@@ -59,6 +65,16 @@ if (args[0] === "session" && args[1] === "prepare-client") {
           text: promptText,
         },
       },
+      cli_hints: {
+        workspace_path: path.join(root, "workspace"),
+        query_shortcut: "afs query <text> --path " + path.join(root, "workspace"),
+        query_canonical: "afs context query <text> --path " + path.join(root, "workspace"),
+        index_rebuild: "afs index rebuild --path " + path.join(root, "workspace"),
+        work_summary: "afs work --path " + path.join(root, "workspace"),
+        work_approvals: "afs work approvals list --path " + path.join(root, "workspace"),
+        work_communication: "afs work communication preflight --path " + path.join(root, "workspace"),
+        notes: ["Index may be stale"],
+      },
       artifact_paths: {
         json: payloadJson,
       },
@@ -78,6 +94,189 @@ if (args[0] === "fs" && args[1] === "read") {
     process.exit(1);
   }
   process.stdout.write("from-context");
+  process.exit(0);
+}
+
+if (args[0] === "context" && args[1] === "query") {
+  process.stdout.write(
+    JSON.stringify({
+      count: 1,
+      entries: [
+        {
+          mount_type: "scratchpad",
+          relative_path: "note.md",
+          absolute_path: path.join(root, "workspace", ".context", "scratchpad", "note.md"),
+          is_dir: false,
+          size_bytes: 12,
+          modified_at: "2026-04-04T00:00:00+00:00",
+          indexed_at: "2026-04-04T00:00:00+00:00",
+          content_excerpt: "from query",
+        },
+      ],
+    }),
+  );
+  process.exit(0);
+}
+
+if (args[0] === "work" && args[1] === "communication" && args[2] === "list") {
+  process.stdout.write(
+    JSON.stringify([
+      {
+        sample_id: "comm_1",
+        purpose: "responding_to_comments",
+        text_excerpt: "Use exact file evidence.",
+        style_notes: ["direct"],
+      },
+    ]),
+  );
+  process.exit(0);
+}
+
+if (args[0] === "work" && args[1] === "communication" && args[2] === "guide") {
+  process.stdout.write(
+    JSON.stringify({
+      sample_count: 1,
+      style_notes: ["direct"],
+      guidance: ["Use samples before drafting.", "Never post externally without approval."],
+      samples: [],
+    }),
+  );
+  process.exit(0);
+}
+
+if (args[0] === "work" && args[1] === "communication" && args[2] === "preflight") {
+  process.stdout.write(
+    JSON.stringify({
+      style: {
+        sample_count: 1,
+        style_notes: ["direct"],
+        guidance: ["Use samples before drafting.", "Never post externally without approval."],
+        samples: [],
+      },
+      approval_guardrail: {
+        requires_explicit_approval: true,
+        ready_to_post: false,
+      },
+      checklist: [
+        { step: "Inspect stored work communication samples before drafting.", status: "done" },
+      ],
+      pending_approval_count: 1,
+    }),
+  );
+  process.exit(0);
+}
+
+if (args[0] === "work" && args[1] === "communication" && args[2] === "add") {
+  process.stdout.write(JSON.stringify({ sample_id: "comm_added" }));
+  process.exit(0);
+}
+
+if (args[0] === "work" && args[1] === "approvals" && args[2] === "list") {
+  process.stdout.write(
+    JSON.stringify([
+      {
+        approval_id: "approval_1",
+        status: "pending",
+        target_system: "github",
+        action: "post_pr_comment",
+        summary: "Post drafted reply",
+      },
+    ]),
+  );
+  process.exit(0);
+}
+
+if (args[0] === "work" && args[1] === "approvals" && args[2] === "show") {
+  process.stdout.write(
+    JSON.stringify({
+      approval_id: args[3],
+      status: "pending",
+      target_system: "github",
+      action: "post_pr_comment",
+      summary: "Post drafted reply",
+    }),
+  );
+  process.exit(0);
+}
+
+if (args[0] === "work" && args[1] === "approvals" && args[2] === "request") {
+  process.stdout.write(JSON.stringify({ approval_id: "approval_requested", status: "pending" }));
+  process.exit(0);
+}
+
+if (args[0] === "context" && args[1] === "discover") {
+  process.stdout.write(
+    JSON.stringify({
+      contexts: [
+        {
+          project_name: "workspace",
+          path: path.join(root, "workspace", ".context"),
+          is_valid: true,
+          total_mounts: 3,
+        },
+      ],
+    }),
+  );
+  process.exit(0);
+}
+
+if (args[0] === "status") {
+  process.stdout.write(
+    JSON.stringify({
+      context_root: path.join(root, "workspace", ".context"),
+      active_profile: "dev",
+      mount_counts: { scratchpad: 1, knowledge: 2 },
+      total_files: 3,
+      mount_health: {
+        healthy: true,
+        suggested_actions: ["Review context.diff before editing."],
+      },
+      index: {
+        available: true,
+        db_path: path.join(root, "workspace", ".context", "global", "context_index.sqlite3"),
+        db_size: 4096,
+        has_entries: true,
+        total_entries: 7,
+        stale: false,
+      },
+    }),
+  );
+  process.exit(0);
+}
+
+if (args[0] === "session" && args[1] === "pack") {
+  process.stdout.write(
+    JSON.stringify({
+      project: "workspace",
+      profile: "dev",
+      model: args.includes("--model") ? args[args.indexOf("--model") + 1] : "generic",
+      pack_mode: args.includes("--pack-mode") ? args[args.indexOf("--pack-mode") + 1] : "focused",
+      estimated_tokens: 123,
+      sections: [
+        {
+          title: "Scratchpad",
+          body: "from pack",
+        },
+      ],
+    }),
+  );
+  process.exit(0);
+}
+
+if (args[0] === "index" && args[1] === "rebuild") {
+  process.stdout.write(
+    JSON.stringify({
+      context_path: path.join(root, "workspace", ".context"),
+      db_path: path.join(root, "workspace", ".context", "global", "context_index.sqlite3"),
+      indexed_at: "2026-04-04T00:00:00+00:00",
+      rows_written: 1,
+      rows_deleted: 0,
+      by_mount_type: { scratchpad: 1 },
+      skipped_large_files: 0,
+      skipped_binary_files: 0,
+      errors: [],
+    }),
+  );
   process.exit(0);
 }
 
@@ -126,7 +325,7 @@ describe("CliClient", () => {
     const result = await client.callTool("context.read", { path: notePath });
     assert.deepStrictEqual(result, { path: notePath, content: "from-context" });
     client.dispose();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
     const calls = readLogEntries(logPath);
     assert.ok(calls.some((entry) => entry.args[0] === "session" && entry.args[1] === "prepare-client"));
@@ -141,7 +340,35 @@ describe("CliClient", () => {
     assert.strictEqual(fsReadCall.env.AFS_SESSION_CLIENT_PAYLOAD_JSON, path.join(tmpDir, "session_client_vscode.json"));
     assert.strictEqual(fsReadCall.env.AFS_SESSION_SYSTEM_PROMPT_JSON, path.join(tmpDir, "session_system_prompt_vscode.json"));
     assert.strictEqual(fsReadCall.env.AFS_SESSION_SYSTEM_PROMPT_TEXT, path.join(tmpDir, "session_system_prompt_vscode.txt"));
+    assert.strictEqual(fsReadCall.env.AFS_SESSION_QUERY_HINT, `afs query <text> --path ${workspaceRoot}`);
+    assert.strictEqual(
+      fsReadCall.env.AFS_SESSION_CONTEXT_QUERY_HINT,
+      `afs context query <text> --path ${workspaceRoot}`,
+    );
+    assert.strictEqual(
+      fsReadCall.env.AFS_SESSION_INDEX_REBUILD_HINT,
+      `afs index rebuild --path ${workspaceRoot}`,
+    );
+    assert.strictEqual(fsReadCall.env.AFS_SESSION_WORK_HINT, `afs work --path ${workspaceRoot}`);
+    assert.strictEqual(
+      fsReadCall.env.AFS_SESSION_WORK_APPROVALS_HINT,
+      `afs work approvals list --path ${workspaceRoot}`,
+    );
+    assert.strictEqual(
+      fsReadCall.env.AFS_SESSION_WORK_COMMUNICATION_HINT,
+      `afs work communication preflight --path ${workspaceRoot}`,
+    );
     assert.strictEqual(fsReadCall.env.AFS_ACTIVE_CONTEXT_ROOT, path.join(tmpDir, "workspace", ".context"));
+    assert.deepStrictEqual(client.getSessionInfo()?.cliHints, {
+      workspacePath: workspaceRoot,
+      queryShortcut: `afs query <text> --path ${workspaceRoot}`,
+      queryCanonical: `afs context query <text> --path ${workspaceRoot}`,
+      indexRebuild: `afs index rebuild --path ${workspaceRoot}`,
+      workSummary: `afs work --path ${workspaceRoot}`,
+      workApprovals: `afs work approvals list --path ${workspaceRoot}`,
+      workCommunication: `afs work communication preflight --path ${workspaceRoot}`,
+      notes: ["Index may be stale"],
+    });
   });
 
   it("records turn events and carries the active turn into nested tool calls", async () => {
@@ -173,7 +400,7 @@ describe("CliClient", () => {
     assert.deepStrictEqual(result, { path: notePath, content: "from-context" });
     await client.completeTurn(turnId, "Context query returned 1 result(s)");
     client.dispose();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
     const calls = readLogEntries(logPath);
     const fsReadCall = calls.find((entry) => entry.args[0] === "fs" && entry.args[1] === "read");
@@ -252,9 +479,292 @@ describe("CliClient", () => {
     await client.initialize();
     await assert.rejects(() => client.callTool("context.read", { path: missingPath }));
     client.dispose();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
     const calls = readLogEntries(logPath);
     assert.ok(calls.some((entry) => entry.args[0] === "session" && entry.args[1] === "event" && entry.args[2] === "task_failed"));
+  });
+
+  it("uses the canonical context query CLI path and preserves query options", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "afs-cli-client-query-"));
+    const logPath = path.join(tmpDir, "cli.log");
+    const workspaceRoot = path.join(tmpDir, "workspace");
+    fs.mkdirSync(path.join(workspaceRoot, ".context", "scratchpad"), { recursive: true });
+    workspace.workspaceFolders = [{ uri: { fsPath: workspaceRoot } }];
+
+    const client = new CliClient(
+      writeFakeAfsBinary(tmpDir, logPath),
+      [],
+      {
+        CLI_TEST_LOG: logPath,
+        CLI_TEST_ROOT: tmpDir,
+      },
+      {
+        appendLine() {},
+        dispose() {},
+      } as never,
+      5_000,
+    );
+
+    await client.initialize();
+    const result = await client.callTool("context.query", {
+      context_path: path.join(workspaceRoot, ".context"),
+      query: "needle",
+      mount_types: ["scratchpad"],
+      relative_prefix: "notes",
+      limit: 7,
+      include_content: true,
+    });
+    client.dispose();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.strictEqual(Array.isArray(result.entries), true);
+    assert.strictEqual(result.count, 1);
+
+    const calls = readLogEntries(logPath);
+    const queryCall = calls.find((entry) => entry.args[0] === "context" && entry.args[1] === "query");
+    assert.ok(queryCall);
+    assert.deepStrictEqual(queryCall.args.slice(0, 10), [
+      "context",
+      "query",
+      "needle",
+      "--path",
+      workspaceRoot,
+      "--json",
+      "--mount",
+      "scratchpad",
+      "--limit",
+      "7",
+    ]);
+    assert.ok(queryCall.args.includes("--prefix"));
+    assert.ok(queryCall.args.includes("notes"));
+    assert.ok(queryCall.args.includes("--include-content"));
+  });
+
+  it("maps work communication and approval tools to the CLI fallback", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "afs-cli-client-work-"));
+    const logPath = path.join(tmpDir, "cli.log");
+    const workspaceRoot = path.join(tmpDir, "workspace");
+    fs.mkdirSync(path.join(workspaceRoot, ".context", "scratchpad"), { recursive: true });
+    workspace.workspaceFolders = [{ uri: { fsPath: workspaceRoot } }];
+
+    const client = new CliClient(
+      writeFakeAfsBinary(tmpDir, logPath),
+      [],
+      {
+        CLI_TEST_LOG: logPath,
+        CLI_TEST_ROOT: tmpDir,
+      },
+      {
+        appendLine() {},
+        dispose() {},
+      } as never,
+      5_000,
+    );
+
+    await client.initialize();
+    const guide = await client.callTool("work.communication.guide", {
+      context_path: path.join(workspaceRoot, ".context"),
+      purpose: "responding_to_comments",
+      limit: 5,
+    });
+    const preflight = await client.callTool("work.communication.preflight", {
+      context_path: path.join(workspaceRoot, ".context"),
+      purpose: "responding_to_comments",
+      limit: 5,
+      approval_limit: 5,
+    });
+    const added = await client.callTool("work.communication.add", {
+      context_path: path.join(workspaceRoot, ".context"),
+      text: "Use exact file evidence.",
+      purpose: "responding_to_comments",
+      style_notes: ["direct"],
+    });
+    const approvals = await client.callTool("work.approvals.list", {
+      context_path: path.join(workspaceRoot, ".context"),
+      status: "pending",
+    });
+    const requested = await client.callTool("work.approvals.request", {
+      context_path: path.join(workspaceRoot, ".context"),
+      target_system: "github",
+      target_id: "PR-1",
+      action: "post_pr_comment",
+      summary: "Post drafted reply",
+      preview: { body: "Thanks, fixed." },
+      affected_people: ["reviewer@example.com"],
+    });
+    client.dispose();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.strictEqual(guide.sample_count, 1);
+    assert.strictEqual((preflight.style as Record<string, unknown>).sample_count, 1);
+    assert.strictEqual(added.sample_id, "comm_added");
+    assert.strictEqual(approvals.count, 1);
+    assert.strictEqual(requested.approval_id, "approval_requested");
+
+    const calls = readLogEntries(logPath);
+    const guideCall = calls.find(
+      (entry) => entry.args[0] === "work" && entry.args[1] === "communication" && entry.args[2] === "guide",
+    );
+    assert.ok(guideCall);
+    assert.ok(guideCall.args.includes("--purpose"));
+    assert.ok(guideCall.args.includes("responding_to_comments"));
+    const preflightCall = calls.find(
+      (entry) => entry.args[0] === "work" && entry.args[1] === "communication" && entry.args[2] === "preflight",
+    );
+    assert.ok(preflightCall);
+    assert.ok(preflightCall.args.includes("--approval-limit"));
+
+    const requestCall = calls.find(
+      (entry) => entry.args[0] === "work" && entry.args[1] === "approvals" && entry.args[2] === "request",
+    );
+    assert.ok(requestCall);
+    assert.ok(requestCall.args.includes("--preview-json"));
+    assert.ok(requestCall.args.includes('{"body":"Thanks, fixed."}'));
+    assert.ok(requestCall.args.includes("--affected-person"));
+    assert.ok(requestCall.args.includes("reviewer@example.com"));
+  });
+
+  it("normalizes context.discover results to the MCP shape", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "afs-cli-client-discover-"));
+    const logPath = path.join(tmpDir, "cli.log");
+    const workspaceRoot = path.join(tmpDir, "workspace");
+    fs.mkdirSync(path.join(workspaceRoot, ".context"), { recursive: true });
+    workspace.workspaceFolders = [{ uri: { fsPath: workspaceRoot } }];
+
+    const client = new CliClient(
+      writeFakeAfsBinary(tmpDir, logPath),
+      [],
+      {
+        CLI_TEST_LOG: logPath,
+        CLI_TEST_ROOT: tmpDir,
+      },
+      {
+        appendLine() {},
+        dispose() {},
+      } as never,
+      5_000,
+    );
+
+    await client.initialize();
+    const result = await client.callTool("context.discover", {});
+
+    assert.deepStrictEqual(result, {
+      contexts: [
+        {
+          project_name: "workspace",
+          path: path.join(workspaceRoot, ".context"),
+          is_valid: true,
+          total_mounts: 3,
+          project: "workspace",
+          valid: true,
+          mounts: 3,
+        },
+      ],
+    });
+  });
+
+  it("normalizes context.status results to the MCP shape", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "afs-cli-client-status-"));
+    const logPath = path.join(tmpDir, "cli.log");
+    const workspaceRoot = path.join(tmpDir, "workspace");
+    fs.mkdirSync(path.join(workspaceRoot, ".context"), { recursive: true });
+    workspace.workspaceFolders = [{ uri: { fsPath: workspaceRoot } }];
+
+    const client = new CliClient(
+      writeFakeAfsBinary(tmpDir, logPath),
+      [],
+      {
+        CLI_TEST_LOG: logPath,
+        CLI_TEST_ROOT: tmpDir,
+      },
+      {
+        appendLine() {},
+        dispose() {},
+      } as never,
+      5_000,
+    );
+
+    await client.initialize();
+    const result = await client.callTool("context.status", {
+      context_path: path.join(workspaceRoot, ".context"),
+    });
+
+    assert.deepStrictEqual(result, {
+      context_root: path.join(workspaceRoot, ".context"),
+      active_profile: "dev",
+      mount_counts: { scratchpad: 1, knowledge: 2 },
+      total_files: 3,
+      mount_health: {
+        healthy: true,
+        suggested_actions: ["Review context.diff before editing."],
+      },
+      index: {
+        available: true,
+        db_path: path.join(workspaceRoot, ".context", "global", "context_index.sqlite3"),
+        db_size: 4096,
+        has_entries: true,
+        total_entries: 7,
+        stale: false,
+        enabled: true,
+        built: true,
+        db_size_bytes: 4096,
+      },
+      context_path: path.join(workspaceRoot, ".context"),
+      profile: "dev",
+      actions: ["Review context.diff before editing."],
+    });
+  });
+
+  it("maps session.pack to the CLI session pack command", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "afs-cli-client-pack-"));
+    const logPath = path.join(tmpDir, "cli.log");
+    const workspaceRoot = path.join(tmpDir, "workspace");
+    fs.mkdirSync(path.join(workspaceRoot, ".context", "scratchpad"), { recursive: true });
+    workspace.workspaceFolders = [{ uri: { fsPath: workspaceRoot } }];
+
+    const client = new CliClient(
+      writeFakeAfsBinary(tmpDir, logPath),
+      [],
+      {
+        CLI_TEST_LOG: logPath,
+        CLI_TEST_ROOT: tmpDir,
+      },
+      {
+        appendLine() {},
+        dispose() {},
+      } as never,
+      5_000,
+    );
+
+    await client.initialize();
+    const result = await client.callTool("session.pack", {
+      context_path: path.join(workspaceRoot, ".context"),
+      query: "needle",
+      task: "Explain the workspace",
+      model: "gemini",
+      workflow: "scan_fast",
+      tool_profile: "context_readonly",
+      pack_mode: "retrieval",
+      include_content: true,
+      max_query_results: 8,
+    });
+    client.dispose();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.strictEqual(result.model, "gemini");
+    assert.strictEqual(result.pack_mode, "retrieval");
+
+    const calls = readLogEntries(logPath);
+    const packCall = calls.find((entry) => entry.args[0] === "session" && entry.args[1] === "pack");
+    assert.ok(packCall);
+    assert.ok(packCall.args.includes("--no-write-artifacts"));
+    assert.ok(packCall.args.includes("needle"));
+    assert.ok(packCall.args.includes("--workflow"));
+    assert.ok(packCall.args.includes("scan_fast"));
+    assert.ok(packCall.args.includes("--tool-profile"));
+    assert.ok(packCall.args.includes("context_readonly"));
+    assert.ok(packCall.args.includes("--pack-mode"));
+    assert.ok(packCall.args.includes("retrieval"));
   });
 });

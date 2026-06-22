@@ -11,7 +11,11 @@ export function buildMcpConfigCandidates(options: McpConfigCandidateOptions): st
   const workspaceFolders = options.workspaceFolders ?? [];
 
   for (const folder of workspaceFolders) {
-    candidates.push(path.join(folder, ".cursor", "mcp.json"));
+    candidates.push(
+      path.join(folder, ".cursor", "mcp.json"),
+      path.join(folder, ".vscode", "mcp.json"),
+      path.join(folder, ".antigravity", "mcp.json"),
+    );
   }
 
   if (options.antigravityContextRoot?.trim()) {
@@ -24,7 +28,11 @@ export function buildMcpConfigCandidates(options: McpConfigCandidateOptions): st
 
   candidates.push(
     path.join(options.home, ".cursor", "mcp.json"),
+    path.join(options.home, ".vscode", "mcp.json"),
     path.join(options.home, ".config", "cursor", "mcp.json"),
+    path.join(options.home, "Library", "Application Support", "Cursor", "User", "mcp.json"),
+    path.join(options.home, "Library", "Application Support", "Code", "User", "mcp.json"),
+    path.join(options.home, "Library", "Application Support", "Antigravity", "User", "mcp.json"),
     path.join(
       options.home,
       "Library",

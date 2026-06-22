@@ -2,7 +2,7 @@
 
 Core provides generic generator infrastructure (BaseGenerator, TrainingSample, CoT, model backends).
 Domain-specific generators (ASM augment, ASAR, curriculum, knowledge) are extension-owned
-and available when afs-ext is installed.
+and available when a companion extension repo is installed.
 """
 
 from .base import (
@@ -79,7 +79,7 @@ __all__ = [
     "register_backend",
 ]
 
-# Domain-specific generators (extension-owned, available with afs-ext)
+# Domain-specific generators (extension-owned, available with a companion extension repo)
 try:
     from .asar_validator import (
         AsarValidator,

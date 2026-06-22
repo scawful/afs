@@ -141,6 +141,7 @@ def test_service_manager_propagates_explicit_config_path(tmp_path) -> None:
 
 
 def test_service_manager_preserves_repo_preference_flag(monkeypatch) -> None:
+    monkeypatch.delenv("AFS_PREFER_USER_CONFIG", raising=False)
     monkeypatch.setenv("AFS_PREFER_REPO_CONFIG", "1")
 
     manager = ServiceManager(config=AFSConfig(), platform_name="linux")

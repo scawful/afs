@@ -43,8 +43,6 @@ def _snapshot_paths(paths: list[Path]) -> dict[str, tuple[float, int]]:
         except OSError:
             continue
         for child in children:
-            if child.name == ".keep":
-                continue
             if child.is_file():
                 try:
                     stat = child.stat()
@@ -68,7 +66,7 @@ def _snapshot_paths(paths: list[Path]) -> dict[str, tuple[float, int]]:
                 continue
 
             for entry in scan_root.rglob("*"):
-                if entry.name == ".keep" or not entry.is_file():
+                if not entry.is_file():
                     continue
                 try:
                     stat = entry.stat()

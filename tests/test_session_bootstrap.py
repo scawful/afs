@@ -5,11 +5,16 @@ from argparse import Namespace
 from pathlib import Path
 
 import afs.cli.core as cli_core_module
+from afs.agent_jobs import AgentJobQueue
+from afs.agent_runs import AgentRunStore
 from afs.cli.core import session_bootstrap_command
+from afs.context_index import ContextSQLiteIndex
 from afs.hivemind import HivemindBus
 from afs.manager import AFSManager
+from afs.models import MountType
 from afs.schema import AFSConfig, DirectoryConfig, GeneralConfig, default_directory_configs
 from afs.tasks import TaskQueue
+from afs.work_assistant import WorkAssistantStore
 
 
 def _remap_directories(**overrides: str) -> list[DirectoryConfig]:
@@ -61,6 +66,28 @@ def test_session_bootstrap_command_outputs_json_and_writes_artifacts(
     queue = TaskQueue(context_root)
     queue.create("bootstrap task", created_by="tester", priority=2)
 
+    bootstrap_job = AgentJobQueue(context_root).create(
+        "bootstrap background job",
+        "Check background state.",
+        created_by="tester",
+        priority=1,
+    )
+    AgentJobQueue(context_root).move(bootstrap_job.id, "done", result="ready")
+    AgentRunStore(context_root).start(
+        "bootstrap recorded run",
+        harness="codex",
+        workspace=str(project_path),
+    )
+    work_store = WorkAssistantStore(context_root, config=config)
+    work_store.create_approval(
+        target_system="zendesk",
+        target_id="ticket-1",
+        action="post_ticket_comment",
+        summary="Send drafted support reply",
+        preview={"text": "Thanks for the report."},
+        permission_required="ticket comment approval",
+    )
+
     bus = HivemindBus(context_root)
     bus.send("tester", "status", {"detail": "handoff ready"})
 
@@ -93,13 +120,36 @@ def test_session_bootstrap_command_outputs_json_and_writes_artifacts(
     assert payload["context_path"] == str(context_root)
     assert payload["scratchpad"]["path"].endswith("/notes")
     assert payload["tasks"]["total"] == 1
+    assert payload["agent_manifest"]["available"] is True
+    assert payload["agent_jobs"]["total"] == 1
+    assert payload["agent_jobs"]["inbox_attention_count"] == 1
+    assert "afs agent-jobs inbox" in payload["agent_jobs"]["inbox_command"]
+    assert payload["agent_runs"]["recent_count"] == 1
+    assert payload["work_assistant"]["summary"]["pending_approvals"] == 1
+    assert payload["work_assistant"]["pending_approvals"][0]["summary"] == "Send drafted support reply"
+    assert payload["work_assistant"]["communication_guidance"]["sample_count"] == 0
+    assert payload["work_assistant"]["communication_preflight"]["missing_style_evidence"] is True
+    assert (
+        payload["work_assistant"]["communication_preflight"]["approval_guardrail"][
+            "requires_explicit_approval"
+        ]
+        is True
+    )
+    assert any(
+        "style evidence is missing" in line
+        for line in payload["work_assistant"]["communication_guidance"]["guidance"]
+    )
     assert payload["hivemind"]["recent_count"] == 1
     assert payload["memory"]["entries_count"] == 1
     assert payload["artifact_paths"]["json"].endswith("session_bootstrap.json")
     assert payload["artifact_paths"]["markdown"].endswith("session_bootstrap.md")
     assert Path(payload["artifact_paths"]["json"]).exists()
     assert Path(payload["artifact_paths"]["markdown"]).exists()
+    assert any("afs context query" in step for step in payload["startup_sequence"])
+    assert any("afs index rebuild" in action for action in payload["recommended_actions"])
     assert any("scratchpad state" in action.lower() for action in payload["recommended_actions"])
+    assert any("afs agent-jobs inbox" in action for action in payload["recommended_actions"])
+    assert any("afs work approvals list" in action for action in payload["recommended_actions"])
 
 
 def test_build_session_bootstrap_does_not_mutate_hivemind_or_memory(
@@ -138,3 +188,73 @@ def test_build_session_bootstrap_does_not_mutate_hivemind_or_memory(
     assert isinstance(summary["memory"]["status"].get("stale"), bool)
     assert msg_path.exists()
     assert not (context_root / "memory" / "entries.jsonl").exists()
+
+
+def test_build_session_bootstrap_ignores_volatile_index_drift(
+    tmp_path: Path,
+) -> None:
+    from afs.session_bootstrap import build_session_bootstrap
+
+    context_root = tmp_path / ".context"
+    config = AFSConfig(
+        general=GeneralConfig(
+            context_root=context_root,
+        )
+    )
+    manager = AFSManager(config=config)
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path, context_root=context_root)
+
+    knowledge_root = context_root / "knowledge"
+    scratchpad_root = context_root / "scratchpad"
+    (knowledge_root / "guide.md").write_text("# Guide\n", encoding="utf-8")
+    (scratchpad_root / "note.md").write_text("first draft\n", encoding="utf-8")
+
+    index = ContextSQLiteIndex(manager, context_root)
+    index.rebuild(
+        mount_types=[MountType.KNOWLEDGE, MountType.SCRATCHPAD],
+        include_content=True,
+    )
+
+    (scratchpad_root / "note.md").write_text("updated draft\n", encoding="utf-8")
+
+    summary = build_session_bootstrap(manager, context_root)
+
+    assert summary["status"]["index"]["stale"] is False
+    assert not any(
+        "afs index rebuild" in action for action in summary["recommended_actions"]
+    )
+
+
+def test_build_session_bootstrap_includes_codebase_summary(
+    tmp_path: Path,
+) -> None:
+    from afs.session_bootstrap import build_session_bootstrap, render_session_bootstrap
+
+    context_root = tmp_path / ".context"
+    config = AFSConfig(
+        general=GeneralConfig(
+            context_root=context_root,
+        )
+    )
+    manager = AFSManager(config=config)
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path)
+
+    (project_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    (project_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (project_path / "src").mkdir()
+    (project_path / "src" / "demo.py").write_text("def demo() -> int:\n    return 1\n", encoding="utf-8")
+    (project_path / "tests").mkdir()
+    (project_path / "tests" / "test_demo.py").write_text("def test_demo():\n    assert True\n", encoding="utf-8")
+
+    summary = build_session_bootstrap(manager, project_path / ".context")
+
+    assert "src" in summary["codebase"]["source_roots"]
+    assert "tests" in summary["codebase"]["test_roots"]
+    assert any("afs context overview" in step for step in summary["startup_sequence"])
+    rendered = render_session_bootstrap(summary)
+    assert "## Codebase" in rendered
+    assert "source_roots: src" in rendered

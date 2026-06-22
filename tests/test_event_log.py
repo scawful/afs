@@ -5,8 +5,8 @@ from pathlib import Path
 from afs.event_log import (
     build_session_replay,
     build_session_timeline,
-    list_sessions,
     list_recorded_sessions,
+    list_sessions,
     summarize_event_analytics,
 )
 from afs.history import append_history_event

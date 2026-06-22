@@ -22,6 +22,18 @@ def find_root(start_dir: Path | None = None) -> Path | None:
     return None
 
 
+def find_existing_root(start_dir: Path | None = None) -> Path | None:
+    """Find the nearest existing .context directory by walking upward."""
+    if start_dir is None:
+        start_dir = Path.cwd()
+    current = start_dir.resolve()
+    for parent in [current, *current.parents]:
+        candidate = parent / ".context"
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+    return None
+
+
 def resolve_context_root(config: AFSConfig | None, linked_root: Path | None) -> Path:
     """Resolve the active context root for this machine."""
     env_root = os.environ.get("AFS_CONTEXT_ROOT")

@@ -10,7 +10,7 @@ import subprocess
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -24,6 +24,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 MODELS_DIR = PROJECT_ROOT / "models"
 EVALUATIONS_DIR = PROJECT_ROOT / "evaluations"
 RESULTS_DIR = EVALUATIONS_DIR / "results"
+LIVE_STATUS_CACHE_TTL = 5.0
+_LIVE_STATUS_CACHE: dict[str, Any] = {"expires_at": 0.0, "payload": None}
 
 # Model configuration - 5 core models
 MODELS_CONFIG = {
@@ -79,14 +81,124 @@ TRAINING_STATE = {
 }
 
 
-def load_model_files() -> Dict[str, Any]:
+def slugify_key(text: str) -> str:
+    chars = []
+    last_dash = False
+    for char in text.lower():
+        if char.isalnum():
+            chars.append(char)
+            last_dash = False
+        elif not last_dash:
+            chars.append("-")
+            last_dash = True
+    return "".join(chars).strip("-") or "run"
+
+
+def resolve_live_status_script() -> Path:
+    configured = os.environ.get("AFS_DASHBOARD_LIVE_STATUS_SCRIPT", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return PROJECT_ROOT.parents[1] / "training" / "scripts" / "live_training_status.py"
+
+
+def load_live_training_status(force: bool = False) -> dict[str, Any] | None:
+    """Load shared live training status emitted by the training repo."""
+    now = time.time()
+    if not force and now < float(_LIVE_STATUS_CACHE["expires_at"]):
+        cached = _LIVE_STATUS_CACHE.get("payload")
+        if isinstance(cached, dict):
+            return cached
+
+    live_status_script = resolve_live_status_script()
+    if not live_status_script.exists():
+        return None
+
+    try:
+        proc = subprocess.run(
+            ["python3", str(live_status_script)],
+            capture_output=True,
+            text=True,
+            timeout=25,
+            check=False,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        app.logger.error("Error running %s: %s", live_status_script, exc)
+        return None
+
+    if proc.returncode != 0:
+        app.logger.error(
+            "live_training_status.py failed: %s",
+            proc.stderr.strip() or proc.stdout.strip() or proc.returncode,
+        )
+        return None
+
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        app.logger.error("Invalid training status JSON: %s", exc)
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    _LIVE_STATUS_CACHE["payload"] = payload
+    _LIVE_STATUS_CACHE["expires_at"] = now + LIVE_STATUS_CACHE_TTL
+    return payload
+
+
+def build_live_model_status(run: dict[str, Any]) -> dict[str, Any]:
+    """Map a shared live run into the dashboard model shape."""
+    hourly = run.get("hourly_usd")
+    elapsed = run.get("elapsed_hours")
+    total = run.get("accumulated_cost_usd")
+    key = str(run.get("source_id") or slugify_key(str(run.get("name") or "run")))
+
+    return {
+        "key": key,
+        "name": str(run.get("name") or key),
+        "description": " · ".join(
+            part for part in [str(run.get("backend") or ""), str(run.get("host") or "")] if part
+        ),
+        "status": str(run.get("state") or "unknown"),
+        "progress": 100 if run.get("running") else 0,
+        "progress_text": str(run.get("progress") or ""),
+        "gpu_hours": round(float(elapsed), 2) if isinstance(elapsed, (int, float)) else None,
+        "cost_per_hour": float(hourly) if isinstance(hourly, (int, float)) else 0.0,
+        "total_cost": round(float(total), 4) if isinstance(total, (int, float)) else 0.0,
+        "training_samples": None,
+        "file_size_mb": 0.0,
+        "last_updated": run.get("started_at"),
+        "evaluation_score": None,
+        "evaluation_date": None,
+        "backend": str(run.get("backend") or ""),
+        "host": str(run.get("host") or ""),
+        "gpu": str(run.get("gpu") or ""),
+        "detail": str(run.get("detail") or ""),
+        "note": str(run.get("note") or ""),
+        "source_id": str(run.get("source_id") or ""),
+        "running": bool(run.get("running")),
+    }
+
+
+def get_live_models() -> list[dict[str, Any]]:
+    payload = load_live_training_status()
+    if not payload:
+        return []
+    runs = payload.get("runs")
+    if not isinstance(runs, list):
+        return []
+    return [build_live_model_status(run) for run in runs if isinstance(run, dict)]
+
+
+def load_model_files() -> dict[str, Any]:
     """Load model metadata from JSONL files."""
     model_data = {}
 
     if not MODELS_DIR.exists():
         return model_data
 
-    for model_key, config in MODELS_CONFIG.items():
+    for model_key, _config in MODELS_CONFIG.items():
         # Look for training data files
         pattern = f"{model_key}*merged.jsonl"
         merged_files = list(MODELS_DIR.glob(pattern))
@@ -108,7 +220,7 @@ def load_model_files() -> Dict[str, Any]:
     return model_data
 
 
-def load_evaluation_results() -> Dict[str, Any]:
+def load_evaluation_results() -> dict[str, Any]:
     """Load evaluation results from results directory."""
     results = {}
 
@@ -127,7 +239,7 @@ def load_evaluation_results() -> Dict[str, Any]:
     return results
 
 
-def calculate_model_status(model_key: str) -> Dict[str, Any]:
+def calculate_model_status(model_key: str) -> dict[str, Any]:
     """Calculate current status for a model."""
     config = MODELS_CONFIG[model_key]
     model_files = load_model_files()
@@ -170,6 +282,24 @@ def health_check():
 @app.route("/api/training/status", methods=["GET"])
 def training_status():
     """Get overall training session status."""
+    live = load_live_training_status()
+    if live and isinstance(live.get("runs"), list):
+        generated_at = str(live.get("generated_at") or datetime.now().isoformat())
+        return jsonify(
+            {
+                "session_start": str(live.get("session_start") or generated_at),
+                "current_time": generated_at,
+                "total_cost": round(float(live.get("total_cost_usd") or 0.0), 4),
+                "hourly_burn": round(float(live.get("live_hourly_usd") or 0.0), 4),
+                "models_completed": int(live.get("stopped_count") or 0),
+                "models_in_progress": int(live.get("running_count") or 0),
+                "models_pending": 0,
+                "total_runs": int(live.get("total_runs") or 0),
+                "errors": list(live.get("errors") or []),
+                "source": "live_training_status",
+            }
+        )
+
     return jsonify(
         {
             "session_start": TRAINING_STATE["session_start"].isoformat(),
@@ -189,6 +319,17 @@ def training_status():
 @app.route("/api/models/status", methods=["GET"])
 def models_status():
     """Get status of all models."""
+    live_models = get_live_models()
+    if live_models:
+        payload = load_live_training_status() or {}
+        return jsonify(
+            {
+                "models": live_models,
+                "timestamp": str(payload.get("generated_at") or datetime.now().isoformat()),
+                "source": "live_training_status",
+            }
+        )
+
     models = []
     for model_key in MODELS_CONFIG.keys():
         models.append(calculate_model_status(model_key))
@@ -198,6 +339,13 @@ def models_status():
 @app.route("/api/models/<model_key>/status", methods=["GET"])
 def model_status(model_key: str):
     """Get status of a specific model."""
+    live_models = get_live_models()
+    if live_models:
+        match = next((model for model in live_models if model["key"] == model_key), None)
+        if not match:
+            return jsonify({"error": "Model not found"}), 404
+        return jsonify({**match, "timestamp": datetime.now().isoformat()})
+
     if model_key not in MODELS_CONFIG:
         return jsonify({"error": "Model not found"}), 404
 
@@ -210,6 +358,32 @@ def model_status(model_key: str):
 @app.route("/api/costs/breakdown", methods=["GET"])
 def cost_breakdown():
     """Get cost breakdown by model."""
+    live_models = get_live_models()
+    if live_models:
+        breakdown = {}
+        total = 0.0
+        for model in live_models:
+            breakdown[model["key"]] = {
+                "model_name": model["name"],
+                "gpu_hours": model["gpu_hours"],
+                "cost_per_hour": model["cost_per_hour"],
+                "total_cost": model["total_cost"],
+                "backend": model["backend"],
+                "status": model["status"],
+            }
+            total += float(model["total_cost"])
+
+        payload = load_live_training_status() or {}
+        return jsonify(
+            {
+                "breakdown": breakdown,
+                "total_cost": round(total, 4),
+                "hourly_rate": round(float(payload.get("live_hourly_usd") or 0.0), 4),
+                "timestamp": str(payload.get("generated_at") or datetime.now().isoformat()),
+                "source": "live_training_status",
+            }
+        )
+
     breakdown = {}
     total = 0
 
@@ -300,6 +474,36 @@ def throughput():
 @app.route("/api/models/registry", methods=["GET"])
 def model_registry():
     """Get complete model registry with deployment status."""
+    live_models = get_live_models()
+    if live_models:
+        registry = []
+        for model in live_models:
+            registry.append({
+                "key": model["key"],
+                "name": model["name"],
+                "version": model["source_id"] or "live",
+                "status": model["status"],
+                "training_samples": None,
+                "file_size_mb": 0.0,
+                "evaluation_score": None,
+                "deployment_status": "active" if model["running"] else model["status"],
+                "download_url": None,
+                "last_updated": model["last_updated"],
+                "backend": model["backend"],
+                "host": model["host"],
+                "gpu": model["gpu"],
+                "detail": model["detail"],
+                "note": model["note"],
+            })
+
+        payload = load_live_training_status() or {}
+        return jsonify({
+            "models": registry,
+            "total_models": len(registry),
+            "timestamp": str(payload.get("generated_at") or datetime.now().isoformat()),
+            "source": "live_training_status",
+        })
+
     registry = []
 
     for model_key, config in MODELS_CONFIG.items():
@@ -335,33 +539,60 @@ def export_csv():
     output = StringIO()
     writer = csv.writer(output)
 
+    live_models = get_live_models()
+    if live_models:
+        writer.writerow([
+            "Run Name",
+            "Backend",
+            "State",
+            "Host",
+            "GPU",
+            "Hours",
+            "Rate/Hour",
+            "Accrued Cost",
+            "Note",
+        ])
+
+        for model in live_models:
+            writer.writerow([
+                model["name"],
+                model["backend"],
+                model["status"],
+                model["host"],
+                model["gpu"],
+                model["gpu_hours"] if model["gpu_hours"] is not None else "",
+                model["cost_per_hour"],
+                model["total_cost"],
+                model["note"],
+            ])
+    else:
     # Write header
-    writer.writerow([
-        "Model Name",
-        "Status",
-        "Progress %",
-        "GPU Hours",
-        "Cost/Hour",
-        "Total Cost",
-        "Training Samples",
-        "File Size (MB)",
-        "Evaluation Score",
-    ])
+        writer.writerow([
+            "Model Name",
+            "Status",
+            "Progress %",
+            "GPU Hours",
+            "Cost/Hour",
+            "Total Cost",
+            "Training Samples",
+            "File Size (MB)",
+            "Evaluation Score",
+        ])
 
     # Write data
-    for model_key in MODELS_CONFIG.keys():
-        status = calculate_model_status(model_key)
-        writer.writerow([
-            status["name"],
-            status["status"],
-            status["progress"],
-            status["gpu_hours"],
-            status["cost_per_hour"],
-            status["total_cost"],
-            status["training_samples"],
-            status["file_size_mb"],
-            status["evaluation_score"] or "N/A",
-        ])
+        for model_key in MODELS_CONFIG.keys():
+            status = calculate_model_status(model_key)
+            writer.writerow([
+                status["name"],
+                status["status"],
+                status["progress"],
+                status["gpu_hours"],
+                status["cost_per_hour"],
+                status["total_cost"],
+                status["training_samples"],
+                status["file_size_mb"],
+                status["evaluation_score"] or "N/A",
+            ])
 
     response = app.response_class(
         response=output.getvalue(),
@@ -377,20 +608,36 @@ def export_csv():
 @app.route("/api/export/json", methods=["GET"])
 def export_json():
     """Export all data as JSON."""
-    data = {
-        "timestamp": datetime.now().isoformat(),
-        "training_status": {
-            "session_start": TRAINING_STATE["session_start"].isoformat(),
-            "total_cost": round(TRAINING_STATE["total_cost"], 4),
-            "models_completed": TRAINING_STATE["models_completed"],
-            "models_in_progress": TRAINING_STATE["models_in_progress"],
-            "models_pending": TRAINING_STATE["models_pending"],
-        },
-        "models": [],
-    }
+    live = load_live_training_status()
+    if live and isinstance(live.get("runs"), list):
+        data = {
+            "timestamp": str(live.get("generated_at") or datetime.now().isoformat()),
+            "training_status": {
+                "session_start": str(live.get("session_start") or datetime.now().isoformat()),
+                "total_cost": round(float(live.get("total_cost_usd") or 0.0), 4),
+                "hourly_burn": round(float(live.get("live_hourly_usd") or 0.0), 4),
+                "models_completed": int(live.get("stopped_count") or 0),
+                "models_in_progress": int(live.get("running_count") or 0),
+                "total_runs": int(live.get("total_runs") or 0),
+                "errors": list(live.get("errors") or []),
+            },
+            "models": get_live_models(),
+        }
+    else:
+        data = {
+            "timestamp": datetime.now().isoformat(),
+            "training_status": {
+                "session_start": TRAINING_STATE["session_start"].isoformat(),
+                "total_cost": round(TRAINING_STATE["total_cost"], 4),
+                "models_completed": TRAINING_STATE["models_completed"],
+                "models_in_progress": TRAINING_STATE["models_in_progress"],
+                "models_pending": TRAINING_STATE["models_pending"],
+            },
+            "models": [],
+        }
 
-    for model_key in MODELS_CONFIG.keys():
-        data["models"].append(calculate_model_status(model_key))
+        for model_key in MODELS_CONFIG.keys():
+            data["models"].append(calculate_model_status(model_key))
 
     response = app.response_class(
         response=json.dumps(data, indent=2),
@@ -406,6 +653,10 @@ def export_json():
 @app.route("/api/update-status", methods=["POST"])
 def update_status():
     """Update model status (for manual updates)."""
+    live = load_live_training_status()
+    if live and isinstance(live.get("runs"), list):
+        return jsonify({"error": "live training status is read-only"}), 405
+
     data = request.get_json()
 
     if not data or "model_key" not in data:

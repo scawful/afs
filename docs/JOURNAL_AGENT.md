@@ -1,141 +1,99 @@
 # Journal Agent
 
-Background agent for org-mode journal carry-forward, daily template generation,
-stale-TODO detection, and weekly review drafting.
+Background agent that drafts the AI portion of a hybrid weekly review by
+scanning a thoughts.org file and a tasks/active.md file.
 
 ## Overview
 
-The `journal-agent` operates on `~/Journal/daily/YYYY-MM-DD.org` files and
-`~/Journal/weekly/` review files. It runs four tasks, selectable via `--task`.
+The `journal-agent` reads dated entries from a thoughts.org file (org-mode
+headlines like `* 4 April 2026`) and items from a markdown task list. For
+the current ISO week it writes (or refreshes) `<weekly_dir>/YYYY-WNN.org`,
+preserving the human section above the divider untouched and only modifying
+the AI draft below.
 
-## Tasks
+## Path resolution
 
-| Task | What it does |
-|---|---|
-| `carry-forward` | Reads yesterday's (or `--date`) daily file, extracts all unchecked `- [ ]` items and `* TODO` headlines |
-| `template-gen` | Creates tomorrow's daily entry (or appends to it) with a `* Carry Over` section pre-populated from carry-forward |
-| `stale-check` | Scans the last N days; flags any TODO that has appeared unchecked for 3+ consecutive days |
-| `weekly-review` | Drafts `~/Journal/weekly/YYYY-WNN.org` from the current week's daily entries |
-| `all` | Runs carry-forward + template-gen + stale-check (default) |
+Paths are not hardcoded to any workspace layout. Resolution order, highest
+precedence first:
+
+1. CLI flags `--thoughts`, `--active-tasks`, `--weekly-dir`
+2. Per-field env vars `AFS_JOURNAL_THOUGHTS`, `AFS_JOURNAL_ACTIVE_TASKS`,
+   `AFS_JOURNAL_WEEKLY_DIR`
+3. Sub-paths derived from `AFS_JOURNAL_ROOT`
+   (`thoughts.org`, `tasks/active.md`, `weekly/`)
+4. Generic fallback: `~/.local/share/afs/journal/`
+
+To point the agent at a custom writing folder, export e.g.:
+
+```bash
+export AFS_JOURNAL_ROOT="$HOME/notes"
+```
+
+The optional `AFS_JOURNAL_AUTHOR` env var sets the `#+AUTHOR:` line on
+newly scaffolded weekly review files.
+
+## Hybrid weekly review format
+
+Newly scaffolded files use this skeleton:
+
+```org
+#+TITLE: Weekly Review — 2026-W14 (Mar 30–Apr 5)
+
+* What happened
+-
+-
+-
+
+* What I want next week
+-
+
+---
+(AI draft below — edit or ignore)
+```
+
+The human writes above the `---` divider; the agent writes below. On
+re-runs, an existing AI section is preserved unless `--overwrite` is set.
 
 ## Usage
 
 ```bash
-# Run all three daily tasks (carry yesterday → tomorrow's template + stale alert)
+# Draft this week's review
 afs agents run journal-agent
 
-# Carry-forward only, pretty JSON output
-afs agents run journal-agent -- --task carry-forward --pretty
+# Draft a specific week, refreshing any existing AI section
+afs agents run journal-agent -- --week 2026-W12 --overwrite
 
-# Generate tomorrow's template from a specific source date
-afs agents run journal-agent -- --task template-gen --date 2026-03-20
-
-# Stale-check with custom window and threshold
-afs agents run journal-agent -- --task stale-check --scan-days 21 --stale-threshold 4
-
-# Draft this week's review
-afs agents run journal-agent -- --task weekly-review
-
-# Draft a specific week (overwrite if it already exists)
-afs agents run journal-agent -- --task weekly-review --week 2026-W12 --overwrite
-
-# Write JSON report to a file
-afs agents run journal-agent -- --output ~/.afs/reports/journal.json
+# Override paths explicitly
+afs agents run journal-agent -- \
+  --thoughts ~/notes/thoughts.org \
+  --active-tasks ~/notes/tasks/active.md \
+  --weekly-dir ~/notes/weekly
 ```
 
 ## Arguments
 
 | Flag | Default | Description |
 |---|---|---|
-| `--task` | `all` | Which task(s) to run (see table above) |
-| `--date` | yesterday | Source date for carry-forward (`YYYY-MM-DD`) |
-| `--week` | current week | ISO week for weekly-review (`YYYY-WNN`) |
-| `--daily-dir` | `~/Journal/daily` | Override daily journal directory |
-| `--weekly-dir` | `~/Journal/weekly` | Override weekly journal directory |
-| `--scan-days` | `14` | History window for stale-check |
-| `--stale-threshold` | `3` | Consecutive-day streak to count as stale |
-| `--overwrite` | off | Replace existing files instead of skipping/appending |
+| `--week` | current ISO week | Week to draft (`YYYY-WNN`) |
+| `--thoughts` | env / fallback | Path to thoughts.org |
+| `--active-tasks` | env / fallback | Path to tasks/active.md |
+| `--weekly-dir` | env / fallback | Weekly review directory |
+| `--overwrite` | off | Replace existing AI draft section instead of skipping |
 | `--output` | — | Write JSON result to this path |
 | `--stdout` | — | Force JSON to stdout even when non-interactive |
 | `--pretty` | — | Pretty-print JSON output |
 | `--quiet` | — | Suppress INFO logs |
 
-## Org-mode parsing
+## What goes into the AI draft
 
-Recognized as **unchecked**:
-- `- [ ] item text` (any leading indent)
-- `* TODO item text` / `** TODO item text`
+The agent scans:
 
-Recognized as **done** (wins):
-- `- [x] item text` / `- [X] item text`
-- `* DONE item text`
+- **Thoughts.org** for any `* DD Month YYYY` headline whose date falls in
+  the current week. Each entry's body is summarized as a one-line preview.
+- **tasks/active.md** for `- [ ]` (open) and `- [x]` (completed) items.
+- **Recent agent activity** from the AFS context index, deduped per
+  agent/op pair, last 7 days.
 
-Both forms are normalized to `- [ ] text` when written to Carry Over sections.
-
-## Stale-TODO detection
-
-For each TODO text, the agent tracks the longest *current* consecutive streak
-(streak that ends yesterday or today). Items with a streak ≥ `--stale-threshold`
-are reported in `payload.stale_check.stale_todos`, sorted longest-streak-first.
-
-Example stale entry:
-```json
-{
-  "todo": "- [ ] Finish V2/V3 postmortem",
-  "streak_days": 5,
-  "first_seen": "2026-03-15",
-  "last_seen": "2026-03-19"
-}
-```
-
-## Weekly review output format
-
-```org
-#+TITLE: Weekly Review — 2026-W12 (Mar 10–16)
-#+AUTHOR: AFS
-
-* Wins
-- ...
-
-* Misses
-- ...
-
-* Carry Over
-- [ ] ...
-
-* Top 3 for Next Week
-1.
-2.
-3.
-```
-
-Wins are populated from `- [x]` items, `* DONE` headlines, and narrative bullets
-from `* Work` / `* AFS / Side Projects` sections. The user should curate before
-publishing.
-
-Misses are items that appeared as unchecked during the week but are absent from
-the final day's carry-over (silently dropped without completion).
-
-## JSON result shape
-
-```json
-{
-  "name": "journal-agent",
-  "status": "ok",
-  "task": "journal:all",
-  "metrics": {
-    "carry_forward_count": 3,
-    "template_items_added": 3,
-    "stale_count": 1
-  },
-  "notes": [
-    "template: created → /Users/…/2026-03-22.org",
-    "STALE: 1 TODO(s) unchecked for 3+ days — \"- [ ] Write postmortem\""
-  ],
-  "payload": {
-    "carry_forward": { "found": true, "todo_count": 3, "items": [...] },
-    "template_gen": { "action": "created", "items_added": 3, "path": "..." },
-    "stale_check": { "stale_count": 1, "stale_todos": [...] }
-  }
-}
-```
+Output is appended below the divider in the weekly file as a single org
+heading `* AI draft — YYYY-WNN` with subheadings for thoughts, tasks, and
+agent activity.

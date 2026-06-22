@@ -12,24 +12,24 @@ def _work_config() -> AFSConfig:
             active_profile="work",
             auto_apply=True,
             profiles={
-                "work": ProfileConfig(policies=["no_zelda"]),
+                "work": ProfileConfig(policies=["deny_keywords:classified,internal-only"]),
             },
         )
     )
 
 
-def test_no_zelda_policy_blocks_agent_dispatch() -> None:
+def test_deny_keywords_policy_blocks_agent_dispatch() -> None:
     with pytest.raises(PermissionError):
         run_grounding_hooks(
             event="before_agent_dispatch",
-            payload={"summary": "Debug Zelda dungeon issue"},
+            payload={"summary": "Review classified launch issue"},
             config=_work_config(),
         )
 
 
-def test_no_zelda_policy_allows_work_dispatch() -> None:
+def test_deny_keywords_policy_allows_unrelated_dispatch() -> None:
     run_grounding_hooks(
         event="before_agent_dispatch",
-        payload={"summary": "Review Gemini CLI MCP integration"},
+        payload={"summary": "Review Antigravity/Gemini MCP integration"},
         config=_work_config(),
     )

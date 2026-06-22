@@ -47,7 +47,7 @@ try:
     from afs.registry.models import VersionStatus
     from afs.training.pipeline import DataPipeline, PipelineConfig
 except (RuntimeError, ImportError):
-    pytest.skip("afs.training/afs.continuous moved to afs-ext", allow_module_level=True)
+    pytest.skip("afs.training/afs.continuous moved to a companion extension repo", allow_module_level=True)
 
 # ============================================================================
 # FIXTURES
@@ -193,6 +193,7 @@ class TestTrainingToDeploymentPipeline:
             gguf_path=str(temp_dir / "model.gguf"),
             evaluation_scores=EvaluationScores(accuracy=0.88),
         )
+        assert version.model_name == "lmstudio-test"
 
         # Mock LMStudio deployment
         with patch('afs.services.manager.LMStudioManager') as mock_lm:
@@ -343,6 +344,7 @@ class TestCostTrackingAndOptimization:
 
         # Create optimizer
         optimizer = CostOptimizer(data_dir=temp_dir / "optimization")
+        assert optimizer.data_dir == temp_dir / "optimization"
 
         # Create training metrics
         metrics = TrainingMetrics(
@@ -372,6 +374,7 @@ class TestCostTrackingAndOptimization:
         4. Send notification
         """
         budget_root = temp_dir / "budget"
+        assert budget_root.name == "budget"
 
         # Simulate budget tracking
         spent = 80.0
@@ -432,6 +435,7 @@ class TestContinuousLearningLoop:
             min_quality_score=0.75,
         )
         generator = TrainingDataGenerator(usage_logger=usage_logger, config=gen_config)
+        assert generator.config.min_quality_score == 0.75
 
         # Generate training samples
         training_samples = []
@@ -483,6 +487,7 @@ class TestContinuousLearningLoop:
             quality_drop_threshold=0.3,
             min_quality_score=0.7,
         )
+        assert trigger_config.enable_quality_drop is True
         # Note: RetrainTrigger is created within the workflow
 
         # Get stats to check quality
@@ -527,6 +532,7 @@ class TestContinuousLearningLoop:
         )
 
         ab_manager = ABTestManager(ab_config=ab_config, registry=registry)
+        assert ab_manager.config.traffic_split_percent == 50
 
         # Simulate traffic - first 5 to model A, next 5 to model B
         for i in range(10):
@@ -857,6 +863,7 @@ class TestRollbackAndRecovery:
         )
 
         pipeline = DataPipeline(config=config)
+        assert pipeline.config.output_dir == temp_dir / "error_test"
 
         # Simulate error
         try:
@@ -993,6 +1000,7 @@ class TestCompleteWorkflowIntegration:
             model_name="latency-test",
             base_model="base",
         )
+        assert model.model_name == "latency-test"
 
         # Log usage
         for i in range(10):
@@ -1055,6 +1063,7 @@ class TestCompleteWorkflowIntegration:
         db_file = temp_dir / "usage.db"
         # Usage logger creates the database on first write
         assert model is not None
+        assert db_file.parent == temp_dir
 
         # Verify dataset file has correct content
         with open(dataset_file) as f:

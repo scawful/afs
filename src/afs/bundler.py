@@ -11,12 +11,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import tomllib
-
 from .config import load_config_model
 from .extensions import resolve_extensions_config
 from .profiles import resolve_active_profile
 from .schema import AFSConfig, AgentConfig, BundleManifest, ProfileConfig
+from .toml_compat import tomllib
 
 DEFAULT_EXTENSION_ROOT = Path.home() / ".config" / "afs" / "extensions"
 CORE_SOURCE_ROOT = Path(__file__).resolve().parents[1]

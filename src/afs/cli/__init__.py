@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import os
+import shlex
 import sys
 from collections.abc import Iterable
 from contextlib import contextmanager
@@ -19,6 +21,8 @@ from ..health import cli as health_cli
 from ..history import log_cli_invocation
 from ..profiles import resolve_active_profile
 from . import (
+    agent_ops,
+    antigravity,
     approvals,
     briefing,
     bundle,
@@ -31,15 +35,23 @@ from . import (
     events,
     fs,
     gemini,
+    guide,
     gws_cli,
+    manager_gui,
     mcp,
+    next_action,
+    personal,
     profile,
     review,
+    setup_wizard,
     skills,
+    sources,
     training,
+    verify,
     watch,
+    work,
 )
-from ._help import render_default_help, render_topic_help
+from ._help import _build_command_tree, render_default_help, render_topic_help
 
 
 @contextmanager
@@ -126,6 +138,76 @@ def _extract_config_argument(argv: Iterable[str] | None) -> Path | None:
     return None
 
 
+def _completion_mode() -> str | None:
+    for env_name in ("_AFS_COMPLETE", "AFS_COMPLETE"):
+        value = os.getenv(env_name)
+        if value:
+            return value.strip()
+    return None
+
+
+def _completion_array_name(path: tuple[str, ...]) -> str:
+    if not path:
+        return "_afs_cmds_root"
+    safe = "".join(ch if ch.isalnum() else "_" for ch in "_".join(path))
+    return f"_afs_cmds_{safe}"
+
+
+def _iter_completion_nodes(
+    tree: dict[str, dict[str, object]],
+    prefix: tuple[str, ...] = (),
+) -> Iterable[tuple[tuple[str, ...], dict[str, dict[str, object]]]]:
+    yield prefix, tree
+    for name, node in tree.items():
+        children = node.get("children")
+        if isinstance(children, dict) and children:
+            yield from _iter_completion_nodes(children, prefix + (name,))
+
+
+def _render_zsh_completion(parser: argparse.ArgumentParser) -> str:
+    tree = _build_command_tree(parser)
+    lines = ["#compdef afs", ""]
+
+    nodes = list(_iter_completion_nodes(tree))
+    for path, children in nodes:
+        array_name = _completion_array_name(path)
+        lines.append(f"typeset -ga {array_name}")
+        lines.append(f"{array_name}=(")
+        for name, node in children.items():
+            help_text = str(node.get("help") or "").replace(":", ";").replace("\n", " ").strip()
+            entry = f"{name}:{help_text}" if help_text else name
+            lines.append(f"  {shlex.quote(entry)}")
+        lines.append(")")
+        lines.append("")
+
+    lines.extend(
+        [
+            "_afs() {",
+            "  local path",
+            "  path=\"${(j: :)${words[@]:2:$((CURRENT-2))}}\"",
+            "  case \"$path\" in",
+        ]
+    )
+
+    for path, _children in nodes:
+        array_name = _completion_array_name(path)
+        label = "afs" if not path else f"afs {' '.join(path)}"
+        case_label = shlex.quote(" ".join(path)) if path else "''"
+        lines.append(
+            f"    {case_label}) _describe -t commands {shlex.quote(f'{label} command')} {array_name}; return ;;"
+        )
+
+    lines.extend(
+        [
+            "  esac",
+            "}",
+            "",
+            "compdef _afs afs",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
 def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
     """Build the main argument parser."""
     parser = argparse.ArgumentParser(prog="afs")
@@ -134,8 +216,20 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
     # Register core commands (init, plugins, status, services, agents, orchestrator, studio)
     core.register_parsers(subparsers)
 
+    # Register guided setup and workflow guides early so they are easy to find.
+    setup_wizard.register_parsers(subparsers)
+    guide.register_parsers(subparsers)
+    manager_gui.register_parsers(subparsers)
+    next_action.register_parsers(subparsers)
+
     # Register approvals commands
     approvals.register_parsers(subparsers)
+
+    # Register work-assistant people/review/approval commands
+    work.register_parsers(subparsers)
+
+    # Register agent operations commands
+    agent_ops.register_parsers(subparsers)
 
     # Register cache management commands
     cache.register_parsers(subparsers)
@@ -149,14 +243,18 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
     # Register embedding commands
     embeddings.register_parsers(subparsers)
 
-    # Register Gemini integration commands
+    # Register Gemini/Antigravity integration commands
     gemini.register_parsers(subparsers)
+    antigravity.register_parsers(subparsers)
 
     # Register MCP server commands
     mcp.register_parsers(subparsers)
 
     # Register profile switching commands
     profile.register_parsers(subparsers)
+
+    # Register personal context loader
+    personal.register_parsers(subparsers)
 
     # Register briefing command
     briefing.register_parsers(subparsers)
@@ -169,6 +267,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
 
     # Register skill metadata commands
     skills.register_parsers(subparsers)
+
+    # Register generic context source provider commands
+    sources.register_parsers(subparsers)
 
     # Register bundle commands
     bundle.register_parsers(subparsers)
@@ -187,6 +288,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
 
     # Register training pipeline commands
     training.register_parsers(subparsers)
+
+    # Register verification planning and execution commands
+    verify.register_parsers(subparsers)
 
     # Register watch command
     watch.register_parsers(subparsers)
@@ -227,7 +331,7 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
         extension_roots: dict[str, list[Path]] = {}
         for extension in extensions.values():
             for module_name in extension.cli_modules:
-                extension_roots.setdefault(module_name, []).append(extension.root)
+                extension_roots.setdefault(module_name, []).extend(extension.import_roots)
 
         for module_name in resolved_profile.cli_modules:
             try:
@@ -282,7 +386,15 @@ def _requires_subcommand(
 def main(argv: Iterable[str] | None = None) -> int:
     """Main CLI entry point."""
     argv_list = list(argv) if argv is not None else sys.argv[1:]
+    completion_mode = _completion_mode()
     parser = build_parser(argv_list)
+
+    if completion_mode:
+        if completion_mode in {"zsh_source", "source_zsh"}:
+            print(_render_zsh_completion(parser), end="")
+            return 0
+        return 1
+
     args = parser.parse_args(argv_list)
 
     if not getattr(args, "command", None):

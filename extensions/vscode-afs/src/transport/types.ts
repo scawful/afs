@@ -35,6 +35,27 @@ export interface ServerCapabilities {
   prompts: boolean;
 }
 
+export interface SessionCliHints {
+  workspacePath: string;
+  queryShortcut: string;
+  queryCanonical: string;
+  indexRebuild: string;
+  workSummary: string;
+  workApprovals: string;
+  workCommunication: string;
+  notes: string[];
+}
+
+export interface TransportSessionInfo {
+  sessionId: string;
+  payloadFile: string;
+  contextPath: string;
+  promptJson: string;
+  promptText: string;
+  workspace: string;
+  cliHints: SessionCliHints;
+}
+
 /** Optional turn lifecycle surface for host-driven session events. */
 export interface TurnLifecycleClient {
   beginTurn(prompt: string, summary?: string): Promise<string>;
@@ -64,6 +85,7 @@ export interface ITransportClient extends vscode.Disposable {
   beginTurn?(prompt: string, summary?: string): Promise<string>;
   completeTurn?(turnId: string, summary?: string): Promise<void>;
   failTurn?(turnId: string, error: unknown, summary?: string): Promise<void>;
+  getSessionInfo(): TransportSessionInfo | undefined;
 
   onConnectionStateChanged: vscode.Event<ConnectionState>;
 }

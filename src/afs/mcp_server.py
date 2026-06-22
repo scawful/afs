@@ -20,7 +20,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .agent_scope import is_tool_allowed
+from .agent_scope import allowed_tools, is_tool_allowed
+from .codebase_explorer import build_codebase_summary, render_codebase_summary
 from .config import load_config_model
 from .context_index import (
     DEFAULT_MAX_CONTENT_CHARS,
@@ -29,6 +30,7 @@ from .context_index import (
 )
 from .context_pack import build_context_pack, render_context_pack
 from .context_paths import resolve_mount_root
+from .core import find_existing_root
 from .discovery import discover_contexts
 from .event_log import read_agent_events
 from .manager import AFSManager
@@ -68,6 +70,7 @@ from .models import MountType
 from .operator_digests import KIND_CHOICES, digest_operator_output
 from .plugins import load_enabled_extensions
 from .profiles import resolve_active_profile
+from .repo_policy import evaluate_repo_policy, load_repo_policy
 from .response_schemas import (
     SCHEMA_MIME_TYPE,
     SCHEMA_URI_PREFIX,
@@ -76,6 +79,7 @@ from .response_schemas import (
     list_response_schema_specs,
 )
 from .schema import ContextIndexConfig
+from .sensitivity import SensitivityRuleSet
 from .session_bootstrap import (
     build_session_bootstrap,
     collect_context_diff,
@@ -97,6 +101,18 @@ _read_message = _read_message_fn
 _write_message = _write_message_fn
 _error_response = _error_response_fn
 _success_response = _success_response_fn
+
+MCP_TOOL_CATALOG_ENV = "AFS_MCP_TOOL_CATALOG"
+FULL_MCP_TOOL_CATALOG_VALUES = frozenset({"all", "full", "legacy"})
+DEFAULT_MCP_TOOL_CATALOG = frozenset(
+    {
+        "context.status",
+        "context.query",
+        "context.read",
+        "context.list",
+        "context.write",
+    }
+)
 
 
 def _allowed_roots(manager: AFSManager) -> list[Path]:
@@ -148,8 +164,19 @@ def _resolve_context_path(arguments: dict[str, Any], manager: AFSManager) -> Pat
     raw = arguments.get("context_path")
     if isinstance(raw, str) and raw.strip():
         return _assert_allowed(Path(raw), manager)
-    default = Path.cwd() / ".context"
-    return _assert_allowed(default, manager)
+    project_raw = arguments.get("project_path", arguments.get("path"))
+    project_path = (
+        Path(project_raw).expanduser().resolve()
+        if isinstance(project_raw, str) and project_raw.strip()
+        else Path.cwd().resolve()
+    )
+    existing_context = find_existing_root(project_path)
+    if existing_context is not None:
+        return _assert_allowed(existing_context, manager)
+    raise FileNotFoundError(
+        f"No existing AFS context found for {project_path}. "
+        "Use context.init/context.ensure before context.query."
+    )
 
 
 def _resolve_project_path(arguments: dict[str, Any]) -> Path:
@@ -288,6 +315,76 @@ def _context_candidates_for_path(path: Path, manager: AFSManager) -> list[Path]:
     return candidates
 
 
+def _sensitivity_export_rules(manager: AFSManager) -> SensitivityRuleSet:
+    sensitivity = manager.config.sensitivity
+    return SensitivityRuleSet.from_patterns(
+        [*sensitivity.never_index, *sensitivity.never_export]
+    )
+
+
+def _sensitivity_relative_paths(path: Path, manager: AFSManager) -> list[str]:
+    """Return context-relative path variants used by sensitivity globs."""
+    resolved = path.expanduser().resolve()
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: str) -> None:
+        cleaned = value.replace("\\", "/").strip().lstrip("./")
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            values.append(cleaned)
+
+    for context_path in _context_candidates_for_path(resolved, manager):
+        for mount_type in MountType:
+            try:
+                mount_root = manager.resolve_mount_root(context_path, mount_type)
+            except Exception:
+                continue
+            try:
+                rel = resolved.relative_to(mount_root.expanduser().resolve()).as_posix()
+            except ValueError:
+                continue
+            _add(rel)
+            _add(f"{mount_type.value}/{rel}")
+    return values
+
+
+def _sensitivity_block_match(path: Path, manager: AFSManager) -> tuple[str, str] | None:
+    rules = _sensitivity_export_rules(manager)
+    if not rules.enabled:
+        return None
+    resolved = path.expanduser().resolve()
+    relative_values = _sensitivity_relative_paths(resolved, manager)
+    if not relative_values:
+        relative_values = [resolved.name]
+    match = rules.match(resolved, relative_paths=relative_values)
+    return (match.relative_path, match.pattern) if match is not None else None
+
+
+def _assert_sensitivity_allowed(path: Path, manager: AFSManager, *, operation: str) -> None:
+    match = _sensitivity_block_match(path, manager)
+    if match is None:
+        return
+    relative_path, pattern = match
+    raise PermissionError(
+        f"Blocked by sensitivity rule during {operation}: "
+        f"path '{relative_path}' matches pattern '{pattern}'"
+    )
+
+
+def _entry_blocked_by_sensitivity(entry: dict[str, Any], manager: AFSManager) -> bool:
+    rules = _sensitivity_export_rules(manager)
+    if not rules.enabled:
+        return False
+    absolute_path = Path(str(entry.get("absolute_path", "")))
+    relative_path = (
+        f"{entry.get('mount_type', '')}/{entry.get('relative_path', '')}"
+        .replace("\\", "/")
+        .strip("/")
+    )
+    return rules.blocked(absolute_path, relative_paths=(relative_path,))
+
+
 def _sync_context_index_for_path(path: Path, manager: AFSManager) -> bool:
     settings = _context_index_settings(manager)
     if not settings.enabled:
@@ -350,13 +447,19 @@ def _query_context_index(
         )
         rebuild_summary = summary.to_dict()
 
+    query_limit = 500 if _sensitivity_export_rules(manager).enabled else limit_value
     entries = index.query(
         query=query,
         mount_types=mount_types,
         relative_prefix=relative_prefix,
-        limit=limit_value,
+        limit=query_limit,
         include_content=include_content,
     )
+    entries = [
+        entry
+        for entry in entries
+        if not _entry_blocked_by_sensitivity(entry, manager)
+    ][:limit_value]
     payload: dict[str, Any] = {
         "context_path": str(context_path),
         "db_path": str(index.db_path),
@@ -379,11 +482,145 @@ def _as_text_result(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _work_store(
+    arguments: dict[str, Any],
+    manager: AFSManager,
+) -> tuple[Any, Path]:
+    from .work_assistant import WorkAssistantStore
+
+    context_path = _resolve_context_path(arguments, manager)
+    return WorkAssistantStore(context_path, config=manager.config), context_path
+
+
+def _tool_work_communication_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    store, context_path = _work_store(arguments, manager)
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    person_id = arguments.get("person_id")
+    purpose = arguments.get("purpose")
+    samples = store.list_communication_samples(
+        person_id=person_id if isinstance(person_id, str) and person_id.strip() else None,
+        purpose=purpose if isinstance(purpose, str) and purpose.strip() else None,
+        limit=limit,
+    )
+    return {"context_path": str(context_path), "samples": samples, "count": len(samples)}
+
+
+def _tool_work_communication_add(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    store, context_path = _work_store(arguments, manager)
+    text = arguments.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("work.communication.add requires non-empty text")
+    style_notes = arguments.get("style_notes")
+    provenance = arguments.get("provenance")
+    sample_id = store.record_communication_sample(
+        text=text,
+        person_id=str(arguments.get("person_id") or ""),
+        source_system=str(arguments.get("source_system") or ""),
+        source_id=str(arguments.get("source_id") or ""),
+        channel=str(arguments.get("channel") or ""),
+        purpose=str(arguments.get("purpose") or "work_communication"),
+        style_notes=style_notes if isinstance(style_notes, list) else [],
+        provenance=provenance if isinstance(provenance, list) else ([provenance] if provenance else []),
+        confidence=float(arguments.get("confidence") or 0.5),
+        dedupe_key=str(arguments.get("dedupe_key") or "") or None,
+    )
+    return {"context_path": str(context_path), "sample_id": sample_id}
+
+
+def _tool_work_communication_guide(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    store, context_path = _work_store(arguments, manager)
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    person_id = arguments.get("person_id")
+    purpose = arguments.get("purpose")
+    summary = store.communication_style_summary(
+        person_id=person_id if isinstance(person_id, str) and person_id.strip() else None,
+        purpose=purpose if isinstance(purpose, str) and purpose.strip() else None,
+        limit=limit,
+    )
+    summary["context_path"] = str(context_path)
+    return summary
+
+
+def _load_personal_context_for_work(arguments: dict[str, Any]) -> Any | None:
+    personal_mode = arguments.get("personal_mode")
+    if not isinstance(personal_mode, str) or not personal_mode.strip():
+        return None
+    from .personal_context import load_personal_context
+
+    raw_root = arguments.get("personal_context_root")
+    return load_personal_context(
+        personal_mode.strip(),
+        context_root=Path(raw_root).expanduser() if isinstance(raw_root, str) and raw_root.strip() else None,
+    )
+
+
+def _tool_work_communication_preflight(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    store, context_path = _work_store(arguments, manager)
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    approval_limit = _coerce_int(arguments.get("approval_limit"), default=10, minimum=1, maximum=100)
+    person_id = arguments.get("person_id")
+    purpose = arguments.get("purpose")
+    return store.communication_preflight(
+        person_id=person_id if isinstance(person_id, str) and person_id.strip() else None,
+        purpose=purpose if isinstance(purpose, str) and purpose.strip() else None,
+        limit=limit,
+        approval_limit=approval_limit,
+        personal_context=_load_personal_context_for_work(arguments),
+        context_path=context_path,
+    )
+
+
+def _tool_work_approvals_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    store, context_path = _work_store(arguments, manager)
+    limit = _coerce_int(arguments.get("limit"), default=50, minimum=1, maximum=100)
+    status_arg = arguments.get("status")
+    status = status_arg if isinstance(status_arg, str) and status_arg.strip() else "pending"
+    if bool(arguments.get("all", False)):
+        status = None
+    approvals = store.list_approvals(status=status, limit=limit)
+    return {"context_path": str(context_path), "approvals": approvals, "count": len(approvals)}
+
+
+def _tool_work_approvals_show(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    store, context_path = _work_store(arguments, manager)
+    approval_id = arguments.get("approval_id")
+    if not isinstance(approval_id, str) or not approval_id.strip():
+        raise ValueError("work.approvals.show requires approval_id")
+    approval = store.get_approval(approval_id)
+    if approval is None:
+        raise FileNotFoundError(f"No approval found: {approval_id}")
+    return {"context_path": str(context_path), "approval": approval}
+
+
+def _tool_work_approvals_request(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    store, context_path = _work_store(arguments, manager)
+    required = ("target_system", "target_id", "action", "summary")
+    missing = [name for name in required if not str(arguments.get(name) or "").strip()]
+    if missing:
+        raise ValueError(f"work.approvals.request missing required fields: {', '.join(missing)}")
+    preview = arguments.get("preview")
+    approval_id = store.create_approval(
+        target_system=str(arguments.get("target_system") or ""),
+        target_id=str(arguments.get("target_id") or ""),
+        action=str(arguments.get("action") or ""),
+        summary=str(arguments.get("summary") or ""),
+        preview=preview if preview is not None else {},
+        affected_people=arguments.get("affected_people") if isinstance(arguments.get("affected_people"), list) else [],
+        risk_level=str(arguments.get("risk_level") or "medium"),
+        permission_required=str(arguments.get("permission_required") or "human approval"),
+        requested_by=str(arguments.get("requested_by") or "agent"),
+        expires_at=str(arguments.get("expires_at") or "") or None,
+        dedupe_key=str(arguments.get("dedupe_key") or "") or None,
+    )
+    return {"context_path": str(context_path), "approval_id": approval_id, "status": "pending"}
+
+
 def _tool_fs_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     path_value = arguments.get("path")
     if not isinstance(path_value, str):
         raise ValueError("path must be a string")
     path = _assert_allowed(Path(path_value), manager)
+    _assert_sensitivity_allowed(path, manager, operation="read")
     if not path.exists():
         raise FileNotFoundError(f"Path not found: {path}")
     if path.is_dir():
@@ -403,6 +640,7 @@ def _tool_fs_write(arguments: dict[str, Any], manager: AFSManager) -> dict[str, 
         raise ValueError("path and content must be strings")
 
     path = _assert_allowed(Path(path_value), manager)
+    _assert_sensitivity_allowed(path, manager, operation="write")
     if not path.parent.exists():
         if not mkdirs:
             raise FileNotFoundError(f"Parent directory missing: {path.parent}")
@@ -427,6 +665,7 @@ def _tool_fs_delete(arguments: dict[str, Any], manager: AFSManager) -> dict[str,
         raise ValueError("path must be a string")
 
     path = _assert_allowed(Path(path_value), manager)
+    _assert_sensitivity_allowed(path, manager, operation="delete")
     if not path.exists() and not path.is_symlink():
         raise FileNotFoundError(f"Path not found: {path}")
 
@@ -463,6 +702,8 @@ def _tool_fs_move(arguments: dict[str, Any], manager: AFSManager) -> dict[str, A
 
     source = _assert_allowed(Path(source_value), manager)
     destination = _assert_allowed(Path(destination_value), manager)
+    _assert_sensitivity_allowed(source, manager, operation="move")
+    _assert_sensitivity_allowed(destination, manager, operation="move")
 
     if not source.exists() and not source.is_symlink():
         raise FileNotFoundError(f"Source path not found: {source}")
@@ -502,6 +743,7 @@ def _tool_fs_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, A
         max_depth = 1
 
     root = _assert_allowed(Path(path_value), manager)
+    _assert_sensitivity_allowed(root, manager, operation="list")
     if not root.exists():
         raise FileNotFoundError(f"Path not found: {root}")
 
@@ -515,6 +757,8 @@ def _tool_fs_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, A
             except Exception:
                 continue
             if max_depth >= 0 and depth > max_depth:
+                continue
+            if _sensitivity_block_match(candidate, manager) is not None:
                 continue
             entries.append({"path": str(candidate), "is_dir": candidate.is_dir()})
     return {"path": str(root), "entries": entries}
@@ -1014,6 +1258,281 @@ def _tool_task_complete(arguments: dict[str, Any], manager: AFSManager) -> dict[
     return task.to_dict()
 
 
+def _tool_agent_manifest_show(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_manifest import (
+        default_manifest_path,
+        export_for_harness,
+        load_manifest,
+        summarize_manifest,
+        validate_manifest,
+    )
+
+    raw_path = arguments.get("file")
+    path = Path(str(raw_path)).expanduser() if raw_path else default_manifest_path()
+    data = load_manifest(path)
+    harness = str(arguments.get("harness", "") or "").strip()
+    payload = export_for_harness(data, harness) if harness else summarize_manifest(data)
+    if bool(arguments.get("validate", False)):
+        payload["issues"] = [
+            issue.to_dict()
+            for issue in validate_manifest(
+                data,
+                check_paths=bool(arguments.get("check_paths", False)),
+            )
+        ]
+    payload["path"] = str(path)
+    return payload
+
+
+def _tool_agent_run_start(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_runs import AgentRunStore
+
+    task = str(arguments.get("task", "") or "").strip()
+    if not task:
+        raise ValueError("task is required")
+    context_path = _resolve_context_path(arguments, manager)
+    run = AgentRunStore(context_path).start(
+        task,
+        harness=str(arguments.get("harness", "") or "").strip(),
+        workspace=str(arguments.get("workspace", "") or "").strip(),
+        prompt=str(arguments.get("prompt", "") or ""),
+    )
+    return run.to_dict()
+
+
+def _tool_agent_run_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_runs import AgentRunStore
+
+    context_path = _resolve_context_path(arguments, manager)
+    status = arguments.get("status")
+    if isinstance(status, str):
+        status = status.strip() or None
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    runs = AgentRunStore(context_path).list(status=status, limit=limit)
+    return {"runs": [run.to_dict() for run in runs]}
+
+
+def _tool_agent_run_show(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_runs import AgentRunStore
+
+    run_id = str(arguments.get("run_id", "") or "").strip()
+    if not run_id:
+        raise ValueError("run_id is required")
+    context_path = _resolve_context_path(arguments, manager)
+    run = AgentRunStore(context_path).get(run_id)
+    if run is None:
+        raise FileNotFoundError(f"Agent run not found: {run_id}")
+    return run.to_dict()
+
+
+def _tool_agent_run_event(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_runs import AgentRunStore
+
+    run_id = str(arguments.get("run_id", "") or "").strip()
+    event_type = str(arguments.get("event_type", "") or "").strip()
+    if not run_id or not event_type:
+        raise ValueError("run_id and event_type are required")
+    context_path = _resolve_context_path(arguments, manager)
+    run = AgentRunStore(context_path).record_event(
+        run_id,
+        event_type,
+        summary=str(arguments.get("summary", "") or ""),
+        data=arguments.get("data") if isinstance(arguments.get("data"), dict) else {},
+    )
+    return run.to_dict()
+
+
+def _tool_agent_run_finish(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_runs import AgentRunStore
+
+    run_id = str(arguments.get("run_id", "") or "").strip()
+    if not run_id:
+        raise ValueError("run_id is required")
+    context_path = _resolve_context_path(arguments, manager)
+    files_changed = arguments.get("files_changed")
+    commands = arguments.get("commands")
+    verification = arguments.get("verification")
+    run = AgentRunStore(context_path).finish(
+        run_id,
+        status=str(arguments.get("status", "") or "done"),
+        summary=str(arguments.get("summary", "") or ""),
+        files_changed=[str(item) for item in files_changed] if isinstance(files_changed, list) else [],
+        commands=[str(item) for item in commands] if isinstance(commands, list) else [],
+        verification=[item for item in verification if isinstance(item, dict)]
+        if isinstance(verification, list)
+        else [],
+        handoff_path=str(arguments.get("handoff_path", "") or ""),
+    )
+    return run.to_dict()
+
+
+def _tool_agent_job_create(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_jobs import AgentJobQueue
+
+    title = str(arguments.get("title", "") or "").strip()
+    if not title:
+        raise ValueError("title is required")
+    prompt = str(arguments.get("prompt", "") or title)
+    context_path = _resolve_context_path(arguments, manager)
+    priority = _coerce_int(arguments.get("priority"), default=5, minimum=1, maximum=10)
+    job = AgentJobQueue(context_path).create(
+        title,
+        prompt,
+        priority=priority,
+        created_by=str(arguments.get("created_by", "") or "").strip(),
+        scope=str(arguments.get("scope", "") or "").strip(),
+        expected_output=str(arguments.get("expected_output", "") or "").strip(),
+        allow_destructive=bool(arguments.get("allow_destructive", False)),
+    )
+    return job.to_dict()
+
+
+def _tool_agent_job_status(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_job_status import build_agent_job_status
+
+    context_path = _resolve_context_path(arguments, manager)
+    stale_after_raw = arguments.get("stale_after_seconds", 3600.0)
+    stale_after = (
+        float(stale_after_raw)
+        if isinstance(stale_after_raw, (int, float))
+        else 3600.0
+    )
+    recent_runs = _coerce_int(arguments.get("recent_runs"), default=5, minimum=0, maximum=50)
+    label = str(arguments.get("label", "") or "").strip() or "com.afs.agent-jobs"
+    return build_agent_job_status(
+        context_path,
+        label=label,
+        stale_after_seconds=stale_after,
+        recent_runs_limit=recent_runs,
+    )
+
+
+def _tool_agent_job_inbox(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_job_inbox import build_agent_job_inbox
+
+    context_path = _resolve_context_path(arguments, manager)
+    stale_after_raw = arguments.get("stale_after_seconds", 3600.0)
+    stale_after = (
+        float(stale_after_raw)
+        if isinstance(stale_after_raw, (int, float))
+        else 3600.0
+    )
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    return build_agent_job_inbox(
+        context_path,
+        stale_after_seconds=stale_after,
+        limit=limit,
+    )
+
+
+def _tool_agent_job_seed(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_job_seeds import seed_agent_jobs
+
+    context_path = _resolve_context_path(arguments, manager)
+    profile = str(arguments.get("profile", "") or "repo-maintenance").strip()
+    cadence = str(arguments.get("cadence", "") or "daily").strip()
+    created_by = str(arguments.get("created_by", "") or "agent.job.seed").strip()
+    return seed_agent_jobs(
+        context_path,
+        profile=profile,
+        cadence=cadence,
+        created_by=created_by,
+        dry_run=bool(arguments.get("dry_run", False)),
+        force=bool(arguments.get("force", False)),
+    )
+
+
+def _tool_agent_job_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_jobs import AgentJobQueue
+
+    status = arguments.get("status")
+    if isinstance(status, str):
+        status = status.strip() or None
+    context_path = _resolve_context_path(arguments, manager)
+    jobs = AgentJobQueue(context_path).list(status=status)
+    return {"jobs": [job.to_dict() for job in jobs]}
+
+
+def _tool_agent_job_show(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_jobs import AgentJobQueue
+
+    job_id = str(arguments.get("job_id", "") or "").strip()
+    if not job_id:
+        raise ValueError("job_id is required")
+    context_path = _resolve_context_path(arguments, manager)
+    job = AgentJobQueue(context_path).get(job_id)
+    if job is None:
+        raise FileNotFoundError(f"Agent job not found: {job_id}")
+    return job.to_dict()
+
+
+def _tool_agent_job_review(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_job_inbox import review_agent_job
+
+    job_id = str(arguments.get("job_id", "") or "").strip()
+    if not job_id:
+        raise ValueError("job_id is required")
+    context_path = _resolve_context_path(arguments, manager)
+    return review_agent_job(context_path, job_id)
+
+
+def _tool_agent_job_archive(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_job_inbox import archive_agent_job
+
+    job_id = str(arguments.get("job_id", "") or "").strip()
+    if not job_id:
+        raise ValueError("job_id is required")
+    context_path = _resolve_context_path(arguments, manager)
+    return archive_agent_job(context_path, job_id).to_dict()
+
+
+def _tool_agent_job_promote(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_job_inbox import archive_agent_job, promote_agent_job_to_handoff
+
+    job_id = str(arguments.get("job_id", "") or "").strip()
+    if not job_id:
+        raise ValueError("job_id is required")
+    if not bool(arguments.get("to_handoff", True)):
+        raise ValueError("agent.job.promote currently supports --to-handoff only")
+    context_path = _resolve_context_path(arguments, manager)
+    payload = promote_agent_job_to_handoff(
+        context_path,
+        job_id,
+        handoff_name=str(arguments.get("handoff_name", "") or ""),
+    )
+    if bool(arguments.get("archive", False)):
+        payload["archived"] = archive_agent_job(context_path, job_id).to_dict()
+    return payload
+
+
+def _tool_agent_job_claim(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_jobs import AgentJobQueue
+
+    job_id = str(arguments.get("job_id", "") or "").strip()
+    agent_name = str(arguments.get("agent_name", "") or "").strip()
+    if not job_id or not agent_name:
+        raise ValueError("job_id and agent_name are required")
+    context_path = _resolve_context_path(arguments, manager)
+    job = AgentJobQueue(context_path).claim(job_id, agent_name)
+    return job.to_dict()
+
+
+def _tool_agent_job_move(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .agent_jobs import AgentJobQueue
+
+    job_id = str(arguments.get("job_id", "") or "").strip()
+    status = str(arguments.get("status", "") or "").strip()
+    if not job_id or not status:
+        raise ValueError("job_id and status are required")
+    context_path = _resolve_context_path(arguments, manager)
+    job = AgentJobQueue(context_path).move(
+        job_id,
+        status,
+        result=str(arguments.get("result", "") or ""),
+    )
+    return job.to_dict()
+
+
 def _tool_agent_logs(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     agent_name = arguments.get("name", "")
     if not isinstance(agent_name, str) or not agent_name.strip():
@@ -1384,6 +1903,290 @@ def _tool_session_replay(arguments: dict[str, Any], manager: AFSManager) -> dict
     return build_session_timeline(context_path, session_id=session_id, since=since, limit=limit, config=manager.config)
 
 
+def _resolve_codebase_index_dir(context_path: Path, manager: AFSManager) -> Path:
+    """Return the codebase symbol index directory for *context_path*."""
+    from .codebase_index import codebase_index_dir
+    return codebase_index_dir(context_path)
+
+
+def _resolve_embedding_index_dir(context_path: Path, manager: AFSManager) -> Path | None:
+    """Return the embedding index dir if it exists, else None."""
+    from .context_paths import resolve_mount_root
+    from .models import MountType
+    try:
+        knowledge = resolve_mount_root(context_path, MountType.KNOWLEDGE)
+        candidate = knowledge / "embeddings"
+        if (candidate / "embedding_index.json").exists():
+            return candidate
+    except Exception:
+        pass
+    # Fallback: look in scratchpad
+    try:
+        scratchpad = resolve_mount_root(context_path, MountType.SCRATCHPAD)
+        candidate = scratchpad / "embeddings"
+        if (candidate / "embedding_index.json").exists():
+            return candidate
+    except Exception:
+        pass
+    return None
+
+
+def _fuse_search_results(
+    fts: list[dict[str, Any]],
+    emb: list[dict[str, Any]],
+    sym: list[dict[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Normalize, merge, deduplicate by source_path, and re-rank results."""
+    # Normalize FTS relevance_score to [0,1]: BM25 from SQLite is a positive
+    # float where higher is better (the index uses -bm25() internally).
+    fts_scores = [float(e.get("relevance_score") or 0) for e in fts]
+    fts_max = max(fts_scores, default=1.0) or 1.0
+    # Normalize embedding scores (already [0,1] cosine or keyword [0,1])
+    emb_scores = [float(e.get("score", 0)) for e in emb]
+    emb_max = max(emb_scores, default=1.0) or 1.0
+    sym_scores = [float(e.get("score", 1)) for e in sym]
+    sym_max = max(sym_scores, default=1.0) or 1.0
+
+    # key: absolute source_path, value: best merged entry
+    merged: dict[str, dict[str, Any]] = {}
+
+    def _update(entry: dict[str, Any], norm_score: float, source_tag: str) -> None:
+        path = str(entry.get("source_path") or entry.get("absolute_path", ""))
+        if not path:
+            return
+        if path not in merged:
+            merged[path] = {
+                "source_path": path,
+                "relative_path": str(entry.get("relative_path") or ""),
+                "fused_score": norm_score,
+                "sources": [source_tag],
+                "mount_type": entry.get("mount_type", ""),
+                "size_bytes": entry.get("size_bytes", 0),
+                "content_excerpt": entry.get("content_excerpt") or entry.get("text_preview", ""),
+                "symbol_name": entry.get("symbol_name"),
+                "symbol_kind": entry.get("kind"),
+                "line_start": entry.get("line_start"),
+                "chunk_index": entry.get("chunk_index"),
+                "chunk_line_start": entry.get("line_start") if entry.get("chunk_index") is not None else None,
+                "chunk_line_end": entry.get("line_end") if entry.get("chunk_index") is not None else None,
+            }
+        else:
+            existing = merged[path]
+            existing["fused_score"] = max(existing["fused_score"], norm_score)
+            if source_tag not in existing["sources"]:
+                existing["sources"].append(source_tag)
+            if not existing.get("symbol_name") and entry.get("symbol_name"):
+                existing["symbol_name"] = entry["symbol_name"]
+                existing["symbol_kind"] = entry.get("kind")
+                existing["line_start"] = entry.get("line_start")
+
+    for i, entry in enumerate(fts):
+        raw = fts_scores[i]
+        norm = raw / fts_max if fts_max else (1.0 / (i + 1))
+        _update(entry, norm * 0.85, "fts")  # slight weight discount vs embedding
+
+    for i, entry in enumerate(emb):
+        raw = emb_scores[i]
+        norm = raw / emb_max if emb_max else (1.0 / (i + 1))
+        _update({"source_path": entry.get("source_path", ""),
+                  "text_preview": entry.get("text_preview", ""),
+                  "score": raw,
+                  "chunk_index": entry.get("chunk_index"),
+                  "line_start": entry.get("line_start"),
+                  "line_end": entry.get("line_end")}, norm, "embedding")
+
+    for i, entry in enumerate(sym):
+        raw = sym_scores[i]
+        norm = raw / sym_max if sym_max else (1.0 / (i + 1))
+        _update({"source_path": entry.get("source_path", ""),
+                  "symbol_name": entry.get("symbol_name"),
+                  "kind": entry.get("kind"),
+                  "line_start": entry.get("line_start")}, norm * 0.9, "symbol")
+
+    ranked = sorted(merged.values(), key=lambda r: r["fused_score"], reverse=True)
+    return ranked[:limit]
+
+
+def _tool_afs_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    """Unified search: FTS + embedding + symbol index, fused and ranked."""
+    query = str(arguments.get("query", "")).strip()
+    if not query:
+        raise ValueError("query is required")
+
+    try:
+        context_path = _resolve_context_path(arguments, manager)
+    except FileNotFoundError as exc:
+        return {"error": str(exc), "results": [], "sources_used": [], "query": query}
+
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    include_fts = bool(arguments.get("include_fts", True))
+    include_embeddings = bool(arguments.get("include_embeddings", True))
+    include_symbols = bool(arguments.get("include_symbols", True))
+    mount_types = _parse_mount_types(arguments.get("mount_types"))
+
+    fts_entries: list[dict[str, Any]] = []
+    emb_entries: list[dict[str, Any]] = []
+    sym_entries: list[dict[str, Any]] = []
+    sources_used: list[str] = []
+
+    # FTS leg
+    if include_fts:
+        try:
+            payload = _query_context_index(
+                context_path=context_path,
+                manager=manager,
+                query=query,
+                mount_types=mount_types,
+                limit=min(limit * 2, 40),
+                include_content=False,
+            )
+            fts_entries = payload.get("entries", [])
+            if fts_entries:
+                sources_used.append("fts")
+        except Exception:
+            pass
+
+    # Embedding leg
+    if include_embeddings:
+        emb_dir = _resolve_embedding_index_dir(context_path, manager)
+        if emb_dir is not None:
+            provider = arguments.get("provider")
+            model = arguments.get("model")
+            try:
+                from .embeddings import create_embed_fn, search_embedding_index
+                embed_fn = None
+                if isinstance(provider, str) and provider.strip():
+                    kwargs: dict[str, Any] = {}
+                    if isinstance(model, str) and model.strip():
+                        kwargs["model"] = model.strip()
+                    embed_fn = create_embed_fn(provider.strip(), **kwargs)
+                emb_results = search_embedding_index(
+                    emb_dir, query, embed_fn=embed_fn, top_k=min(limit, 15), min_score=0.2
+                )
+                emb_entries = [r.to_dict() for r in emb_results]
+                if emb_entries:
+                    sources_used.append("embedding")
+            except Exception:
+                pass
+
+    # Symbol leg
+    if include_symbols:
+        idx_dir = _resolve_codebase_index_dir(context_path, manager)
+        if (idx_dir / "index.json").exists():
+            try:
+                from .codebase_index import search_codebase_index
+                sym_results = search_codebase_index(idx_dir, query, limit=min(limit, 15))
+                sym_entries = [r.to_dict() for r in sym_results]
+                if sym_entries:
+                    sources_used.append("symbol")
+            except Exception:
+                pass
+
+    results = _fuse_search_results(fts_entries, emb_entries, sym_entries, limit)
+
+    return {
+        "query": query,
+        "context_path": str(context_path),
+        "sources_used": sources_used,
+        "total": len(results),
+        "results": results,
+    }
+
+
+def _tool_afs_codebase_symbols(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    """Look up symbol definitions from the AST codebase index."""
+    from .codebase_index import search_codebase_index
+
+    query = str(arguments.get("query", "")).strip()
+    if not query:
+        raise ValueError("query is required")
+
+    try:
+        context_path = _resolve_context_path(arguments, manager)
+    except FileNotFoundError as exc:
+        return {"error": str(exc), "symbols": [], "query": query}
+
+    idx_dir = _resolve_codebase_index_dir(context_path, manager)
+    if not (idx_dir / "index.json").exists():
+        return {
+            "query": query,
+            "symbols": [],
+            "total": 0,
+            "error": f"No codebase index found at {idx_dir}. Run afs.codebase.index first.",
+        }
+
+    kind = arguments.get("kind")
+    language = arguments.get("language")
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=200)
+    exact = bool(arguments.get("exact", False))
+
+    results = search_codebase_index(
+        idx_dir,
+        query,
+        kind=kind if isinstance(kind, str) else None,
+        language=language if isinstance(language, str) else None,
+        limit=limit,
+        exact=exact,
+    )
+
+    return {
+        "query": query,
+        "kind": kind,
+        "language": language,
+        "total": len(results),
+        "symbols": [r.to_dict() for r in results],
+    }
+
+
+def _tool_afs_codebase_index(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    """Build or update the AST codebase symbol index for a project."""
+    from .codebase_index import build_codebase_index, codebase_index_dir
+
+    try:
+        context_path = _resolve_context_path(arguments, manager)
+    except FileNotFoundError as exc:
+        return {"error": str(exc)}
+
+    project_root_raw = arguments.get("project_path") or arguments.get("path")
+    if isinstance(project_root_raw, str) and project_root_raw.strip():
+        project_root = Path(project_root_raw).expanduser().resolve()
+    else:
+        from .codebase_explorer import infer_project_root as _infer
+        project_root = _infer(context_path)
+
+    output_dir = codebase_index_dir(context_path)
+    max_files = _coerce_int(arguments.get("max_files"), default=5000, minimum=1, maximum=50000)
+    incremental = bool(arguments.get("incremental", True))
+    languages_raw = arguments.get("languages")
+    languages = (
+        [str(lang) for lang in languages_raw if isinstance(lang, str)]
+        if isinstance(languages_raw, list)
+        else None
+    )
+
+    result = build_codebase_index(
+        project_root,
+        output_dir,
+        max_files=max_files,
+        incremental=incremental,
+        languages=languages,
+    )
+
+    return {
+        "summary": result.summary(),
+        "project_root": str(project_root),
+        "output_dir": str(output_dir),
+        "total_files": result.total_files,
+        "indexed": result.indexed,
+        "skipped": result.skipped,
+        "reused": result.reused,
+        "removed": result.removed,
+        "errors": result.errors[:10],
+        "mode": result.mode,
+    }
+
+
 def _tool_alias_definition(
     tool: MCPToolDefinition,
     *,
@@ -1476,7 +2279,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
     return [
         MCPToolDefinition(
             name="briefing",
-            description="Morning briefing — git velocity across all projects, stale project alerts, carry-over items, open tasks, and active agents. Use at the start of a session to understand current state.",
+            description="Morning briefing — calendar, gmail, open tasks, and active agents. Use at the start of a session to understand current state.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -1715,6 +2518,134 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             handler=_tool_session_pack,
         ),
         MCPToolDefinition(
+            name="work.communication.list",
+            description="List captured work communication samples before drafting docs, design docs, requirements, or replies in the user's work style.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "person_id": {"type": "string"},
+                    "purpose": {"type": "string"},
+                    "limit": {"type": "integer", "default": 20},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_work_communication_list,
+        ),
+        MCPToolDefinition(
+            name="work.communication.add",
+            description="Capture a work communication sample for future tone/style grounding. Store only deliberate work samples, not arbitrary private text.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "text": {"type": "string"},
+                    "person_id": {"type": "string"},
+                    "source_system": {"type": "string"},
+                    "source_id": {"type": "string"},
+                    "channel": {"type": "string"},
+                    "purpose": {"type": "string"},
+                    "style_notes": {"type": "array", "items": {"type": "string"}},
+                    "provenance": {"type": "array", "items": {"type": "object"}},
+                    "confidence": {"type": "number", "default": 0.5},
+                    "dedupe_key": {"type": "string"},
+                },
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+            handler=_tool_work_communication_add,
+        ),
+        MCPToolDefinition(
+            name="work.communication.guide",
+            description="Summarize available work communication style evidence and mandatory approval guardrails for work-context writing.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "person_id": {"type": "string"},
+                    "purpose": {"type": "string"},
+                    "limit": {"type": "integer", "default": 20},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_work_communication_guide,
+        ),
+        MCPToolDefinition(
+            name="work.communication.preflight",
+            description=(
+                "Run the mandatory work-writing preflight: style evidence, optional opt-in "
+                "personal context, pending approvals, and explicit approval guardrails. "
+                "This never executes an external write."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "person_id": {"type": "string"},
+                    "purpose": {"type": "string"},
+                    "limit": {"type": "integer", "default": 20},
+                    "approval_limit": {"type": "integer", "default": 10},
+                    "personal_mode": {"type": "string"},
+                    "personal_context_root": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_work_communication_preflight,
+        ),
+        MCPToolDefinition(
+            name="work.approvals.list",
+            description="List local AFS work approval requests. Review this before using connector write tools or claiming permission to post externally.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "status": {"type": "string", "default": "pending"},
+                    "all": {"type": "boolean", "default": False},
+                    "limit": {"type": "integer", "default": 50},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_work_approvals_list,
+        ),
+        MCPToolDefinition(
+            name="work.approvals.show",
+            description="Show one local AFS work approval request and its preview/result details.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "approval_id": {"type": "string"},
+                },
+                "required": ["approval_id"],
+                "additionalProperties": False,
+            },
+            handler=_tool_work_approvals_show,
+        ),
+        MCPToolDefinition(
+            name="work.approvals.request",
+            description="Create a local approval request for posting, sending, submitting, or editing an external work system. This asks for permission; it does not execute the write.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "target_system": {"type": "string"},
+                    "target_id": {"type": "string"},
+                    "action": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "preview": {"type": "object"},
+                    "affected_people": {"type": "array", "items": {}},
+                    "risk_level": {"type": "string", "default": "medium"},
+                    "permission_required": {"type": "string", "default": "human approval"},
+                    "requested_by": {"type": "string", "default": "agent"},
+                    "expires_at": {"type": "string"},
+                    "dedupe_key": {"type": "string"},
+                },
+                "required": ["target_system", "target_id", "action", "summary"],
+                "additionalProperties": False,
+            },
+            handler=_tool_work_approvals_request,
+        ),
+        MCPToolDefinition(
             name="operator.digest",
             description="Compress noisy command, test, traceback, grep, or diffstat output into a small digest before sending it back into model context.",
             input_schema={
@@ -1915,6 +2846,272 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             handler=_tool_task_complete,
         ),
         MCPToolDefinition(
+            name="agent.manifest.show",
+            description="Show or export the repo-owned agent harness manifest.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file": {"type": "string", "description": "Optional manifest TOML path."},
+                    "harness": {"type": "string", "description": "Optional harness name to export."},
+                    "validate": {"type": "boolean", "default": False},
+                    "check_paths": {"type": "boolean", "default": False},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_manifest_show,
+        ),
+        MCPToolDefinition(
+            name="agent.run.start",
+            description="Start a replayable agent run record in scratchpad/agent_runs.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "task": {"type": "string"},
+                    "harness": {"type": "string"},
+                    "workspace": {"type": "string"},
+                    "prompt": {"type": "string"},
+                },
+                "required": ["task"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_run_start,
+        ),
+        MCPToolDefinition(
+            name="agent.run.list",
+            description="List replayable agent run records from scratchpad/agent_runs.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "status": {"type": "string", "description": "Optional status filter."},
+                    "limit": {"type": "integer", "default": 20},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_run_list,
+        ),
+        MCPToolDefinition(
+            name="agent.run.show",
+            description="Show one replayable agent run record.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "run_id": {"type": "string"},
+                },
+                "required": ["run_id"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_run_show,
+        ),
+        MCPToolDefinition(
+            name="agent.run.event",
+            description="Append an event to a replayable agent run record.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "run_id": {"type": "string"},
+                    "event_type": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "data": {"type": "object"},
+                },
+                "required": ["run_id", "event_type"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_run_event,
+        ),
+        MCPToolDefinition(
+            name="agent.run.finish",
+            description="Finish a replayable agent run record with summary, commands, and verification.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "run_id": {"type": "string"},
+                    "status": {"type": "string", "default": "done"},
+                    "summary": {"type": "string"},
+                    "files_changed": {"type": "array", "items": {"type": "string"}},
+                    "commands": {"type": "array", "items": {"type": "string"}},
+                    "verification": {"type": "array", "items": {"type": "object"}},
+                    "handoff_path": {"type": "string"},
+                },
+                "required": ["run_id"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_run_finish,
+        ),
+        MCPToolDefinition(
+            name="agent.job.create",
+            description="Create a markdown background agent job in items/agent_jobs/queue.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "title": {"type": "string"},
+                    "prompt": {"type": "string"},
+                    "priority": {"type": "integer", "default": 5},
+                    "created_by": {"type": "string"},
+                    "scope": {"type": "string"},
+                    "expected_output": {"type": "string"},
+                    "allow_destructive": {"type": "boolean", "default": False},
+                },
+                "required": ["title"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_create,
+        ),
+        MCPToolDefinition(
+            name="agent.job.status",
+            description="Show background job queue, worker, recent run, and watchdog status.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "label": {"type": "string", "default": "com.afs.agent-jobs"},
+                    "stale_after_seconds": {"type": "number", "default": 3600},
+                    "recent_runs": {"type": "integer", "default": 5},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_status,
+        ),
+        MCPToolDefinition(
+            name="agent.job.inbox",
+            description="Show completed, failed, stale, or blocked background jobs needing human review.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "stale_after_seconds": {"type": "number", "default": 3600},
+                    "limit": {"type": "integer", "default": 20},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_inbox,
+        ),
+        MCPToolDefinition(
+            name="agent.job.seed",
+            description="Idempotently queue safe report-only background maintenance jobs.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "profile": {"type": "string", "default": "repo-maintenance"},
+                    "cadence": {"type": "string", "default": "daily"},
+                    "created_by": {"type": "string"},
+                    "dry_run": {"type": "boolean", "default": False},
+                    "force": {"type": "boolean", "default": False},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_seed,
+        ),
+        MCPToolDefinition(
+            name="agent.job.list",
+            description="List markdown background agent jobs.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "status": {"type": "string", "description": "queue, running, done, failed, or archived."},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_list,
+        ),
+        MCPToolDefinition(
+            name="agent.job.show",
+            description="Show one markdown background agent job.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "job_id": {"type": "string"},
+                },
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_show,
+        ),
+        MCPToolDefinition(
+            name="agent.job.review",
+            description="Review one background job and its linked run record.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "job_id": {"type": "string"},
+                },
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_review,
+        ),
+        MCPToolDefinition(
+            name="agent.job.archive",
+            description="Archive one background job without deleting its markdown record.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "job_id": {"type": "string"},
+                },
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_archive,
+        ),
+        MCPToolDefinition(
+            name="agent.job.promote",
+            description="Promote one background job review into scratchpad/handoffs.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "job_id": {"type": "string"},
+                    "to_handoff": {"type": "boolean", "default": True},
+                    "handoff_name": {"type": "string"},
+                    "archive": {"type": "boolean", "default": False},
+                },
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_promote,
+        ),
+        MCPToolDefinition(
+            name="agent.job.claim",
+            description="Claim a queued markdown background agent job.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "job_id": {"type": "string"},
+                    "agent_name": {"type": "string"},
+                },
+                "required": ["job_id", "agent_name"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_claim,
+        ),
+        MCPToolDefinition(
+            name="agent.job.move",
+            description="Move a markdown background agent job to queue, running, done, failed, or archived.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string"},
+                    "job_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "result": {"type": "string"},
+                },
+                "required": ["job_id", "status"],
+                "additionalProperties": False,
+            },
+            handler=_tool_agent_job_move,
+        ),
+        MCPToolDefinition(
             name="review.list",
             description="List agents awaiting review.",
             input_schema={
@@ -2069,6 +3266,89 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_embeddings_index,
+        ),
+        MCPToolDefinition(
+            name="afs.search",
+            description=(
+                "Unified search across the FTS context index, embedding index, and AST symbol index. "
+                "Returns fused, ranked results from whichever sources are available. "
+                "Use this before grep/glob when looking for code, docs, or context files."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query."},
+                    "context_path": {"type": "string", "description": "Context path (uses default if omitted)."},
+                    "mount_types": {
+                        "type": "string",
+                        "description": "Comma-separated mount types for the FTS leg (e.g. 'scratchpad,knowledge').",
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Embedding provider (ollama, openai, gemini, hf). Omit to skip embedding leg.",
+                    },
+                    "model": {"type": "string", "description": "Embedding model name."},
+                    "limit": {"type": "integer", "default": 20, "description": "Max results to return."},
+                    "include_symbols": {"type": "boolean", "default": True, "description": "Include AST symbol index results."},
+                    "include_embeddings": {"type": "boolean", "default": True, "description": "Include embedding index results."},
+                    "include_fts": {"type": "boolean", "default": True, "description": "Include FTS context index results."},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            handler=_tool_afs_search,
+        ),
+        MCPToolDefinition(
+            name="afs.codebase.symbols",
+            description=(
+                "Look up function, class, and import definitions from the AST codebase index. "
+                "Faster and more precise than grep for finding where something is defined."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Symbol name or substring to search."},
+                    "context_path": {"type": "string", "description": "Context path (uses default if omitted)."},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["functions", "classes", "imports", "exports"],
+                        "description": "Filter by symbol kind.",
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Filter by language (python, typescript, javascript, rust, go).",
+                    },
+                    "limit": {"type": "integer", "default": 20},
+                    "exact": {"type": "boolean", "default": False, "description": "Require exact (case-insensitive) name match."},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            handler=_tool_afs_codebase_symbols,
+        ),
+        MCPToolDefinition(
+            name="afs.codebase.index",
+            description=(
+                "Build or update the AST symbol index for a project. "
+                "Run this once after checkout or when files change. "
+                "Results are used by afs.codebase.symbols and the symbol leg of afs.search."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "context_path": {"type": "string", "description": "Context path (uses default if omitted)."},
+                    "path": {"type": "string", "description": "Project root to index (inferred from context if omitted)."},
+                    "max_files": {"type": "integer", "default": 5000, "description": "Max files to index."},
+                    "incremental": {"type": "boolean", "default": True, "description": "Skip unchanged files."},
+                    "languages": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Limit to specific languages (python, typescript, javascript, rust, go). All supported languages if omitted.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_afs_codebase_index,
         ),
         MCPToolDefinition(
             name="handoff.create",
@@ -2665,13 +3945,15 @@ def _load_extension_surface(
     manager: AFSManager,
     *,
     extension_name: str,
-    extension_root: Path,
+    extension_roots: list[Path],
     surface: str,
     module_name: str,
     factory_name: str,
 ) -> tuple[MCPExtensionContribution, ExtensionMCPStatus]:
     source = f"extension:{extension_name}"
-    search_roots = [extension_root, extension_root.parent]
+    search_roots: list[Path] = []
+    for root in extension_roots:
+        search_roots.extend([root, root.parent])
     status = ExtensionMCPStatus(
         extension=extension_name,
         surface=surface,
@@ -2739,7 +4021,7 @@ def _load_extension_mcp_definitions(
             contribution, status = _load_extension_surface(
                 manager,
                 extension_name=extension_name,
-                extension_root=manifest.root,
+                extension_roots=manifest.import_roots,
                 surface=surface,
                 module_name=module_name,
                 factory_name=factory_name,
@@ -2901,7 +4183,27 @@ def _tool_specs(registry: MCPToolRegistry | None = None) -> list[dict[str, Any]]
         specs = [tool.to_spec() for tool in _builtin_tool_definitions()]
     else:
         specs = registry.specs()
-    return [spec for spec in specs if is_tool_allowed(spec["name"])]
+    return [spec for spec in specs if _should_list_tool(str(spec["name"]))]
+
+
+def _should_list_tool(tool_name: str) -> bool:
+    """Return whether *tool_name* belongs in MCP ``tools/list``.
+
+    AFS has more operational tools than a model should see by default.  Keep
+    call-time permissions separate from discoverability: explicit
+    ``AFS_ALLOWED_TOOLS`` / ``AFS_TOOL_PROFILE`` still constrain both listing
+    and calls, while the default catalog only narrows ``tools/list``.
+    """
+    if not is_tool_allowed(tool_name):
+        return False
+
+    if allowed_tools() is not None:
+        return True
+
+    catalog = os.environ.get(MCP_TOOL_CATALOG_ENV, "slim").strip().lower() or "slim"
+    if catalog in FULL_MCP_TOOL_CATALOG_VALUES:
+        return True
+    return tool_name in DEFAULT_MCP_TOOL_CATALOG
 
 
 def get_mcp_status(config_path: Path | None = None) -> dict[str, Any]:
@@ -3045,7 +4347,7 @@ def _read_resource(
         context_path = _resolve_explicit_allowed_context_path(context_path_str, manager)
         index = ContextSQLiteIndex(manager, context_path)
         has = index.has_entries()
-        stale = index.needs_refresh() if has else False
+        stale = index.needs_health_refresh() if has else False
         data_dict: dict[str, Any] = {
             "context_path": str(context_path),
             "db_path": str(index.db_path),
@@ -3129,11 +4431,16 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
         },
         {
             "name": "afs.context.overview",
-            "description": "Describe the AFS context structure and available mounts",
+            "description": "Describe the AFS context structure plus a cheap project codebase summary",
             "arguments": [
                 {
                     "name": "context_path",
                     "description": "Path to .context root (uses default if omitted)",
+                    "required": False,
+                },
+                {
+                    "name": "path",
+                    "description": "Project path to summarize when no .context exists yet.",
                     "required": False,
                 },
             ],
@@ -3232,6 +4539,33 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                 },
             ],
         },
+        {
+            "name": "afs.personal.load",
+            "description": (
+                "Load personal context for a personalized conversation. Opt-in: "
+                "requires an explicit mode declared in the manifest.toml of the "
+                "personal context root. The default root is "
+                "$AFS_PERSONAL_CONTEXT_ROOT or ~/.config/afs/personal."
+            ),
+            "arguments": [
+                {
+                    "name": "mode",
+                    "description": (
+                        "Conversation mode declared in manifest.toml (e.g. "
+                        "claudia, advice, checkin)."
+                    ),
+                    "required": True,
+                },
+                {
+                    "name": "context_root",
+                    "description": (
+                        "Override personal context root. Defaults to "
+                        "$AFS_PERSONAL_CONTEXT_ROOT or ~/.config/afs/personal."
+                    ),
+                    "required": False,
+                },
+            ],
+        },
     ]
     if registry is not None:
         prompts.extend(registry.prompt_specs())
@@ -3279,30 +4613,74 @@ def _get_prompt(
         return [{"role": "user", "content": {"type": "text", "text": text}}]
 
     if name == "afs.context.overview":
-        context_path = _resolve_prompt_context_path(arguments, manager)
-        ctx_root = manager.list_context(context_path=context_path)
+        explicit_context = isinstance(arguments.get("context_path"), str) and str(arguments.get("context_path")).strip()
+        explicit_project = any(
+            isinstance(arguments.get(key), str) and str(arguments.get(key)).strip()
+            for key in ("path", "project_path")
+        )
+        context_available = True
+        ctx_root = None
+        context_path = None
+        if explicit_context:
+            context_path = _resolve_prompt_context_path(arguments, manager)
+            ctx_root = manager.list_context(context_path=context_path)
+            project_path = Path(context_path).parent
+        elif explicit_project:
+            project_path = _assert_allowed(_resolve_project_path(arguments), manager)
+            try:
+                context_path = _resolve_context_path(arguments, manager)
+                ctx_root = manager.list_context(context_path=context_path)
+            except FileNotFoundError:
+                context_available = False
+                ctx_root = None
+                context_path = None
+        else:
+            context_path = _resolve_prompt_context_path(arguments, manager)
+            ctx_root = manager.list_context(context_path=context_path)
+            project_path = Path(context_path).parent
+        codebase_target = project_path if explicit_project or ctx_root is None else context_path
+        codebase = build_codebase_summary(codebase_target)
+        project_name = project_path.name if explicit_project or ctx_root is None else ctx_root.project_name
         lines = [
-            f"# AFS Context: {ctx_root.project_name}",
-            f"Path: {ctx_root.path}",
-            f"Valid: {ctx_root.is_valid}",
-            f"Total mounts: {ctx_root.total_mounts}",
-            "",
-            "## Mounts",
+            f"# AFS Context: {project_name}",
+            f"Context available: {'yes' if context_available else 'no'}",
+            f"Project path: {project_path}",
         ]
-        for mount_type, mount_list in ctx_root.mounts.items():
-            lines.append(f"### {mount_type.value}")
-            if mount_list:
-                for m in mount_list:
-                    lines.append(f"  - {m.name} → {m.source} (symlink={m.is_symlink})")
-            else:
-                lines.append("  (empty)")
-        if ctx_root.metadata:
+        if ctx_root is not None:
+            lines.extend(
+                [
+                    f"Path: {ctx_root.path}",
+                    f"Valid: {ctx_root.is_valid}",
+                    f"Total mounts: {ctx_root.total_mounts}",
+                    "",
+                    "## Mounts",
+                ]
+            )
+            if project_name != ctx_root.project_name:
+                lines.append(f"Nearest context project: {ctx_root.project_name}")
+            for mount_type, mount_list in ctx_root.mounts.items():
+                lines.append(f"### {mount_type.value}")
+                if mount_list:
+                    for m in mount_list:
+                        lines.append(f"  - {m.name} → {m.source} (symlink={m.is_symlink})")
+                else:
+                    lines.append("  (empty)")
+        else:
+            lines.append("Valid: false")
+            lines.append("Total mounts: 0")
+            lines.append("")
+            lines.append("## Mounts")
+            lines.append("  (no context yet)")
+        if ctx_root is not None and ctx_root.metadata:
             lines.append("")
             lines.append("## Metadata")
             lines.append(f"Description: {ctx_root.metadata.description or '(none)'}")
             lines.append(f"Agents: {', '.join(ctx_root.metadata.agents) or '(none)'}")
             if ctx_root.metadata.manual_only:
                 lines.append(f"Protected paths: {', '.join(ctx_root.metadata.manual_only)}")
+        lines.append("")
+        lines.append("## Codebase")
+        lines.extend(render_codebase_summary(codebase).splitlines())
         return [{"role": "user", "content": {"type": "text", "text": "\n".join(lines)}}]
 
     if name == "afs.workflow.structured":
@@ -3334,6 +4712,12 @@ def _get_prompt(
             or None,
         )
         schema = get_response_schema(schema_name)
+        policy = load_repo_policy(start_dir=Path(context_path).parent)
+        policy_summary = evaluate_repo_policy(
+            policy,
+            repo_root=Path(context_path).parent,
+            changed_paths=[],
+        )
         lines = [
             "# AFS Structured Workflow Prompt",
             "",
@@ -3351,6 +4735,34 @@ def _get_prompt(
             "## Working Context",
             render_context_pack(payload),
         ]
+        if policy_summary.get("available"):
+            review_focus = (
+                policy_summary.get("review_focus")
+                if isinstance(policy_summary.get("review_focus"), list)
+                else []
+            )
+            design_constraints = (
+                policy_summary.get("design_constraints")
+                if isinstance(policy_summary.get("design_constraints"), list)
+                else []
+            )
+            planning_principles = (
+                policy_summary.get("planning_principles")
+                if isinstance(policy_summary.get("planning_principles"), list)
+                else []
+            )
+            if review_focus or design_constraints or planning_principles:
+                policy_lines = ["", "## Repo Policy"]
+                if review_focus:
+                    policy_lines.append("Review focus:")
+                    policy_lines.extend(f"- {item}" for item in review_focus[:6])
+                if design_constraints:
+                    policy_lines.append("Design constraints:")
+                    policy_lines.extend(f"- {item}" for item in design_constraints[:6])
+                if planning_principles:
+                    policy_lines.append("Planning principles:")
+                    policy_lines.extend(f"- {item}" for item in planning_principles[:6])
+                lines.extend(policy_lines)
         return [{"role": "user", "content": {"type": "text", "text": "\n".join(lines)}}]
 
     if name == "afs.query.search":
@@ -3426,6 +4838,19 @@ def _get_prompt(
                     lines.append(f"- {name_str}")
 
         return [{"role": "user", "content": {"type": "text", "text": "\n".join(lines)}}]
+
+    if name == "afs.personal.load":
+        from .personal_context import render_personal_context
+
+        mode_arg = arguments.get("mode", "")
+        if not isinstance(mode_arg, str) or not mode_arg.strip():
+            raise ValueError("mode argument is required")
+        root_arg = arguments.get("context_root")
+        context_root = (
+            Path(str(root_arg)).expanduser() if isinstance(root_arg, str) and root_arg.strip() else None
+        )
+        text = render_personal_context(mode_arg.strip(), context_root=context_root)
+        return [{"role": "user", "content": {"type": "text", "text": text}}]
 
     if registry is not None and name in registry.prompts:
         return registry.get_prompt(name, arguments, manager)

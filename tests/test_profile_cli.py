@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from afs.cli.profile import profile_switch_command
 from afs.config import load_config_model

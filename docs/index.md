@@ -39,16 +39,22 @@ It provides filesystem-native primitives for:
 ## Core Docs
 
 - [Agent Surfaces](AGENT_SURFACES.md)
+- [Agent Operations](AGENT_OPERATIONS.md)
+- [Agent Integration Upgrade](AGENT_INTEGRATION_UPGRADE.md)
+- [Guided Setup](SETUP_GUIDE.md)
 - [Architecture](ARCHITECTURE.md)
 - [Profiles and Hooks](PROFILES.md)
 - [Extensions](PLUGINS.md)
 - [MCP Server](MCP_SERVER.md)
+- [Work Assistant](WORK_ASSISTANT.md)
+- [Work Assistant Connectors](WORK_ASSISTANT_CONNECTORS.md)
+- [Work Assistant Upgrade Guide](WORK_ASSISTANT_UPGRADE.md)
 - [Embeddings](EMBEDDINGS.md)
 - [Knowledge System & Gemini Setup Guide](KNOWLEDGE_SYSTEM_GUIDE.md)
 - [VSCode Extension Review](VSCODE_EXTENSION_REVIEW.md)
 - [Memory and Context Layout](MEMORY_SYSTEM.md)
 - [CLI Reference](CLI_REFERENCE.md)
-- [Roadmap](ROADMAP.md)
+- [Training and Feedback RFC](TRAINING_FEEDBACK_RFC.md)
 - [Emacs Integration](EMACS_INTEGRATION.md)
 
 ## Agent Note
@@ -58,6 +64,6 @@ unless the package is already installed in the Python environment the agent uses
 
 ## Scope Boundary
 
-Domain/model-training documentation has moved out of core AFS.
-
-See [AFS Scawful Migration](SCAWFUL_MIGRATION.md).
+Domain/model-training workflows live in extensions and downstream repos.
+Generic training and feedback orchestration primitives may live in core AFS when
+they are reusable across repos.

@@ -56,6 +56,8 @@ def embeddings_index_command(args: argparse.Namespace) -> int:
             patterns=config.sensitivity.never_embed,
         ),
         incremental=getattr(args, "incremental", False),
+        chunk_size=getattr(args, "chunk_size", None),
+        chunk_overlap=getattr(args, "chunk_overlap", 200),
     )
 
     if args.json:
@@ -356,6 +358,20 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     emb_index.add_argument(
         "--incremental", action="store_true", help="Skip unchanged files (size+mtime comparison)."
+    )
+    emb_index.add_argument(
+        "--chunk-size",
+        type=int,
+        default=None,
+        dest="chunk_size",
+        help="Split files larger than N chars into overlapping chunks before embedding.",
+    )
+    emb_index.add_argument(
+        "--chunk-overlap",
+        type=int,
+        default=200,
+        dest="chunk_overlap",
+        help="Overlap in chars between consecutive chunks (default 200).",
     )
     emb_index.add_argument("--json", action="store_true", help="Output JSON.")
     emb_index.set_defaults(func=embeddings_index_command)
