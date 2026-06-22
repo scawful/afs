@@ -10,9 +10,9 @@ from unittest.mock import patch
 
 import pytest
 
-from afs.event_log import read_agent_events
 from afs.agent_registry import AgentRegistry
 from afs.agents.supervisor import AgentSupervisor
+from afs.event_log import read_agent_events
 from afs.schema import (
     AFSConfig,
     AgentConfig,

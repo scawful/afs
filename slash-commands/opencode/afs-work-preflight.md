@@ -1,8 +1,8 @@
 ---
-description: run AFS work communication preflight before work writing
+description: run AFS communication preflight before external writing
 ---
 
-Prepare for work-facing writing or external posting:
+Prepare for external-facing writing or posting:
 
 `$ARGUMENTS`
 

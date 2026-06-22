@@ -30,6 +30,6 @@ def test_deny_keywords_policy_blocks_agent_dispatch() -> None:
 def test_deny_keywords_policy_allows_unrelated_dispatch() -> None:
     run_grounding_hooks(
         event="before_agent_dispatch",
-        payload={"summary": "Review Gemini CLI MCP integration"},
+        payload={"summary": "Review Antigravity/Gemini MCP integration"},
         config=_work_config(),
     )

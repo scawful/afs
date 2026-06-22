@@ -146,7 +146,7 @@ elif [ -n "$credential_source" ] && [ -f "$credential_source" ]; then
   run_or_print cp "$credential_source" "$CLIENT_SECRET"
 else
   warn "no client_secret JSON found"
-  echo "Place a work-approved OAuth client_secret JSON at:"
+  echo "Place a user-provided OAuth client_secret JSON at:"
   echo "  $CLIENT_SECRET"
   echo "or rerun with:"
   echo "  scripts/setup_gws.sh --credentials /path/to/client_secret.json"

@@ -6,9 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-import tomllib
-
 from .schema import AFSConfig
+from .toml_compat import tomllib
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

@@ -45,9 +45,17 @@ def test_find_afs_mcp_registrations_detects_supported_clients(tmp_path: Path) ->
         encoding="utf-8",
     )
 
+    antigravity_config = home / ".gemini" / "config" / "mcp_config.json"
+    antigravity_config.parent.mkdir(parents=True)
+    antigravity_config.write_text(
+        '{"mcpServers":{"afs":{"command":"afs","args":["mcp","serve"]}}}',
+        encoding="utf-8",
+    )
+
     hits = find_afs_mcp_registrations(home=home, cwd=cwd)
 
     assert hits["gemini"] == [str(gemini_config)]
+    assert hits["antigravity"] == [str(antigravity_config)]
     assert hits["claude"] == [str(claude_desktop)]
     assert hits["codex"] == [str(codex_config)]
 
@@ -68,6 +76,26 @@ def test_discover_mcp_config_paths_includes_project_codex_config(tmp_path: Path)
     configs = discover_mcp_config_paths(home=home, cwd=cwd)
 
     assert configs["codex"] == [project_codex]
+
+
+def test_discover_mcp_config_paths_includes_project_antigravity_config(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "repo"
+    home.mkdir()
+    cwd.mkdir()
+
+    project_antigravity = cwd / ".antigravity" / "settings.json"
+    project_antigravity.parent.mkdir(parents=True)
+    project_antigravity.write_text(
+        '{"mcpServers":{"afs":{"command":"afs","args":["mcp","serve"]}}}',
+        encoding="utf-8",
+    )
+
+    configs = discover_mcp_config_paths(home=home, cwd=cwd)
+    hits = find_afs_mcp_registrations(home=home, cwd=cwd)
+
+    assert configs["antigravity"] == [project_antigravity]
+    assert hits["antigravity"] == [str(project_antigravity)]
 
 
 def test_discover_mcp_config_paths_includes_project_gemini_config(tmp_path: Path) -> None:

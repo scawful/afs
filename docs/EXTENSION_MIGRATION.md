@@ -1,7 +1,7 @@
 # AFS Extension Migration
 
 This repository (`lab/afs`) ships **core AFS platform capabilities** only. It
-should not assume one user's games, corpora, model lineages, work tools, or
+should not assume one user's games, corpora, model lineages, external tools, or
 machine layout.
 
 Domain-specific content belongs in companion extension repos named like
@@ -16,7 +16,7 @@ If a workflow is specific to:
 - a model family or persona strategy
 - game/domain corpora
 - personal workstation/laptop deployment paths
-- work connector implementations such as Google Workspace adapters
+- external connector implementations such as Google Workspace public API adapters
 - MCP/domain servers that are not useful for every AFS user
 
 it belongs in a companion extension repo, not in core AFS.
@@ -37,9 +37,9 @@ it belongs in a companion extension repo, not in core AFS.
 A companion repo can be a sibling of `afs`:
 
 ```text
-~/src/lab/afs_google/
+~/src/lab/afs_example/
   extension.toml
-  src/afs_google/
+  src/afs_example/
     __init__.py
     cli.py
     agents.py
@@ -50,7 +50,7 @@ Core AFS discovers it with:
 
 ```toml
 [extensions]
-enabled_extensions = ["afs_google"]
+enabled_extensions = ["afs_example"]
 extension_repo_roots = ["~/src/lab"]
 ```
 

@@ -612,7 +612,7 @@ class TestDeploymentController:
 
     def test_rollback_deployment(self):
         """Should log rollback."""
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory():
             controller = DeploymentController()
             success = controller.rollback(
                 "test_model", "v1", "staging", reason="Test failure"

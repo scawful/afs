@@ -61,7 +61,7 @@ class AgentRun:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "AgentRun":
+    def from_dict(cls, data: dict[str, Any]) -> AgentRun:
         return cls(
             id=str(data.get("id", "")),
             task=str(data.get("task", "")),

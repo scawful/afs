@@ -23,7 +23,7 @@ knowledge_mounts = ["~/personal/knowledge"]
 A companion repo can also contribute knowledge through `extension.toml`:
 
 ```toml
-name = "afs_google"
+name = "afs_example"
 knowledge_mounts = ["knowledge"]
 skill_roots = ["skills"]
 ```

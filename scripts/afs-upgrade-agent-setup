@@ -15,20 +15,24 @@ Options:
   --workspace PATH        Project/workspace to repair and inspect (default: $PWD)
   --harness NAME          Limit manifest sync to a harness; repeatable
   --apply                 Apply write operations
-  --work                  Work-machine defaults: Codex/Claude/Gemini/hcode
+  --full                  Full local harness defaults: Codex/Claude/Gemini/Antigravity/hcode
                           manifest sync, shell hooks, hcode smoke, and index rebuild
+  --work                  Compatibility alias for --full
   --all                   Enable common write operations when paired with --apply
-                          (shell hooks, worker, Claude MCP, Gemini MCP, hcode, index rebuild)
+                          (shell hooks, worker, Claude/Gemini/Antigravity MCP, hcode, index rebuild)
   --rebuild-index         Rebuild the workspace SQLite context index during repair
   --install-shell-hooks   Install idempotent shell wrappers for agent commands
   --install-worker        Install/load the background agent-jobs LaunchAgent
   --setup-claude          Write Claude MCP setup for the selected scope
   --setup-gemini          Write Gemini MCP setup for the selected scope
+  --setup-antigravity     Preview/write Antigravity CLI MCP setup for the selected scope
   --setup-hcode           Sync hcode slash commands/manifest and smoke bootstrap
   --halext-code PATH      halext-code checkout for hcode smoke (default: ~/src/lab/halext-code)
   --claude-scope SCOPE    project or user (default: project)
   --gemini-scope SCOPE    project or user (default: project)
-  --force-mcp             Pass --force to Claude/Gemini MCP setup
+  --antigravity-scope SCOPE
+                          project or user (default: project)
+  --force-mcp             Pass --force to Claude/Gemini/Antigravity MCP setup
   --skip-venv             Do not create/update the AFS venv
   --skip-manifest-sync    Do not validate/sync the harness manifest
   --skip-context-repair   Do not run context repair
@@ -37,8 +41,8 @@ Options:
 Examples:
   scripts/afs-upgrade-agent-setup --workspace ~/src/lab/afs
   scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
-  scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode
-  scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode --apply
+  scripts/afs-upgrade-agent-setup --workspace ~/src --full --setup-hcode
+  scripts/afs-upgrade-agent-setup --workspace ~/src --full --setup-hcode --apply
   scripts/afs-upgrade-agent-setup --apply --harness codex --harness claude
 EOF
 }
@@ -49,7 +53,7 @@ AFS_CLI="${SCRIPT_DIR}/afs"
 
 WORKSPACE="${AFS_UPGRADE_WORKSPACE:-$PWD}"
 APPLY=0
-WORK_MODE=0
+FULL_MODE=0
 ALL_MODE=0
 RUN_VENV=1
 RUN_MANIFEST=1
@@ -59,9 +63,11 @@ INSTALL_SHELL_HOOKS=0
 INSTALL_WORKER=0
 SETUP_CLAUDE=0
 SETUP_GEMINI=0
+SETUP_ANTIGRAVITY=0
 SETUP_HCODE=0
 CLAUDE_SCOPE="project"
 GEMINI_SCOPE="project"
+ANTIGRAVITY_SCOPE="project"
 FORCE_MCP=0
 HALEXT_CODE_PATH="${AFS_HALEXT_CODE_PATH:-$HOME/src/lab/halext-code}"
 HARNESSES=()
@@ -80,8 +86,12 @@ while [ "$#" -gt 0 ]; do
       APPLY=1
       shift
       ;;
+    --full)
+      FULL_MODE=1
+      shift
+      ;;
     --work)
-      WORK_MODE=1
+      FULL_MODE=1
       shift
       ;;
     --all)
@@ -91,6 +101,7 @@ while [ "$#" -gt 0 ]; do
       INSTALL_WORKER=1
       SETUP_CLAUDE=1
       SETUP_GEMINI=1
+      SETUP_ANTIGRAVITY=1
       SETUP_HCODE=1
       shift
       ;;
@@ -114,6 +125,10 @@ while [ "$#" -gt 0 ]; do
       SETUP_GEMINI=1
       shift
       ;;
+    --setup-antigravity)
+      SETUP_ANTIGRAVITY=1
+      shift
+      ;;
     --setup-hcode)
       SETUP_HCODE=1
       shift
@@ -128,6 +143,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --gemini-scope)
       GEMINI_SCOPE="${2:-}"
+      shift 2
+      ;;
+    --antigravity-scope)
+      ANTIGRAVITY_SCOPE="${2:-}"
       shift 2
       ;;
     --force-mcp)
@@ -169,19 +188,20 @@ append_harness_once() {
   HARNESSES+=("$name")
 }
 
-if [ "$WORK_MODE" -eq 1 ]; then
+if [ "$FULL_MODE" -eq 1 ]; then
   REBUILD_INDEX=1
   INSTALL_SHELL_HOOKS=1
   SETUP_CLAUDE=1
   SETUP_GEMINI=1
+  SETUP_ANTIGRAVITY=1
   SETUP_HCODE=1
   if [ "${#HARNESSES[@]}" -eq 0 ]; then
-    HARNESSES=(codex claude gemini hcode)
+    HARNESSES=(codex claude gemini antigravity hcode)
   fi
 fi
 
 if [ "$SETUP_HCODE" -eq 1 ]; then
-  if [ "${#HARNESSES[@]}" -gt 0 ] || { [ "$WORK_MODE" -eq 0 ] && [ "$ALL_MODE" -eq 0 ]; }; then
+  if [ "${#HARNESSES[@]}" -gt 0 ] || { [ "$FULL_MODE" -eq 0 ] && [ "$ALL_MODE" -eq 0 ]; }; then
     append_harness_once hcode
   fi
 fi
@@ -200,6 +220,10 @@ if [ "$CLAUDE_SCOPE" != "project" ] && [ "$CLAUDE_SCOPE" != "user" ]; then
 fi
 if [ "$GEMINI_SCOPE" != "project" ] && [ "$GEMINI_SCOPE" != "user" ]; then
   echo "--gemini-scope must be project or user" >&2
+  exit 2
+fi
+if [ "$ANTIGRAVITY_SCOPE" != "project" ] && [ "$ANTIGRAVITY_SCOPE" != "user" ]; then
+  echo "--antigravity-scope must be project or user" >&2
   exit 2
 fi
 if [ -z "$HALEXT_CODE_PATH" ]; then
@@ -249,8 +273,8 @@ echo "mode: $([ "$APPLY" -eq 1 ] && echo apply || echo dry-run)"
 echo "afs_root: ${AFS_ROOT}"
 echo "workspace: ${WORKSPACE}"
 echo "mcp_catalog: slim default; use AFS_MCP_TOOL_CATALOG=full or mcp serve --tool-catalog full for debug/admin tools"
-if [ "$WORK_MODE" -eq 1 ]; then
-  echo "work_mode: enabled"
+if [ "$FULL_MODE" -eq 1 ]; then
+  echo "full_mode: enabled"
 fi
 echo
 
@@ -348,8 +372,26 @@ if [ "$SETUP_GEMINI" -eq 1 ]; then
   fi
   run_or_plan_write "$AFS_CLI" "${gemini_args[@]}"
 else
-  echo "Gemini MCP setup not requested; command:"
+  echo "Gemini compatibility setup not requested; command:"
   plan_cmd "$AFS_CLI" gemini setup --scope project --project-path "$WORKSPACE"
+fi
+echo
+
+if [ "$SETUP_ANTIGRAVITY" -eq 1 ]; then
+  antigravity_args=(antigravity setup --scope "$ANTIGRAVITY_SCOPE")
+  if [ "$ANTIGRAVITY_SCOPE" = "project" ]; then
+    antigravity_args+=(--project-path "$WORKSPACE")
+  fi
+  if [ "$FORCE_MCP" -eq 1 ]; then
+    antigravity_args+=(--force)
+  fi
+  if [ "$APPLY" -eq 1 ]; then
+    antigravity_args+=(--apply)
+  fi
+  run_cmd "$AFS_CLI" "${antigravity_args[@]}"
+else
+  echo "Antigravity CLI setup not requested; command:"
+  plan_cmd "$AFS_CLI" antigravity setup --scope project --project-path "$WORKSPACE" --apply
 fi
 echo
 
@@ -379,9 +421,9 @@ plan_cmd "$AFS_CLI" session bootstrap --json
 
 if [ "$APPLY" -eq 0 ]; then
   echo
-  if [ "$WORK_MODE" -eq 1 ]; then
-    echo "Apply the work-machine upgrade with:"
-    plan_cmd "$0" --workspace "$WORKSPACE" --work --setup-hcode --apply
+  if [ "$FULL_MODE" -eq 1 ]; then
+    echo "Apply the full local harness upgrade with:"
+    plan_cmd "$0" --workspace "$WORKSPACE" --full --setup-hcode --apply
   else
     echo "Apply the common local upgrade with:"
     plan_cmd "$0" --workspace "$WORKSPACE" --apply --all

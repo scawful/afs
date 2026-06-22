@@ -23,10 +23,10 @@ These surfaces are visible in:
 ./scripts/afs agent-hooks install-worker --apply --load
 ./scripts/afs agent-hooks status --path "$PWD"
 ./scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
-./scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode --apply
+./scripts/afs-upgrade-agent-setup --workspace ~/src --full --setup-hcode --apply
 ```
 
-Use this before editing Codex, Claude, Gemini, hcode, or another
+Use this before editing Codex, Claude, Gemini compatibility, Antigravity, hcode, or another
 harness-specific config. Harness-specific files can still exist, but they
 should point back to this manifest or derive their local view from it.
 
@@ -34,7 +34,7 @@ should point back to this manifest or derive their local view from it.
 refresh. It defaults to dry-run, then with `--apply` can update the venv, copy
 skills and slash-command packs, write manifest exports, repair/rebuild context
 state, install hooks, run hcode bootstrap smoke, and write Claude/Gemini MCP
-setup. `--work --setup-hcode` is the convenient work-machine path; it keeps the
+setup. `--full --setup-hcode` is the convenient full local path; it keeps the
 MCP default catalog slim and routes richer flows through commands/framework
 hints.
 
@@ -48,10 +48,10 @@ customized commands untouched unless a pack explicitly opts into overwrite.
 that sources AFS shell helpers. Use `--helpers-only` for aliases, colors, and
 completion without routing AI harness commands. Without `--helpers-only`, a new
 shell routes normal generic harness commands such as `codex`, `claude`,
-`gemini`, and `hcode` through the AFS wrappers. Companion extension repos can
+`gemini`, `antigravity`, and `hcode` through the AFS wrappers. Companion extension repos can
 add their own local harness wrappers. Run `afs-agent-hooks-off` inside a shell
 to disable the functions for that shell. Use raw bypass functions such as
-`codex-raw`, `claude-raw`, `gemini-raw`, or `hcode-raw` when you want the
+`codex-raw`, `claude-raw`, `gemini-raw`, `antigravity-raw`, or `hcode-raw` when you want the
 underlying command directly.
 
 `agent-hooks install-worker` installs a user LaunchAgent for

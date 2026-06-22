@@ -2,19 +2,14 @@
 
 from __future__ import annotations
 
-import pytest
-
 from afs.gws_policy import (
-    ActionClassification,
     GWSPolicyConfig,
     GWSPolicyEnforcer,
-    PolicyDecision,
     RateLimiter,
     RiskTier,
     check_recipient,
     classify_action,
 )
-
 
 # -------------------------------------------------------------------
 # classify_action

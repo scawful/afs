@@ -25,7 +25,7 @@ def _make_manager_and_context(tmp_path: Path) -> tuple[AFSManager, Path]:
     manager = AFSManager(config=config)
     project_path = tmp_path / "project"
     project_path.mkdir()
-    context_path = manager.ensure(path=project_path).path
+    manager.ensure(path=project_path)
     return manager, project_path
 
 
@@ -349,6 +349,7 @@ def test_review_skill_candidates_uses_latest_artifact_and_candidate_filter(
             }
         ],
     )
+    assert old_path.exists()
     new_path = _write_candidate_artifact(
         manager,
         context_path,

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import importlib
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from afs_scawful.agents.zelda_tools import ZeldaToolkit, _extract_labels_from_asm
 
 _EXTENSION_MODULE = "afs_scawful.agents.zelda_tools"
 _ERROR = (

@@ -8,7 +8,6 @@ from pathlib import Path
 from afs.agents import list_agents
 from afs.agents import tether_bridge as bridge
 
-
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------

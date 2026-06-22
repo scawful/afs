@@ -95,28 +95,28 @@ def test_discovers_companion_afs_name_repo_and_implicit_src_python_path(
 ) -> None:
     _clear_extension_env(monkeypatch)
     workspace_root = tmp_path / "lab"
-    repo = workspace_root / "afs_google"
-    package = repo / "src" / "afs_google"
+    repo = workspace_root / "afs_example"
+    package = repo / "src" / "afs_example"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
     (repo / "extension.toml").write_text(
-        "name = \"afs_google\"\n"
-        "description = \"Google Workspace adapter\"\n"
-        "cli_modules = [\"afs_google.cli\"]\n",
+        "name = \"afs_example\"\n"
+        "description = \"Example context adapter\"\n"
+        "cli_modules = [\"afs_example.cli\"]\n",
         encoding="utf-8",
     )
 
     config = ExtensionsConfig(
-        enabled_extensions=["afs_google"],
+        enabled_extensions=["afs_example"],
         extension_dirs=[],
         extension_repo_roots=[workspace_root],
         auto_discover=False,
     )
 
     discovered = discover_extension_manifests(config)
-    assert discovered["afs_google"] == (repo / "extension.toml").resolve()
+    assert discovered["afs_example"] == (repo / "extension.toml").resolve()
 
-    manifest = load_extensions(config)["afs_google"]
+    manifest = load_extensions(config)["afs_example"]
     assert manifest.root == repo.resolve()
     assert manifest.python_paths == [(repo / "src").resolve()]
     assert (repo / "src").resolve() in manifest.import_roots

@@ -11,7 +11,7 @@ from ._utils import load_manager, resolve_context_paths
 
 def cache_clear_command(args: argparse.Namespace) -> int:
     """Clear session pack cache files."""
-    from ..context_pack import clear_pack_cache, _resolve_session_pack_cache_dir
+    from ..context_pack import _resolve_session_pack_cache_dir, clear_pack_cache
 
     config_path = Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     manager = load_manager(config_path)

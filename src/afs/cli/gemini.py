@@ -25,6 +25,18 @@ from ..health.mcp_registration import find_afs_mcp_registrations
 from ..mcp_runtime import build_afs_mcp_entry
 from ..models import MountType
 
+GEMINI_CLI_INDIVIDUAL_CUTOFF = "2026-06-18"
+GEMINI_CLI_DEPRECATION_NOTE = (
+    "Gemini CLI compatibility is deprecated for individual/free/Pro/Ultra users "
+    "after 2026-06-18; use `afs antigravity setup` for the public Antigravity CLI path. "
+    "API-key and enterprise Gemini workflows may continue to use this command."
+)
+
+
+def _print_gemini_cli_deprecation_note() -> None:
+    print(f"note: {GEMINI_CLI_DEPRECATION_NOTE}")
+
+
 # --------------------------------------------------------------------------- #
 # settings.json management
 # --------------------------------------------------------------------------- #
@@ -93,6 +105,8 @@ def _write_settings(path: Path, data: dict[str, Any]) -> None:
 
 def gemini_setup_command(args: argparse.Namespace) -> int:
     """Set up Gemini integration: settings.json + MCP registration."""
+    if not getattr(args, "json", False):
+        _print_gemini_cli_deprecation_note()
     project_path = None
     if args.scope == "project":
         project_path = (
@@ -305,6 +319,11 @@ def gemini_status_command(args: argparse.Namespace) -> int:
     # --- Output ---
     if args.json:
         payload: dict[str, Any] = {
+            "cli_deprecation": {
+                "cutoff": GEMINI_CLI_INDIVIDUAL_CUTOFF,
+                "note": GEMINI_CLI_DEPRECATION_NOTE,
+                "replacement_command": "afs antigravity setup",
+            },
             "checks": [
                 {"name": name, "ok": ok, "detail": detail}
                 for name, ok, detail in checks
@@ -315,6 +334,8 @@ def gemini_status_command(args: argparse.Namespace) -> int:
         }
         print(json.dumps(payload, indent=2))
         return 0
+
+    _print_gemini_cli_deprecation_note()
 
     all_ok = True
     for name, ok, detail in checks:

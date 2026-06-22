@@ -16,6 +16,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - optional dependency
     _watch_paths = None
 
+from ..agent_context import ContextAwareAgent
 from ..cli._utils import write_config
 from ..context_index import ContextSQLiteIndex
 from ..context_paths import resolve_mount_root
@@ -25,7 +26,6 @@ from ..embeddings import build_embedding_index, create_ollama_embed_fn
 from ..manager import AFSManager
 from ..models import MountType
 from ..workspace_sync import load_workspace_entries, resolve_config_output, sync_workspace_config
-from ..agent_context import ContextAwareAgent
 from .base import (
     AgentResult,
     build_base_parser,

@@ -8,7 +8,7 @@ people, docs, sheets, ticket, or permission administration through the default
 server. External writes should flow through an approved AFS work request and
 one explicit connector executor command.
 
-For Gemini CLI, prefer the MCP server from the repo or project root you want to
+For Antigravity CLI and Gemini CLI compatibility, prefer the MCP server from the repo or project root you want to
 work in. That keeps repo-local `context.init` available while preserving the
 allowed-root guardrails on all file and context operations.
 
@@ -22,7 +22,7 @@ afs mcp serve
 python3 -m afs.mcp_server
 ```
 
-## Gemini CLI Registration
+## Antigravity and Gemini CLI Registration
 
 Preferred — use the built-in setup command:
 
@@ -37,9 +37,12 @@ entry and preserves the repo runtime env (`AFS_ROOT`, `AFS_VENV`, `PYTHONPATH`,
 and `AFS_PREFER_REPO_CONFIG=1`) so Gemini uses the same import/config path as
 the rest of the AFS toolchain.
 
-Use `--scope project` when you want Gemini CLI to keep MCP registration inside
-the current repo at `./.gemini/settings.json`. `afs gemini status` detects both
-user-level and project-level Gemini configs.
+Use `afs antigravity setup --scope project` for the public `agy` CLI path. New
+`agy` builds use `~/.gemini/config/mcp_config.json` for migrated MCP config, and
+AFS detects the older Antigravity CLI/IDE paths as compatibility fallbacks. Use
+`--scope project` when you want the compatibility Gemini CLI setup to keep MCP
+registration inside the current repo at `./.gemini/settings.json`.
+`afs gemini status` detects both user-level and project-level Gemini configs.
 
 Manual alternative:
 

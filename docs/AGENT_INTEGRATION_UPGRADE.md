@@ -1,6 +1,6 @@
 # Agent Integration Upgrade Guide
 
-Use this when refreshing Codex, Claude, Gemini, hcode, or another local
+Use this when refreshing Codex, Claude, Gemini compatibility, Antigravity, hcode, or another local
 agent harness to follow AFS without adding unnecessary tool noise.
 
 ## Upgrade Command
@@ -19,14 +19,14 @@ cd ~/src/lab/afs
 scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
 ```
 
-For a work-machine refresh, keep the default catalog slim and let the setup
-script sync hcode/OpenCode commands plus the usual Codex/Claude/Gemini harness
+For a full local harness refresh, keep the default catalog slim and let the setup
+script sync hcode/OpenCode commands plus the usual Codex/Claude/Gemini/Antigravity harness
 state:
 
 ```bash
 cd ~/src/lab/afs
-scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode
-scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode --apply
+scripts/afs-upgrade-agent-setup --workspace ~/src --full --setup-hcode
+scripts/afs-upgrade-agent-setup --workspace ~/src --full --setup-hcode --apply
 ```
 
 The script keeps dry-run mode as the default. `--apply --all` performs the
@@ -37,7 +37,7 @@ normal local upgrade:
 - copies shared skills and writes harness manifest exports
 - repairs the selected workspace context and rebuilds its SQLite index
 - installs idempotent shell hooks for generic harnesses such as `codex`,
-  `claude`, `gemini`, and `hcode`
+  `claude`, `gemini`, `antigravity`, and `hcode`
 - installs the background agent-job LaunchAgent
 - writes project-scoped Claude and Gemini MCP setup
 - syncs the default hcode/OpenCode AFS slash-command pack when hcode setup is
@@ -111,7 +111,7 @@ Optional surfaces should be profile-gated or harness-specific:
 - `embeddings.*` for semantic indexing
 - `training.*` for reusable training/eval workflows
 - companion-repo domain servers, for example the MCP surfaces supplied by a
-  local `afs_google` or `afs_scawful` repo
+  local `afs_example` or `afs_scawful` repo
 
 ## Skills
 
@@ -164,7 +164,7 @@ scripts/afs query "handoff" --path ~/src/project-a --mount scratchpad
 
 ## Harness Notes
 
-Codex, Claude, Gemini, hcode, and any companion-repo harnesses should launch
+Codex, Claude, Gemini compatibility, Antigravity, hcode, and any companion-repo harnesses should launch
 through the repo wrappers when shell hooks are enabled:
 
 ```bash

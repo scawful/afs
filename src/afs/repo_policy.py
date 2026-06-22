@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-import tomllib
+from .toml_compat import tomllib
 
 
 def _as_str_list(value: Any) -> list[str]:
