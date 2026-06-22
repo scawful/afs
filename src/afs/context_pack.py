@@ -7,10 +7,11 @@ import json
 import logging
 import os
 import tempfile
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any
 
 from .context_index import ContextSQLiteIndex
 from .context_paths import load_context_metadata, resolve_agent_output_root, resolve_mount_root

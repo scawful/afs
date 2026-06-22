@@ -15,7 +15,6 @@ from typing import Any
 from .codebase_explorer import (
     _IGNORED_DIRS,
     _LANGUAGE_BY_EXTENSION,
-    infer_project_root,
 )
 
 _SCHEMA_VERSION = 1

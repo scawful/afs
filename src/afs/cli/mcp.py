@@ -6,8 +6,7 @@ import argparse
 import os
 from pathlib import Path
 
-from ..mcp_server import MCP_TOOL_CATALOG_ENV
-from ..mcp_server import serve
+from ..mcp_server import MCP_TOOL_CATALOG_ENV, serve
 
 
 def mcp_serve_command(args: argparse.Namespace) -> int:

@@ -299,8 +299,8 @@ def _phase_observe(
             notes.append(f"History: {len(events)} recent events")
     else:
         try:
-            from ..history import query_events
             from ..context_paths import resolve_mount_root
+            from ..history import query_events
             from ..models import MountType
             history_root = resolve_mount_root(context_path, MountType.HISTORY)
             if history_root.exists():

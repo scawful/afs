@@ -52,7 +52,7 @@ See `docs/development.md` for PR target and promotion guidance.
 **Agent Operations** — Optional run records, safe background job queues, and
 handoffs for work that spans turns or harnesses.
 
-**Work Assistant** — Context-local people, relationship, review-route,
+**Workflow Assistant** — Context-local people, relationship, review-route,
 approval, and activity records for documents, sheets, tickets, planning, and
 other non-technical workflows.
 
@@ -62,6 +62,8 @@ cross-agent coordination.
 **Memory Consolidation** — Event history rolled up into durable memory entries, with optional LLM-assisted summarization.
 
 **Profiles & Extensions** — Profile-driven context injection via `afs.toml`. Extensions add domain-specific functionality without forking core.
+
+**Context Sources** — Provider-neutral adapters for tasks, tickets, reviews, docs, messages, tests, hooks, and traces. Core AFS owns the normalized records; concrete source connectors live in extensions.
 
 ## Architecture
 
@@ -92,6 +94,8 @@ afs context discover                  # Find .context roots
 afs context mount <path>              # Mount a context directory
 afs status --start-dir "$PWD"         # Show mount status and index health
 afs context query "search term"       # Search the context index
+afs sources list                      # Extension-owned context source providers
+afs sources sync --provider NAME      # Preview provider records into .context/items
 afs context diff                      # Changes since last session
 afs session pack --model gemini       # Token-budgeted context export
 ```
@@ -221,7 +225,18 @@ See [docs/MCP_SERVER.md](docs/MCP_SERVER.md) for configuration and tool referenc
 ## Gemini Integration
 
 ```bash
-afs gemini setup                      # Register MCP for Gemini CLI
+afs antigravity setup --scope project    # Preview Antigravity CLI MCP setup
+afs gemini setup                         # Gemini CLI compatibility/API helper
+afs antigravity models --json            # Parse the installed agy model list
+```
+
+Gemini CLI compatibility is retained for API-key/enterprise workflows, but the
+individual/free/Pro/Ultra public path moved to Antigravity CLI (`agy`) on
+2026-06-18. AFS does not auto-install `agy`; run `afs antigravity status` or
+`afs antigravity setup --json` to inspect the local state. Current `agy` builds
+use `~/.gemini/config/mcp_config.json` as the migrated MCP config path.
+
+```
 afs gemini status                     # Check API key, SDK, embeddings
 afs gemini context "search query"     # Generate context for Gemini session
 afs gemini context --include-content  # With full file content

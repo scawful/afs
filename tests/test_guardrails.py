@@ -5,20 +5,16 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from afs.agents.guardrails import (
-    AUTO_APPROVE,
     ALWAYS_APPROVE,
+    AUTO_APPROVE,
     ApprovalGate,
-    ApprovalRequest,
     GuardrailConfig,
     GuardrailedAgent,
-    ModelRoute,
-    QuotaEntry,
     QuotaTracker,
     _file_lock,
     resolve_model,
@@ -425,7 +421,7 @@ class TestFileLocking:
         num_processes = 4
 
         procs = []
-        for i in range(num_processes):
+        for _i in range(num_processes):
             p = multiprocessing.Process(
                 target=_concurrent_writer,
                 args=(str(path), "claude", calls_per_process),

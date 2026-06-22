@@ -62,7 +62,7 @@ class SensitivityRuleSet:
     patterns: tuple[str, ...] = ()
 
     @classmethod
-    def from_patterns(cls, patterns: Iterable[str]) -> "SensitivityRuleSet":
+    def from_patterns(cls, patterns: Iterable[str]) -> SensitivityRuleSet:
         return cls(tuple(str(pattern).strip() for pattern in patterns if str(pattern).strip()))
 
     @property

@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
-
-import pytest
 
 from afs.agent_context import (
     AGENT_CONTEXT_ENV,
@@ -17,7 +13,6 @@ from afs.agent_context import (
     load_agent_context_snapshot,
     write_agent_context_snapshot,
 )
-
 
 # ---------------------------------------------------------------------------
 # Snapshot serialization

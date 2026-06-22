@@ -180,7 +180,7 @@ def _collect_answers(args: argparse.Namespace) -> dict[str, Any]:
     if interactive and mcp_mode == "ask":
         mcp_mode = _ask_choice(
             "Register AFS with local MCP clients",
-            ["none", "claude", "gemini", "both"],
+            ["none", "claude", "gemini", "antigravity", "both", "all"],
             "none",
         )
     elif mcp_mode == "ask":
@@ -303,7 +303,7 @@ def build_setup_plan(
             )
         )
 
-    if mcp_mode in {"claude", "both"}:
+    if mcp_mode in {"claude", "both", "all"}:
         steps.append(
             SetupStep(
                 "Register Claude-compatible MCP config",
@@ -311,7 +311,7 @@ def build_setup_plan(
                 optional=True,
             )
         )
-    if mcp_mode in {"gemini", "both"}:
+    if mcp_mode in {"gemini", "both", "all"}:
         gemini_cmd = [*afs, "gemini", "setup", "--scope", config_scope]
         if config_scope == "project":
             gemini_cmd.extend(["--project-path", str(workspace)])
@@ -319,6 +319,19 @@ def build_setup_plan(
             SetupStep(
                 "Register Gemini MCP config",
                 gemini_cmd,
+                optional=True,
+            )
+        )
+
+    if mcp_mode in {"antigravity", "all"}:
+        antigravity_cmd = [*afs, "antigravity", "setup", "--scope", config_scope]
+        if config_scope == "project":
+            antigravity_cmd.extend(["--project-path", str(workspace)])
+        steps.append(
+            SetupStep(
+                "Preview Antigravity CLI MCP config",
+                antigravity_cmd,
+                note="Add --apply to write the Antigravity settings file after reviewing the plan.",
                 optional=True,
             )
         )
@@ -331,7 +344,7 @@ def build_setup_plan(
             SetupStep(
                 "Run Google Workspace helper setup",
                 [str(gws_script)],
-                note="Uses work-approved OAuth/client credentials and scopes.",
+                note="Uses user-provided OAuth/client credentials and scopes.",
                 optional=True,
             )
         )
@@ -446,7 +459,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     parser.add_argument(
         "--mcp",
-        choices=["ask", "none", "claude", "gemini", "both"],
+        choices=["ask", "none", "claude", "gemini", "antigravity", "both", "all"],
         default="ask",
         help="MCP client registration.",
     )

@@ -14,7 +14,6 @@ import sys
 from pathlib import Path
 
 from ..personal_context import (
-    default_context_root,
     list_modes,
     load_personal_context,
     render_personal_context,

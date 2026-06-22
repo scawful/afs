@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import os
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from .toml_compat import tomllib
 
 
 def default_manifest_path() -> Path:
@@ -120,7 +121,7 @@ def validate_manifest(data: dict[str, Any], *, check_paths: bool = False) -> lis
                 path_values.extend(str(p) for p in _as_list(harness.get("instructions")))
                 path_values.extend(str(p) for p in _as_list(harness.get("skill_roots")))
                 path_values.extend(str(p) for p in _as_list(harness.get("command_roots")))
-                path_values.extend(str(p) for p in _as_list(harness.get("manifest_exports")))
+                # manifest_exports are generated output paths; they do not need to exist before sync.
         for skill in skills:
             if isinstance(skill, dict) and isinstance(skill.get("canonical_path"), str):
                 path_values.append(str(skill["canonical_path"]))

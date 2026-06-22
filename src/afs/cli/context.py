@@ -9,6 +9,7 @@ from pathlib import Path
 from ..codebase_explorer import build_codebase_summary, render_codebase_summary
 from ..context_index import ContextSQLiteIndex
 from ..core import find_existing_root
+from ..models import MountType
 from ._utils import load_manager, parse_mount_type, resolve_context_paths
 
 
@@ -723,9 +724,7 @@ def context_freshness_command(args: argparse.Namespace) -> int:
 
 def _parse_mount_filters(
     raw_mounts: list[str] | None,
-) -> list["MountType"] | None:
-    from ..models import MountType
-
+) -> list[MountType] | None:
     if not raw_mounts:
         return None
     mount_types: list[MountType] = []
@@ -741,7 +740,7 @@ def _maybe_refresh_context_index(
     *,
     index: ContextSQLiteIndex,
     manager,
-    mount_types: list["MountType"] | None,
+    mount_types: list[MountType] | None,
     auto_index: bool,
     auto_refresh: bool,
 ) -> dict | None:

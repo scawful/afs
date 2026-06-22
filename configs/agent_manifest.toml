@@ -1,5 +1,5 @@
 version = 1
-last_reviewed = "2026-05-01"
+last_reviewed = "2026-06-22"
 description = "Single source of truth for local AI harness routing, shared skills, and AFS-native agent operations."
 
 [paths]
@@ -45,40 +45,49 @@ mcp_servers = ["afs"]
 startup = ["~/src/lab/afs/scripts/afs-hcode"]
 manifest_exports = ["~/.config/hcode/afs-agent-manifest.json"]
 
+[[harnesses]]
+name = "antigravity"
+kind = "cli"
+instructions = ["~/src/AGENTS.md", "~/src/docs/guides/ai-coder/AGENT_HARNESS_CONTRACT.md"]
+skill_roots = ["~/.gemini/skills"]
+mcp_servers = ["afs"]
+startup = ["~/src/lab/afs/scripts/afs-antigravity"]
+manifest_exports = ["~/.gemini/antigravity-cli/afs-agent-manifest.json"]
+
 [[skills]]
 name = "focused-verification"
 canonical_path = "~/.codex/skills/focused-verification"
-targets = ["codex", "claude", "gemini"]
+targets = ["codex", "claude", "gemini", "antigravity"]
 
 [[skills]]
 name = "handoff-writer"
 canonical_path = "~/.codex/skills/handoff-writer"
-targets = ["codex", "claude", "gemini"]
+targets = ["codex", "claude", "gemini", "antigravity"]
 
 [[skills]]
 name = "stale-knowledge-auditor"
 canonical_path = "~/.codex/skills/stale-knowledge-auditor"
-targets = ["codex", "claude", "gemini"]
+targets = ["codex", "claude", "gemini", "antigravity"]
 
 [[skills]]
 name = "skill-maintainer"
 canonical_path = "~/.codex/skills/skill-maintainer"
-targets = ["codex", "claude", "gemini"]
+targets = ["codex", "claude", "gemini", "antigravity"]
 
 [[skills]]
 name = "code-review-findings"
 canonical_path = "~/.codex/skills/code-review-findings"
-targets = ["codex", "claude", "gemini"]
+targets = ["codex", "claude", "gemini", "antigravity"]
 
 [[skills]]
 name = "config-change-safety"
 canonical_path = "~/.codex/skills/config-change-safety"
-targets = ["codex", "claude", "gemini"]
+targets = ["codex", "claude", "gemini", "antigravity"]
 
 [[skills]]
 name = "device-deploy-operator"
 canonical_path = "~/.codex/skills/device-deploy-operator"
-targets = ["codex", "claude", "gemini"]
+targets = ["codex", "claude", "gemini", "antigravity"]
 
 [[slash_command_packs]]
 name = "afs-opencode"

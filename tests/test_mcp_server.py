@@ -3354,8 +3354,8 @@ def test_review_tools_use_manager_config(tmp_path: Path) -> None:
 
 def test_companion_repo_mcp_server_uses_src_layout(tmp_path: Path) -> None:
     workspace_root = tmp_path / "lab"
-    repo = workspace_root / "afs_google"
-    package = repo / "src" / "afs_google"
+    repo = workspace_root / "afs_example"
+    package = repo / "src" / "afs_example"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
     (package / "mcp_surface.py").write_text(
@@ -3366,10 +3366,10 @@ def test_companion_repo_mcp_server_uses_src_layout(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (repo / "extension.toml").write_text(
-        "name = \"afs_google\"\n"
+        "name = \"afs_example\"\n"
         "\n"
         "[mcp_server]\n"
-        "module = \"afs_google.mcp_surface\"\n"
+        "module = \"afs_example.mcp_surface\"\n"
         "factory = \"register_mcp_server\"\n",
         encoding="utf-8",
     )
@@ -3381,7 +3381,7 @@ def test_companion_repo_mcp_server_uses_src_layout(tmp_path: Path) -> None:
         config=AFSConfig(
             general=GeneralConfig(context_root=context_root),
             extensions=ExtensionsConfig(
-                enabled_extensions=["afs_google"],
+                enabled_extensions=["afs_example"],
                 extension_dirs=[],
                 extension_repo_roots=[workspace_root],
                 auto_discover=False,

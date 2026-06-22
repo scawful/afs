@@ -345,7 +345,7 @@ def training_antigravity_status_command(args: argparse.Namespace) -> int:
 
 
 def training_gemini_export_command(args: argparse.Namespace) -> int:
-    """Export Gemini CLI logs to TrainingSample JSONL."""
+    """Export legacy Gemini CLI logs to TrainingSample JSONL."""
     from ..config import load_config_model
     from ..training import export_gemini_logs_to_dataset
 
@@ -1342,7 +1342,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 
     # training gemini-export
     train_gemini = training_sub.add_parser(
-        "gemini-export", help="Export Gemini CLI logs to TrainingSample JSONL."
+        "gemini-export", help="Export legacy Gemini CLI logs to TrainingSample JSONL."
     )
     train_gemini.add_argument("--config", help="Config path.")
     train_gemini.add_argument(

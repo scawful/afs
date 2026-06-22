@@ -10,7 +10,6 @@ from unittest.mock import patch
 import pytest
 
 from afs.agents.workspace_analyst import (
-    AGENT_NAME,
     RepoHealth,
     _analyze_repo,
     _find_repos,
@@ -122,10 +121,6 @@ class TestAnalyzeRepo:
             capture_output=True, check=True,
         )
         # Merge back to original branch
-        main_branch = subprocess.run(
-            ["git", "-C", str(git_repo), "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True,
-        ).stdout.strip()
         subprocess.run(
             ["git", "-C", str(git_repo), "checkout", "-"],
             capture_output=True, check=True,

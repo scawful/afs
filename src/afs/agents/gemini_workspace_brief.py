@@ -25,7 +25,7 @@ AGENT_NAME = "gemini-workspace-brief"
 AGENT_DESCRIPTION = "Use Gemini to summarize configured workspaces and discovered contexts."
 DEFAULT_MODEL = "gemini-3-flash-preview"
 DEFAULT_SYSTEM_PROMPT = (
-    "You are preparing a concise operational brief for Gemini CLI users working in AFS-managed "
+    "You are preparing a concise operational brief for Gemini/Antigravity users working in AFS-managed "
     "repositories. Return compact markdown with sections 'Snapshot', 'Risks', and 'Next Actions'. "
     "Prefer concrete path-oriented guidance over general advice."
 )
@@ -143,7 +143,7 @@ def _build_prompt(
     contexts: list[dict[str, object]],
 ) -> str:
     lines = [
-        "Prepare a brief for Gemini CLI workspace operations.",
+        "Prepare a brief for Gemini/Antigravity workspace operations.",
         "",
         "Workspace roots:",
     ]
@@ -171,7 +171,7 @@ def _build_prompt(
 
     lines.append("")
     lines.append(
-        "Focus on what a Gemini CLI user should inspect or initialize next. "
+        "Focus on what a Gemini/Antigravity user should inspect or initialize next. "
         "Call out invalid contexts and missing workspace coverage."
     )
     return "\n".join(lines)

@@ -18,17 +18,19 @@ AFS_AGENT_HOOKS_DIR="$(cd "$(dirname "${AFS_AGENT_HOOKS_SOURCE}")" && pwd)"
 AFS_ROOT="${AFS_ROOT:-$(cd "${AFS_AGENT_HOOKS_DIR}/.." && pwd)}"
 export AFS_ROOT
 
-unalias codex claude gemini hcode z3cli 2>/dev/null || true
+unalias codex claude gemini antigravity hcode z3cli 2>/dev/null || true
 
 codex() { "${AFS_ROOT}/scripts/afs-codex" "$@"; }
 claude() { "${AFS_ROOT}/scripts/afs-claude" "$@"; }
 gemini() { "${AFS_ROOT}/scripts/afs-gemini" "$@"; }
+antigravity() { "${AFS_ROOT}/scripts/afs-antigravity" "$@"; }
 hcode() { "${AFS_ROOT}/scripts/afs-hcode" "$@"; }
 z3cli() { "${AFS_ROOT}/scripts/afs-z3cli" "$@"; }
 
 codex-raw() { command codex "$@"; }
 claude-raw() { command claude "$@"; }
 gemini-raw() { command gemini "$@"; }
+antigravity-raw() { command agy "$@"; }
 hcode-raw() { command hcode "$@"; }
 z3cli-raw() { command z3cli "$@"; }
 
@@ -37,12 +39,13 @@ afs-agent-hooks-status() {
   printf '  codex -> %s\n' "${AFS_ROOT}/scripts/afs-codex"
   printf '  claude -> %s\n' "${AFS_ROOT}/scripts/afs-claude"
   printf '  gemini -> %s\n' "${AFS_ROOT}/scripts/afs-gemini"
+  printf '  antigravity -> %s\n' "${AFS_ROOT}/scripts/afs-antigravity"
   printf '  hcode -> %s\n' "${AFS_ROOT}/scripts/afs-hcode"
   printf '  z3cli -> %s\n' "${AFS_ROOT}/scripts/afs-z3cli"
-  printf '%s\n' "Raw bypasses: codex-raw claude-raw gemini-raw hcode-raw z3cli-raw"
+  printf '%s\n' "Raw bypasses: codex-raw claude-raw gemini-raw antigravity-raw hcode-raw z3cli-raw"
 }
 
 afs-agent-hooks-off() {
-  unset -f codex claude gemini hcode z3cli codex-raw claude-raw gemini-raw hcode-raw z3cli-raw afs-agent-hooks-status afs-agent-hooks-off 2>/dev/null || true
+  unset -f codex claude gemini antigravity hcode z3cli codex-raw claude-raw gemini-raw antigravity-raw hcode-raw z3cli-raw afs-agent-hooks-status afs-agent-hooks-off 2>/dev/null || true
   printf '%s\n' "AFS agent hooks disabled for this shell"
 }

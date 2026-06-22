@@ -250,13 +250,12 @@ def build_codebase_summary(
 
     summary["ecosystems"] = sorted(ecosystems)
     summary["nested_manifests"] = nested_manifests[:max_top_level]
-    summary["language_hints"] = {
-        language: count
-        for language, count in sorted(
+    summary["language_hints"] = dict(
+        sorted(
             language_counts.items(),
             key=_language_rank,
         )
-    }
+    )
     summary["sample_paths"] = sorted(sample_candidates, key=_sample_rank)[:max_sample_paths]
     summary["scan"] = {
         "files_scanned": files_scanned,

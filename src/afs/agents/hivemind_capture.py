@@ -35,10 +35,11 @@ import shutil
 import subprocess
 import time
 from collections.abc import Sequence
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from ..personal_context import default_context_root
 from .base import (
     AgentResult,
     build_base_parser,
@@ -47,7 +48,6 @@ from .base import (
     now_iso,
 )
 from .journal_agent import default_thoughts_path
-from ..personal_context import default_context_root
 
 AGENT_NAME = "hivemind-capture"
 AGENT_DESCRIPTION = (

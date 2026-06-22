@@ -52,7 +52,7 @@ def test_gemini_setup_writes_afs_mcp_entry(
     assert entry["args"] == ["mcp", "serve"]
     assert entry["command"].endswith("/scripts/afs")
     assert entry["env"]["AFS_PREFER_REPO_CONFIG"] == "1"
-    assert entry["env"]["AFS_ROOT"].endswith("/src/lab/afs")
+    assert entry["env"]["AFS_ROOT"] == str(Path(entry["command"]).parents[1])
 
 
 def test_gemini_setup_supports_project_scope(
