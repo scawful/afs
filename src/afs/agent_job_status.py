@@ -6,13 +6,14 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .agent_hooks import DEFAULT_WORKER_LABEL, default_launchd_plist_path
 from .agent_job_worker import job_needs_destructive_opt_in
-from .agent_jobs import AgentJob, AgentJobQueue, JOB_STATES
+from .agent_jobs import JOB_STATES, AgentJob, AgentJobQueue
 from .agent_runs import AgentRun, AgentRunStore
 
 LaunchdProbe = Callable[[str], dict[str, Any]]
@@ -87,7 +88,7 @@ def build_agent_job_status(
         else []
     )
     now = datetime.now(timezone.utc)
-    counts = {state: 0 for state in JOB_STATES}
+    counts = dict.fromkeys(JOB_STATES, 0)
     for job in jobs:
         counts[job.status] = counts.get(job.status, 0) + 1
 

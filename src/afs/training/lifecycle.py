@@ -9,10 +9,11 @@ import shlex
 import signal
 import subprocess
 import time
-import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import tomllib
 
 from ..models import MountType
 
@@ -214,7 +215,7 @@ def build_dataset_stats(dataset_path: Path) -> dict[str, Any]:
         role_counts: dict[str, int] = {}
         tool_counts: dict[str, int] = {}
         with split_path.open(encoding="utf-8") as handle:
-            for line_number, raw in enumerate(handle, 1):
+            for _line_number, raw in enumerate(handle, 1):
                 raw = raw.strip()
                 if not raw:
                     continue

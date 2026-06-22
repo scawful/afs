@@ -327,7 +327,7 @@
     "watch": "node esbuild.mjs --watch",
     "lint": "eslint src --ext ts",
     "typecheck": "tsc --noEmit",
-    "test": "node esbuild.test.mjs && node --test dist-test/suite/**/*.test.js",
+    "test": "node esbuild.test.mjs && node --test dist-test/suite/*.test.js",
     "package": "npx @vscode/vsce package --no-dependencies"
   },
   "devDependencies": {

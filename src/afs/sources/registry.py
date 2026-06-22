@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import importlib
 import sys
+from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..plugins import load_enabled_extensions
-from .models import ContextSourceProvider, ContextSourceRecord, SourceProviderSpec, SourceSyncResult, safe_source_id
+from .models import (
+    ContextSourceProvider,
+    ContextSourceRecord,
+    SourceProviderSpec,
+    SourceSyncResult,
+    safe_source_id,
+)
 
 
 def _as_str_list(value: Any) -> list[str]:
@@ -76,9 +83,9 @@ def load_source_provider(spec: SourceProviderSpec, *, manifest: Any | None = Non
     provider = factory()
     name = str(getattr(provider, "name", "")).strip()
     if not name:
-        setattr(provider, "name", spec.name)
+        provider.name = spec.name
     if not hasattr(provider, "kinds"):
-        setattr(provider, "kinds", spec.kinds)
+        provider.kinds = spec.kinds
     return provider
 
 

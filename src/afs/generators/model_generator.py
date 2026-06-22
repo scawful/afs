@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from importlib.util import find_spec
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -136,11 +137,7 @@ class MLXBackend(ModelBackend):
         return response
 
     def is_available(self) -> bool:
-        try:
-            import mlx
-            return True
-        except ImportError:
-            return False
+        return find_spec("mlx") is not None
 
 
 class LlamaCppBackend(ModelBackend):
@@ -186,11 +183,7 @@ class LlamaCppBackend(ModelBackend):
         return response["choices"][0]["text"]
 
     def is_available(self) -> bool:
-        try:
-            import llama_cpp
-            return True
-        except ImportError:
-            return False
+        return find_spec("llama_cpp") is not None
 
 
 class HuggingFaceBackend(ModelBackend):
@@ -246,11 +239,7 @@ class HuggingFaceBackend(ModelBackend):
         return response[len(prompt):].strip()
 
     def is_available(self) -> bool:
-        try:
-            import transformers
-            return True
-        except ImportError:
-            return False
+        return find_spec("transformers") is not None
 
 
 class APIBackend(ModelBackend):

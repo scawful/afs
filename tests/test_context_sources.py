@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 
 from afs.extensions import load_extension_manifest
-from afs.sources import ContextSourceRecord, discover_source_provider_specs, materialize_source_records
+from afs.sources import (
+    ContextSourceRecord,
+    discover_source_provider_specs,
+    materialize_source_records,
+)
 
 
 def test_context_source_record_renders_indexable_markdown() -> None:

@@ -79,7 +79,7 @@ class ContextSourceRecord:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ContextSourceRecord":
+    def from_dict(cls, payload: dict[str, Any]) -> ContextSourceRecord:
         return cls(
             id=str(payload.get("id", "")).strip(),
             kind=str(payload.get("kind", "doc")).strip(),

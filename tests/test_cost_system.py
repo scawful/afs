@@ -406,6 +406,7 @@ class TestIntegration:
                 gpu_price_per_hour=1.50,
                 epoch_hours=2.5 / 3,
             )
+            assert recs is not None
 
             # Check statistics
             stats = tracker.get_price_statistics()

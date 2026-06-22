@@ -7,13 +7,13 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ._utils import load_runtime_config_from_args, resolve_context_paths
 from ..manager import AFSManager
 from ..sources import (
     discover_source_provider_specs,
     load_source_providers,
     materialize_source_records,
 )
+from ._utils import load_runtime_config_from_args, resolve_context_paths
 
 
 def _load_manager_and_context(args: argparse.Namespace) -> tuple[Any, AFSManager, Path]:

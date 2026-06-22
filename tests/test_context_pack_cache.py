@@ -18,7 +18,6 @@ from afs.manager import AFSManager
 from afs.models import MountType
 from afs.schema import AFSConfig, GeneralConfig, SensitivityConfig, SessionPackCacheConfig
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -94,13 +93,13 @@ def test_cache_hit_returns_without_rebuild(tmp_path: Path, monkeypatch) -> None:
     scratchpad_root.mkdir(parents=True, exist_ok=True)
     (scratchpad_root / "state.md").write_text("cached pack state", encoding="utf-8")
 
-    kwargs = dict(
-        query="cached pack",
-        task="Keep the cached pack stable.",
-        model="codex",
-        workflow="general",
-        token_budget=400,
-    )
+    kwargs = {
+        "query": "cached pack",
+        "task": "Keep the cached pack stable.",
+        "model": "codex",
+        "workflow": "general",
+        "token_budget": 400,
+    }
 
     first = build_context_pack(manager, context_root, **kwargs)
     assert first["cache"]["hit"] is False
@@ -211,13 +210,13 @@ def test_session_cache_invalidates_when_sensitivity_changes(tmp_path: Path) -> N
         include_content=True,
     )
 
-    kwargs = dict(
-        query="private cache",
-        task="Check sensitivity cache invalidation.",
-        model="codex",
-        token_budget=1000,
-        include_content=True,
-    )
+    kwargs = {
+        "query": "private cache",
+        "task": "Check sensitivity cache invalidation.",
+        "model": "codex",
+        "token_budget": 1000,
+        "include_content": True,
+    }
     first = build_context_pack(manager, context_root, **kwargs)
     assert first["cache"]["hit"] is False
     assert "private cache leak marker" in json.dumps(first)
@@ -345,19 +344,19 @@ def test_load_cache_returns_none_on_corrupt_json(tmp_path: Path) -> None:
 
 def test_cache_key_is_deterministic(tmp_path: Path) -> None:
     """Same inputs should produce the same cache key."""
-    kwargs = dict(
-        bootstrap={"project": "test", "status": {}},
-        query="q",
-        task="t",
-        model="codex",
-        pack_mode="focused",
-        workflow="general",
-        tool_profile="default",
-        token_budget=400,
-        include_content=False,
-        max_query_results=6,
-        max_embedding_results=4,
-    )
+    kwargs = {
+        "bootstrap": {"project": "test", "status": {}},
+        "query": "q",
+        "task": "t",
+        "model": "codex",
+        "pack_mode": "focused",
+        "workflow": "general",
+        "tool_profile": "default",
+        "token_budget": 400,
+        "include_content": False,
+        "max_query_results": 6,
+        "max_embedding_results": 4,
+    }
     key_a = _context_pack_cache_key(tmp_path, **kwargs)
     key_b = _context_pack_cache_key(tmp_path, **kwargs)
     assert key_a == key_b
@@ -365,18 +364,18 @@ def test_cache_key_is_deterministic(tmp_path: Path) -> None:
 
 def test_cache_key_changes_with_different_task(tmp_path: Path) -> None:
     """Changing just the task should produce a different cache key."""
-    base = dict(
-        bootstrap={"project": "test"},
-        query="q",
-        model="codex",
-        pack_mode="focused",
-        workflow="general",
-        tool_profile="default",
-        token_budget=400,
-        include_content=False,
-        max_query_results=6,
-        max_embedding_results=4,
-    )
+    base = {
+        "bootstrap": {"project": "test"},
+        "query": "q",
+        "model": "codex",
+        "pack_mode": "focused",
+        "workflow": "general",
+        "tool_profile": "default",
+        "token_budget": 400,
+        "include_content": False,
+        "max_query_results": 6,
+        "max_embedding_results": 4,
+    }
     key_a = _context_pack_cache_key(tmp_path, task="task A", **base)
     key_b = _context_pack_cache_key(tmp_path, task="task B", **base)
     assert key_a != key_b
