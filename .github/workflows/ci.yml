@@ -60,7 +60,7 @@ jobs:
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v5
       with:
-        file: ./coverage.xml
+        files: ./coverage.xml
         fail_ci_if_error: false
 
   integration-tests:
@@ -210,17 +210,33 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Deploy to Google Drive
+    - name: Deploy model artifact backup
       run: |
-        # Backup artifacts to Google Drive
+        if [ ! -f scripts/gdrive_backup.py ]; then
+          echo "No external artifact backup script found; skipping deploy."
+          exit 0
+        fi
+        if [ -z "${GCP_CREDENTIALS_JSON:-}" ]; then
+          echo "No GCP credentials configured; skipping deploy."
+          exit 0
+        fi
+        credentials_file="$RUNNER_TEMP/gcp_credentials.json"
+        printf '%s' "$GCP_CREDENTIALS_JSON" > "$credentials_file"
+        export GOOGLE_APPLICATION_CREDENTIALS="$credentials_file"
         python3 scripts/gdrive_backup.py --all
       env:
-        GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+        GCP_CREDENTIALS_JSON: ${{ secrets.GCP_CREDENTIALS }}
 
     - name: Notify on success
-      uses: 8398a7/action-slack@v3
-      with:
-        status: ${{ job.status }}
-        text: 'AFS CI/CD completed successfully'
-        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
       if: always()
+      run: |
+        if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+          echo "No Slack webhook configured; skipping notification."
+          exit 0
+        fi
+        curl -fsS -X POST \
+          -H 'Content-Type: application/json' \
+          --data '{"text":"AFS CI/CD completed on main."}' \
+          "$SLACK_WEBHOOK_URL"
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
