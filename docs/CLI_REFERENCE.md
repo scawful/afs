@@ -642,6 +642,7 @@ Context-source providers are extension-owned and provider-neutral. See
 ./scripts/afs antigravity setup --scope project --project-path .
 ./scripts/afs antigravity setup --scope project --project-path . --apply
 ./scripts/afs antigravity models
+./scripts/afs antigravity models --json
 ```
 
 `setup` is dry-run by default and does not install `agy`. See
@@ -674,11 +675,11 @@ Context-source providers are extension-owned and provider-neutral. See
 ./scripts/afs gemini context --knowledge-path ~/.context/knowledge/afs "hooks"
 ```
 
-`afs antigravity setup` previews or writes the AFS MCP entry for Antigravity CLI. `afs gemini setup` remains as Gemini CLI compatibility/API-key setup and writes settings so
+`afs antigravity setup` previews or writes the AFS MCP entry for Antigravity CLI. New `agy` builds use `~/.gemini/config/mcp_config.json` for MCP config by default. `afs gemini setup` remains as Gemini CLI compatibility/API-key setup and writes settings so
 Gemini can discover AFS tools automatically. The default launch target is the
 repo-local `scripts/afs mcp serve` wrapper, which preserves AFS runtime env and
 repo-config preference automatically. Use `--scope project` for repo-local
-`./.gemini/settings.json` and `--python-module` only when you explicitly want
+`./.gemini/config/mcp_config.json` and `--python-module` only when you explicitly want
 the direct Python module entrypoint.
 
 `afs gemini status` checks: API key, google-genai SDK, settings.json, MCP registration,

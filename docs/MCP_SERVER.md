@@ -37,9 +37,12 @@ entry and preserves the repo runtime env (`AFS_ROOT`, `AFS_VENV`, `PYTHONPATH`,
 and `AFS_PREFER_REPO_CONFIG=1`) so Gemini uses the same import/config path as
 the rest of the AFS toolchain.
 
-Use `afs antigravity setup --scope project` for the public `agy` CLI path. Use `--scope project` when you want the compatibility Gemini CLI setup to keep MCP registration inside
-the current repo at `./.gemini/settings.json`. `afs gemini status` detects both
-user-level and project-level Gemini configs.
+Use `afs antigravity setup --scope project` for the public `agy` CLI path. New
+`agy` builds use `~/.gemini/config/mcp_config.json` for migrated MCP config, and
+AFS detects the older Antigravity CLI/IDE paths as compatibility fallbacks. Use
+`--scope project` when you want the compatibility Gemini CLI setup to keep MCP
+registration inside the current repo at `./.gemini/settings.json`.
+`afs gemini status` detects both user-level and project-level Gemini configs.
 
 Manual alternative:
 

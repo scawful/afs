@@ -45,9 +45,17 @@ def test_find_afs_mcp_registrations_detects_supported_clients(tmp_path: Path) ->
         encoding="utf-8",
     )
 
+    antigravity_config = home / ".gemini" / "config" / "mcp_config.json"
+    antigravity_config.parent.mkdir(parents=True)
+    antigravity_config.write_text(
+        '{"mcpServers":{"afs":{"command":"afs","args":["mcp","serve"]}}}',
+        encoding="utf-8",
+    )
+
     hits = find_afs_mcp_registrations(home=home, cwd=cwd)
 
     assert hits["gemini"] == [str(gemini_config)]
+    assert hits["antigravity"] == [str(antigravity_config)]
     assert hits["claude"] == [str(claude_desktop)]
     assert hits["codex"] == [str(codex_config)]
 

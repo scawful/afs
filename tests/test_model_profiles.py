@@ -8,9 +8,10 @@ def test_resolve_modern_model_profiles() -> None:
     assert codex.family == "codex"
     assert "stable prefix" in codex.cache_strategy
 
-    opus = resolve_model_client_profile("claude-opus-4-8")
+    opus = resolve_model_client_profile("claude-opus-4-6")
     assert opus.family == "claude"
     assert "1024" in opus.cache_strategy
+    assert resolve_model_client_profile("claude-opus-4-8").name == opus.name
 
     agy = resolve_model_client_profile("jetski")
     assert agy.name == "antigravity:agy"

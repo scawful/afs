@@ -18,7 +18,11 @@ _JSON_CONFIG_CANDIDATES: dict[str, tuple[str, ...]] = {
         ".gemini/settings.json",
     ),
     "antigravity": (
+        ".gemini/config/mcp_config.json",
+        ".gemini/settings.json",
         ".gemini/antigravity-cli/settings.json",
+        ".gemini/antigravity/mcp_config.json",
+        ".gemini/antigravity-ide/mcp_config.json",
         ".config/antigravity/settings.json",
     ),
     "claude": (
@@ -56,6 +60,9 @@ def discover_mcp_config_paths(
                     paths.append(project_candidate)
         if client == "antigravity":
             for project_candidate in (
+                cwd_dir / ".gemini" / "config" / "mcp_config.json",
+                cwd_dir / ".gemini" / "settings.json",
+                cwd_dir / ".antigravity" / "mcp_config.json",
                 cwd_dir / ".antigravity" / "settings.json",
                 cwd_dir / ".gemini" / "antigravity-cli" / "settings.json",
             ):

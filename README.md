@@ -227,12 +227,14 @@ See [docs/MCP_SERVER.md](docs/MCP_SERVER.md) for configuration and tool referenc
 ```bash
 afs antigravity setup --scope project    # Preview Antigravity CLI MCP setup
 afs gemini setup                         # Gemini CLI compatibility/API helper
+afs antigravity models --json            # Parse the installed agy model list
 ```
 
 Gemini CLI compatibility is retained for API-key/enterprise workflows, but the
 individual/free/Pro/Ultra public path moved to Antigravity CLI (`agy`) on
 2026-06-18. AFS does not auto-install `agy`; run `afs antigravity status` or
-`afs antigravity setup --json` to inspect the local state.
+`afs antigravity setup --json` to inspect the local state. Current `agy` builds
+use `~/.gemini/config/mcp_config.json` as the migrated MCP config path.
 
 ```
 afs gemini status                     # Check API key, SDK, embeddings

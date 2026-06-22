@@ -52,9 +52,21 @@ _MODEL_PROFILES = (
         notes=("Use Responses-style tool semantics when the host supports them.",),
     ),
     ModelClientProfile(
-        name="claude:opus-4.8",
+        name="claude:opus-thinking",
         family="claude",
-        aliases=("claude", "opus-4.8", "claude-opus-4-8"),
+        aliases=(
+            "claude",
+            "opus-thinking",
+            "claude-opus-thinking",
+            "opus-4.6",
+            "claude-opus-4-6",
+            "Claude Opus 4.6",
+            "Claude Opus 4.6 (Thinking)",
+            # Keep the user's older shorthand resolving, but prefer runtime
+            # model discovery via `agy models` over this compatibility alias.
+            "opus-4.8",
+            "claude-opus-4-8",
+        ),
         context_window_hint="very large context; still prefer source-ranked slices over dumping everything",
         reasoning_effort="adaptive thinking only; avoid manual budget assumptions",
         cache_strategy="keep at least a stable 1024-token prefix for prompt caching",
