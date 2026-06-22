@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import tomllib
+from .toml_compat import tomllib
 
 
 def default_manifest_path() -> Path:

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-import tomllib
+from ..toml_compat import tomllib
 
 SUPPORTED_MCP_CLIENTS = ("gemini", "antigravity", "claude", "codex")
 

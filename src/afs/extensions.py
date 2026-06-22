@@ -8,9 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import tomllib
-
 from .schema import AFSConfig, ExtensionsConfig
+from .toml_compat import tomllib
 
 
 @dataclass(frozen=True)

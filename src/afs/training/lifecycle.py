@@ -13,9 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import tomllib
-
 from ..models import MountType
+from ..toml_compat import tomllib
 
 
 def now_iso() -> str:
