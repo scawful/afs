@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from afs.model_prompts import build_model_system_prompt
+from afs.model_prompts import build_hook_injection, build_model_system_prompt
 
 
 def test_build_model_system_prompt_includes_session_state_summary() -> None:
@@ -170,3 +170,91 @@ def test_build_model_system_prompt_budget_drops_dynamic_sections_first() -> None
 
     assert "Base behavior." in prompt
     assert "## Session Context" not in prompt
+
+
+def test_session_context_surfaces_stakeholders_and_project_intent() -> None:
+    prompt = build_model_system_prompt(
+        base_prompt="Base behavior.",
+        session_state={
+            "project": "afs",
+            "profile": "default",
+            "project_description": "Agentic File System: RAG/context engine for coding agents.",
+            "work_assistant": {
+                "available": True,
+                "summary": {"people": 2, "review_routes": 1},
+                "people": [
+                    {
+                        "display_name": "Dana Reviewer",
+                        "organization": "CoreInfra",
+                        "team": "Context",
+                        "roles": ["code_owner", "approver"],
+                    },
+                    {"display_name": "Sam PM", "organization": "Product", "roles": []},
+                ],
+                "relationships": [
+                    {
+                        "display_name": "Dana Reviewer",
+                        "relationship_type": "code_reviewer",
+                        "scope_id": "afs",
+                        "permission_class": "trusted",
+                    }
+                ],
+            },
+        },
+    )
+
+    assert "Project intent: Agentic File System: RAG/context engine for coding agents." in prompt
+    assert "Stakeholders (people in this project's context" in prompt
+    assert "- Dana Reviewer — CoreInfra/Context; roles: code_owner, approver" in prompt
+    assert "- Sam PM — Product" in prompt
+    assert "Stakeholder relationships / review authority:" in prompt
+    assert "- Dana Reviewer: code_reviewer (afs) [trusted]" in prompt
+
+
+def test_session_context_stakeholders_absent_when_no_people() -> None:
+    prompt = build_model_system_prompt(
+        base_prompt="Base behavior.",
+        session_state={
+            "project": "afs",
+            "profile": "default",
+            "work_assistant": {
+                "available": True,
+                "summary": {"people": 0},
+                "people": [],
+                "relationships": [],
+            },
+        },
+    )
+
+    assert "Stakeholders (people in this project's context" not in prompt
+    assert "Stakeholder relationships" not in prompt
+
+
+def test_build_hook_injection_session_start_returns_full_block() -> None:
+    injection = build_hook_injection(
+        event="SessionStart",
+        session_state={
+            "project": "afs",
+            "profile": "default",
+            "scratchpad": {"state_text": "Wiring the push hooks."},
+        },
+    )
+
+    assert "## Session Context" in injection
+    assert "Project: afs (profile: default)" in injection
+    assert "Scratchpad state excerpt (untrusted): Wiring the push hooks." in injection
+
+
+def test_build_hook_injection_user_prompt_submit_only_on_comms() -> None:
+    comms = build_hook_injection(
+        event="UserPromptSubmit",
+        prompt="draft a reply comment for the ticket",
+    )
+    assert "## Work Communication Contract" in comms
+    assert "without explicit approval" in comms
+
+    non_comms = build_hook_injection(
+        event="UserPromptSubmit",
+        prompt="refactor the retrieval index",
+    )
+    assert non_comms == ""

@@ -315,6 +315,7 @@ def build_session_bootstrap(
     summary = {
         "context_path": str(context_path),
         "project": context.project_name,
+        "project_description": getattr(context.metadata, "description", "") or "",
         "profile": status["profile"],
         "startup_sequence": [
             "Review context health and recent drift first.",
@@ -887,6 +888,8 @@ def _collect_work_assistant(
                 "initialized": False,
                 "db_path": str(db_path),
                 "summary": empty_summary,
+                "people": [],
+                "relationships": [],
                 "pending_approvals": [],
                 "communication_samples": [],
                 "communication_guidance": {},
@@ -901,6 +904,10 @@ def _collect_work_assistant(
             "initialized": True,
             "db_path": str(db_path),
             "summary": store.summary(),
+            "people": store.list_people(limit=max(1, min(limit, _MAX_LIST_ITEMS))),
+            "relationships": store.list_relationships(
+                limit=max(1, min(limit, _MAX_LIST_ITEMS))
+            ),
             "pending_approvals": store.list_approvals(status="pending", limit=max(1, limit)),
             "communication_samples": store.list_communication_samples(
                 limit=max(1, min(limit, _MAX_LIST_ITEMS))
@@ -921,6 +928,8 @@ def _collect_work_assistant(
             "available": False,
             "initialized": False,
             "summary": {},
+            "people": [],
+            "relationships": [],
             "pending_approvals": [],
             "communication_samples": [],
             "communication_guidance": {},

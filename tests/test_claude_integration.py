@@ -8,11 +8,21 @@ from pathlib import Path
 
 from afs.claude_integration import (
     default_claude_user_settings_path,
+    generate_afs_hook_settings,
     generate_claude_md,
     generate_claude_settings,
     generate_hooks_config,
     merge_claude_settings,
 )
+
+
+def _afs_hook_commands(settings: dict, event: str) -> list[str]:
+    return [
+        hook["command"]
+        for entry in settings.get("hooks", {}).get(event, [])
+        for hook in entry.get("hooks", [])
+        if "afs claude hook" in hook.get("command", "")
+    ]
 
 
 def test_generate_claude_settings_basic() -> None:
@@ -132,6 +142,62 @@ def test_generate_hooks_config() -> None:
     assert "PostToolUse" in hooks["hooks"]
     assert len(hooks["hooks"]["PostToolUse"]) == 1
     assert "-m afs events tail" in hooks["hooks"]["PostToolUse"][0]["command"]
+
+
+def test_generate_claude_settings_includes_push_hooks() -> None:
+    settings = generate_claude_settings(Path("/tmp/test"))
+    assert "SessionStart" in _hook_events(settings)
+    assert "UserPromptSubmit" in _hook_events(settings)
+    session_cmds = _afs_hook_commands(settings, "SessionStart")
+    assert len(session_cmds) == 1
+    assert "-m afs claude hook" in session_cmds[0]
+    assert "--event SessionStart" in session_cmds[0]
+
+
+def test_generate_afs_hook_settings_bakes_runtime_env(tmp_path: Path) -> None:
+    hooks = generate_afs_hook_settings(
+        tmp_path,
+        context_root=tmp_path / ".context",
+    )
+    command = hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    # Env is baked in as a prefix since Claude hooks take no per-hook env block.
+    assert "PYTHONPATH=" in command
+    assert f"AFS_CONTEXT_ROOT={tmp_path / '.context'}" in command
+    assert command.strip().endswith("--event UserPromptSubmit")
+
+
+def test_merge_hooks_is_idempotent_and_preserves_user_hooks() -> None:
+    existing = {
+        "hooks": {
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": "echo user-owned"}]}
+            ]
+        }
+    }
+    afs_entry = generate_claude_settings(Path("/tmp/test"))
+    merged_once = merge_claude_settings(existing, afs_entry)
+    merged_twice = merge_claude_settings(merged_once, afs_entry)
+
+    session = merged_twice["hooks"]["SessionStart"]
+    afs_hooks = [
+        hook
+        for entry in session
+        for hook in entry["hooks"]
+        if "afs claude hook" in hook["command"]
+    ]
+    user_hooks = [
+        hook
+        for entry in session
+        for hook in entry["hooks"]
+        if hook["command"] == "echo user-owned"
+    ]
+    # AFS hook appears exactly once after two merges; the user's hook is preserved.
+    assert len(afs_hooks) == 1
+    assert len(user_hooks) == 1
+
+
+def _hook_events(settings: dict) -> set:
+    return set(settings.get("hooks", {}).keys())
 
 
 def test_default_claude_user_settings_path(tmp_path: Path) -> None:
