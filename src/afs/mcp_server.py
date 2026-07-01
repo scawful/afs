@@ -4724,6 +4724,11 @@ def _get_prompt(
             "Return only JSON matching the response schema below.",
             "Do not wrap the response in markdown fences.",
             "Keep every field grounded in the supplied context. If evidence is missing, keep the answer minimal and note the uncertainty in fields that allow it.",
+            (
+                "Before returning, self-check your JSON: it is validated with "
+                f"`afs schema validate --schema {schema_name}` (exit 1 lists the exact "
+                "violations). Fix every reported violation before finalizing."
+            ),
             "",
             f"Schema resource: {SCHEMA_URI_PREFIX}{schema_name}",
             "",
