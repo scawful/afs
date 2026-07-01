@@ -8,9 +8,9 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from .work_assistant import WorkAssistantStore
+from .work_assistant import EXTERNAL_WRITE_ACTIONS, WorkAssistantStore
 
 PAYLOAD_VERSION = 1
 COMMUNICATION_WRITE_ACTIONS = frozenset(
@@ -31,6 +31,94 @@ COMMUNICATION_WRITE_ACTIONS = frozenset(
 
 class WorkApprovalExecutionError(RuntimeError):
     """Raised when an approved work action cannot be executed."""
+
+
+class HumanApprovalRequiredError(WorkApprovalExecutionError):
+    """Raised when an external-write approval lacks interactive human confirmation.
+
+    External and communication writes (see :data:`EXTERNAL_WRITE_ACTIONS`) must be
+    confirmed by a person at a terminal before an agent may act on the user's behalf.
+    This closes the hole where an agent with shell access could self-approve via
+    ``afs work approvals approve <id> --by human`` (``approved_by`` is unauthenticated
+    free text). Confirmation is read from the controlling terminal, which a headless
+    agent cannot satisfy.
+    """
+
+
+def action_requires_human_ack(action: str) -> bool:
+    """True when an action is an external/communication write and needs a human ack.
+
+    ``COMMUNICATION_WRITE_ACTIONS`` is a subset of ``EXTERNAL_WRITE_ACTIONS``, so the
+    superset is the always-confirm set.
+    """
+    return str(action or "").strip() in EXTERNAL_WRITE_ACTIONS
+
+
+def _default_tty_reader(tty_path: str) -> Callable[[str], str | None]:
+    """Return a reader that prompts on and reads a line from the controlling terminal.
+
+    Reads from ``/dev/tty`` rather than stdin so that an agent piping text into the
+    command cannot satisfy the prompt. Returns ``None`` when no terminal is available
+    (a headless or agent context), which the caller treats as a refusal.
+    """
+
+    def _read(prompt: str) -> str | None:
+        try:
+            with open(tty_path, "r+", encoding="utf-8") as tty:
+                tty.write(prompt)
+                tty.flush()
+                line = tty.readline()
+        except OSError:
+            return None
+        return line.rstrip("\r\n")
+
+    return _read
+
+
+def confirm_human_approval(
+    approval: dict[str, Any],
+    *,
+    tty_path: str = "/dev/tty",
+    reader: Callable[[str], str | None] | None = None,
+) -> None:
+    """Require interactive human confirmation for an external-write approval.
+
+    A no-op for non-external actions. For external writes it prompts on the
+    controlling terminal and requires the operator to type the approval id. Raises
+    :class:`HumanApprovalRequiredError` when no terminal is available or the typed
+    value does not match — so approval cannot be granted from a non-interactive
+    (agent) context. ``reader`` is injectable for testing.
+    """
+    action = str(approval.get("action") or "").strip()
+    if not action_requires_human_ack(action):
+        return
+    approval_id = str(approval.get("approval_id") or "")
+    target = f"{approval.get('target_system') or '?'}:{approval.get('target_id') or '?'}"
+    summary = str(approval.get("summary") or "")
+    prompt = "\n".join(
+        [
+            "",
+            "=== HUMAN CONFIRMATION REQUIRED (external write) ===",
+            f"  action:   {action}",
+            f"  target:   {target}",
+            f"  summary:  {summary}",
+            f"  approval: {approval_id}",
+            "Approving lets an agent perform this outward action on your behalf.",
+            f"Type the approval id ({approval_id}) to confirm, anything else aborts: ",
+        ]
+    )
+    read = reader or _default_tty_reader(tty_path)
+    response = read(prompt)
+    if response is None:
+        raise HumanApprovalRequiredError(
+            "external write requires interactive human confirmation, but no terminal "
+            f"is available; refusing to approve {approval_id!r} in a non-interactive "
+            "context. Re-run `afs work approvals approve` from an interactive terminal."
+        )
+    if response.strip() != approval_id:
+        raise HumanApprovalRequiredError(
+            f"human confirmation did not match approval id; not approving {approval_id!r}."
+        )
 
 
 def build_approval_payload(

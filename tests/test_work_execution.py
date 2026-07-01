@@ -6,7 +6,13 @@ from pathlib import Path
 import pytest
 
 from afs.work_assistant import WorkAssistantStore
-from afs.work_execution import WorkApprovalExecutionError, execute_approved_action
+from afs.work_execution import (
+    HumanApprovalRequiredError,
+    WorkApprovalExecutionError,
+    action_requires_human_ack,
+    confirm_human_approval,
+    execute_approved_action,
+)
 
 
 def _approved_action(
@@ -25,6 +31,39 @@ def _approved_action(
     )
     assert store.approve(approval_id, approved_by="human")
     return approval_id
+
+
+def test_action_requires_human_ack_classification() -> None:
+    assert action_requires_human_ack("send_email") is True
+    assert action_requires_human_ack("post_pr_comment") is True
+    assert action_requires_human_ack("internal_note") is False
+    assert action_requires_human_ack("") is False
+
+
+def test_confirm_human_approval_noop_for_internal_action() -> None:
+    def _reader(_prompt: str) -> str | None:
+        raise AssertionError("reader must not be consulted for a non-external action")
+
+    # Should return without raising and without touching the reader.
+    confirm_human_approval({"action": "internal_note", "approval_id": "a1"}, reader=_reader)
+
+
+def test_confirm_human_approval_accepts_matching_id() -> None:
+    approval = {"action": "send_email", "approval_id": "approval_abc"}
+    confirm_human_approval(approval, reader=lambda _prompt: "approval_abc")
+
+
+def test_confirm_human_approval_rejects_mismatch() -> None:
+    approval = {"action": "send_email", "approval_id": "approval_abc"}
+    with pytest.raises(HumanApprovalRequiredError, match="did not match"):
+        confirm_human_approval(approval, reader=lambda _prompt: "nope")
+
+
+def test_confirm_human_approval_refuses_without_terminal() -> None:
+    approval = {"action": "send_email", "approval_id": "approval_abc"}
+    # reader returns None → no controlling terminal available (agent context).
+    with pytest.raises(HumanApprovalRequiredError, match="no terminal"):
+        confirm_human_approval(approval, reader=lambda _prompt: None)
 
 
 def test_execute_approved_action_marks_success_applied(tmp_path: Path) -> None:

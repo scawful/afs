@@ -198,7 +198,7 @@ posting_policy = "Ask before posting."
     assert preflight["approval_guardrail"]["requires_explicit_approval"] is True
 
 
-def test_work_approval_request_and_approve(tmp_path: Path, capsys) -> None:
+def test_work_approval_request_and_approve(tmp_path: Path, capsys, monkeypatch) -> None:
     context_root = tmp_path / ".context"
     context_root.mkdir()
 
@@ -225,6 +225,12 @@ def test_work_approval_request_and_approve(tmp_path: Path, capsys) -> None:
     approvals = json.loads(capsys.readouterr().out)
     assert approvals[0]["action"] == "post_ticket_comment"
 
+    # post_ticket_comment is an external write, so approve now requires interactive
+    # human confirmation. Simulate the operator typing the approval id at the terminal.
+    monkeypatch.setattr(
+        "afs.work_execution._default_tty_reader",
+        lambda tty_path: (lambda prompt: approval_id),
+    )
     assert approvals_approve_command(_args(context_root, approval_id=approval_id, by="human")) == 0
     assert "Approved" in capsys.readouterr().out
 
@@ -252,6 +258,42 @@ def test_work_approval_request_and_approve(tmp_path: Path, capsys) -> None:
     structured = WorkAssistantStore(context_root).get_approval(structured_id)
     assert structured is not None
     assert structured["preview"]["subject"] == "Hi"
+
+
+def test_work_approval_external_write_refused_without_tty(tmp_path: Path, capsys, monkeypatch) -> None:
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    approval_id = store.create_approval(
+        target_system="gmail",
+        target_id="message",
+        action="send_email",
+        summary="Send approved email",
+    )
+    # No controlling terminal (headless/agent context): the reader returns None.
+    monkeypatch.setattr(
+        "afs.work_execution._default_tty_reader",
+        lambda tty_path: (lambda prompt: None),
+    )
+    assert approvals_approve_command(_args(context_root, approval_id=approval_id, by="human")) == 2
+    assert "interactive human confirmation" in capsys.readouterr().out
+    # The approval must remain pending — the agent could not self-approve.
+    assert store.get_approval(approval_id)["status"] == "pending"  # type: ignore[index]
+
+
+def test_work_approval_internal_action_skips_confirmation(tmp_path: Path, capsys) -> None:
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    approval_id = store.create_approval(
+        target_system="local",
+        target_id="note-1",
+        action="internal_note",  # not an external/communication write
+        summary="Record an internal note",
+    )
+    # No tty monkeypatch: a non-external action must approve without any prompt.
+    assert approvals_approve_command(_args(context_root, approval_id=approval_id, by="human")) == 0
+    assert store.get_approval(approval_id)["status"] == "approved"  # type: ignore[index]
 
 
 def test_work_approval_execute_command(tmp_path: Path, capsys) -> None:
