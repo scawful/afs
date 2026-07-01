@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import tempfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1022,6 +1022,14 @@ def _build_sections(
         )
         if embedding_section is not None:
             sections.append(embedding_section)
+        fused_section = _fused_retrieval_section(
+            query_sections,
+            embedding_section,
+            pack_mode=pack_mode,
+            max_results=max(max_query_results, max_embedding_results),
+        )
+        if fused_section is not None:
+            sections.append(fused_section)
 
     return [section for section in sections if section.body.strip()]
 
@@ -1221,6 +1229,78 @@ def _knowledge_slice_section(
         body="\n".join(lines),
         priority=32,
         sources=sources,
+    )
+
+
+def rrf_fuse(
+    ranked_lists: Sequence[Sequence[str]],
+    *,
+    k: int = 60,
+) -> list[tuple[str, float]]:
+    """Reciprocal Rank Fusion of several ranked key lists (best-first).
+
+    Each list contributes ``1 / (k + rank)`` (1-based rank) to a key's fused score,
+    so a document that ranks well in *both* keyword and semantic retrieval outscores
+    one that is strong in only a single signal. ``k`` damps the contribution of
+    lower ranks (60 is the value from the original RRF paper). Returns ``(key,
+    score)`` sorted by score descending, ties broken by key for determinism.
+    """
+    scores: dict[str, float] = {}
+    for ranked in ranked_lists:
+        for rank, key in enumerate(ranked):
+            normalized = str(key).strip()
+            if not normalized:
+                continue
+            scores[normalized] = scores.get(normalized, 0.0) + 1.0 / (k + rank + 1)
+    return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+
+
+def _fused_retrieval_section(
+    query_sections: list[ContextPackSection],
+    embedding_section: ContextPackSection | None,
+    *,
+    pack_mode: str,
+    max_results: int,
+) -> ContextPackSection | None:
+    """Fuse keyword (bm25) and semantic (embedding) hits into one ranked view.
+
+    Reuses the ranked ``sources`` already computed for the query and embedding
+    sections (no extra index queries), so this only adds a compact fused ranking
+    on top. Emitted only when both signals produced hits — with a single signal the
+    existing section already conveys the ranking and fusion would add nothing.
+    """
+    bm25_paths = [
+        section.sources[0]
+        for section in query_sections
+        if getattr(section, "sources", None)
+    ]
+    cosine_paths = list(embedding_section.sources) if embedding_section else []
+    if not bm25_paths or not cosine_paths:
+        return None
+
+    bm25_rank = {path: idx for idx, path in enumerate(bm25_paths)}
+    cosine_rank = {path: idx for idx, path in enumerate(cosine_paths)}
+    fused = rrf_fuse([bm25_paths, cosine_paths])
+
+    lines = [
+        "Hybrid ranking fusing keyword (bm25) and semantic (embedding) retrieval;",
+        "documents corroborated by both signals rank highest.",
+    ]
+    ordered_sources: list[str] = []
+    for path, score in fused[: max(1, max_results)]:
+        signals: list[str] = []
+        if path in bm25_rank:
+            signals.append(f"keyword #{bm25_rank[path] + 1}")
+        if path in cosine_rank:
+            signals.append(f"semantic #{cosine_rank[path] + 1}")
+        lines.append(f"- {path} (rrf={score:.4f}; {' + '.join(signals)})")
+        ordered_sources.append(path)
+
+    return ContextPackSection(
+        title="Fused Retrieval",
+        body="\n".join(lines),
+        priority=_query_section_priority(pack_mode, 0),
+        sources=ordered_sources,
     )
 
 

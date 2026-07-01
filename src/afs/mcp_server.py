@@ -1720,6 +1720,10 @@ def _tool_embeddings_index(arguments: dict[str, Any], manager: AFSManager) -> di
     include_patterns = arguments.get("include_patterns")
     exclude_patterns = arguments.get("exclude_patterns")
     incremental = bool(arguments.get("incremental", False))
+    chunk_size = _coerce_int(arguments.get("chunk_size"), default=0, minimum=0, maximum=100000)
+    chunk_overlap = _coerce_int(
+        arguments.get("chunk_overlap"), default=200, minimum=0, maximum=100000
+    )
 
     result = build_embedding_index(
         sources,
@@ -1727,6 +1731,8 @@ def _tool_embeddings_index(arguments: dict[str, Any], manager: AFSManager) -> di
         include_patterns=include_patterns,
         exclude_patterns=exclude_patterns,
         incremental=incremental,
+        chunk_size=chunk_size or None,
+        chunk_overlap=chunk_overlap,
     )
     return {
         "summary": result.summary(),
