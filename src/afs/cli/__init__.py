@@ -39,6 +39,7 @@ from . import (
     gws_cli,
     manager_gui,
     mcp,
+    missions,
     next_action,
     personal,
     profile,
@@ -271,6 +272,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
 
     # Register response-schema validation commands
     schema.register_parsers(subparsers)
+
+    # Register background-mission commands
+    missions.register_parsers(subparsers)
 
     # Register generic context source provider commands
     sources.register_parsers(subparsers)

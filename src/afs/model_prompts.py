@@ -354,6 +354,42 @@ def _stakeholder_lines(work_assistant: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _active_mission_lines(missions: dict[str, Any]) -> list[str]:
+    """Render in-flight background missions so a resumed session sees them.
+
+    Bounded and compact: a resumed session should immediately know what work is
+    already underway (and by whom) to avoid dropping or duplicating it.
+    """
+    if not isinstance(missions, dict):
+        return []
+    active = missions.get("active")
+    if not isinstance(active, list) or not active:
+        return []
+    lines = ["Active background missions (in-flight; do not restart or duplicate):"]
+    for mission in active[:5]:
+        if not isinstance(mission, dict):
+            continue
+        title = str(mission.get("title") or "").strip()
+        if not title:
+            continue
+        status = str(mission.get("status") or "active").strip()
+        owner = str(mission.get("owner") or "").strip()
+        owner_text = f", owner={owner}" if owner else ""
+        line = f"- [{status}{owner_text}] {title}"
+        next_steps = mission.get("next_steps")
+        if isinstance(next_steps, list) and next_steps:
+            first = str(next_steps[0]).strip()
+            if first:
+                line += f" — next: {first}"
+        blockers = mission.get("blockers")
+        if status == "blocked" and isinstance(blockers, list) and blockers:
+            first_blocker = str(blockers[0]).strip()
+            if first_blocker:
+                line += f" — blocked: {first_blocker}"
+        lines.append(line)
+    return lines if len(lines) > 1 else []
+
+
 def _session_context_block(
     context_path: Path | None,
     session_state: dict[str, Any] | None,
@@ -434,6 +470,9 @@ def _session_context_block(
     tasks = state.get("tasks", {})
     if tasks.get("total", 0) > 0:
         lines.append(f"Tasks: {tasks['total']} ({', '.join(f'{k}={v}' for k, v in sorted(tasks.get('counts', {}).items()))})")
+
+    # Active background missions (in-flight work carried across sessions/subagents)
+    lines.extend(_active_mission_lines(state.get("missions", {})))
 
     work_assistant = state.get("work_assistant", {})
     if isinstance(work_assistant, dict) and work_assistant.get("available", True):

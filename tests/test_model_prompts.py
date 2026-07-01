@@ -230,6 +230,45 @@ def test_session_context_stakeholders_absent_when_no_people() -> None:
     assert "Stakeholder relationships" not in prompt
 
 
+def test_session_context_surfaces_active_missions() -> None:
+    prompt = build_model_system_prompt(
+        base_prompt="Base behavior.",
+        session_state={
+            "project": "afs",
+            "profile": "default",
+            "missions": {
+                "available": True,
+                "active": [
+                    {
+                        "title": "Triage incident 4821",
+                        "status": "blocked",
+                        "owner": "gemini",
+                        "next_steps": ["pull logs"],
+                        "blockers": ["waiting on access"],
+                    }
+                ],
+                "active_count": 1,
+            },
+        },
+    )
+    assert "Active background missions (in-flight; do not restart or duplicate):" in prompt
+    assert "[blocked, owner=gemini] Triage incident 4821" in prompt
+    assert "next: pull logs" in prompt
+    assert "blocked: waiting on access" in prompt
+
+
+def test_session_context_no_mission_block_when_none_active() -> None:
+    prompt = build_model_system_prompt(
+        base_prompt="Base behavior.",
+        session_state={
+            "project": "afs",
+            "profile": "default",
+            "missions": {"available": True, "active": [], "active_count": 0},
+        },
+    )
+    assert "Active background missions" not in prompt
+
+
 def test_build_hook_injection_session_start_returns_full_block() -> None:
     injection = build_hook_injection(
         event="SessionStart",
