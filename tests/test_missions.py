@@ -98,6 +98,40 @@ def test_list_filters_by_status(tmp_path: Path) -> None:
     assert [m.mission_id for m in done] == [a.mission_id]
 
 
+def test_construction_is_read_only_no_dir_created(tmp_path: Path) -> None:
+    # Session bootstrap constructs a store just to read active missions; that read path
+    # must not create items/missions on disk (would dirty a repo / external mount).
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = MissionStore(context_root)
+    assert not store._root.exists()  # type: ignore[attr-defined]
+    # Read APIs tolerate the absent directory and return empty.
+    assert store.list() == []
+    assert store.active() == []
+    assert store.get("mission_missing") is None
+    assert not store._root.exists()  # type: ignore[attr-defined]
+    # The first write lazily creates it.
+    store.create(title="first real mission")
+    assert store._root.exists()  # type: ignore[attr-defined]
+
+
+def test_mission_survives_manifest_loss(tmp_path: Path) -> None:
+    # Simulate a lost concurrent-create race: the mission file exists but the manifest
+    # never recorded its id. list()/active() must still surface it via disk reconciliation.
+    store = _store(tmp_path)
+    kept = store.create(title="kept")
+    raced = store.create(title="raced")
+    # Rewrite the manifest to drop the raced mission (as a lost read-modify-write would).
+    store._atomic_write(  # type: ignore[attr-defined]
+        store._manifest_path,  # type: ignore[attr-defined]
+        __import__("json").dumps([kept.mission_id]) + "\n",
+    )
+    listed_ids = {m.mission_id for m in store.list()}
+    assert raced.mission_id in listed_ids
+    assert kept.mission_id in listed_ids
+    assert raced.mission_id in {m.mission_id for m in store.active()}
+
+
 def test_mission_dataclass_round_trip() -> None:
     mission = Mission(
         mission_id="mission_1",

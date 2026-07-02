@@ -296,7 +296,7 @@ def test_work_approval_internal_action_skips_confirmation(tmp_path: Path, capsys
     assert store.get_approval(approval_id)["status"] == "approved"  # type: ignore[index]
 
 
-def test_work_approval_execute_command(tmp_path: Path, capsys) -> None:
+def test_work_approval_execute_command(tmp_path: Path, capsys, monkeypatch) -> None:
     context_root = tmp_path / ".context"
     context_root.mkdir()
     store = WorkAssistantStore(context_root)
@@ -308,6 +308,12 @@ def test_work_approval_execute_command(tmp_path: Path, capsys) -> None:
     )
     assert store.approve(approval_id, approved_by="human")
 
+    # edit_doc is an external write, so execution (where the connector actually fires)
+    # now also requires a terminal confirmation. Simulate the operator at the terminal.
+    monkeypatch.setattr(
+        "afs.work_execution._default_tty_reader",
+        lambda tty_path: (lambda prompt: approval_id),
+    )
     assert approvals_execute_command(
         _args(
             context_root,
@@ -327,6 +333,39 @@ def test_work_approval_execute_command(tmp_path: Path, capsys) -> None:
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "applied"
     assert result["output"]["approval"] == approval_id
+
+
+def test_work_approval_execute_refused_without_tty(tmp_path: Path, capsys, monkeypatch) -> None:
+    # Closes the "already-approved row" hole: even a row that is already `approved`
+    # cannot execute an external write from a headless (no-terminal) context.
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    approval_id = store.create_approval(
+        target_system="gmail",
+        target_id="message",
+        action="send_email",
+        summary="Send approved email",
+    )
+    assert store.approve(approval_id, approved_by="human")
+    monkeypatch.setattr(
+        "afs.work_execution._default_tty_reader",
+        lambda tty_path: (lambda prompt: None),  # no controlling terminal
+    )
+    assert approvals_execute_command(
+        _args(
+            context_root,
+            approval_id=approval_id,
+            actor="test-agent",
+            timeout=10,
+            dry_run=False,
+            json=True,
+            executor=f"{sys.executable} -c 'print(\"should not run\")'",
+        )
+    ) == 1
+    assert "interactive human confirmation" in capsys.readouterr().out
+    # The outward action never ran; the row stays approved (retryable).
+    assert store.get_approval(approval_id)["status"] == "approved"  # type: ignore[index]
 
 
 def test_register_parsers_includes_work_subcommands() -> None:

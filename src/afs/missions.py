@@ -101,15 +101,30 @@ class MissionStore:
 
     def __init__(self, context_path: Path, *, config: Any = None) -> None:
         self._context_path = context_path.expanduser().resolve()
+        # Construction is READ-ONLY: never create the mission directory here. Session
+        # bootstrap constructs a store just to read active missions, and that read path
+        # must not dirty a repo or an external mount. The directory is created lazily on
+        # the first write (see :meth:`_ensure_root`).
         self._root = resolve_mount_root(
             self._context_path, MountType.ITEMS, config=config
         ) / "missions"
-        self._root.mkdir(parents=True, exist_ok=True)
         self._manifest_path = self._root / "_manifest.json"
 
     # -- persistence helpers -------------------------------------------------
+    def _ensure_root(self) -> None:
+        """Create the mission directory. Called only from write paths."""
+        self._root.mkdir(parents=True, exist_ok=True)
+
     def _mission_path(self, mission_id: str) -> Path:
         return self._root / f"{mission_id}.json"
+
+    @staticmethod
+    def _atomic_write(path: Path, text: str) -> None:
+        """Write via a temp file + atomic rename so a concurrent reader/writer never
+        observes a partially written file."""
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(path)
 
     def _load_manifest(self) -> list[str]:
         if not self._manifest_path.exists():
@@ -120,17 +135,39 @@ class MissionStore:
             return []
         return [str(item) for item in data] if isinstance(data, list) else []
 
+    def _disk_mission_ids(self) -> list[str]:
+        """Mission ids present on disk, independent of the manifest."""
+        if not self._root.exists():
+            return []
+        return sorted(path.stem for path in self._root.glob("mission_*.json"))
+
+    def _reconciled_ids(self) -> list[str]:
+        """Manifest order plus any on-disk mission the manifest is missing.
+
+        ``_append_manifest`` is a lock-free read-modify-write, so two concurrent
+        ``create`` calls can race and the later manifest write can drop the earlier id.
+        Reconciling reads against the actual ``mission_*.json`` files means a mission is
+        never invisible to ``list``/``active``/session bootstrap just because it lost the
+        race — the durable per-mission file is the source of truth, the manifest only
+        supplies ordering.
+        """
+        manifest = self._load_manifest()
+        seen = set(manifest)
+        extras = [mid for mid in self._disk_mission_ids() if mid not in seen]
+        return manifest + extras
+
     def _append_manifest(self, mission_id: str) -> None:
+        self._ensure_root()
         manifest = self._load_manifest()
         if mission_id not in manifest:
             manifest.append(mission_id)
-            self._manifest_path.write_text(
-                json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
-            )
+            self._atomic_write(self._manifest_path, json.dumps(manifest, indent=2) + "\n")
 
     def _write(self, mission: Mission) -> None:
-        self._mission_path(mission.mission_id).write_text(
-            json.dumps(mission.to_dict(), indent=2) + "\n", encoding="utf-8"
+        self._ensure_root()
+        self._atomic_write(
+            self._mission_path(mission.mission_id),
+            json.dumps(mission.to_dict(), indent=2) + "\n",
         )
 
     # -- public API ----------------------------------------------------------
@@ -177,7 +214,7 @@ class MissionStore:
         self, *, status: str | None = None, limit: int = 50
     ) -> list[Mission]:
         missions: list[Mission] = []
-        for mission_id in reversed(self._load_manifest()):
+        for mission_id in reversed(self._reconciled_ids()):
             mission = self.get(mission_id)
             if mission is None:
                 continue
