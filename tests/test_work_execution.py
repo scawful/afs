@@ -10,6 +10,7 @@ from afs.work_execution import (
     HumanApprovalRequiredError,
     WorkApprovalExecutionError,
     action_requires_human_ack,
+    approval_requires_human_ack,
     confirm_human_approval,
     execute_approved_action,
 )
@@ -19,10 +20,11 @@ def _approved_action(
     store: WorkAssistantStore,
     *,
     action: str = "edit_doc",
+    target_system: str = "google-docs",
     preview: dict[str, str] | None = None,
 ) -> str:
     approval_id = store.create_approval(
-        target_system="google-docs",
+        target_system=target_system,
         target_id="doc-1",
         action=action,
         summary="Apply approved edit",
@@ -44,13 +46,27 @@ def test_action_requires_human_ack_covers_generic_and_novel_outward_actions() ->
     # The generic sentinel stamped on gated approvals with no specific verb used to
     # slip past the gate; it must now require confirmation.
     assert action_requires_human_ack("external_write") is True
+    assert action_requires_human_ack("external-write") is True
     # A novel outward action from a future connector, not on the enumerated list.
     assert action_requires_human_ack("escalate_incident") is True
     assert action_requires_human_ack("page_oncall") is True
+    assert action_requires_human_ack("delete_ticket") is True
+    assert action_requires_human_ack("update_crm_record") is True
+    assert action_requires_human_ack("archive_ticket") is True
+    assert action_requires_human_ack("remove_user") is True
     # Token-matched, so a benign name whose substring contains an outward stem
     # ("preview" ⊃ "review") is NOT misclassified.
     assert action_requires_human_ack("preview_doc") is False
     assert action_requires_human_ack("read_ticket") is False
+
+
+def test_approval_requires_human_ack_uses_external_target_backstop() -> None:
+    assert approval_requires_human_ack(
+        {"action": "internal_note", "target_system": "google-docs"}
+    ) is True
+    assert approval_requires_human_ack(
+        {"action": "internal_note", "target_system": "local"}
+    ) is False
 
 
 def test_confirm_human_approval_noop_for_internal_action() -> None:
@@ -58,7 +74,10 @@ def test_confirm_human_approval_noop_for_internal_action() -> None:
         raise AssertionError("reader must not be consulted for a non-external action")
 
     # Should return without raising and without touching the reader.
-    confirm_human_approval({"action": "internal_note", "approval_id": "a1"}, reader=_reader)
+    confirm_human_approval(
+        {"action": "internal_note", "approval_id": "a1", "target_system": "local"},
+        reader=_reader,
+    )
 
 
 def test_confirm_human_approval_accepts_matching_id() -> None:
@@ -210,7 +229,7 @@ def test_execute_internal_action_needs_no_terminal(tmp_path: Path) -> None:
     context_root = tmp_path / ".context"
     context_root.mkdir()
     store = WorkAssistantStore(context_root)
-    approval_id = _approved_action(store, action="internal_note")
+    approval_id = _approved_action(store, action="internal_note", target_system="local")
 
     result = execute_approved_action(
         store,
@@ -220,6 +239,28 @@ def test_execute_internal_action_needs_no_terminal(tmp_path: Path) -> None:
         confirm_reader=lambda _prompt: None,  # would refuse if consulted
     )
     assert result["status"] == "applied"
+
+
+def test_execute_external_target_backstop_refuses_unclassified_action(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    approval_id = store.create_approval(
+        target_system="zendesk",
+        target_id="ticket-1",
+        action="internal_note",
+        summary="Misclassified external update",
+    )
+    assert store.approve(approval_id, approved_by="human")
+
+    with pytest.raises(HumanApprovalRequiredError, match="no terminal"):
+        execute_approved_action(
+            store,
+            context_root=context_root,
+            approval_id=approval_id,
+            executor_command=[sys.executable, "-c", "print('should not run')"],
+            confirm_reader=lambda _prompt: None,
+        )
 
 
 def test_execute_requires_approved_status(tmp_path: Path) -> None:

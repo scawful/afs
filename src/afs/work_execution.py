@@ -49,6 +49,20 @@ class HumanApprovalRequiredError(WorkApprovalExecutionError):
 # (see work_assistant._normalize_approval_event). It is deliberately NOT a member of
 # EXTERNAL_WRITE_ACTIONS, so a naive membership test let it slip past the human gate.
 _GENERIC_EXTERNAL_WRITE = "external_write"
+_LOCAL_TARGET_SYSTEMS = frozenset(
+    {
+        "",
+        "afs",
+        "context",
+        "history",
+        "hivemind",
+        "items",
+        "knowledge",
+        "local",
+        "memory",
+        "scratchpad",
+    }
+)
 
 # Verb stems that mark an action as an outward/mutating write even when the exact
 # action name is not enumerated in EXTERNAL_WRITE_ACTIONS. Fail-safe: a novel outward
@@ -71,11 +85,20 @@ _OUTWARD_ACTION_STEMS = frozenset(
         "mention",
         "review",
         "assign",
+        "add",
+        "archive",
+        "change",
+        "create",
+        "delete",
+        "edit",
         "escalate",
         "page",
         "merge",
         "close",
+        "remove",
         "resolve",
+        "update",
+        "write",
     }
 )
 
@@ -97,10 +120,25 @@ def action_requires_human_ack(action: str) -> bool:
     if normalized in EXTERNAL_WRITE_ACTIONS:
         return True
     lowered = normalized.lower()
-    if lowered == _GENERIC_EXTERNAL_WRITE:
+    if lowered.replace("-", "_") == _GENERIC_EXTERNAL_WRITE:
         return True
     tokens = lowered.replace("-", "_").split("_")
     return any(token in _OUTWARD_ACTION_STEMS for token in tokens)
+
+
+def approval_requires_human_ack(approval: dict[str, Any]) -> bool:
+    """True when an approval row represents an outward/external write.
+
+    Action-name stems are useful but not authoritative: new connectors can choose
+    names like ``delete_ticket`` or ``update_crm_record`` before AFS knows those exact
+    verbs. The approval target is the stronger backstop. Anything aimed at a non-local
+    target system needs the terminal confirmation even if the action label looks
+    harmless or internal.
+    """
+    if action_requires_human_ack(str(approval.get("action") or "")):
+        return True
+    target_system = str(approval.get("target_system") or "").strip().lower()
+    return target_system not in _LOCAL_TARGET_SYSTEMS
 
 
 def _default_tty_reader(tty_path: str) -> Callable[[str], str | None]:
@@ -139,7 +177,7 @@ def confirm_human_approval(
     (agent) context. ``reader`` is injectable for testing.
     """
     action = str(approval.get("action") or "").strip()
-    if not action_requires_human_ack(action):
+    if not approval_requires_human_ack(approval):
         return
     approval_id = str(approval.get("approval_id") or "")
     target = f"{approval.get('target_system') or '?'}:{approval.get('target_id') or '?'}"
@@ -244,7 +282,7 @@ def execute_approved_action(
     if not command:
         raise WorkApprovalExecutionError("executor command is required")
 
-    if require_human_ack and action_requires_human_ack(str(approval.get("action") or "")):
+    if require_human_ack and approval_requires_human_ack(approval):
         confirm_human_approval(approval, tty_path=tty_path, reader=confirm_reader)
 
     resolved_command = [_resolve_executable(command[0]), *command[1:]]
