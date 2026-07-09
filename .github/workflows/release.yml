@@ -1,0 +1,35 @@
+name: Release Artifacts
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build release artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Build distributions
+      run: |
+        python -m pip install --upgrade pip build
+        python -m build
+        python scripts/check_release.py --dist
+
+    - name: Create GitHub release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: dist/*
+        generate_release_notes: true
+        prerelease: ${{ startsWith(github.ref_name, 'v0.') }}

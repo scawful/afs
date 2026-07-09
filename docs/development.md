@@ -4,9 +4,8 @@
 
 This repository documents and develops core AFS platform features.
 
-Domain-specific and model-training development flows live in companion extension
-repos. In this workspace, Scawful/Zelda/persona workflows live in
-`lab/afs-scawful` and import as `afs_scawful`.
+Domain-specific and model-training development flows live in companion
+extension repos. Keep this repository focused on the reusable core platform.
 See docs/EXTENSION_MIGRATION.md.
 
 ## Local Setup
@@ -15,14 +14,15 @@ See docs/EXTENSION_MIGRATION.md.
 cd <afs-root>
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[dev,test,docs]"
 ```
 
 ## Fast Validation
 
 ```bash
-pytest -q tests/test_config.py tests/test_manager.py tests/test_profiles.py
-python3 -m py_compile src/afs/*.py
+make lint
+make test
+make package-check
 ```
 
 ## Contributor Workflow
@@ -32,6 +32,10 @@ python3 -m py_compile src/afs/*.py
 3. Add or update targeted tests for behavior changes.
 4. Run the fastest relevant test subset before commit.
 5. Document user-facing changes in docs/ when CLI or config behavior changes.
+
+## Versioning
+
+AFS follows SemVer-style pre-1.0 releases. Keep `pyproject.toml`, `src/afs/version.py`, `CHANGELOG.md`, and release notes aligned. See `../RELEASE.md`.
 
 ## Branching Workflow
 

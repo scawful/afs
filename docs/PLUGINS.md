@@ -1,13 +1,15 @@
 # Plugins and Extensions
 
+For a step-by-step extension contract and hello-world template, see the [Extension Authoring Guide](EXTENSION_AUTHORING.md).
+
 AFS supports two opt-in extension mechanisms:
 
 - Python plugins for lightweight runtime hooks
 - Manifest-based extensions for repo-owned context, commands, agents, and MCP surfaces
 
 Core AFS stays neutral. Personal, work, or domain-specific behavior should live in
-a companion extension repo such as `afs_example`, `afs_company`, or
-`afs_scawful` instead of being hardcoded into `lab/afs`.
+a companion extension repo such as `afs_example` or `afs_company` instead of
+being hardcoded into core AFS.
 
 ## Python Plugins
 

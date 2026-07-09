@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from afs.version import __version__
+
 SERVER_NAME = "afs"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = __version__
 PROTOCOL_VERSION = "2025-06-18"
 LEGACY_PROTOCOL_VERSION = "2024-11-05"
 SUPPORTED_PROTOCOL_VERSIONS = (PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION)

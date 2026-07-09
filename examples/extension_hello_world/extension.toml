@@ -1,0 +1,11 @@
+schema_version = "0.1"
+name = "afs_hello_extension"
+description = "Minimal extension example for AFS users"
+
+knowledge_mounts = ["knowledge"]
+skill_roots = ["skills"]
+python_paths = ["src"]
+cli_modules = ["afs_hello_extension.cli"]
+
+[manager]
+actions = ["afs hello-extension status"]

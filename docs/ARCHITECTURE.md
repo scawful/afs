@@ -84,8 +84,8 @@ AFS extension points are explicit:
 
 ## Scope Boundary
 
-Core AFS docs and code avoid domain-specific model-training/persona workflows.
-Those belong in extensions such as `lab/afs-scawful`.
+Core AFS docs and code avoid domain-specific model-training, assistant, or
+private connector workflows. Those belong in companion extensions.
 
 Core AFS may still own generic training/feedback orchestration primitives when
 they are reusable across repos and model families.

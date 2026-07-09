@@ -3,7 +3,7 @@
 ## Status
 
 - Draft
-- Audience: core `afs`, `afs-scawful`, and downstream agent/training workspaces
+- Audience: core `afs`, companion extensions, and downstream agent/training workspaces
 
 ## Why This Exists
 
@@ -47,9 +47,9 @@ Core AFS should own generic, reusable primitives:
 - event and metric schemas
 - extension hooks for custom backends and policies
 
-### `afs-scawful`
+### Companion Extensions
 
-`afs-scawful` should own reusable but opinionated extensions:
+Companion extensions should own reusable but opinionated adapters:
 
 - local log ingestors for Claude, Gemini, Codex, and similar tools
 - backend adapters for MLX, Unsloth, Vast, LM Studio, Ollama, and local model managers
@@ -58,7 +58,7 @@ Core AFS should own generic, reusable primitives:
 
 ### Downstream Repos
 
-Repos like `scawfulbot`, `halext-code`, and future training projects should own:
+Downstream application repos and future training projects should own:
 
 - concrete job specs
 - project-specific datasets and eval packs
@@ -288,8 +288,8 @@ Examples:
 - `feedback_synthesizer` plugins
 - `metric_extractor` plugins
 
-This lets core `afs` stay generic while `afs-scawful` and others contribute
-useful adapters without forking the operator surface.
+This lets core `afs` stay generic while companion extensions contribute useful
+adapters without forking the operator surface.
 
 ## Relationship To Existing AFS Surfaces
 
@@ -329,7 +329,7 @@ operator workflows and start treating them as first-class AFS objects.
 
 ### Phase 5: Promote Extension Adapters
 
-- move log-ingest, local backend, and scoring adapters into `afs-scawful`
+- move log-ingest, local backend, and scoring adapters into companion extensions
 - let downstream repos focus on specs and policy, not orchestration glue
 
 ## Recommended First Implementation Slice
