@@ -2,6 +2,12 @@
 
 All notable changes to AFS are documented here. AFS follows Semantic Versioning while it is pre-1.0: minor versions may refine public APIs, and patch versions are bugfix-only.
 
+## [Unreleased]
+
+### Changed
+
+- Refreshed GitHub Actions dependencies to current Node-runtime-compatible releases.
+
 ## [0.2.0] - 2026-07-09
 
 ### Added
@@ -31,5 +37,6 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 
 - Initial core AFS runtime with context roots, MCP server, session bootstrap, context packs, memory consolidation, agent harness support, and guardrailed tooling.
 
+[Unreleased]: https://github.com/scawful/afs/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/scawful/afs/compare/v0.1...v0.2.0
 [0.1.0]: https://github.com/scawful/afs/releases/tag/v0.1
