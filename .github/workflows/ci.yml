@@ -41,9 +41,8 @@ jobs:
     - name: Lint with ruff
       run: ruff check src/ tests/
 
-    - name: Type check with mypy (advisory)
-      continue-on-error: true
-      run: mypy src/afs --ignore-missing-imports
+    - name: Type check release metadata
+      run: make type-check
 
     - name: Run unit tests
       run: |

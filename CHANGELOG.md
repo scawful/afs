@@ -7,6 +7,7 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 ### Changed
 
 - Refreshed GitHub Actions dependencies to current Node-runtime-compatible releases.
+- Narrowed CI type checking to the release-critical slice while broader type debt remains tracked in `ROADMAP.md`.
 
 ## [0.2.0] - 2026-07-09
 
