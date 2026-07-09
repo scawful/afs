@@ -5,6 +5,8 @@ This docs set covers the **core AFS platform** in `lab/afs`.
 ## Read First
 
 - [Home](index.md)
+- [Executive Summary](EXECUTIVE_SUMMARY.md)
+- [Research Lineage](LINEAGE.md)
 - [Agent Surfaces](AGENT_SURFACES.md)
 - [Agent Operations](AGENT_OPERATIONS.md)
 - [Agent Integration Upgrade](AGENT_INTEGRATION_UPGRADE.md)

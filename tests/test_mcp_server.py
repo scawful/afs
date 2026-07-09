@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +12,7 @@ from afs.manager import AFSManager
 from afs.mcp_server import (
     DEFAULT_MCP_TOOL_CATALOG,
     MCP_TOOL_CATALOG_ENV,
+    MCP_TOOL_NAME_STYLE_ENV,
     PROTOCOL_VERSION,
     _handle_request,
     _read_message,
@@ -124,6 +126,7 @@ def test_tools_list_defaults_to_slim_catalog(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.delenv("AFS_ALLOWED_TOOLS", raising=False)
     monkeypatch.delenv("AFS_TOOL_PROFILE", raising=False)
     monkeypatch.delenv(MCP_TOOL_CATALOG_ENV, raising=False)
+    monkeypatch.delenv(MCP_TOOL_NAME_STYLE_ENV, raising=False)
     manager = _make_manager(tmp_path)
     response = _handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, manager)
     assert response is not None
@@ -133,6 +136,49 @@ def test_tools_list_defaults_to_slim_catalog(tmp_path: Path, monkeypatch) -> Non
     assert "context.repair" not in names
     assert "agent.spawn" not in names
     assert not COMPATIBILITY_FILE_TOOL_ALIASES.intersection(names)
+
+
+def test_claude_tool_name_style_lists_safe_aliases_and_accepts_calls(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AFS_ALLOWED_TOOLS", raising=False)
+    monkeypatch.delenv("AFS_TOOL_PROFILE", raising=False)
+    monkeypatch.delenv(MCP_TOOL_CATALOG_ENV, raising=False)
+    monkeypatch.setenv(MCP_TOOL_NAME_STYLE_ENV, "claude")
+    manager = _make_manager(tmp_path)
+    registry = build_mcp_registry(manager)
+
+    response = _handle_request(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        manager,
+        registry=registry,
+    )
+    assert response is not None
+    tools = response["result"]["tools"]
+    names = {tool["name"] for tool in tools}
+
+    assert names == {
+        "context_status",
+        "context_query",
+        "context_read",
+        "context_list",
+        "context_write",
+    }
+    assert all(re.fullmatch(r"^[a-zA-Z0-9_-]{1,64}$", name) for name in names)
+
+    call_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "context_status", "arguments": {}},
+        },
+        manager,
+        registry=registry,
+    )
+    assert call_response is not None
+    assert "result" in call_response
 
 
 def test_tools_list_can_expose_full_catalog(tmp_path: Path, monkeypatch) -> None:

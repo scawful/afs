@@ -13,6 +13,7 @@ import importlib
 import inspect
 import json
 import os
+import re
 import shutil
 import sys
 from collections.abc import Callable, Iterable
@@ -103,7 +104,11 @@ _error_response = _error_response_fn
 _success_response = _success_response_fn
 
 MCP_TOOL_CATALOG_ENV = "AFS_MCP_TOOL_CATALOG"
+MCP_TOOL_NAME_STYLE_ENV = "AFS_MCP_TOOL_NAME_STYLE"
 FULL_MCP_TOOL_CATALOG_VALUES = frozenset({"all", "full", "legacy"})
+SAFE_MCP_TOOL_NAME_STYLE_VALUES = frozenset({"anthropic", "claude", "safe", "underscore"})
+MCP_TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+MCP_TOOL_NAME_UNSAFE_CHARS = re.compile(r"[^a-zA-Z0-9_-]+")
 DEFAULT_MCP_TOOL_CATALOG = frozenset(
     {
         "context.status",
@@ -4186,10 +4191,80 @@ def build_mcp_registry(manager: AFSManager) -> MCPToolRegistry:
 
 def _tool_specs(registry: MCPToolRegistry | None = None) -> list[dict[str, Any]]:
     if registry is None:
-        specs = [tool.to_spec() for tool in _builtin_tool_definitions()]
+        tools = _builtin_tool_definitions()
+        specs = [tool.to_spec() for tool in tools]
+        tool_names = [tool.name for tool in tools]
     else:
         specs = registry.specs()
-    return [spec for spec in specs if _should_list_tool(str(spec["name"]))]
+        tool_names = list(registry.tools)
+    filtered = [spec for spec in specs if _should_list_tool(str(spec["name"]))]
+    return _client_tool_specs(filtered, tool_names)
+
+
+def _safe_mcp_tool_names_enabled() -> bool:
+    style = os.environ.get(MCP_TOOL_NAME_STYLE_ENV, "").strip().lower()
+    return style in SAFE_MCP_TOOL_NAME_STYLE_VALUES
+
+
+def _safe_mcp_tool_name(name: str) -> str:
+    if MCP_TOOL_NAME_PATTERN.fullmatch(name):
+        return name
+    safe_name = MCP_TOOL_NAME_UNSAFE_CHARS.sub("_", name).strip("_")
+    if not safe_name:
+        safe_name = "tool"
+    if len(safe_name) > 64:
+        safe_name = safe_name[:64].rstrip("_") or "tool"
+    return safe_name
+
+
+def _tool_name_alias_maps(
+    tool_names: Iterable[str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    original_to_client: dict[str, str] = {}
+    client_to_original: dict[str, str] = {}
+    used: set[str] = set()
+
+    # Keep already-valid names stable when they collide with sanitized aliases.
+    ordered = sorted(tool_names, key=lambda name: (not MCP_TOOL_NAME_PATTERN.fullmatch(name), name))
+    for original in ordered:
+        alias = _safe_mcp_tool_name(original)
+        candidate = alias
+        suffix_index = 2
+        while candidate in used:
+            suffix = f"_{suffix_index}"
+            base = alias[: 64 - len(suffix)].rstrip("_") or "tool"
+            candidate = f"{base}{suffix}"
+            suffix_index += 1
+        used.add(candidate)
+        original_to_client[original] = candidate
+        client_to_original[candidate] = original
+
+    return original_to_client, client_to_original
+
+
+def _client_tool_specs(
+    specs: list[dict[str, Any]],
+    tool_names: Iterable[str],
+) -> list[dict[str, Any]]:
+    if not _safe_mcp_tool_names_enabled():
+        return specs
+
+    original_to_client, _ = _tool_name_alias_maps(tool_names)
+    client_specs: list[dict[str, Any]] = []
+    for spec in specs:
+        original_name = str(spec["name"])
+        client_name = original_to_client.get(original_name, _safe_mcp_tool_name(original_name))
+        client_spec = dict(spec)
+        client_spec["name"] = client_name
+        client_specs.append(client_spec)
+    return client_specs
+
+
+def _server_tool_name(client_name: str, registry: MCPToolRegistry) -> str:
+    if not _safe_mcp_tool_names_enabled():
+        return client_name
+    _, client_to_original = _tool_name_alias_maps(registry.tools)
+    return client_to_original.get(client_name, client_name)
 
 
 def _should_list_tool(tool_name: str) -> bool:
@@ -4924,11 +4999,12 @@ def _handle_request(
             return _error_response(request_id, -32602, "Missing tool name")
         if not isinstance(arguments, dict):
             return _error_response(request_id, -32602, "arguments must be object")
+        registry_name = _server_tool_name(name, active_registry)
 
         try:
-            payload = active_registry.call(name, arguments, manager)
+            payload = active_registry.call(registry_name, arguments, manager)
         except Exception as exc:
-            print(f"[afs-mcp] tool error: {name}: {exc}", file=sys.stderr)
+            print(f"[afs-mcp] tool error: {registry_name}: {exc}", file=sys.stderr)
             error_msg = _annotate_error(exc)
             return _error_response(request_id, -32000, error_msg)
 
