@@ -1,7 +1,8 @@
 """Training data pipeline.
 
-Provides core pipeline primitives used by afs.continuous and integration
-tests. Domain-specific pipeline stages belong in a companion extension repo.
+Provides core pipeline primitives used by extension-owned training and
+continuous-learning workflows. Domain-specific pipeline stages belong in a
+companion extension repo.
 """
 
 from __future__ import annotations

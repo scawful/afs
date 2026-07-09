@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from ..work_assistant import WorkAssistantStore
-from ..work_execution import WorkApprovalExecutionError, execute_approved_action
+from ..work_execution import (
+    HumanApprovalRequiredError,
+    WorkApprovalExecutionError,
+    confirm_human_approval,
+    execute_approved_action,
+)
 from ._utils import load_manager, resolve_context_paths
 
 
@@ -198,6 +203,18 @@ def approvals_request_command(args: argparse.Namespace) -> int:
 
 def approvals_approve_command(args: argparse.Namespace) -> int:
     store, _context_path = _store_from_args(args)
+    approval = store.get_approval(args.approval_id)
+    if approval is None or approval.get("status") != "pending":
+        print(f"No pending approval found: {args.approval_id}")
+        return 1
+    # External/communication writes require an interactive human confirmation that a
+    # headless agent cannot satisfy. This is the single chokepoint: execute() only
+    # runs on already-approved actions, so gating approve gates the outward action.
+    try:
+        confirm_human_approval(approval)
+    except HumanApprovalRequiredError as exc:
+        print(str(exc))
+        return 2
     if store.approve(args.approval_id, approved_by=args.by):
         print(f"Approved: {args.approval_id}")
         return 0

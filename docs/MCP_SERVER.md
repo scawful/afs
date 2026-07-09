@@ -91,12 +91,18 @@ been the most reliable path in practice.
       "env": {
         "AFS_ROOT": "$AFS_ROOT",
         "AFS_VENV": "$AFS_ROOT/.venv",
-        "PYTHONPATH": "$AFS_ROOT/src"
+        "PYTHONPATH": "$AFS_ROOT/src",
+        "AFS_MCP_TOOL_NAME_STYLE": "claude"
       }
     }
   }
 }
 ```
+
+`AFS_MCP_TOOL_NAME_STYLE=claude` exposes tool names with Claude-safe
+underscores, while routing calls back to the canonical AFS names internally
+(`context.status` is listed as `context_status`, for example). Leave it unset
+for clients that already accept dotted MCP tool names.
 
 For the bundled VS Code extension, `AFS: Register MCP Server` now checks
 workspace `.cursor`, `.vscode`, and `.antigravity` MCP configs plus existing
@@ -182,6 +188,11 @@ full-catalog/debug launch:
 - `context.read`
 - `context.write`
 - `context.list`
+
+When `AFS_MCP_TOOL_NAME_STYLE=claude` is set, these are advertised as
+`context_status`, `context_query`, `context_read`, `context_write`, and
+`context_list` to satisfy Claude's stricter tool-name schema. Calls using
+either the underscore aliases or canonical dotted names are accepted.
 
 `afs.session.bootstrap`, `afs.session.pack`, and `afs.scratchpad.review` remain
 available as prompts from `prompts/list`, not as tools. Work preflight,

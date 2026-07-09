@@ -1,4 +1,4 @@
-"""Training CLI commands: training, discriminator, tokenizer, encoder."""
+"""Training CLI commands: training, tokenizer, encoder."""
 
 from __future__ import annotations
 
@@ -599,133 +599,6 @@ def training_rebalance_command(args: argparse.Namespace) -> int:
 
 
 # =============================================================================
-# Discriminator Commands
-# =============================================================================
-
-
-def discriminator_data_command(args: argparse.Namespace) -> int:
-    """Create ELECTRA training data from assembly sources."""
-    from ..discriminator import create_training_data
-
-    sources = [Path(s).expanduser() for s in args.sources]
-    output = Path(args.output).expanduser()
-
-    print("Creating ELECTRA training data...")
-    print(f"  Sources: {len(sources)} paths")
-    print(f"  Fake ratio: {args.fake_ratio}")
-
-    dataset = create_training_data(
-        real_sources=sources,
-        fake_ratio=args.fake_ratio,
-        min_lines=args.min_lines,
-        max_lines=args.max_lines,
-    )
-
-    dataset.to_jsonl(output)
-    stats = dataset.stats()
-
-    print("\nResults:")
-    print(f"  Total: {stats['total']}")
-    print(f"  Real: {stats['real']}")
-    print(f"  Fake: {stats['fake']}")
-    print(f"  Output: {output}")
-
-    return 0
-
-
-def discriminator_train_command(args: argparse.Namespace) -> int:
-    """Train ASM-ELECTRA discriminator."""
-    from ..discriminator import ASMElectra, ElectraConfig, ElectraDataset
-
-    input_path = Path(args.input).expanduser()
-    output_dir = Path(args.output).expanduser()
-    val_path = Path(args.val).expanduser() if args.val else None
-
-    config = ElectraConfig(
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        output_dir=output_dir,
-    )
-
-    print("Training ASM-ELECTRA...")
-    print(f"  Input: {input_path}")
-    print(f"  Epochs: {config.epochs}")
-    print(f"  Batch size: {config.batch_size}")
-
-    # Load data
-    train_dataset = ElectraDataset.from_jsonl(input_path)
-    train_data = train_dataset.to_hf_format()
-
-    val_data = None
-    if val_path:
-        val_dataset = ElectraDataset.from_jsonl(val_path)
-        val_data = val_dataset.to_hf_format()
-
-    # Train
-    electra = ASMElectra(config=config)
-    metrics = electra.train(train_data, val_data)
-
-    print("\nTraining complete:")
-    print(f"  Loss: {metrics['train_loss']:.4f}")
-    print(f"  Steps: {metrics['steps']}")
-    print(f"  Model saved: {output_dir / 'final'}")
-
-    return 0
-
-
-def discriminator_filter_command(args: argparse.Namespace) -> int:
-    """Filter training data using trained discriminator."""
-    from ..discriminator import FilterConfig, SampleFilter
-
-    model_path = Path(args.model).expanduser()
-    input_path = Path(args.input).expanduser()
-    output_path = Path(args.output).expanduser()
-    rejected_path = Path(args.rejected).expanduser() if args.rejected else None
-
-    config = FilterConfig(min_score=args.min_score)
-
-    print("Filtering training data...")
-    print(f"  Model: {model_path}")
-    print(f"  Min score: {config.min_score}")
-
-    sample_filter = SampleFilter(model_path=model_path, config=config)
-    result = sample_filter.filter_jsonl(input_path, output_path, rejected_path)
-
-    print(f"\n{result}")
-    print("\nScore distribution:")
-    for bucket, count in result.score_distribution.items():
-        print(f"  {bucket}: {count}")
-
-    return 0
-
-
-def discriminator_score_command(args: argparse.Namespace) -> int:
-    """Score assembly code quality."""
-    from ..discriminator import ASMElectra
-
-    model_path = Path(args.model).expanduser()
-
-    if args.file:
-        text = Path(args.file).expanduser().read_text()
-    elif args.text:
-        text = args.text
-    else:
-        print("Error: must provide --text or --file")
-        return 1
-
-    electra = ASMElectra(model_path=model_path)
-    score = electra.score(text)
-    prediction, confidence = electra.predict(text)
-
-    label = "REAL" if prediction == 0 else "FAKE"
-    print(f"Score: {score:.4f}")
-    print(f"Prediction: {label} (confidence: {confidence:.2%})")
-
-    return 0
-
-
-# =============================================================================
 # Phase 2 Training Integration Commands
 # =============================================================================
 
@@ -1051,7 +924,7 @@ def training_generate_router_command(args: argparse.Namespace) -> int:
 
 
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
-    """Register training and discriminator command parsers."""
+    """Register training command parsers."""
 
     # =========================================================================
     # Training
@@ -1865,44 +1738,3 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     training_run_stop.add_argument("--force", action="store_true", help="Send SIGKILL if SIGTERM does not stop the run.")
     training_run_stop.add_argument("--json", action="store_true", help="Output JSON.")
     training_run_stop.set_defaults(func=training_run_stop_command)
-
-    # =========================================================================
-    # Discriminator
-    # =========================================================================
-    disc_parser = subparsers.add_parser("discriminator", help="ELECTRA discriminator tools.")
-    disc_sub = disc_parser.add_subparsers(dest="discriminator_command")
-
-    # discriminator data
-    disc_data = disc_sub.add_parser("data", help="Create ELECTRA training data.")
-    disc_data.add_argument("--sources", nargs="+", required=True, help="Source paths.")
-    disc_data.add_argument("--output", required=True, help="Output JSONL path.")
-    disc_data.add_argument("--fake-ratio", type=float, default=0.5, help="Fake sample ratio.")
-    disc_data.add_argument("--min-lines", type=int, default=3, help="Min lines per sample.")
-    disc_data.add_argument("--max-lines", type=int, default=50, help="Max lines per sample.")
-    disc_data.set_defaults(func=discriminator_data_command)
-
-    # discriminator train
-    disc_train = disc_sub.add_parser("train", help="Train ELECTRA discriminator.")
-    disc_train.add_argument("--input", required=True, help="Training data JSONL.")
-    disc_train.add_argument("--output", required=True, help="Output directory.")
-    disc_train.add_argument("--val", help="Validation data JSONL.")
-    disc_train.add_argument("--epochs", type=int, default=3, help="Training epochs.")
-    disc_train.add_argument("--batch-size", type=int, default=32, help="Batch size.")
-    disc_train.add_argument("--learning-rate", type=float, default=5e-5, help="Learning rate.")
-    disc_train.set_defaults(func=discriminator_train_command)
-
-    # discriminator filter
-    disc_filter = disc_sub.add_parser("filter", help="Filter data using discriminator.")
-    disc_filter.add_argument("--model", required=True, help="Discriminator model path.")
-    disc_filter.add_argument("--input", required=True, help="Input JSONL.")
-    disc_filter.add_argument("--output", required=True, help="Output JSONL (passed samples).")
-    disc_filter.add_argument("--rejected", help="Output JSONL for rejected samples.")
-    disc_filter.add_argument("--min-score", type=float, default=0.5, help="Minimum score.")
-    disc_filter.set_defaults(func=discriminator_filter_command)
-
-    # discriminator score
-    disc_score = disc_sub.add_parser("score", help="Score assembly code.")
-    disc_score.add_argument("--model", required=True, help="Discriminator model path.")
-    disc_score.add_argument("--text", help="Text to score.")
-    disc_score.add_argument("--file", help="File to score.")
-    disc_score.set_defaults(func=discriminator_score_command)

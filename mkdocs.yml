@@ -33,6 +33,7 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Executive Summary: EXECUTIVE_SUMMARY.md
   - Guides:
     - Agent Surfaces: AGENT_SURFACES.md
     - Architecture: ARCHITECTURE.md
@@ -47,7 +48,9 @@ nav:
     - CLI Reference: CLI_REFERENCE.md
     - API: api.md
   - Migration:
-    - AFS Scawful Migration: SCAWFUL_MIGRATION.md
+    - Extension Migration: EXTENSION_MIGRATION.md
+  - Research:
+    - Lineage: LINEAGE.md
 
 extra:
   version: "core"

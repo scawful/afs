@@ -411,15 +411,15 @@ To extend the framework:
 3. **Report Formats**: Add generator methods
 4. **Statistics**: Extend `StatisticalTester`
 
-See `examples/comparison_custom_scorer.py` for examples.
+See `examples/comparison_tutorial.py` for a runnable example.
 
 ## References
 
 - **Framework Code**: `$AFS_ROOT/src/afs/comparison/framework.py`
 - **CLI Commands**: `$AFS_ROOT/src/afs/cli/comparison.py`
 - **Tutorial**: `$AFS_ROOT/examples/comparison_tutorial.py`
-- **Full Documentation**: `$AFS_ROOT/docs/COMPARISON_FRAMEWORK.md`
+- **Extension Boundary**: `$AFS_ROOT/docs/EXTENSION_MIGRATION.md`
 
 ## License
 
-Part of the AFS (Assembly Fusion System) project.
+Part of the AFS (Agentic File System) project.
