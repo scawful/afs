@@ -1,20 +1,35 @@
 # AFS — Agentic File System
 
+[![CI](https://github.com/scawful/afs/actions/workflows/ci.yml/badge.svg)](https://github.com/scawful/afs/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](CHANGELOG.md)
+
 AFS is an orchestration layer for managing multi-agent systems and context directly within the filesystem. It treats documentation, tools, and memory as mountable context nodes, providing a structured surface for AI agents to operate within a repository.
 
 AFS is an independent implementation and extension of the agentic file system abstraction from ["Everything is Context" (arXiv:2512.05470)](https://arxiv.org/abs/2512.05470) — see [docs/LINEAGE.md](docs/LINEAGE.md) for the concept mapping and where AFS goes beyond the paper.
 
 ## Install
 
+Fast path for a fresh checkout:
+
 ```bash
 git clone https://github.com/scawful/afs.git
 cd afs
+make setup
+./scripts/afs --help
+```
+
+Equivalent manual setup:
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -e .
 ```
 
-Use the wrapper script for reliable agent invocation (sets `AFS_ROOT` and `PYTHONPATH`):
+Use the wrapper script for reliable local development and agent invocation; it sets repo-local environment defaults before dispatching to the package:
 
 ```bash
 ./scripts/afs --help
@@ -23,6 +38,7 @@ Use the wrapper script for reliable agent invocation (sets `AFS_ROOT` and `PYTHO
 ## Quick Start
 
 ```bash
+make check                            # lint, tests, package smoke
 ./scripts/afs setup                   # Guided setup wizard
 ./scripts/afs guide                   # Friendly workflow menu
 ./scripts/afs init                    # Initialize AFS configuration
@@ -40,10 +56,12 @@ indexes with a dry-run first:
 ./scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
 ```
 
-## Branching
+## Branching and releases
 
 AFS uses a staged integration flow across `features`, `development`, and `main`.
-See `docs/development.md` for PR target and promotion guidance.
+See `docs/development.md` for PR target and promotion guidance, and `RELEASE.md` for the release/tag checklist.
+
+Current release line: `0.2.x` pre-1.0 core platform.
 
 ## Core Concepts
 
@@ -66,6 +84,18 @@ cross-agent coordination.
 **Profiles & Extensions** — Profile-driven context injection via `afs.toml`. Extensions add domain-specific functionality without forking core.
 
 **Context Sources** — Provider-neutral adapters for tasks, tickets, reviews, docs, messages, tests, hooks, and traces. Core AFS owns the normalized records; concrete source connectors live in extensions.
+
+## Professional/project docs
+
+- [Executive Summary](docs/EXECUTIVE_SUMMARY.md)
+- [Lineage](docs/LINEAGE.md)
+- [Setup Guide](docs/SETUP_GUIDE.md)
+- [Extension Authoring](docs/EXTENSION_AUTHORING.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security](SECURITY.md)
+- [Release Process](RELEASE.md)
+- [Roadmap](ROADMAP.md)
+- [Changelog](CHANGELOG.md)
 
 ## Architecture
 

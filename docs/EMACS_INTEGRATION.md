@@ -14,7 +14,7 @@ agent workflows directly inside Emacs.
 - `afs-emacs-agents-monitor`: stream `afs agents monitor --all --json`
 - `afs-emacs-session-prepare-client-open`: inspect `afs session prepare-client`
 - `afs-emacs-session-replay-open`: inspect `afs session replay --json`
-- `afs-emacs-chat`: open `hafs chat` from your AFS context
+- `afs-emacs-chat`: open `afs chat` from your AFS context
 
 Static AFS buffers share a small UX contract:
 

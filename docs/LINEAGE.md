@@ -9,12 +9,12 @@ abstraction proposed in:
 > https://arxiv.org/abs/2512.05470
 
 The arXiv preprint was posted December 5, 2025. Design work applying it began
-December 10, 2025 (Studio context-panel redesign around the paper's mount
-taxonomy); the AFS repository baseline followed on December 30, 2025. Earlier
-context tooling from the HAFS/Halext stack was consolidated under this design.
+December 10, 2025 with an early context-panel prototype around the paper's
+mount taxonomy; the AFS repository baseline followed on December 30, 2025.
+Earlier context tooling was consolidated under this design.
 
-AFS is research-only and is not affiliated with the paper's authors, CSIRO
-Data61, or ArcBlock's AIGNE framework (the paper's reference implementation).
+AFS is an independent project and is not affiliated with the paper's authors,
+CSIRO Data61, or ArcBlock's AIGNE framework (the paper's reference implementation).
 
 ## Concept mapping
 
@@ -45,11 +45,10 @@ Where AFS extends the abstraction rather than implementing it:
   framework (AIGNE, TypeScript). AFS treats the harness as pluggable: the same
   `.context/` state serves Claude, Codex, and Gemini through session packs and
   wrapper scripts, so context outlives any single vendor's agent runtime.
-- **Cross-language consumers over a file contract.** Cortex (Swift) and
-  Barista (C/Lua) read the same context roots with no Python dependency,
-  governed by `CORTEX_AFS_CONTRACT.md`. This is direct evidence for the
-  paper's thesis: when the filesystem is the interface, integration needs a
-  spec, not an SDK.
+- **Cross-language consumers over a file contract.** Non-Python clients and
+  runtime integrations can read the same context roots without depending on
+  AFS internals. This is direct evidence for the paper's thesis: when the
+  filesystem is the interface, integration needs a spec, not a mandatory SDK.
 - **Session handoffs.** Structured records of accomplished work, blockers, and
   next steps (`handoff.create`) that the next session's bootstrap ingests —
   cross-session continuity as a first-class protocol rather than a memory
@@ -68,7 +67,7 @@ Where AFS extends the abstraction rather than implementing it:
 
 Between January and April 2026 the repository also carried a speculative
 self-improvement stack (discriminator, MoE routing, active learning,
-continuous learning). It was extracted to the personal extension in March 2026
+continuous learning). It was moved behind the extension boundary in March 2026
 and largely frozen there. The surviving core is the paper-shaped part:
 repository, constructor, loader, evaluator, plus the deltas above. Domain and
 training workflows live in extensions (see Scope Boundary in
@@ -78,8 +77,8 @@ training workflows live in extensions (see Scope Boundary in
 
 The file formats are the durable interface. Current contract documents:
 
-- `CORTEX_AFS_CONTRACT.md` (workspace `docs/`) — shared `~/.context/` paths,
-  mount policies, and JSON formats consumed by non-Python clients.
+- `docs/*` contract pages — shared `.context/` paths, mount policies, and JSON
+  formats consumed by compatible clients.
 - [MEMORY_SYSTEM.md](MEMORY_SYSTEM.md) — memory and context layout.
 - [MCP_SERVER.md](MCP_SERVER.md) — tool surface exposed to MCP clients.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system architecture.

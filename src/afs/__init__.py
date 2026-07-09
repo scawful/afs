@@ -1,6 +1,4 @@
-"""AFS package stub."""
-
-__version__ = "0.0.0"
+"""Agentic File System core package."""
 
 from .config import load_config, load_config_model
 from .core import find_root, resolve_context_root
@@ -11,8 +9,11 @@ from .models import ContextRoot, MountPoint, MountType, ProjectMetadata
 from .plugins import discover_plugins, load_plugins
 from .schema import DirectoryConfig, PolicyType
 from .validator import AFSValidator
+from .version import __version__, __version_info__
 
 __all__ = [
+    "__version__",
+    "__version_info__",
     "load_config",
     "load_config_model",
     "discover_plugins",

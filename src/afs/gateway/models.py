@@ -8,6 +8,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from afs.version import __version__
+
 
 class Message(BaseModel):
     """Chat message."""
@@ -97,4 +99,4 @@ class HealthResponse(BaseModel):
     status: str
     backends: dict[str, dict]
     active_backend: str
-    version: str = "0.1.0"
+    version: str = __version__

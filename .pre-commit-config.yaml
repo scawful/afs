@@ -1,9 +1,9 @@
-# Pre-commit hooks for code quality
+# Pre-commit hooks for AFS core.
 # Install: pip install pre-commit && pre-commit install
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+    rev: v4.6.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
@@ -16,43 +16,32 @@ repos:
       - id: debug-statements
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.1.9
+    rev: v0.5.7
     hooks:
       - id: ruff
         args: [--fix]
       - id: ruff-format
 
-  - repo: https://github.com/psf/black
-    rev: 23.12.1
-    hooks:
-      - id: black
-        language_version: python3.10
-
-  - repo: https://github.com/pycqa/isort
-    rev: 5.13.2
-    hooks:
-      - id: isort
-
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.7.1
+    rev: v1.11.1
     hooks:
       - id: mypy
         additional_dependencies: [types-requests]
         args: [--ignore-missing-imports]
-        exclude: tests/
+        files: ^src/afs/
 
-  - repo: https://github.com/python-poetry/poetry
-    rev: 1.7.0
+  - repo: local
     hooks:
-      - id: poetry-check
-        files: ^pyproject\.toml$
+      - id: release-metadata
+        name: release metadata check
+        entry: python scripts/check_release.py
+        language: system
+        pass_filenames: false
+        files: ^(pyproject\.toml|src/afs/version\.py|CHANGELOG\.md|CITATION\.cff)$
 
 ci:
   autofix_commit_msg: |
     [pre-commit.ci] auto fixes from pre-commit hooks
   autofix_prs: true
-  autoupdate_branch: ''
-  autoupdate_commit_msg: '[pre-commit.ci] pre-commit autoupdate'
   autoupdate_schedule: weekly
-  skip: []
   submodules: false

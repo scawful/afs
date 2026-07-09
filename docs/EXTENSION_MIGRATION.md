@@ -1,20 +1,20 @@
 # AFS Extension Migration
 
-This repository (`lab/afs`) ships **core AFS platform capabilities** only. It
-should not assume one user's games, corpora, model lineages, external tools, or
+This repository ships **core AFS platform capabilities** only. It
+should not assume one user's private corpora, model lineages, external tools, or
 machine layout.
 
 Domain-specific content belongs in companion extension repos named like
-`afs_<name>` or `afs-<name>`. In this workspace, Zelda/Oracle/persona/training
-content lives in the `lab/afs-scawful` repo and imports as the `afs_scawful`
-Python package.
+`afs_<name>` or `afs-<name>`. Those repos can mount knowledge, skills, CLI
+commands, agents, context sources, and MCP surfaces without hardcoding them into
+core AFS.
 
 ## Migration Rule
 
 If a workflow is specific to:
 
-- a model family or persona strategy
-- game/domain corpora
+- a model family or assistant strategy
+- private or domain-specific corpora
 - personal workstation/laptop deployment paths
 - external connector implementations such as Google Workspace public API adapters
 - MCP/domain servers that are not useful for every AFS user
@@ -71,14 +71,9 @@ actions = [
 The Python `afs manager` GUI lists those actions next to the extension and
 keeps execution explicit.
 
-## Current Scawful/Zelda Boundary
+## Compatibility Shims
 
-- Core docs/code: `lab/afs/`
-- Personal/domain extension repo: `lab/afs-scawful/`
-- Python package: `afs_scawful`
-- Zelda/Oracle modules: `afs_scawful.oracle.*`, `afs_scawful.agents.zelda_tools`
-- Scawful model/tool shims: `afs_scawful.agent_model_presets`,
-  `afs_scawful.agent_tools`
-
-Core AFS may keep compatibility shims that explain where a moved module lives,
-but new domain implementation should be added to the companion repo.
+Core AFS may keep small compatibility shims that explain where a moved module
+lives, but new domain implementation should be added to a companion extension
+repo. Shims should fail with clear install/enable instructions rather than
+reintroducing private implementation details into core.

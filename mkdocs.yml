@@ -1,7 +1,8 @@
 site_name: AFS Core Documentation
-site_url: https://afs.local
+site_url: https://scawful.github.io/afs/
 repo_url: https://github.com/scawful/afs
 edit_uri: edit/main/docs/
+exclude_docs: README.md
 
 theme:
   name: material
@@ -39,6 +40,7 @@ nav:
     - Architecture: ARCHITECTURE.md
     - Profiles and Hooks: PROFILES.md
     - Extensions: PLUGINS.md
+    - Extension Authoring: EXTENSION_AUTHORING.md
     - MCP Server: MCP_SERVER.md
     - Memory System: MEMORY_SYSTEM.md
     - Workspace Integration: WORKSPACE_INTEGRATION.md
@@ -53,4 +55,4 @@ nav:
     - Lineage: LINEAGE.md
 
 extra:
-  version: "core"
+  version: "0.2.0"
