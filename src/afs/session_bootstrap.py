@@ -262,6 +262,7 @@ def build_session_bootstrap(
     agent_runs = _collect_agent_runs(context_path, limit=task_limit)
     agent_manifest = _collect_agent_manifest()
     work_assistant = _collect_work_assistant(manager, context_path, limit=task_limit)
+    missions = _collect_missions(manager, context_path, limit=task_limit)
     hivemind = _collect_hivemind(context_path, limit=message_limit)
     memory = _collect_memory(manager, context_path)
     reports = _collect_agent_reports(manager, context_path)
@@ -315,6 +316,7 @@ def build_session_bootstrap(
     summary = {
         "context_path": str(context_path),
         "project": context.project_name,
+        "project_description": getattr(context.metadata, "description", "") or "",
         "profile": status["profile"],
         "startup_sequence": [
             "Review context health and recent drift first.",
@@ -334,6 +336,7 @@ def build_session_bootstrap(
         "agent_jobs": agent_jobs,
         "agent_runs": agent_runs,
         "work_assistant": work_assistant,
+        "missions": missions,
         "codebase": codebase,
         "hivemind": hivemind,
         "memory": memory,
@@ -887,6 +890,8 @@ def _collect_work_assistant(
                 "initialized": False,
                 "db_path": str(db_path),
                 "summary": empty_summary,
+                "people": [],
+                "relationships": [],
                 "pending_approvals": [],
                 "communication_samples": [],
                 "communication_guidance": {},
@@ -901,6 +906,10 @@ def _collect_work_assistant(
             "initialized": True,
             "db_path": str(db_path),
             "summary": store.summary(),
+            "people": store.list_people(limit=max(1, min(limit, _MAX_LIST_ITEMS))),
+            "relationships": store.list_relationships(
+                limit=max(1, min(limit, _MAX_LIST_ITEMS))
+            ),
             "pending_approvals": store.list_approvals(status="pending", limit=max(1, limit)),
             "communication_samples": store.list_communication_samples(
                 limit=max(1, min(limit, _MAX_LIST_ITEMS))
@@ -921,6 +930,8 @@ def _collect_work_assistant(
             "available": False,
             "initialized": False,
             "summary": {},
+            "people": [],
+            "relationships": [],
             "pending_approvals": [],
             "communication_samples": [],
             "communication_guidance": {},
@@ -929,6 +940,28 @@ def _collect_work_assistant(
             "commands": commands,
             "error": str(exc),
         }
+
+
+def _collect_missions(
+    manager: AFSManager, context_path: Path, *, limit: int
+) -> dict[str, Any]:
+    """Collect in-flight background missions so a resumed session sees them.
+
+    Defensive: missions are optional; any failure yields an empty, well-shaped
+    result rather than breaking bootstrap.
+    """
+    try:
+        from .missions import MissionStore
+
+        store = MissionStore(context_path, config=manager.config)
+        active = store.active(limit=max(1, limit))
+    except Exception as exc:
+        return {"available": False, "active": [], "active_count": 0, "error": str(exc)}
+    return {
+        "available": True,
+        "active": [mission.to_dict() for mission in active],
+        "active_count": len(active),
+    }
 
 
 def _collect_hivemind(context_path: Path, *, limit: int) -> dict[str, Any]:

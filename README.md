@@ -2,6 +2,8 @@
 
 AFS is an orchestration layer for managing multi-agent systems and context directly within the filesystem. It treats documentation, tools, and memory as mountable context nodes, providing a structured surface for AI agents to operate within a repository.
 
+AFS is an independent implementation and extension of the agentic file system abstraction from ["Everything is Context" (arXiv:2512.05470)](https://arxiv.org/abs/2512.05470) — see [docs/LINEAGE.md](docs/LINEAGE.md) for the concept mapping and where AFS goes beyond the paper.
+
 ## Install
 
 ```bash
@@ -80,8 +82,9 @@ src/afs/
 ├── handoff.py        # Structured session handoff protocol
 ├── embeddings.py     # Embedding index with Gemini provider
 ├── services/         # launchd/systemd service adapters
-├── gates/            # Quality gates and CI integration
-├── continuous/       # A/B testing, triggers, continuous learning
+├── training/         # Generic dataset/run/eval/feedback primitives
+├── sources/          # Provider-neutral context source interfaces
+├── mcp/              # MCP extension registry and shared schemas
 └── ...
 ```
 
@@ -284,6 +287,8 @@ Domain-specific functionality (model training, persona configurations, deploymen
 ## Documentation
 
 - [docs/index.md](docs/index.md) — Documentation index
+- [docs/EXECUTIVE_SUMMARY.md](docs/EXECUTIVE_SUMMARY.md) — Shareable non-domain executive summary
+- [docs/LINEAGE.md](docs/LINEAGE.md) — Research lineage and concept mapping to arXiv:2512.05470
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — System architecture
 - [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md) — Guided setup, shell helpers, and approachable onboarding
 - [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) — Full CLI reference

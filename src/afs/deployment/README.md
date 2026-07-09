@@ -69,8 +69,8 @@ The validator runs 8 comprehensive checks:
 
 ## Documentation
 
-- `../../docs/DEPLOYMENT_VALIDATOR.md` - Complete feature documentation
-- `../../docs/DEPLOYMENT_INTEGRATION.md` - Integration guide
+- `README.md` - Core feature documentation for this package
+- `../../docs/EXTENSION_MIGRATION.md` - Boundary for domain deployment playbooks
 - `../../examples/deployment_validation_example.py` - Usage examples
 
 ## CLI Commands
@@ -252,10 +252,10 @@ python -c "from llama_cpp import Llama; Llama('model.gguf')"
 
 ## Related Documentation
 
-- [Deployment Validator Features](../../docs/DEPLOYMENT_VALIDATOR.md)
-- [Integration Guide](../../docs/DEPLOYMENT_INTEGRATION.md)
-- [Model Registry](../registry/README.md)
-- [Notifications](../notifications/README.md)
+- [Extension Migration](../../docs/EXTENSION_MIGRATION.md)
+- [Training and Feedback RFC](../../docs/TRAINING_FEEDBACK_RFC.md)
+- [Model Registry API](../registry/database.py)
+- [Notification API](../notifications/base.py)
 
 ## License
 

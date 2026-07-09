@@ -165,6 +165,78 @@ def claude_context_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def claude_hook_command(args: argparse.Namespace) -> int:
+    """Emit AFS grounding as a Claude Code hook ``additionalContext`` payload.
+
+    Wire this as a ``SessionStart`` / ``UserPromptSubmit`` hook so AFS context is
+    pushed into the session automatically instead of waiting for an explicit prompt.
+    Reads the hook's stdin JSON (event name, cwd, prompt) as Claude Code provides it,
+    and degrades to a silent no-op (exit 0, no output) whenever context can't be
+    resolved — a lifecycle hook must never break or spam the host session.
+    """
+    import sys
+
+    from ..model_prompts import build_hook_injection
+
+    stdin_payload: dict = {}
+    try:
+        if not sys.stdin.isatty():
+            raw = sys.stdin.read()
+            if raw.strip():
+                stdin_payload = json.loads(raw)
+    except (OSError, ValueError):
+        stdin_payload = {}
+    if not isinstance(stdin_payload, dict):
+        stdin_payload = {}
+
+    event = (
+        str(getattr(args, "event", "") or "").strip()
+        or str(stdin_payload.get("hook_event_name") or "").strip()
+        or "SessionStart"
+    )
+    prompt = str(stdin_payload.get("prompt") or "")
+
+    # Resolve the workspace: explicit --path, else the hook's cwd, else current dir.
+    if not getattr(args, "path", None):
+        cwd = str(stdin_payload.get("cwd") or "").strip()
+        if cwd:
+            args.path = cwd
+
+    injection = ""
+    try:
+        config_path = Path(args.config) if getattr(args, "config", None) else None
+        manager = load_manager(config_path)
+        _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+            args, manager
+        )
+        injection = build_hook_injection(
+            event=event, context_path=context_path, prompt=prompt
+        )
+    except Exception:
+        injection = ""
+
+    if not injection.strip():
+        return 0
+
+    if getattr(args, "raw", False):
+        # Host-agnostic mode: emit the injection text only, for callers that wrap it
+        # themselves (e.g. the hcode system-transform seam pushing into system[]).
+        print(injection)
+        return 0
+
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": event,
+                    "additionalContext": injection,
+                }
+            }
+        )
+    )
+    return 0
+
+
 def claude_doctor_command(args: argparse.Namespace) -> int:
     """Inspect Claude session accumulation, bridge protection, and debug signals."""
     claude_root = Path(args.claude_root).expanduser().resolve() if args.claude_root else None
@@ -346,6 +418,28 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     context_parser.add_argument("--context-root", help="Context root override.")
     context_parser.add_argument("--context-dir", help="Context directory name.")
     context_parser.set_defaults(func=claude_context_command)
+
+    # hook: runtime injector for SessionStart / UserPromptSubmit
+    hook_parser = claude_sub.add_parser(
+        "hook",
+        help="Emit AFS grounding as a Claude Code hook additionalContext payload.",
+    )
+    hook_parser.add_argument("--config", help="Config path.")
+    hook_parser.add_argument("--path", help="Project path (defaults to the hook cwd).")
+    hook_parser.add_argument("--context-root", help="Context root override.")
+    hook_parser.add_argument("--context-dir", help="Context directory name.")
+    hook_parser.add_argument(
+        "--event",
+        help="Hook event name (SessionStart or UserPromptSubmit). "
+        "Falls back to the stdin hook payload, then SessionStart.",
+    )
+    hook_parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Emit the injection text only (no Claude hook JSON wrapper), "
+        "for host-agnostic callers such as the hcode system-transform seam.",
+    )
+    hook_parser.set_defaults(func=claude_hook_command)
 
     doctor_parser = claude_sub.add_parser(
         "doctor",

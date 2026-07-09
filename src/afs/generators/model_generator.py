@@ -7,6 +7,7 @@ and syntax validation.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import uuid
 from abc import ABC, abstractmethod
@@ -15,14 +16,16 @@ from dataclasses import dataclass
 from enum import Enum
 from importlib.util import find_spec
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .base import BaseGenerator, GenerationResult, TrainingSample
 
 if TYPE_CHECKING:
-    from afs.discriminator.electra import ASMElectra
     from afs.generators.asar_validator import AsarValidator
     from afs.training.scoring import QualityScorer
+
+# The ASMElectra discriminator lives in the afs-scawful extension; core only
+# loads it opportunistically at runtime (see ModelGenerator.discriminator).
 
 logger = logging.getLogger(__name__)
 
@@ -372,7 +375,7 @@ class ModelGenerator(BaseGenerator):
     def __init__(
         self,
         config: ModelGeneratorConfig,
-        discriminator: ASMElectra | None = None,
+        discriminator: Any | None = None,
         validator: AsarValidator | None = None,
         scorer: QualityScorer | None = None,
     ):
@@ -406,12 +409,15 @@ class ModelGenerator(BaseGenerator):
         return factory(self.config)
 
     @property
-    def discriminator(self) -> ASMElectra | None:
+    def discriminator(self) -> Any | None:
         """Lazy load discriminator."""
         if self._discriminator is None and self.config.use_discriminator:
             if self.config.discriminator_model_path:
                 try:
-                    from afs.discriminator.electra import ASMElectra
+                    electra_module = importlib.import_module(
+                        "afs_scawful.discriminator.electra"
+                    )
+                    ASMElectra = electra_module.ASMElectra
                     self._discriminator = ASMElectra(
                         model_path=self.config.discriminator_model_path
                     )

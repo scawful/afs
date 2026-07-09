@@ -3,6 +3,7 @@ name: Branch Policy
 on:
   pull_request:
     branches: [ main, development, features ]
+    types: [ opened, synchronize, reopened, edited ]
 
 jobs:
   enforce-branch-flow:

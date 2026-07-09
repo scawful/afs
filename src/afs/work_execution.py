@@ -7,10 +7,11 @@ import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .work_assistant import WorkAssistantStore
+from .work_assistant import EXTERNAL_WRITE_ACTIONS, WorkAssistantStore
 
 PAYLOAD_VERSION = 1
 COMMUNICATION_WRITE_ACTIONS = frozenset(
@@ -31,6 +32,181 @@ COMMUNICATION_WRITE_ACTIONS = frozenset(
 
 class WorkApprovalExecutionError(RuntimeError):
     """Raised when an approved work action cannot be executed."""
+
+
+class HumanApprovalRequiredError(WorkApprovalExecutionError):
+    """Raised when an external-write approval lacks interactive human confirmation.
+
+    External and communication writes (see :data:`EXTERNAL_WRITE_ACTIONS`) must be
+    confirmed by a person at a terminal before an agent may act on the user's behalf.
+    This closes the hole where an agent with shell access could self-approve via
+    ``afs work approvals approve <id> --by human`` (``approved_by`` is unauthenticated
+    free text). Confirmation is read from the controlling terminal, which a headless
+    agent cannot satisfy.
+    """
+
+
+# Generic sentinel stamped on a gated approval that carries no specific action verb
+# (see work_assistant._normalize_approval_event). It is deliberately NOT a member of
+# EXTERNAL_WRITE_ACTIONS, so a naive membership test let it slip past the human gate.
+_GENERIC_EXTERNAL_WRITE = "external_write"
+_LOCAL_TARGET_SYSTEMS = frozenset(
+    {
+        "",
+        "afs",
+        "context",
+        "history",
+        "hivemind",
+        "items",
+        "knowledge",
+        "local",
+        "memory",
+        "scratchpad",
+    }
+)
+
+# Verb stems that mark an action as an outward/mutating write even when the exact
+# action name is not enumerated in EXTERNAL_WRITE_ACTIONS. Fail-safe: a novel outward
+# action from a new connector (e.g. "post_status", "escalate_incident") still trips the
+# human gate instead of sliding through just because it was not on the hardcoded list.
+# Matched against underscore/hyphen-split tokens (not raw substrings) so benign names
+# like "preview_doc" are not misread as "review".
+_OUTWARD_ACTION_STEMS = frozenset(
+    {
+        "post",
+        "send",
+        "submit",
+        "publish",
+        "reply",
+        "share",
+        "comment",
+        "email",
+        "message",
+        "notify",
+        "mention",
+        "review",
+        "assign",
+        "add",
+        "archive",
+        "change",
+        "create",
+        "delete",
+        "edit",
+        "escalate",
+        "page",
+        "merge",
+        "close",
+        "remove",
+        "resolve",
+        "update",
+        "write",
+    }
+)
+
+
+def action_requires_human_ack(action: str) -> bool:
+    """True when an action is an external/communication write and needs a human ack.
+
+    Fail-safe classification: the enumerated ``EXTERNAL_WRITE_ACTIONS`` (of which
+    ``COMMUNICATION_WRITE_ACTIONS`` is a subset) are covered, plus the generic
+    ``external_write`` sentinel and any action name whose tokens carry an outward verb
+    stem. This closes the hole where a gated approval with a generic or novel action
+    (``action_requires_human_ack("external_write")`` was ``False``) slipped past the
+    terminal-confirmation gate. An empty action stays non-outward — upstream stamps the
+    sentinel whenever the verb is unknown, so an empty string here means "no action".
+    """
+    normalized = str(action or "").strip()
+    if not normalized:
+        return False
+    if normalized in EXTERNAL_WRITE_ACTIONS:
+        return True
+    lowered = normalized.lower()
+    if lowered.replace("-", "_") == _GENERIC_EXTERNAL_WRITE:
+        return True
+    tokens = lowered.replace("-", "_").split("_")
+    return any(token in _OUTWARD_ACTION_STEMS for token in tokens)
+
+
+def approval_requires_human_ack(approval: dict[str, Any]) -> bool:
+    """True when an approval row represents an outward/external write.
+
+    Action-name stems are useful but not authoritative: new connectors can choose
+    names like ``delete_ticket`` or ``update_crm_record`` before AFS knows those exact
+    verbs. The approval target is the stronger backstop. Anything aimed at a non-local
+    target system needs the terminal confirmation even if the action label looks
+    harmless or internal.
+    """
+    if action_requires_human_ack(str(approval.get("action") or "")):
+        return True
+    target_system = str(approval.get("target_system") or "").strip().lower()
+    return target_system not in _LOCAL_TARGET_SYSTEMS
+
+
+def _default_tty_reader(tty_path: str) -> Callable[[str], str | None]:
+    """Return a reader that prompts on and reads a line from the controlling terminal.
+
+    Reads from ``/dev/tty`` rather than stdin so that an agent piping text into the
+    command cannot satisfy the prompt. Returns ``None`` when no terminal is available
+    (a headless or agent context), which the caller treats as a refusal.
+    """
+
+    def _read(prompt: str) -> str | None:
+        try:
+            with open(tty_path, "r+", encoding="utf-8") as tty:
+                tty.write(prompt)
+                tty.flush()
+                line = tty.readline()
+        except OSError:
+            return None
+        return line.rstrip("\r\n")
+
+    return _read
+
+
+def confirm_human_approval(
+    approval: dict[str, Any],
+    *,
+    tty_path: str = "/dev/tty",
+    reader: Callable[[str], str | None] | None = None,
+) -> None:
+    """Require interactive human confirmation for an external-write approval.
+
+    A no-op for non-external actions. For external writes it prompts on the
+    controlling terminal and requires the operator to type the approval id. Raises
+    :class:`HumanApprovalRequiredError` when no terminal is available or the typed
+    value does not match — so approval cannot be granted from a non-interactive
+    (agent) context. ``reader`` is injectable for testing.
+    """
+    action = str(approval.get("action") or "").strip()
+    if not approval_requires_human_ack(approval):
+        return
+    approval_id = str(approval.get("approval_id") or "")
+    target = f"{approval.get('target_system') or '?'}:{approval.get('target_id') or '?'}"
+    summary = str(approval.get("summary") or "")
+    prompt = "\n".join(
+        [
+            "",
+            "=== HUMAN CONFIRMATION REQUIRED (external write) ===",
+            f"  action:   {action}",
+            f"  target:   {target}",
+            f"  summary:  {summary}",
+            f"  approval: {approval_id}",
+            "Approving lets an agent perform this outward action on your behalf.",
+            f"Type the approval id ({approval_id}) to confirm, anything else aborts: ",
+        ]
+    )
+    read = reader or _default_tty_reader(tty_path)
+    response = read(prompt)
+    if response is None:
+        raise HumanApprovalRequiredError(
+            "external write requires interactive human confirmation, but no terminal "
+            f"is available; refusing to approve {approval_id!r} in a non-interactive "
+            "context. Re-run `afs work approvals approve` from an interactive terminal."
+        )
+    if response.strip() != approval_id:
+        raise HumanApprovalRequiredError(
+            f"human confirmation did not match approval id; not approving {approval_id!r}."
+        )
 
 
 def build_approval_payload(
@@ -58,6 +234,9 @@ def execute_approved_action(
     timeout: int = 60,
     dry_run: bool = False,
     cwd: Path | None = None,
+    require_human_ack: bool = True,
+    tty_path: str = "/dev/tty",
+    confirm_reader: Callable[[str], str | None] | None = None,
 ) -> dict[str, Any]:
     """Execute one approved action by passing its JSON payload to a command.
 
@@ -65,6 +244,16 @@ def execute_approved_action(
     appended as the final argument and also exposed as
     ``AFS_WORK_APPROVAL_FILE``. On success the approval is marked ``applied``.
     On failure, the approval remains ``approved`` so the caller can retry.
+
+    Execution — not approval — is when the connector actually performs the outward
+    action, so for external writes it demands a fresh interactive human confirmation
+    here too (defense in depth over the approve-time check in ``cli/work.py``). This
+    closes the hole where a row that reached ``approved`` by any path (a pre-existing
+    row, a direct ``store.approve``, or an action the classifier missed) would execute
+    with no confirmation. A headless agent has no controlling terminal, so it cannot
+    satisfy the gate. ``confirm_reader`` is injectable for testing; a ``dry_run``
+    preview never prompts. Pass ``require_human_ack=False`` only for a caller that has
+    already confirmed out of band.
     """
     approval = store.get_approval(approval_id)
     if approval is None:
@@ -93,6 +282,9 @@ def execute_approved_action(
         }
     if not command:
         raise WorkApprovalExecutionError("executor command is required")
+
+    if require_human_ack and approval_requires_human_ack(approval):
+        confirm_human_approval(approval, tty_path=tty_path, reader=confirm_reader)
 
     resolved_command = [_resolve_executable(command[0]), *command[1:]]
     run_cwd = cwd.expanduser().resolve() if cwd else Path.cwd()
