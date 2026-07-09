@@ -39,3 +39,6 @@ curl_tests/
 dashboard/
 LMSTUDIO_SETUP.md
 personas/
+
+# Documentation build output
+/site/

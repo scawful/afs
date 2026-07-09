@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+title: "AFS: Agentic File System"
+message: "If you use AFS in research or demos, please cite the repository and the Agentic File System lineage note."
+type: software
+authors:
+  - family-names: scawful
+repository-code: "https://github.com/scawful/afs"
+license: MIT
+version: 0.2.0
+date-released: 2026-07-09

@@ -3,9 +3,9 @@
 Guide for agents maintaining a generic AFS knowledge mount, rebuilding
 embeddings, and setting up Gemini integration on a new machine.
 
-Domain-specific routing tables, game/ROM notes, persona model docs, and
-project-specific skills belong in a companion extension repo such as
-`afs_scawful`, not in core AFS docs.
+Domain-specific routing tables, private corpus notes, assistant model docs, and
+project-specific skills belong in companion extension repos, not in core AFS
+docs.
 
 ## Knowledge Mounts
 
