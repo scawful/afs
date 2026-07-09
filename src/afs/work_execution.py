@@ -7,8 +7,9 @@ import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .work_assistant import EXTERNAL_WRITE_ACTIONS, WorkAssistantStore
 
