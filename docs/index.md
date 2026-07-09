@@ -38,6 +38,8 @@ It provides filesystem-native primitives for:
 
 ## Core Docs
 
+- [Executive Summary](EXECUTIVE_SUMMARY.md) — concise non-domain overview for sharing
+- [Research Lineage](LINEAGE.md) — how AFS maps to the Agentic File System paper and where it goes beyond it
 - [Agent Surfaces](AGENT_SURFACES.md)
 - [Agent Operations](AGENT_OPERATIONS.md)
 - [Agent Integration Upgrade](AGENT_INTEGRATION_UPGRADE.md)

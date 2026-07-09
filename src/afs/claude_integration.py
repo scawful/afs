@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
 
-from .mcp_runtime import build_afs_mcp_entry
+from .mcp_runtime import build_afs_mcp_entry, build_afs_runtime_env
+
+# Marker used to find/replace AFS-owned lifecycle hooks idempotently on re-setup.
+_AFS_HOOK_MARKER = "afs claude hook"
+# Lifecycle events AFS pushes grounding into. SessionStart grounds the session once;
+# UserPromptSubmit injects the work-communication contract just-in-time on comms turns.
+_AFS_HOOK_EVENTS = ("SessionStart", "UserPromptSubmit")
 
 
 def generate_claude_settings(
@@ -16,7 +23,7 @@ def generate_claude_settings(
     config_path: Path | None = None,
     include_project_context: bool = True,
 ) -> dict[str, Any]:
-    """Build the mcpServers.afs entry for Claude Code settings."""
+    """Build the mcpServers.afs entry plus AFS push hooks for Claude Code settings."""
     resolved_project = project_path.expanduser().resolve()
     config_path_for_env: Path | None = None
     context_root_for_env: Path | None = None
@@ -35,7 +42,51 @@ def generate_claude_settings(
         config_path=config_path_for_env,
         context_root=context_root_for_env,
     )
-    return {"mcpServers": {"afs": entry}}
+    hooks = generate_afs_hook_settings(
+        resolved_project,
+        prefer_repo_config=include_project_context,
+        config_path=config_path_for_env,
+        context_root=context_root_for_env,
+    )
+    return {"mcpServers": {"afs": entry}, **hooks}
+
+
+def generate_afs_hook_settings(
+    project_path: Path,
+    *,
+    prefer_repo_config: bool = True,
+    config_path: Path | None = None,
+    context_root: Path | None = None,
+) -> dict[str, Any]:
+    """Build Claude Code ``hooks`` entries that push AFS grounding into a session.
+
+    Claude Code runs hooks as plain shell command strings without a per-hook ``env``
+    block, so the AFS runtime environment (PYTHONPATH, context root, config) is baked
+    in as a command prefix that mirrors the MCP server entry. The command degrades to
+    a silent no-op when context can't be resolved, so it is safe to register widely.
+    """
+    resolved_project = project_path.expanduser().resolve()
+    env = build_afs_runtime_env(
+        prefer_repo_config=prefer_repo_config,
+        config_path=config_path,
+        context_root=context_root,
+    )
+    prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in sorted(env.items()))
+    python = shlex.quote(sys.executable)
+    base = f"{python} -m afs claude hook --path {shlex.quote(str(resolved_project))}"
+    if context_root is not None:
+        base += f" --context-root {shlex.quote(str(context_root.expanduser().resolve()))}"
+
+    def _command(event: str) -> str:
+        command = f"{base} --event {event}"
+        return f"{prefix} {command}" if prefix else command
+
+    return {
+        "hooks": {
+            event: [{"hooks": [{"type": "command", "command": _command(event)}]}]
+            for event in _AFS_HOOK_EVENTS
+        }
+    }
 
 
 def default_claude_user_settings_path(home: Path | None = None) -> Path:
@@ -45,17 +96,44 @@ def default_claude_user_settings_path(home: Path | None = None) -> Path:
 
 
 def merge_claude_settings(existing: dict[str, Any], afs_entry: dict[str, Any]) -> dict[str, Any]:
-    """Deep-merge AFS MCP entry into existing Claude settings, preserving other servers."""
+    """Deep-merge AFS MCP entry and push hooks into existing Claude settings.
+
+    Preserves other MCP servers and other users' hooks. AFS-owned hooks (identified
+    by the ``afs claude hook`` marker) are replaced rather than duplicated, so repeated
+    ``afs claude setup`` runs stay idempotent.
+    """
     merged = dict(existing)
     mcp_key = "mcpServers"
-    if mcp_key not in merged:
-        merged[mcp_key] = {}
-    if not isinstance(merged[mcp_key], dict):
+    if not isinstance(merged.get(mcp_key), dict):
         merged[mcp_key] = {}
     else:
         merged[mcp_key] = dict(merged[mcp_key])
     merged[mcp_key]["afs"] = afs_entry.get(mcp_key, {}).get("afs", {})
+
+    new_hooks = afs_entry.get("hooks")
+    if isinstance(new_hooks, dict):
+        existing_hooks = merged.get("hooks")
+        merged_hooks = dict(existing_hooks) if isinstance(existing_hooks, dict) else {}
+        for event, entries in new_hooks.items():
+            prior = merged_hooks.get(event)
+            kept = [
+                entry
+                for entry in (prior if isinstance(prior, list) else [])
+                if not _is_afs_hook_entry(entry)
+            ]
+            merged_hooks[event] = kept + list(entries)
+        merged["hooks"] = merged_hooks
     return merged
+
+
+def _is_afs_hook_entry(entry: Any) -> bool:
+    """True when a Claude hook entry is an AFS-owned push hook."""
+    if not isinstance(entry, dict):
+        return False
+    for hook in entry.get("hooks", []) or []:
+        if isinstance(hook, dict) and _AFS_HOOK_MARKER in str(hook.get("command", "")):
+            return True
+    return False
 
 
 def generate_claude_md(project_name: str, context_path: str) -> str:
