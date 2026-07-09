@@ -111,7 +111,7 @@ Optional surfaces should be profile-gated or harness-specific:
 - `embeddings.*` for semantic indexing
 - `training.*` for reusable training/eval workflows
 - companion-repo domain servers, for example the MCP surfaces supplied by a
-  local `afs_example` or `afs_scawful` repo
+  local `afs_example` or `afs_company` repo
 
 ## Skills
 
@@ -120,7 +120,7 @@ roots. It intentionally does not rely on symlinks, because not every harness
 loads symlinked skill folders consistently.
 
 The same manifest sync can copy default OpenCode slash-command packs into
-harness command roots such as `~/src/lab/halext-code/.opencode/command`. These
+harness command roots such as `~/src/company-agent/.opencode/command`. These
 commands keep models on the slim MCP surface by default and route heavier
 actions through CLI/framework commands. Command packs are additive by default:
 existing customized command files are reported as `customized` and left

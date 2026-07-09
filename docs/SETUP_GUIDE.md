@@ -1,5 +1,13 @@
 # Guided Setup
 
+For a fresh local checkout, start with:
+
+```bash
+make setup
+make check
+./scripts/afs setup --yes --dry-run
+```
+
 AFS has a guided setup flow for new machines and new workspaces:
 
 ```bash

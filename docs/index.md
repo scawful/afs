@@ -47,6 +47,7 @@ It provides filesystem-native primitives for:
 - [Architecture](ARCHITECTURE.md)
 - [Profiles and Hooks](PROFILES.md)
 - [Extensions](PLUGINS.md)
+- [Extension Authoring](EXTENSION_AUTHORING.md)
 - [MCP Server](MCP_SERVER.md)
 - [Work Assistant](WORK_ASSISTANT.md)
 - [Work Assistant Connectors](WORK_ASSISTANT_CONNECTORS.md)
