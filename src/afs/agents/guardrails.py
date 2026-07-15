@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
@@ -13,6 +12,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:  # pragma: no cover - platform specific
+    import fcntl
+except ImportError:  # pragma: no cover - platform specific
+    fcntl = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - platform specific
+    import msvcrt
+except ImportError:  # pragma: no cover - platform specific
+    msvcrt = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +53,30 @@ def _prefer_writable_state_path(filename: str, *, env_var: str) -> Path:
 
     return (Path.cwd() / ".afs" / "agents" / filename).expanduser().resolve()
 
+
+def _try_lock(fd: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return
+    if msvcrt is not None:
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+
+
+def _unlock(fd: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return
+    if msvcrt is not None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+
 @contextmanager
 def _file_lock(path: Path, *, timeout: float = 5.0):
-    """Advisory file lock using fcntl. Non-blocking with timeout."""
+    """Acquire a non-blocking advisory file lock with a bounded timeout."""
     lock_path = path.with_suffix(path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = None
@@ -55,7 +85,7 @@ def _file_lock(path: Path, *, timeout: float = 5.0):
         deadline = time.monotonic() + timeout
         while True:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _try_lock(fd)
                 break
             except OSError:
                 if time.monotonic() >= deadline:
@@ -66,7 +96,7 @@ def _file_lock(path: Path, *, timeout: float = 5.0):
     finally:
         if fd is not None:
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                _unlock(fd)
             except OSError:
                 pass
             os.close(fd)

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import afs.agents.guardrails as guardrails
 from afs.agents.guardrails import (
     ALWAYS_APPROVE,
     AUTO_APPROVE,
@@ -413,6 +414,27 @@ class TestFileLocking:
             pass
         # Lock file should exist (not deleted, just unlocked)
         assert (tmp_path / "test.json.lock").exists()
+
+    def test_lock_uses_windows_backend_when_fcntl_is_unavailable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[int, int]] = []
+
+        class FakeMsvcrt:
+            LK_NBLCK = 1
+            LK_UNLCK = 2
+
+            @staticmethod
+            def locking(_fd: int, mode: int, size: int) -> None:
+                calls.append((mode, size))
+
+        monkeypatch.setattr(guardrails, "fcntl", None)
+        monkeypatch.setattr(guardrails, "msvcrt", FakeMsvcrt)
+
+        with _file_lock(tmp_path / "test.json"):
+            pass
+
+        assert calls == [(FakeMsvcrt.LK_NBLCK, 1), (FakeMsvcrt.LK_UNLCK, 1)]
 
     def test_concurrent_quota_writes(self, tmp_path: Path) -> None:
         """Verify concurrent writers don't corrupt the quota file."""
