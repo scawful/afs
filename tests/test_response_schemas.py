@@ -66,6 +66,29 @@ def test_coerce_passes_through_objects() -> None:
     assert error == ""
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_coerce_rejects_non_finite_parsed_values(value: float) -> None:
+    parsed, error = coerce_response_payload({"value": value})
+
+    assert parsed is None
+    assert "non-finite" in error
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
+def test_coerce_rejects_nonstandard_json_number_tokens(token: str) -> None:
+    parsed, error = coerce_response_payload(f'{{"value": {token}}}')
+
+    assert parsed is None
+    assert "non-standard JSON number" in error
+
+
+def test_coerce_rejects_duplicate_object_members() -> None:
+    parsed, error = coerce_response_payload('{"outer": {"value": 1, "value": 2}}')
+
+    assert parsed is None
+    assert "duplicate JSON object member 'value'" in error
+
+
 def test_build_schema_correction_lists_violations_and_resource() -> None:
     result = validate_structured_response("handoff-summary", {"accomplished": ["x"]})
     correction = build_schema_correction(result)
@@ -93,6 +116,35 @@ def test_builtin_fallback_matches_core_rules() -> None:
 
     wrong_type = _builtin_schema_errors(schema, {**_VALID_PLAN, "summary": 123})
     assert any("summary" in err for err in wrong_type)
+
+
+def test_builtin_fallback_checks_nested_protocol_rules() -> None:
+    schema = get_response_schema("v1/optimization/evaluation")
+    payload = {
+        "schema_version": "1.0",
+        "candidate_id": "candidate",
+        "parent_id": "root",
+        "artifact_sha256": "a" * 64,
+        "evaluation_suite": {
+            "name": "suite",
+            "version": "1",
+            "case_set_sha256": "b" * 64,
+        },
+        "provenance": {
+            "run_id": "run",
+            "evaluator": "eval",
+            "evaluator_version": "1",
+            "seed": 1,
+            "environment_sha256": "c" * 64,
+        },
+        "metrics": [{"name": "quality", "unit": "ratio", "value": 1.0, "sample_count": 0}],
+        "constraints": {"tests": "yes"},
+    }
+
+    errors = _builtin_schema_errors(schema, payload)
+
+    assert any("sample_count" in error and ">= 1" in error for error in errors)
+    assert any("constraints/tests" in error and "boolean" in error for error in errors)
 
 
 def test_result_to_dict_shape() -> None:

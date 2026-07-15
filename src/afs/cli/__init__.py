@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import logging
 import os
 import shlex
 import sys
@@ -33,6 +34,7 @@ from . import (
     doctor,
     embeddings,
     events,
+    execution,
     fs,
     gemini,
     guide,
@@ -41,6 +43,7 @@ from . import (
     mcp,
     missions,
     next_action,
+    optimize,
     personal,
     profile,
     review,
@@ -54,6 +57,8 @@ from . import (
     work,
 )
 from ._help import _build_command_tree, render_default_help, render_topic_help
+
+logger = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -273,6 +278,12 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
     # Register response-schema validation commands
     schema.register_parsers(subparsers)
 
+    # Register pure optimization evidence comparison commands
+    optimize.register_parsers(subparsers)
+
+    # Register read-only policy inspection for typed execution requests.
+    execution.register_parsers(subparsers)
+
     # Register background-mission commands
     missions.register_parsers(subparsers)
 
@@ -316,42 +327,65 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
         )
     )
 
-    # Allow plugins to extend the CLI surface.
+    # Allow plugins to extend the CLI surface. Plugin hooks and extension CLI
+    # modules are isolated failure domains: a broken plugin cannot abort
+    # extension registration or vice versa.
+    config = None
     try:
-        from ..plugins import (
-            call_plugin_hook,
-            load_enabled_extensions,
-            load_enabled_plugins,
-        )
-
         config_path = _extract_config_argument(argv)
         config, _resolved_config_path = load_runtime_config_model(
             config_path=config_path,
             merge_user=True,
             start_dir=Path.cwd(),
         )
-        plugins = load_enabled_plugins(config=config)
-        call_plugin_hook("register_cli", subparsers, plugins=plugins.values())
-        call_plugin_hook("register_parsers", subparsers, plugins=plugins.values())
+    except Exception as exc:
+        logger.debug(
+            "CLI plugin/extension registration skipped: config load failed (%s)",
+            type(exc).__name__,
+        )
 
-        extensions = load_enabled_extensions(config=config)
-        resolved_profile = resolve_active_profile(config)
-        extension_roots: dict[str, list[Path]] = {}
-        for extension in extensions.values():
-            for module_name in extension.cli_modules:
-                extension_roots.setdefault(module_name, []).extend(extension.import_roots)
+    if config is not None:
+        try:
+            from ..plugins import call_plugin_hook, load_enabled_plugins
 
-        for module_name in resolved_profile.cli_modules:
-            try:
-                _register_cli_module(
-                    subparsers,
-                    module_name,
-                    search_roots=extension_roots.get(module_name, []),
-                )
-            except Exception:
-                continue
-    except Exception:
-        pass
+            plugins = load_enabled_plugins(config=config)
+            call_plugin_hook("register_cli", subparsers, plugins=plugins.values())
+            call_plugin_hook("register_parsers", subparsers, plugins=plugins.values())
+        except Exception as exc:
+            logger.warning(
+                "Plugin CLI registration failed (%s)", type(exc).__name__
+            )
+
+        try:
+            from ..plugins import load_enabled_extensions
+
+            extensions = load_enabled_extensions(config=config)
+            resolved_profile = resolve_active_profile(config)
+            extension_roots: dict[str, list[Path]] = {}
+            for extension in extensions.values():
+                for module_name in extension.cli_modules:
+                    extension_roots.setdefault(module_name, []).extend(
+                        extension.import_roots
+                    )
+
+            for module_name in resolved_profile.cli_modules:
+                try:
+                    _register_cli_module(
+                        subparsers,
+                        module_name,
+                        search_roots=extension_roots.get(module_name, []),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Extension CLI module %r failed to register (%s)",
+                        module_name,
+                        type(exc).__name__,
+                    )
+                    continue
+        except Exception as exc:
+            logger.warning(
+                "Extension CLI registration failed (%s)", type(exc).__name__
+            )
 
     return parser
 

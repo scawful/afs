@@ -211,6 +211,8 @@ TOOL_PROFILE_DEFINITIONS = {
         name="default",
         summary="Minimal context bridge for normal repo work.",
         preferred_surfaces=(
+            "skill.match",
+            "skill.read",
             "context.status",
             "context.query",
             "context.read",
@@ -225,6 +227,8 @@ TOOL_PROFILE_DEFINITIONS = {
         name="context_readonly",
         summary="Read-only context discovery and evidence gathering.",
         preferred_surfaces=(
+            "skill.match",
+            "skill.read",
             "session.bootstrap",
             "session.pack",
             "operator.digest",
@@ -242,6 +246,8 @@ TOOL_PROFILE_DEFINITIONS = {
         name="context_repair",
         summary="AFS context repair and freshness recovery.",
         preferred_surfaces=(
+            "skill.match",
+            "skill.read",
             "session.bootstrap",
             "operator.digest",
             "context.status",
@@ -258,6 +264,8 @@ TOOL_PROFILE_DEFINITIONS = {
         name="edit_and_verify",
         summary="Context-guided edit loop with immediate verification.",
         preferred_surfaces=(
+            "skill.match",
+            "skill.read",
             "session.bootstrap",
             "session.pack",
             "operator.digest",
@@ -275,6 +283,8 @@ TOOL_PROFILE_DEFINITIONS = {
         name="handoff_only",
         summary="Minimal surfaces for summarizing status and handing work off cleanly.",
         preferred_surfaces=(
+            "skill.match",
+            "skill.read",
             "session.bootstrap",
             "context.status",
             "handoff.read",

@@ -33,6 +33,15 @@ This page documents core AFS APIs and CLI surfaces in `lab/afs`.
 - `afs.health.afs_status.collect_afs_health`
 - `afs.health.afs_status.render_afs_health`
 
+### Policy-Checked Execution
+
+- `afs.execution.ExecutionRequest`
+- `afs.execution.ExecutionPolicy`
+- `afs.execution.ExecutionInspection`
+- `afs.execution.ExecutionRecord`
+- `afs.execution.inspect_execution`
+- `afs.execution.execute_checked`
+
 ## CLI Surface
 
 Use `./scripts/afs` during local development unless `afs` is installed in the
@@ -72,6 +81,18 @@ active environment.
 ./scripts/afs health status
 ```
 
+### Execution Inspection
+
+```bash
+./scripts/afs execution inspect --request request.json --allowed-root "$PWD" \
+  --allowed-executable python3 --json
+```
+
+Inspection is read-only. AFS does not expose a generic execution command; use
+the typed Python API from trusted code. The CLI blocks when executable
+permission is omitted; pass `--allowed-env NAME` for each non-baseline
+environment key. See [Policy-Checked Execution](EXECUTION_BROKER.md).
+
 ### Skills and Embeddings
 
 ```bash
@@ -88,6 +109,7 @@ active environment.
 - `[extensions]`
 - `[hooks]`
 - `[plugins]`
+- `[verification]`, `[verification.profiles.<name>]`
 
 For examples, see:
 

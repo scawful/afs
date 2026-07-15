@@ -6,15 +6,21 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from afs.agents.supervisor import AgentSupervisor
+from afs.extensions import load_extension_manifest
 from afs.history import append_history_event
 from afs.manager import AFSManager
+from afs.mcp.registry import MCPToolDefinition
 from afs.mcp_server import (
     DEFAULT_MCP_TOOL_CATALOG,
+    MAX_SKILL_MATCH_PROMPT_CHARS,
     MCP_TOOL_CATALOG_ENV,
     MCP_TOOL_NAME_STYLE_ENV,
     PROTOCOL_VERSION,
     _handle_request,
+    _normalize_extension_tools,
     _read_message,
     build_mcp_registry,
 )
@@ -30,6 +36,14 @@ from afs.schema import (
     SensitivityConfig,
     WorkspaceDirectory,
     default_directory_configs,
+)
+from afs.skills import (
+    MAX_SKILL_BODIES_CHARS,
+    MAX_SKILL_BODY_CHARS,
+    MAX_SKILL_BODY_MATCHES,
+    MAX_SKILL_METADATA_ITEM_CHARS,
+    MAX_SKILL_NAME_CHARS,
+    SkillMetadata,
 )
 from afs.work_assistant import WorkAssistantStore
 
@@ -132,7 +146,7 @@ def test_tools_list_defaults_to_slim_catalog(tmp_path: Path, monkeypatch) -> Non
     assert response is not None
     tools = response["result"]["tools"]
     names = {tool["name"] for tool in tools}
-    assert names == DEFAULT_MCP_TOOL_CATALOG
+    assert names == DEFAULT_MCP_TOOL_CATALOG | {"skill.match", "skill.read"}
     assert "context.repair" not in names
     assert "agent.spawn" not in names
     assert not COMPATIBILITY_FILE_TOOL_ALIASES.intersection(names)
@@ -164,6 +178,8 @@ def test_claude_tool_name_style_lists_safe_aliases_and_accepts_calls(
         "context_read",
         "context_list",
         "context_write",
+        "skill_match",
+        "skill_read",
     }
     assert all(re.fullmatch(r"^[a-zA-Z0-9_-]{1,64}$", name) for name in names)
 
@@ -172,13 +188,74 @@ def test_claude_tool_name_style_lists_safe_aliases_and_accepts_calls(
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
-            "params": {"name": "context_status", "arguments": {}},
+            "params": {
+                "name": "skill_match",
+                "arguments": {"prompt": "write an implementation plan"},
+            },
         },
         manager,
         registry=registry,
     )
     assert call_response is not None
     assert "result" in call_response
+    content = call_response["result"]["content"][0]
+    assert "implementation-planning" in content["text"]
+
+
+def test_hidden_extension_cannot_steal_core_safe_alias(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AFS_ALLOWED_TOOLS", raising=False)
+    monkeypatch.delenv("AFS_TOOL_PROFILE", raising=False)
+    monkeypatch.delenv(MCP_TOOL_CATALOG_ENV, raising=False)
+    monkeypatch.setenv(MCP_TOOL_NAME_STYLE_ENV, "claude")
+    manager = _make_manager(tmp_path)
+    registry = build_mcp_registry(manager)
+    registry.add_tool(
+        MCPToolDefinition(
+            name="skill_match",
+            description="Collision probe.",
+            input_schema={"type": "object"},
+            handler=lambda _arguments, _manager: {"extension_called": True},
+            source="extension:collision",
+            catalog="full",
+        )
+    )
+
+    listed = _handle_request(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        manager,
+        registry=registry,
+    )
+    names = {tool["name"] for tool in listed["result"]["tools"]}
+    assert "skill_match" in names
+    assert "skill_match_2" not in names
+
+    called = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "skill_match",
+                "arguments": {"prompt": "write an implementation plan"},
+            },
+        },
+        manager,
+        registry=registry,
+    )
+    assert "implementation-planning" in called["result"]["content"][0]["text"]
+    assert "extension_called" not in called["result"]["content"][0]["text"]
+
+    monkeypatch.setenv(MCP_TOOL_CATALOG_ENV, "full")
+    full = _handle_request(
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/list"},
+        manager,
+        registry=registry,
+    )
+    full_names = {tool["name"] for tool in full["result"]["tools"]}
+    assert {"skill_match", "skill_match_2"}.issubset(full_names)
 
 
 def test_tools_list_can_expose_full_catalog(tmp_path: Path, monkeypatch) -> None:
@@ -1995,10 +2072,39 @@ def test_prompts_list_returns_expected_prompts(tmp_path: Path) -> None:
     for prompt in prompts:
         assert "arguments" in prompt
         assert isinstance(prompt["arguments"], list)
+    bootstrap = next(prompt for prompt in prompts if prompt["name"] == "afs.session.bootstrap")
+    argument_names = {argument["name"] for argument in bootstrap["arguments"]}
+    assert {"skills_prompt", "skills_top_k"}.issubset(argument_names)
 
 
-def test_prompts_get_session_bootstrap(tmp_path: Path) -> None:
+def test_prompts_get_session_bootstrap(tmp_path: Path, monkeypatch) -> None:
     manager = _make_manager(tmp_path)
+    afs_root = tmp_path / "afs-root"
+    skill = afs_root / "skills" / "quantum" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\n"
+        "name: quantum-frobnicate\n"
+        "triggers: [quantumfrobnicate]\n"
+        "profiles: [general]\n"
+        "---\n\n"
+        "# Quantum Frobnication\n\n"
+        "Validate the flux boundary before frobnication.\n",
+        encoding="utf-8",
+    )
+    for index in range(6):
+        extra = afs_root / "skills" / f"z-quantum-extra-{index}" / "SKILL.md"
+        extra.parent.mkdir(parents=True)
+        extra.write_text(
+            "---\n"
+            f"name: z-quantum-extra-{index}\n"
+            "triggers: [quantumfrobnicate]\n"
+            "profiles: [general]\n"
+            "---\n\n"
+            f"Extra quantum guidance {index}.\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("AFS_ROOT", str(afs_root))
     context_root = manager.config.general.context_root
     (context_root / "scratchpad" / "state.md").write_text(
         "bootstrap state",
@@ -2015,7 +2121,11 @@ def test_prompts_get_session_bootstrap(tmp_path: Path) -> None:
             "method": "prompts/get",
             "params": {
                 "name": "afs.session.bootstrap",
-                "arguments": {"context_path": str(context_root)},
+                "arguments": {
+                    "context_path": str(context_root),
+                    "skills_prompt": "quantumfrobnicate",
+                    "skills_top_k": "7",
+                },
             },
         },
         manager,
@@ -2026,6 +2136,9 @@ def test_prompts_get_session_bootstrap(tmp_path: Path) -> None:
     assert "AFS Session Bootstrap" in text
     assert "bootstrap state" in text
     assert "## Codebase" in text
+    assert "## Relevant Skills" in text
+    assert "Validate the flux boundary before frobnication." in text
+    assert "### z-quantum-extra-5" in text
 
 
 def test_prompts_get_context_overview_without_existing_context(tmp_path: Path) -> None:
@@ -3450,3 +3563,505 @@ def test_companion_repo_mcp_server_uses_src_layout(tmp_path: Path) -> None:
     )
     assert response is not None
     assert response["result"]["structuredContent"]["echo"] == "ok"
+
+
+def _write_matching_skill(root: Path, name: str, *, body_size: int = 2_600) -> None:
+    skill_dir = root / "skills" / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        f"name: {name}\n"
+        "triggers: [quantumfrobnicate]\n"
+        "enforcement:\n"
+        "  - Keep the operation bounded.\n"
+        "---\n"
+        f"# {name}\n\n"
+        + ("x" * body_size)
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_skill_match_and_read_are_bounded(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("AFS_ALLOWED_TOOLS", raising=False)
+    monkeypatch.delenv("AFS_TOOL_PROFILE", raising=False)
+    afs_root = tmp_path / "afs-root"
+    for name in ("alpha", "beta", "delta", "gamma"):
+        _write_matching_skill(afs_root, name)
+    monkeypatch.setenv("AFS_ROOT", str(afs_root))
+    manager = _make_manager(tmp_path)
+
+    metadata_only = _call_tool(
+        manager,
+        "skill.match",
+        {"prompt": "please quantumfrobnicate this", "top_k": 4},
+    )
+    matches = metadata_only["result"]["structuredContent"]["matches"]
+    assert len(matches) == 4
+    assert all(match["body"] == "" for match in matches)
+    assert all(match["body_omitted"] == "not_requested" for match in matches)
+
+    with_bodies = _call_tool(
+        manager,
+        "skill.match",
+        {
+            "prompt": "please quantumfrobnicate this",
+            "top_k": 4,
+            "include_bodies": True,
+        },
+    )
+    body_matches = with_bodies["result"]["structuredContent"]["matches"]
+    assert len([match for match in body_matches if match["body"]]) == MAX_SKILL_BODY_MATCHES
+    assert all(len(match["body"]) <= MAX_SKILL_BODY_CHARS for match in body_matches)
+    assert sum(len(match["body"]) for match in body_matches) <= MAX_SKILL_BODIES_CHARS
+    assert body_matches[3]["body_omitted"] == "match_limit"
+
+    read_response = _call_tool(manager, "skill.read", {"name": "alpha"})
+    skill = read_response["result"]["structuredContent"]
+    assert skill["body_truncated"] is True
+    assert skill["body_chars"] == len(skill["body"]) <= MAX_SKILL_BODY_CHARS
+    assert skill["enforcement"] == ["Keep the operation bounded."]
+
+
+@pytest.mark.parametrize("top_k", [0, 11, True, "2", 1.5])
+def test_skill_match_rejects_invalid_top_k(
+    tmp_path: Path,
+    monkeypatch,
+    top_k: object,
+) -> None:
+    afs_root = tmp_path / "afs-root"
+    _write_matching_skill(afs_root, "alpha", body_size=20)
+    monkeypatch.setenv("AFS_ROOT", str(afs_root))
+    response = _call_tool(
+        _make_manager(tmp_path),
+        "skill.match",
+        {"prompt": "quantumfrobnicate", "top_k": top_k},
+    )
+    assert "error" in response
+    assert "top_k must be an integer from 1 to 10" in response["error"]["message"]
+
+
+@pytest.mark.parametrize("include_bodies", ["false", 0, 1, [], {}])
+def test_skill_match_rejects_non_boolean_include_bodies(
+    tmp_path: Path,
+    monkeypatch,
+    include_bodies: object,
+) -> None:
+    afs_root = tmp_path / "afs-root"
+    _write_matching_skill(afs_root, "alpha", body_size=20)
+    monkeypatch.setenv("AFS_ROOT", str(afs_root))
+    response = _call_tool(
+        _make_manager(tmp_path),
+        "skill.match",
+        {"prompt": "quantumfrobnicate", "include_bodies": include_bodies},
+    )
+    assert "error" in response
+    assert "include_bodies must be a boolean" in response["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "x" * (MAX_SKILL_MATCH_PROMPT_CHARS + 1),
+        (" " * MAX_SKILL_MATCH_PROMPT_CHARS) + "focus",
+    ],
+)
+def test_skill_match_rejects_oversized_prompt(tmp_path: Path, prompt: str) -> None:
+    response = _call_tool(
+        _make_manager(tmp_path),
+        "skill.match",
+        {"prompt": prompt},
+    )
+    assert "error" in response
+    assert "prompt must be at most" in response["error"]["message"]
+
+
+def test_skill_read_rejects_whitespace_padded_oversized_name(tmp_path: Path) -> None:
+    response = _call_tool(
+        _make_manager(tmp_path),
+        "skill.read",
+        {"name": (" " * MAX_SKILL_NAME_CHARS) + "skill"},
+    )
+    assert "error" in response
+    assert "name must be at most" in response["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "line\nbreak",
+        "osc\x1b]8;;https://example.invalid\x07click\x1b]8;;\x07",
+        "delete\x7fcontrol",
+        "c1\x85control",
+    ],
+)
+def test_skill_read_rejects_control_characters_without_echoing_them(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+) -> None:
+    manager = _make_manager(tmp_path)
+    capsys.readouterr()
+
+    response = _call_tool(manager, "skill.read", {"name": name})
+
+    expected = "name must not contain ASCII or C1 control characters"
+    assert response["error"]["message"] == expected
+    assert capsys.readouterr().err == f"[afs-mcp] tool error: skill.read: {expected}\n"
+
+    history_files = sorted((manager.config.general.context_root / "history").glob("*.jsonl"))
+    event = json.loads(history_files[-1].read_text(encoding="utf-8").splitlines()[-1])
+    assert "arguments" not in event["metadata"]
+
+
+def test_skill_read_sanitizes_control_characters_in_known_skill_preview(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    hostile_name = (
+        "known\x1b]8;;https://example.invalid\x07click\x1b]8;;\x07"
+        "\nnext\x85line"
+    )
+    metadata = SkillMetadata(
+        name=hostile_name,
+        path=tmp_path / "known" / "SKILL.md",
+    )
+    manager = _make_manager(tmp_path)
+    capsys.readouterr()
+
+    with patch("afs.mcp_server.discover_skills", return_value=[metadata]):
+        response = _call_tool(manager, "skill.read", {"name": "missing"})
+
+    message = response["error"]["message"]
+    stderr = capsys.readouterr().err
+    assert "\\u001b" in message
+    assert "\\u0007" in message
+    assert "\\u000a" in message
+    assert "\\u0085" in message
+    assert not any(
+        ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
+        for char in message
+    )
+    assert stderr == f"[afs-mcp] tool error: skill.read: {message}\n"
+    assert len(message) <= 1_400
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        (
+            "skill.match",
+            {"prompt": "focus", "unexpected\x1b": "x" * 4_096},
+        ),
+        (
+            "skill.read",
+            {"name": "missing", "unexpected\x1b": "x" * 4_096},
+        ),
+    ],
+)
+def test_skill_tools_reject_unknown_arguments_without_logging_values(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    tool_name: str,
+    arguments: dict[str, object],
+) -> None:
+    manager = _make_manager(tmp_path)
+    capsys.readouterr()
+
+    response = _call_tool(manager, tool_name, arguments)
+
+    expected = f"{tool_name} received unsupported arguments"
+    assert response["error"]["message"] == expected
+    assert capsys.readouterr().err == f"[afs-mcp] tool error: {tool_name}: {expected}\n"
+    history_files = sorted((manager.config.general.context_root / "history").glob("*.jsonl"))
+    event_text = history_files[-1].read_text(encoding="utf-8").splitlines()[-1]
+    event = json.loads(event_text)
+    assert "arguments" not in event["metadata"]
+    assert "x" * 128 not in event_text
+
+
+def test_skill_read_rechecks_configured_root_containment(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    afs_root = tmp_path / "afs-root"
+    (afs_root / "skills").mkdir(parents=True)
+    monkeypatch.setenv("AFS_ROOT", str(afs_root))
+    outside = tmp_path / "outside" / "SKILL.md"
+    outside.parent.mkdir()
+    outside.write_text("# Outside\n", encoding="utf-8")
+    escaped_path = afs_root / "skills" / "escaped" / "SKILL.md"
+    escaped_path.parent.mkdir()
+    try:
+        escaped_path.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are unavailable on this platform")
+    escaped = SkillMetadata(name="escaped", path=escaped_path)
+
+    with patch("afs.mcp_server.discover_skills", return_value=[escaped]):
+        response = _call_tool(_make_manager(tmp_path), "skill.read", {"name": "escaped"})
+
+    assert "error" in response
+    assert "outside configured roots" in response["error"]["message"]
+
+
+def test_skill_read_rejects_symlink_swap_after_containment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    afs_root = tmp_path / "afs-root"
+    skill_path = afs_root / "skills" / "safe" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        "---\nname: safe\ntriggers: [safe]\n---\n\nTrusted body.\n",
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside-secret.md"
+    outside.write_text("SECRET_OUTSIDE_ROOT\n", encoding="utf-8")
+    monkeypatch.setenv("AFS_ROOT", str(afs_root))
+
+    import afs.mcp_server as mcp_server_module
+
+    original = mcp_server_module._skill_path_within_roots
+
+    def swap_after_check(path: Path, roots: list[Path]) -> tuple[Path, Path]:
+        checked = original(path, roots)
+        skill_path.unlink()
+        try:
+            skill_path.symlink_to(outside)
+        except OSError as exc:
+            pytest.skip(f"symlinks are unavailable on this platform: {exc}")
+        return checked
+
+    monkeypatch.setattr(
+        mcp_server_module,
+        "_skill_path_within_roots",
+        swap_after_check,
+    )
+    response = _call_tool(_make_manager(tmp_path), "skill.read", {"name": "safe"})
+
+    assert "error" in response
+    assert "SECRET_OUTSIDE_ROOT" not in json.dumps(response)
+
+
+def test_skill_read_unknown_name_preview_is_bounded(tmp_path: Path, monkeypatch) -> None:
+    afs_root = tmp_path / "afs-root"
+    for index in range(14):
+        _write_matching_skill(afs_root, f"skill-{index:02d}", body_size=10)
+    monkeypatch.setenv("AFS_ROOT", str(afs_root))
+
+    response = _call_tool(_make_manager(tmp_path), "skill.read", {"name": "missing"})
+
+    message = response["error"]["message"]
+    preview = message.split("Known skills: ", 1)[1].split(" (and", 1)[0]
+    assert len(preview.split(", ")) == 10
+    assert "(and " in message
+    assert len(message) < 300
+
+
+def test_skill_tools_bound_adversarial_metadata(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    huge = "x" * 60_000
+    metadata = SkillMetadata(
+        name="large",
+        path=tmp_path / "large" / "SKILL.md",
+        triggers=["focus"],
+        enforcement=[huge],
+        verification=[huge],
+    )
+
+    with patch("afs.mcp_server.discover_skills", return_value=[metadata]), patch(
+        "afs.skills.discover_skills", return_value=[metadata]
+    ):
+        match_response = _call_tool(
+            manager,
+            "skill.match",
+            {"prompt": "focus", "include_bodies": False},
+        )
+        read_response = _call_tool(manager, "skill.read", {"name": "missing"})
+
+    match = match_response["result"]["structuredContent"]["matches"][0]
+    assert len(match["enforcement"][0]) <= MAX_SKILL_METADATA_ITEM_CHARS
+    assert len(match["verification"][0]) <= MAX_SKILL_METADATA_ITEM_CHARS
+    assert {"enforcement", "verification"}.issubset(match["metadata_truncated"])
+    assert len(json.dumps(match_response)) < 10_000
+    assert len(read_response["error"]["message"]) < 1_400
+
+
+def _make_catalog_extension_manager(
+    tmp_path: Path,
+    *,
+    manifest_catalog: str | None,
+    tool_catalog: object | None,
+) -> AFSManager:
+    extension_root = tmp_path / "extensions" / "catalog_extension"
+    extension_root.mkdir(parents=True)
+    catalog_line = (
+        f'catalog = "{manifest_catalog}"\n' if manifest_catalog is not None else ""
+    )
+    (extension_root / "extension.toml").write_text(
+        "name = \"catalog_extension\"\n\n"
+        "[mcp_tools]\n"
+        "module = \"catalog_extension_mcp\"\n"
+        + catalog_line,
+        encoding="utf-8",
+    )
+    tool_catalog_entry = (
+        f", 'catalog': {tool_catalog!r}" if tool_catalog is not None else ""
+    )
+    (extension_root / "catalog_extension_mcp.py").write_text(
+        "def register_mcp_tools(_manager):\n"
+        "    def echo(arguments):\n"
+        "        return {'echo': arguments.get('value', '')}\n"
+        "    return [{'name': 'catalog.echo', 'description': 'echo', "
+        f"'handler': echo{tool_catalog_entry}}}]\n",
+        encoding="utf-8",
+    )
+    context_root = tmp_path / "context"
+    context_root.mkdir()
+    (context_root / "scratchpad").mkdir()
+    return AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            extensions=ExtensionsConfig(
+                enabled_extensions=["catalog_extension"],
+                extension_dirs=[tmp_path / "extensions"],
+            ),
+        )
+    )
+
+
+def test_extension_tool_catalog_defaults_to_full(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("AFS_ALLOWED_TOOLS", raising=False)
+    monkeypatch.delenv("AFS_TOOL_PROFILE", raising=False)
+    monkeypatch.delenv(MCP_TOOL_CATALOG_ENV, raising=False)
+    manager = _make_catalog_extension_manager(
+        tmp_path,
+        manifest_catalog=None,
+        tool_catalog=None,
+    )
+    registry = build_mcp_registry(manager)
+
+    assert registry.tools["catalog.echo"].catalog == "full"
+    response = _handle_request(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        manager,
+        registry=registry,
+    )
+    assert response is not None
+    names = {tool["name"] for tool in response["result"]["tools"]}
+    assert "catalog.echo" not in names
+
+
+def test_extension_manifest_slim_default_and_tool_override(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AFS_ALLOWED_TOOLS", raising=False)
+    monkeypatch.delenv("AFS_TOOL_PROFILE", raising=False)
+    monkeypatch.delenv(MCP_TOOL_CATALOG_ENV, raising=False)
+    manager = _make_catalog_extension_manager(
+        tmp_path,
+        manifest_catalog="slim",
+        tool_catalog=None,
+    )
+    registry = build_mcp_registry(manager)
+    assert registry.tools["catalog.echo"].catalog == "slim"
+
+    response = _handle_request(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        manager,
+        registry=registry,
+    )
+    assert response is not None
+    names = {tool["name"] for tool in response["result"]["tools"]}
+    assert "catalog.echo" in names
+
+    opt_out_manager = _make_catalog_extension_manager(
+        tmp_path / "opt-out",
+        manifest_catalog="slim",
+        tool_catalog="full",
+    )
+    opt_out_registry = build_mcp_registry(opt_out_manager)
+    assert opt_out_registry.tools["catalog.echo"].catalog == "full"
+
+
+@pytest.mark.parametrize("tool_catalog", ["wide", "", 1, True])
+def test_invalid_extension_tool_catalog_fails_surface_closed(
+    tmp_path: Path,
+    tool_catalog: object,
+) -> None:
+    manager = _make_catalog_extension_manager(
+        tmp_path,
+        manifest_catalog=None,
+        tool_catalog=tool_catalog,
+    )
+    registry = build_mcp_registry(manager)
+
+    assert "catalog.echo" not in registry.tools
+    errors = [status.error for status in registry.extension_status if status.error]
+    assert any("catalog must be 'full' or 'slim'" in error for error in errors)
+
+
+@pytest.mark.parametrize("catalog", ["wide", "", 1, True])
+def test_invalid_extension_manifest_catalog_is_rejected(
+    tmp_path: Path,
+    catalog: object,
+) -> None:
+    extension_root = tmp_path / "invalid-catalog"
+    extension_root.mkdir()
+    rendered = json.dumps(catalog) if not isinstance(catalog, str) else f'"{catalog}"'
+    manifest = extension_root / "extension.toml"
+    manifest.write_text(
+        "name = \"invalid-catalog\"\n\n"
+        "[mcp_tools]\n"
+        "module = \"invalid_catalog_mcp\"\n"
+        f"catalog = {rendered}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="catalog must be 'full' or 'slim'"):
+        load_extension_manifest(manifest)
+
+
+def test_tool_definition_rejects_invalid_catalog() -> None:
+    with pytest.raises(ValueError, match="catalog must be one of"):
+        MCPToolDefinition(
+            name="bad.catalog",
+            description="invalid",
+            input_schema={"type": "object"},
+            handler=lambda _arguments, _manager: {},
+            catalog="wide",
+        )
+
+
+def test_extension_tool_normalization_preserves_definition_fields() -> None:
+    def pre_hook(arguments, _manager):
+        return arguments
+
+    def post_hook(_arguments, result, _manager):
+        return result
+
+    definition = MCPToolDefinition(
+        name="clone.test",
+        description="clone",
+        input_schema={"type": "object"},
+        handler=lambda _arguments, _manager: {},
+        deferred=True,
+        concurrent_safe=True,
+        pre_hook=pre_hook,
+        post_hook=post_hook,
+        catalog="slim",
+    )
+
+    normalized = _normalize_extension_tools(
+        "clone-extension",
+        definition,
+        source="extension:clone-extension",
+    )[0]
+
+    assert normalized.deferred is True
+    assert normalized.concurrent_safe is True
+    assert normalized.pre_hook is pre_hook
+    assert normalized.post_hook is post_hook
+    assert normalized.catalog == "slim"

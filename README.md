@@ -85,12 +85,23 @@ cross-agent coordination.
 
 **Context Sources** — Provider-neutral adapters for tasks, tickets, reviews, docs, messages, tests, hooks, and traces. Core AFS owns the normalized records; concrete source connectors live in extensions.
 
+**Optimization Evidence** — Versioned, language-neutral evaluation and policy
+records plus a pure decision gate for bounded hill-climbing experiments. The
+gate can recommend human review but cannot execute or promote a candidate.
+
+**Policy-Checked Execution** — Typed, hash-bound execution requests inspected
+against trusted policy before a portable process backend launches them. The
+current backend scrubs environment state and bounds time/output, but is not a
+security sandbox.
+
 ## Professional/project docs
 
 - [Executive Summary](docs/EXECUTIVE_SUMMARY.md)
 - [Lineage](docs/LINEAGE.md)
 - [Setup Guide](docs/SETUP_GUIDE.md)
 - [Extension Authoring](docs/EXTENSION_AUTHORING.md)
+- [Autonomous Optimization Protocol](docs/OPTIMIZATION_PROTOCOL.md)
+- [Policy-Checked Execution](docs/EXECUTION_BROKER.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
 - [Release Process](RELEASE.md)
@@ -103,6 +114,7 @@ cross-agent coordination.
 src/afs/
 ├── cli/              # 30+ CLI command groups
 ├── agents/           # optional background agents + supervisor
+├── execution/        # typed policy checks + bounded process backend
 ├── mcp_server.py     # MCP prompts/tools/resources for external clients
 ├── context_index.py  # SQLite-backed context indexing and search
 ├── context_pack.py   # Token-budgeted context packs with caching
@@ -115,6 +127,7 @@ src/afs/
 ├── training/         # Generic dataset/run/eval/feedback primitives
 ├── sources/          # Provider-neutral context source interfaces
 ├── mcp/              # MCP extension registry and shared schemas
+├── protocols/        # Versioned, language-neutral JSON Schema contracts
 └── ...
 ```
 
@@ -132,6 +145,20 @@ afs sources sync --provider NAME      # Preview provider records into .context/i
 afs context diff                      # Changes since last session
 afs session pack --model gemini       # Token-budgeted context export
 ```
+
+### Execution & Verification
+
+```bash
+afs execution inspect --request request.json --allowed-root "$PWD" \
+  --allowed-executable python3 --json
+afs verify plan --cwd "$PWD" --json   # Inspect selected structured checks
+afs verify run --cwd "$PWD" --json    # Run checks through the broker
+```
+
+Execution inspection never launches the request, and AFS intentionally exposes
+no generic execution CLI. Executable permission is explicit; omitting
+`--allowed-executable` returns a blocked inspection. See [Policy-Checked
+Execution](docs/EXECUTION_BROKER.md) for the typed Python API and backend limits.
 
 ### Agents
 
@@ -252,8 +279,20 @@ See [docs/MCP_SERVER.md](docs/MCP_SERVER.md) for configuration and tool referenc
 | `history-memory` | Consolidate event history into durable memory |
 | `context-audit` | Audit contexts for missing directories |
 | `context-inventory` | Inventory contexts and mount counts |
+| `index-rebuild` | Refresh the knowledge/memory SQLite index after source changes |
+| `skills-mine` | Mine repeated successful traces into reviewable skill candidates |
+| `morning-briefing` | Write a network-free daily digest to the configured scratchpad |
 | `scribe-draft` | Draft responses via configured chat model |
 | `researcher` | Research agent with structured output |
+
+When the active profile has no `agent_configs`, the supervisor supplies a
+conservative four-agent default set. It performs a network-free daily context
+audit, watches the configured knowledge/memory roots, mines skills weekly, and
+writes a daily briefing. Existing custom agent lists are never augmented.
+Disable defaults with `[agents] default_set = false` or
+`AFS_DEFAULT_AGENTS=off`. Starting the supervisor remains explicit.
+The audit does not modify workspace source files, but supervisor snapshots and
+index-health reads may initialize SQLite metadata inside the configured context.
 
 ## Gemini Integration
 
@@ -309,6 +348,14 @@ include_content = true
 [hooks]
 session_start = ["echo 'session started'"]
 ```
+
+`skill_roots` are an instruction trust boundary: task-matched `SKILL.md`
+bodies can enter generated system prompts. Configure only roots whose content
+you trust. AFS delivers at most three bodies, capped at 2,000 characters each
+and 6,000 characters in aggregate; additional matches remain metadata-only.
+Skill files over 64,000 characters, names over 256 characters, or metadata
+lists over 16 items of 256 characters each are rejected during discovery so
+enforcement and verification rules are never silently clipped.
 
 ## Extensions
 

@@ -377,6 +377,7 @@ See `docs/JOURNAL_AGENT.md` for full argument reference and JSON output shape.
 ```bash
 ./scripts/afs session bootstrap
 ./scripts/afs session bootstrap --json
+./scripts/afs session bootstrap --skills-prompt "review this Python refactor"
 ./scripts/afs session pack
 ./scripts/afs session pack "sqlite indexing" --model gemini
 ./scripts/afs session pack "sqlite indexing" --model gemini --workflow scan_fast --task "Find the three most relevant SQLite files"
@@ -395,6 +396,8 @@ See `docs/JOURNAL_AGENT.md` for full argument reference and JSON output shape.
 - work-assistant people, activity, and pending approval-gated external writes
 - recent `hivemind/` messages
 - latest durable memory summary
+- bounded bodies for skills matched by `--skills-prompt`, or by the current
+  handoff, active missions, and open tasks when no explicit focus is supplied
 
 It also refreshes:
 
@@ -469,7 +472,9 @@ fills in `--client`, `--session-id`, `--payload-file`, `--cwd`, and the current
 also export `AFS_SESSION_SYSTEM_PROMPT_*` and, by default, wire the prompt
 artifact into the native client entrypoint when one exists: Codex via
 `-c model_instructions_file=...`, Claude via `--append-system-prompt-file`,
-and Gemini via `GEMINI_SYSTEM_MD`. Set `AFS_CLIENT_NATIVE_PROMPT=0` or
+and Gemini/Antigravity via `GEMINI_SYSTEM_MD`. Hook-only host integrations
+receive a compact pointer plus a 1,000-character top-skill excerpt. Set
+`AFS_CLIENT_NATIVE_PROMPT=0` or
 `AFS_<CLIENT>_NATIVE_PROMPT=0` to disable that handoff. They also accept
 `--prompt`, `--prompt-file`, and `--turn-id`; when present, they emit
 `user_prompt_submit`, `turn_started`, and `turn_completed` / `turn_failed`
@@ -487,6 +492,12 @@ around the client process.
 - `work_communication`
 - `notes`
 
+Prepared sessions match skills against `--skills-prompt`, then `--task`, then
+`--query`. Match records and generated system prompts may include bodies for
+the first three skills, bounded to 2,000 characters per body and 6,000 total.
+Compact enforcement and verification rules remain a higher-priority prompt
+section so a small token budget sheds bodies before rules.
+
 `afs-client-session` exports the same follow-up hints as:
 
 - `AFS_SESSION_QUERY_HINT`
@@ -503,6 +514,65 @@ when opted in with `AFS_CLIENT_SEED_JOBS=1`, a client-specific
 maintenance jobs with daily dedupe keys and skips existing open jobs. Wrappers
 still print the agent job inbox command at startup so completed background
 output has an obvious review path.
+
+## Optimization Evidence
+
+```bash
+./scripts/afs optimize decide \
+  --baseline examples/optimization_gate/baseline.json \
+  --candidate examples/optimization_gate/candidate.json \
+  --policy examples/optimization_gate/policy.json \
+  --json
+
+./scripts/afs schema show v1/optimization/evaluation
+./scripts/afs schema show v1/optimization/policy
+./scripts/afs schema show v1/optimization/decision
+```
+
+`optimize decide` is a pure evidence comparator. It never executes, writes,
+activates, or promotes a candidate. Exit codes are `0` for
+`eligible_for_human_review`, `1` for `rejected`, `2` for invalid input, `3`
+for `inconclusive`, and `4` for an internal gate error (not an evidence
+verdict). See `docs/OPTIMIZATION_PROTOCOL.md` for the versioned contracts and
+safety boundary.
+
+## Policy-Checked Execution
+
+```bash
+./scripts/afs execution inspect \
+  --request ./request.json \
+  --allowed-root "$PWD" \
+  --allowed-executable python3 \
+  --json
+
+./scripts/afs schema show v1/execution/request
+./scripts/afs schema show v1/execution/inspection
+./scripts/afs schema show v1/execution/record
+```
+
+`execution inspect` validates and resolves a typed request against trusted
+policy but never executes it. Exit codes are `0` when allowed, `2` for invalid
+input, and `3` when blocked. AFS intentionally exposes no generic execution CLI;
+trusted Python callers use `execute_checked(...)`. The portable backend
+supports only `isolation=process` with `network=inherit` and fails closed for
+unsupported sandbox or network restrictions. Omitted executable permission also
+blocks; pass repeated `--allowed-executable` and `--allowed-env` options to
+construct the trusted read-only inspection policy. See
+`docs/EXECUTION_BROKER.md`.
+
+## Verification
+
+```bash
+./scripts/afs verify plan --cwd "$PWD" --json
+./scripts/afs verify run --cwd "$PWD" --json
+./scripts/afs verify run --cwd "$PWD" --allow-legacy-shell
+```
+
+Structured verification `executions` use argv arrays and run through the
+policy-checked broker. String `commands` are deprecated shell input and blocked
+unless configuration or the explicit CLI flag enables the migration path.
+Warnings go to stderr so `--json` stdout remains machine-readable. Legacy shell
+verification commands are scheduled for removal in AFS `0.4.0`.
 
 ## Training
 
@@ -797,6 +867,14 @@ If you have profile-driven background agents with `auto_start`, `schedule`, or
 ./scripts/afs services start agent-supervisor
 ./scripts/afs services start history-memory
 ```
+
+Profiles with an empty `agent_configs` list receive a conservative default set:
+a network-free daily context audit, configured knowledge/memory index refresh,
+weekly skill mining, and a daily scratchpad briefing. Existing custom lists are
+not augmented. Disable the set with `[agents] default_set = false` or
+`AFS_DEFAULT_AGENTS=off`. `daily` is an elapsed interval from the first run,
+not a wall-clock morning schedule, and starting the supervisor remains an
+explicit operator action.
 
 The supervisor stores state under
 `.context/scratchpad/afs_agents/supervisor/` by default, so repo- or

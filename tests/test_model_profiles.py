@@ -19,6 +19,6 @@ def test_resolve_modern_model_profiles() -> None:
 
 
 def test_hcode_profile_is_provider_neutral() -> None:
-    profile = profile_for_client_model("hcode", "hcode")
+    profile = profile_for_client_model("hcode", "generic")
     assert profile.family == "hcode"
     assert "provider-neutral" in " ".join(profile.notes)

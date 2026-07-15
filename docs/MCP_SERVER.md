@@ -180,7 +180,7 @@ In Antigravity, open `MCP Servers -> Manage MCP Servers -> View raw config`, the
 ## Tools
 
 Default `tools/list` is intentionally tiny. It exposes only the core context
-bridge; everything else should come from prompts, CLI hints, or an explicit
+and skill bridge; everything else should come from prompts, CLI hints, or an explicit
 full-catalog/debug launch:
 
 - `context.status`
@@ -188,10 +188,23 @@ full-catalog/debug launch:
 - `context.read`
 - `context.write`
 - `context.list`
+- `skill.match`
+- `skill.read`
+
+`skill.match` ranks configured, profile-eligible skills against a task prompt.
+Prompts are capped at 8,000 characters and `top_k` must be from 1 through 10.
+Bodies are opt-in; when requested, at most three bodies are returned, each body
+is capped at 2,000 characters, and the combined body budget is 6,000
+characters. `skill.read` resolves a skill by name only from configured skill
+roots and returns at most 2,000 characters of its instruction body. Both tools
+report truncation explicitly. Discovery rejects skill files over 64,000
+characters, names over 256 characters, and metadata lists over 16 entries of
+256 characters each, so safety metadata is not silently clipped.
 
 When `AFS_MCP_TOOL_NAME_STYLE=claude` is set, these are advertised as
 `context_status`, `context_query`, `context_read`, `context_write`, and
-`context_list` to satisfy Claude's stricter tool-name schema. Calls using
+`context_list`, plus `skill_match` and `skill_read`, to satisfy Claude's
+stricter tool-name schema. Calls using
 either the underscore aliases or canonical dotted names are accepted.
 
 `afs.session.bootstrap`, `afs.session.pack`, and `afs.scratchpad.review` remain
@@ -296,7 +309,11 @@ Gemini-facing MCP resources:
 `afs.session.bootstrap` is the recommended first call in a new session. It
 packages health, cheap codebase orientation, drift, scratchpad notes, task
 queue state, recent hivemind messages, and the latest durable memory summary
-into one startup packet.
+into one startup packet. Its optional `skills_prompt` and `skills_top_k`
+arguments select bounded skill bodies explicitly. When no prompt is supplied,
+bootstrap uses a bounded continuation signal from handoff next steps, active
+missions, and open tasks; that untrusted state selects only instructions from
+configured skill roots and is not itself treated as policy.
 
 `afs.context.overview` now includes both mount structure and a cheap codebase
 summary. When callers pass `path`/`project_path`, it can also summarize a raw
@@ -329,6 +346,17 @@ workflows. Built-in names currently include:
 - `edit-intent`
 - `verification-summary`
 - `handoff-summary`
+
+Versioned protocol schemas are also exposed through the same resource surface:
+
+- `v1/optimization/evaluation`, `v1/optimization/policy`, and
+  `v1/optimization/decision`
+- `v1/execution/request`, `v1/execution/inspection`, and
+  `v1/execution/record`
+
+For example, an MCP client can read
+`afs://schemas/v1/execution/request`. Execution schemas describe portable
+request and audit records; reading or validating one never launches a process.
 
 These resources return `application/schema+json` so Gemini or other MCP clients
 can request a tiny output contract before asking for a structured response.
@@ -372,7 +400,15 @@ Legacy tool-only registration still works:
 [mcp_tools]
 module = "workspace_adapter.mcp_tools"
 factory = "register_mcp_tools"
+# Optional. Default is "full"; "slim" opts inherited tools into default tools/list.
+catalog = "slim"
 ```
+
+The `[mcp_tools].catalog` default applies only to that tool-only factory.
+Per-tool dictionaries may set `catalog = "slim"` or `catalog = "full"` to
+override it. Tools from `[mcp_server]` default to `"full"` and can opt in only
+per tool. Invalid catalog values reject the affected extension surface instead
+of making it discoverable accidentally.
 
 New server-surface registration can contribute tools, resources, and prompts
 from one factory:

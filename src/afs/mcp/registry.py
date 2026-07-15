@@ -24,6 +24,8 @@ CORE_PROMPT_NAMES = {
     "afs.workflow.structured",
 }
 
+MCP_TOOL_CATALOG_VALUES = frozenset({"", "slim", "full"})
+
 
 @dataclass(frozen=True)
 class MCPToolDefinition:
@@ -36,6 +38,15 @@ class MCPToolDefinition:
     concurrent_safe: bool = False
     pre_hook: Callable[[dict[str, Any], Any], dict[str, Any]] | None = None
     post_hook: Callable[[dict[str, Any], dict[str, Any], Any], dict[str, Any]] | None = None
+    # Empty means "inherit" while an extension contribution is normalized;
+    # outside an extension-level default it remains full-catalog-only.
+    catalog: str = ""
+
+    def __post_init__(self) -> None:
+        if self.catalog not in MCP_TOOL_CATALOG_VALUES:
+            raise ValueError(
+                "MCP tool catalog must be one of: '', 'full', 'slim'"
+            )
 
     def to_spec(self) -> dict[str, Any]:
         return {

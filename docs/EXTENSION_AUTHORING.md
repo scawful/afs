@@ -4,7 +4,10 @@ Extensions let teams add domain behavior without forking core AFS. Use them for 
 
 ## Contract status
 
-AFS `0.2.x` treats the manifest format as a **versioned pre-1.0 contract**. Add `schema_version = "0.1"` to new manifests so future validators can distinguish old and new layouts.
+AFS treats the manifest format as a **versioned pre-1.0 contract**. Add
+`api_version = 1` to new manifests. Existing `schema_version = "0.1"`
+manifests remain compatible, but new manifests should use the integer API
+version.
 
 Core promises for `0.2.x`:
 
@@ -29,7 +32,7 @@ afs_example/
 `extension.toml`:
 
 ```toml
-schema_version = "0.1"
+api_version = 1
 name = "afs_example"
 description = "Example AFS extension"
 
@@ -76,6 +79,8 @@ Tool-only manifest:
 [mcp_tools]
 module = "afs_example.mcp_tools"
 factory = "register_mcp_tools"
+# Optional; omitted tools inherit this value. The default is "full".
+catalog = "slim"
 ```
 
 Broader MCP manifest:
@@ -92,6 +97,15 @@ A tool factory returns dictionaries with:
 - `description`
 - `inputSchema` or `input_schema`
 - `handler`
+- optional `catalog` (`"slim"` or `"full"`)
+
+Catalog exposure is separate from call-time permission. By default extension
+tools are full-catalog-only. `[mcp_tools].catalog = "slim"` opts that factory's
+tools into the default `tools/list`, while a per-tool `catalog = "full"` can opt
+one tool back out. The manifest default does not apply to `[mcp_server]` or
+profile-contributed tools; those must opt in per tool. Unknown catalog values
+reject the manifest or MCP contribution rather than falling back to `"full"`
+or `"slim"` silently.
 
 Avoid overriding core names. Prefer extension-prefixed names such as `example.lookup` or `company.ticket.search`.
 

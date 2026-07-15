@@ -8,7 +8,7 @@ from pathlib import Path
 import afs.cli.claude as claude_cli
 from afs.cli.claude import claude_hook_command
 from afs.manager import AFSManager
-from afs.schema import AFSConfig, GeneralConfig
+from afs.schema import AFSConfig, GeneralConfig, ProfileConfig, ProfilesConfig
 
 
 def _workspace(tmp_path: Path):
@@ -66,6 +66,41 @@ def test_hook_raw_mode_emits_plain_injection(tmp_path, monkeypatch, capsys) -> N
     # Raw mode: the injection block itself, not wrapped in Claude hook JSON.
     assert out.lstrip().startswith("## Session Context")
     assert "hookSpecificOutput" not in out
+
+
+def test_hook_uses_wrapper_skill_prompt_with_resolved_manager_profile(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    context_root = tmp_path / ".context"
+    skill_root = tmp_path / "trusted-skills"
+    skill = skill_root / "hook-profile" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: hook-profile\ntriggers: [hookprofiletoken]\n---\n\n"
+        "Instructions from the explicitly resolved hook profile.\n",
+        encoding="utf-8",
+    )
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            profiles=ProfilesConfig(
+                active_profile="default",
+                profiles={"default": ProfileConfig(skill_roots=[skill_root])},
+            ),
+        )
+    )
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path, context_root=context_root)
+    _wire(monkeypatch, manager, context_root, project_path)
+    _feed_stdin(monkeypatch, {"hook_event_name": "SessionStart", "cwd": str(project_path)})
+    monkeypatch.setenv("AFS_SESSION_SKILLS_PROMPT", "hookprofiletoken")
+    monkeypatch.setenv("AFS_SESSION_SKILLS_MATCH_ENABLED", "1")
+
+    assert claude_hook_command(_args(raw=True, config=str(tmp_path / "custom.toml"))) == 0
+    output = capsys.readouterr().out
+    assert "## Matched Skill Instructions" in output
+    assert "Instructions from the explicitly resolved hook profile." in output
 
 
 def test_hook_user_prompt_submit_injects_contract_on_comms(tmp_path, monkeypatch, capsys) -> None:

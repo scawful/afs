@@ -60,6 +60,43 @@ Primary modules:
 - `src/afs/cli/`
 - `src/afs/mcp_server.py`
 
+### 5. Policy-Checked Execution Layer
+
+- Immutable requests separate untrusted command intent from trusted execution
+  policy.
+- A pure inspection step resolves the executable and working directory, checks
+  environment and backend permissions, and produces a deterministic request
+  hash without launching a process.
+- The portable backend re-inspects immediately before spawn, uses structured
+  argv by default, bounds time and output, and emits redacted audit records.
+- The current backend supports process isolation with inherited networking. It
+  fails closed for sandbox, container, or network-deny requests.
+
+Primary modules:
+
+- `src/afs/execution/`
+- `src/afs/protocols/execution/`
+- `src/afs/cli/execution.py`
+
+See `docs/EXECUTION_BROKER.md`.
+
+### 6. Optimization Evidence Layer
+
+- Versioned JSON Schema records define candidate evaluation, policy, and
+  decision contracts independently of Python.
+- A pure Pareto-style gate compares immutable evidence and returns only a
+  review recommendation.
+- Candidate generation, execution, activation, and rollback are separate trust
+  boundaries; core does not treat an LLM proposal as authority.
+
+Primary modules:
+
+- `src/afs/protocols/optimization/`
+- `src/afs/optimization/`
+- `src/afs/cli/optimize.py`
+
+See `docs/OPTIMIZATION_PROTOCOL.md`.
+
 ## Extensibility Model
 
 AFS extension points are explicit:

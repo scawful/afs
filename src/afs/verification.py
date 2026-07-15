@@ -4,16 +4,43 @@ from __future__ import annotations
 
 import shlex
 import shutil
-import subprocess
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .execution import (
+    ArgvCommand,
+    ExecutionPolicy,
+    ExecutionRequest,
+    LegacyShellCommand,
+    execute_checked,
+)
 from .operator_digests import digest_operator_output
-from .schema import AFSConfig, VerificationCheckConfig, VerificationProfileConfig
+from .protocols.canonical_json import sha256_canonical_json
+from .schema import (
+    AFSConfig,
+    VerificationCheckConfig,
+    VerificationExecutionConfig,
+    VerificationProfileConfig,
+)
 
 _PYTHON_SUFFIXES = {".py", ".pyi"}
 _TS_SUFFIXES = {".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"}
 _CPP_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
+_REDACTED = "<redacted>"
+_REDACTED_LEGACY_SHELL = "<redacted legacy shell command>"
+
+
+def verification_item_id(check_name: str, kind: str, item_index: int) -> str:
+    """Return a stable, non-secret identity for one planned verification item."""
+    digest = sha256_canonical_json(
+        {
+            "check_name": check_name,
+            "item_index": item_index,
+            "kind": kind,
+            "version": 1,
+        }
+    )
+    return f"verification-item-v1:{digest}"
 
 
 def _normalize_rel_path(value: str) -> str:
@@ -54,19 +81,124 @@ def _path_matches(path: str, patterns: list[str]) -> bool:
     return False
 
 
-def _run_git(repo_root: Path, *args: str) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_root), *args],
-            capture_output=True,
-            text=True,
-            check=False,
+def redact_verification_argv(argv: Any, indices: Any) -> list[str]:
+    """Return a best-effort redacted argv suitable for output and persistence."""
+    if not isinstance(argv, (list, tuple)):
+        return []
+    redacted = [str(argument) for argument in argv]
+    if indices is None or indices == [] or indices == ():
+        return redacted
+    if (
+        not isinstance(indices, (list, tuple))
+        or any(
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or index < 0
+            or index >= len(redacted)
+            for index in indices
         )
-    except OSError:
+        or len(set(indices)) != len(indices)
+    ):
+        return [_REDACTED for _argument in redacted]
+    for index in indices:
+        redacted[index] = _REDACTED
+    return redacted
+
+
+def redact_legacy_verification_command(command: Any) -> str:
+    """Hide opaque shell text while preserving that a legacy command exists."""
+    return _REDACTED_LEGACY_SHELL if str(command or "").strip() else ""
+
+
+def redact_verification_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    """Return the verification plan projection safe for prompts and artifacts."""
+    redacted_plan = dict(plan)
+    selected_checks: list[dict[str, Any]] = []
+    expected: list[str] = []
+    allow_legacy_shell = bool(plan.get("allow_legacy_shell", False))
+    for raw_check in plan.get("selected_checks") or []:
+        if not isinstance(raw_check, dict):
+            continue
+        check = dict(raw_check)
+        executions: list[dict[str, Any]] = []
+        for raw_execution in check.get("executions") or []:
+            if not isinstance(raw_execution, dict):
+                continue
+            execution = dict(raw_execution)
+            execution["argv"] = redact_verification_argv(
+                execution.get("argv"), execution.get("redact_argv_indices")
+            )
+            raw_env = execution.get("env")
+            execution["env"] = (
+                {str(key): _REDACTED for key in raw_env}
+                if isinstance(raw_env, dict)
+                else {}
+            )
+            executions.append(execution)
+        check["executions"] = executions
+        check["commands"] = [
+            redact_legacy_verification_command(command)
+            for command in check.get("commands") or []
+            if str(command or "").strip()
+        ]
+        selected_checks.append(check)
+        name = str(check.get("name", "")).strip()
+        for execution in executions:
+            expected.append(
+                f"{name}: {shlex.join(execution.get('argv') or [])}"
+            )
+        legacy_status = (
+            "deprecated; explicit opt-in enabled"
+            if allow_legacy_shell
+            else "deprecated; blocked; explicit opt-in required"
+        )
+        for command in check["commands"]:
+            expected.append(f"{name}: {command} (legacy shell; {legacy_status})")
+        if not executions and not check["commands"] and name:
+            expected.append(f"{name}: review changed scope")
+    redacted_plan["selected_checks"] = selected_checks
+    redacted_plan["expected"] = expected
+    return redacted_plan
+
+
+class VerificationDiscoveryError(RuntimeError):
+    """Raised when verification scope cannot be discovered completely."""
+
+
+def _has_git_metadata(start_dir: Path) -> bool:
+    return any(parent.joinpath(".git").exists() for parent in (start_dir, *start_dir.parents))
+
+
+def _run_git(repo_root: Path, *args: str) -> str | None:
+    git = shutil.which("git")
+    if not git:
         return None
-    if result.returncode != 0:
+    try:
+        request = ExecutionRequest(
+            command=ArgvCommand((git, "-C", str(repo_root), *args)),
+            caller="afs.verify",
+            purpose="discover repository verification scope",
+            cwd=repo_root,
+            timeout_seconds=30,
+        )
+        policy = ExecutionPolicy(
+            allowed_cwd_roots=(repo_root,),
+            allowed_executables=frozenset({git}),
+        )
+        record = execute_checked(request, policy)
+    except (TypeError, ValueError):
         return None
-    return result.stdout.strip()
+    if record.outcome != "completed":
+        return None
+    if record.stdout_truncated or record.stderr_truncated:
+        raise VerificationDiscoveryError(
+            "git discovery output exceeded the execution broker limit"
+        )
+    if "\ufffd" in record.stdout:
+        raise VerificationDiscoveryError(
+            "git discovery output could not be decoded completely as UTF-8"
+        )
+    return record.stdout
 
 
 def discover_git_repo_root(start_dir: str | Path | None = None) -> Path | None:
@@ -74,8 +206,12 @@ def discover_git_repo_root(start_dir: str | Path | None = None) -> Path | None:
     current = Path(start_dir or Path.cwd()).expanduser().resolve()
     output = _run_git(current, "rev-parse", "--show-toplevel")
     if not output:
+        if _has_git_metadata(current):
+            raise VerificationDiscoveryError(
+                "Git metadata is present but repository-root discovery failed"
+            )
         return None
-    return Path(output).expanduser().resolve()
+    return Path(output.strip()).expanduser().resolve()
 
 
 def discover_changed_paths(start_dir: str | Path | None = None) -> list[str]:
@@ -83,23 +219,43 @@ def discover_changed_paths(start_dir: str | Path | None = None) -> list[str]:
     repo_root = discover_git_repo_root(start_dir)
     if repo_root is None:
         return []
-    output = _run_git(repo_root, "status", "--porcelain", "--untracked-files=all")
+    output = _run_git(
+        repo_root,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    )
+    if output is None:
+        raise VerificationDiscoveryError("git status did not complete successfully")
     if not output:
         return []
     changed_paths: list[str] = []
     seen: set[str] = set()
-    for raw_line in output.splitlines():
-        line = raw_line.rstrip()
-        if len(line) < 4:
+    entries = output.split("\x00")
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        index += 1
+        if not entry:
             continue
-        path_text = line[3:]
-        if " -> " in path_text:
-            path_text = path_text.split(" -> ", 1)[1]
-        normalized = _normalize_rel_path(path_text)
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        changed_paths.append(normalized)
+        if len(entry) < 4 or entry[2] != " ":
+            raise VerificationDiscoveryError("git status returned malformed porcelain data")
+        status = entry[:2]
+        path_texts = [entry[3:]]
+        if "R" in status or "C" in status:
+            if index >= len(entries) or not entries[index]:
+                raise VerificationDiscoveryError(
+                    "git status returned an incomplete rename record"
+                )
+            path_texts.append(entries[index])
+            index += 1
+        for path_text in path_texts:
+            normalized = _normalize_rel_path(path_text)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            changed_paths.append(normalized)
     return changed_paths
 
 
@@ -138,36 +294,40 @@ def _build_builtin_checks(
     cpp_paths = [path for path in changed_paths if Path(path).suffix.lower() in _CPP_SUFFIXES]
 
     if python_paths or _has_any_path(repo_root, ["pyproject.toml", "requirements.txt"]):
-        commands: list[str] = []
+        executions: list[VerificationExecutionConfig] = []
         if shutil.which("ruff"):
-            targets = " ".join(shlex.quote(path) for path in python_paths) if python_paths else "."
-            commands.append(f"ruff check {targets}")
+            targets = python_paths if python_paths else ["."]
+            executions.append(VerificationExecutionConfig(argv=["ruff", "check", *targets]))
         if shutil.which("pytest") and (repo_root / "tests").exists():
-            commands.append("pytest -q")
+            executions.append(VerificationExecutionConfig(argv=["pytest", "-q"]))
         if shutil.which("mypy") and _has_any_path(repo_root, ["mypy.ini", "pyproject.toml"]):
-            commands.append("mypy .")
+            executions.append(VerificationExecutionConfig(argv=["mypy", "."]))
         checks.append(
             VerificationCheckConfig(
                 name="builtin-python",
                 description="Auto-detected Python verification.",
                 paths=["**/*.py", "**/*.pyi", "pyproject.toml", "requirements*.txt"],
-                commands=commands,
+                executions=executions,
                 skills=["python-quality"],
             )
         )
 
-    node_runner = ""
+    node_runner: list[str] = []
     if shutil.which("pnpm"):
-        node_runner = "pnpm exec"
+        node_runner = ["pnpm", "exec"]
     elif shutil.which("npm"):
-        node_runner = "npm exec --"
+        node_runner = ["npm", "exec", "--"]
     elif shutil.which("yarn"):
-        node_runner = "yarn"
-    if ts_paths or _has_any_path(repo_root, ["package.json", "tsconfig.json", "tsconfig.base.json"]):
-        commands = []
+        node_runner = ["yarn"]
+    if ts_paths or _has_any_path(
+        repo_root, ["package.json", "tsconfig.json", "tsconfig.base.json"]
+    ):
+        executions = []
         if node_runner:
             if _has_any_path(repo_root, ["tsconfig.json", "tsconfig.base.json"]):
-                commands.append(f"{node_runner} tsc --noEmit")
+                executions.append(
+                    VerificationExecutionConfig(argv=[*node_runner, "tsc", "--noEmit"])
+                )
             if _has_any_path(
                 repo_root,
                 [
@@ -178,37 +338,66 @@ def _build_builtin_checks(
                     "eslint.config.mjs",
                 ],
             ):
-                target = " ".join(shlex.quote(path) for path in ts_paths) if ts_paths else "."
-                commands.append(f"{node_runner} eslint {target}")
+                targets = ts_paths if ts_paths else ["."]
+                executions.append(
+                    VerificationExecutionConfig(argv=[*node_runner, "eslint", *targets])
+                )
             if _has_any_path(repo_root, ["vitest.config.ts", "vitest.config.js", "jest.config.js"]):
-                commands.append(f"{node_runner} vitest run")
+                executions.append(VerificationExecutionConfig(argv=[*node_runner, "vitest", "run"]))
         checks.append(
             VerificationCheckConfig(
                 name="builtin-typescript",
                 description="Auto-detected TypeScript or JavaScript verification.",
-                paths=["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "package.json", "tsconfig*.json"],
-                commands=commands,
+                paths=[
+                    "**/*.ts",
+                    "**/*.tsx",
+                    "**/*.js",
+                    "**/*.jsx",
+                    "package.json",
+                    "tsconfig*.json",
+                ],
+                executions=executions,
                 skills=["typescript-quality"],
             )
         )
 
     if cpp_paths or _has_any_path(repo_root, ["CMakeLists.txt", "compile_commands.json"]):
-        commands = []
-        if shutil.which("clang-tidy") and (repo_root / "compile_commands.json").exists() and cpp_paths:
-            commands.append(
-                "clang-tidy " + " ".join(shlex.quote(path) for path in cpp_paths)
-            )
-        if shutil.which("ctest") and (
-            (repo_root / "CTestTestfile.cmake").exists()
-            or (repo_root / "build" / "CTestTestfile.cmake").exists()
+        executions = []
+        if (
+            shutil.which("clang-tidy")
+            and (repo_root / "compile_commands.json").exists()
+            and cpp_paths
         ):
-            commands.append("ctest --output-on-failure")
+            executions.append(VerificationExecutionConfig(argv=["clang-tidy", *cpp_paths]))
+        if shutil.which("ctest"):
+            if (repo_root / "CTestTestfile.cmake").exists():
+                executions.append(
+                    VerificationExecutionConfig(argv=["ctest", "--output-on-failure"])
+                )
+            elif (repo_root / "build" / "CTestTestfile.cmake").exists():
+                executions.append(
+                    VerificationExecutionConfig(
+                        argv=["ctest", "--output-on-failure"],
+                        cwd="build",
+                    )
+                )
         checks.append(
             VerificationCheckConfig(
                 name="builtin-cpp",
                 description="Auto-detected C or C++ verification.",
-                paths=["**/*.c", "**/*.cc", "**/*.cpp", "**/*.cxx", "**/*.h", "**/*.hh", "**/*.hpp", "**/*.hxx", "CMakeLists.txt", "compile_commands.json"],
-                commands=commands,
+                paths=[
+                    "**/*.c",
+                    "**/*.cc",
+                    "**/*.cpp",
+                    "**/*.cxx",
+                    "**/*.h",
+                    "**/*.hh",
+                    "**/*.hpp",
+                    "**/*.hxx",
+                    "CMakeLists.txt",
+                    "compile_commands.json",
+                ],
+                executions=executions,
                 skills=["cpp-quality"],
             )
         )
@@ -263,6 +452,7 @@ def _collect_selected_checks(
                 "name": check.name,
                 "description": check.description,
                 "required": check.required,
+                "executions": [execution.to_dict() for execution in check.executions],
                 "commands": list(check.commands),
                 "paths": list(check.paths),
                 "matched_by": matched_by,
@@ -334,13 +524,29 @@ def build_verification_plan(
     changed_paths: list[str] | None = None,
     verification_profile: str = "",
     policy_summary: dict[str, Any] | None = None,
+    discovery_error: str = "",
 ) -> dict[str, Any]:
     """Build a repo-aware verification plan from config, git state, and skill matches."""
     resolved_cwd = Path(cwd).expanduser().resolve()
-    repo_root = discover_git_repo_root(resolved_cwd) or resolved_cwd
+    try:
+        repo_root = discover_git_repo_root(resolved_cwd) or resolved_cwd
+    except VerificationDiscoveryError as exc:
+        repo_root = resolved_cwd
+        discovery_error = discovery_error or str(exc)
+    discovered_paths: list[str]
+    if changed_paths is not None:
+        discovered_paths = changed_paths
+    elif discovery_error:
+        discovered_paths = []
+    else:
+        try:
+            discovered_paths = discover_changed_paths(resolved_cwd)
+        except VerificationDiscoveryError as exc:
+            discovered_paths = []
+            discovery_error = str(exc)
     normalized_changed_paths = [
         _normalize_rel_path(path)
-        for path in (changed_paths if changed_paths is not None else discover_changed_paths(resolved_cwd))
+        for path in discovered_paths
         if _normalize_rel_path(path)
     ]
     matched_skill_names = _matched_skill_names(matched_skills)
@@ -349,10 +555,24 @@ def build_verification_plan(
     configured_checks: list[VerificationCheckConfig] = []
     if config.verification.enabled and selected_profile:
         configured_checks = _iter_profile_checks(config.verification.profiles, selected_profile)
-    if not configured_checks and config.verification.enabled and config.verification.fallback_to_builtin:
+    if (
+        not configured_checks
+        and config.verification.enabled
+        and config.verification.fallback_to_builtin
+    ):
         configured_checks = _build_builtin_checks(repo_root, normalized_changed_paths)
         if configured_checks and not selected_profile:
             selected_profile = "builtin"
+
+    check_names = [check.name for check in configured_checks if check.name]
+    duplicate_check_names = sorted(
+        name for name in set(check_names) if check_names.count(name) > 1
+    )
+    if duplicate_check_names:
+        raise ValueError(
+            "verification check names must be unique after profile expansion: "
+            + ", ".join(duplicate_check_names)
+        )
 
     selected_checks = _collect_selected_checks(
         configured_checks,
@@ -361,15 +581,87 @@ def build_verification_plan(
         tool_profile=tool_profile,
         matched_skills=matched_skill_names,
     )
+    if discovery_error:
+        selected_names = {
+            str(check.get("name", "")).strip() for check in selected_checks
+        }
+        all_checks = _collect_selected_checks(
+            configured_checks,
+            changed_paths=normalized_changed_paths,
+            workflow=workflow,
+            tool_profile=tool_profile,
+            matched_skills=matched_skill_names,
+        )
+        for config_check in configured_checks:
+            if not config_check.name or config_check.name in selected_names:
+                continue
+            all_checks.append(
+                {
+                    "name": config_check.name,
+                    "description": config_check.description,
+                    "required": config_check.required,
+                    "executions": [
+                        execution.to_dict() for execution in config_check.executions
+                    ],
+                    "commands": list(config_check.commands),
+                    "paths": list(config_check.paths),
+                    "matched_by": ["discovery_incomplete"],
+                    "matched_paths": [],
+                    "skills": list(config_check.skills),
+                }
+            )
+        selected_checks = all_checks
+
+    for check in selected_checks:
+        check_name = str(check.get("name", "")).strip()
+        check["execution_item_ids"] = [
+            verification_item_id(check_name, "execution", item_index)
+            for item_index, _execution in enumerate(check.get("executions") or [])
+        ]
+        check["command_item_ids"] = [
+            verification_item_id(check_name, "legacy", item_index)
+            for item_index, _command in enumerate(check.get("commands") or [])
+        ]
+        if not check["execution_item_ids"] and not check["command_item_ids"]:
+            check["review_item_id"] = verification_item_id(
+                check_name, "review", 0
+            )
 
     expected: list[str] = []
+    legacy_command_count = 0
+    structured_execution_count = 0
     for check in selected_checks:
+        executions = list(check.get("executions") or [])
         commands = list(check.get("commands") or [])
-        if commands:
-            for command in commands:
-                expected.append(f"{check['name']}: {command}")
-        else:
+        structured_execution_count += len(executions)
+        legacy_command_count += len(commands)
+        for execution in executions:
+            argv = execution.get("argv") if isinstance(execution, dict) else []
+            expected.append(f"{check['name']}: {shlex.join([str(arg) for arg in argv or []])}")
+        legacy_status = (
+            "deprecated; explicit opt-in enabled"
+            if config.verification.allow_legacy_shell
+            else "deprecated; blocked; explicit opt-in required"
+        )
+        for command in commands:
+            expected.append(f"{check['name']}: {command} (legacy shell; {legacy_status})")
+        if not executions and not commands:
             expected.append(f"{check['name']}: review changed scope")
+
+    deprecations: list[dict[str, Any]] = []
+    if legacy_command_count:
+        deprecations.append(
+            {
+                "kind": "legacy_shell",
+                "count": legacy_command_count,
+                "removal_version": "0.4.0",
+                "opt_in_required": True,
+                "message": (
+                    "Legacy verification commands are deprecated and require "
+                    "allow_legacy_shell or --allow-legacy-shell."
+                ),
+            }
+        )
 
     return {
         "available": True,
@@ -378,14 +670,173 @@ def build_verification_plan(
         "workflow": workflow,
         "tool_profile": tool_profile,
         "changed_paths": normalized_changed_paths,
+        "discovery_complete": not bool(discovery_error),
+        "discovery_error": discovery_error,
         "inferred_languages": _infer_languages(normalized_changed_paths),
         "selected_checks": selected_checks,
         "required": any(bool(check.get("required")) for check in selected_checks),
-        "command_count": sum(len(list(check.get("commands") or [])) for check in selected_checks),
+        "allow_legacy_shell": config.verification.allow_legacy_shell,
+        "command_count": structured_execution_count + legacy_command_count,
+        "structured_execution_count": structured_execution_count,
+        "legacy_command_count": legacy_command_count,
+        "deprecations": deprecations,
         "expected": expected,
         "policy_risk_count": len(list((policy_summary or {}).get("matched_risks") or [])),
         "policy_violation_count": len(list((policy_summary or {}).get("anti_pattern_hits") or [])),
     }
+
+
+def _blocked_verification_result(
+    *,
+    check_name: str,
+    command: str,
+    execution_kind: str,
+    reason: str,
+) -> dict[str, Any]:
+    summary = f"{check_name}: {reason}"
+    return {
+        "check_name": check_name,
+        "command": command,
+        "execution_kind": execution_kind,
+        "status": "blocked",
+        "returncode": None,
+        "stdout": "",
+        "stderr": "",
+        "digest": {
+            "kind": "generic",
+            "summary": reason,
+            "highlights": [reason],
+            "truncated": False,
+        },
+        "summary": summary,
+        "blocked_reason": reason,
+        "audit_command": command,
+        "redacted_argv": [],
+    }
+
+
+def _result_from_execution_record(
+    *,
+    check_name: str,
+    command: str,
+    execution_kind: str,
+    record: Any,
+    max_digest_items: int,
+) -> dict[str, Any]:
+    combined_output = (record.stdout or "") + (record.stderr or "")
+    digest = digest_operator_output(combined_output, kind="auto", max_items=max_digest_items)
+    if record.outcome == "completed":
+        status = "passed"
+    elif record.outcome == "blocked":
+        status = "blocked"
+    else:
+        status = "failed"
+    summary = f"{check_name}: {digest.get('summary', status)}"
+    if record.reasons and not combined_output.strip():
+        reason_summary = "; ".join(record.reasons)
+        digest = dict(digest)
+        digest["summary"] = reason_summary
+        digest["highlights"] = list(record.reasons)
+        summary = f"{check_name}: {reason_summary}"
+    audit_command = shlex.join(record.redacted_argv)
+    return {
+        "check_name": check_name,
+        "command": command,
+        "execution_kind": execution_kind,
+        "status": status,
+        "outcome": record.outcome,
+        "returncode": record.returncode,
+        "stdout": record.stdout,
+        "stderr": record.stderr,
+        "digest": digest,
+        "summary": summary,
+        "request_hash": str(record.request_sha256),
+        "resolved_executable": str(record.resolved_executable or ""),
+        "duration_seconds": record.duration_seconds,
+        "timed_out": record.outcome == "timed_out",
+        "stdout_truncated": record.stdout_truncated,
+        "stderr_truncated": record.stderr_truncated,
+        "reason_codes": list(record.reason_codes),
+        "reasons": list(record.reasons),
+        "audit_command": audit_command,
+        "redacted_argv": list(record.redacted_argv),
+    }
+
+
+def run_verification_execution(
+    *,
+    repo_root: str | Path,
+    check_name: str,
+    execution: VerificationExecutionConfig | dict[str, Any],
+    max_digest_items: int = 5,
+) -> dict[str, Any]:
+    """Execute a structured verification argv through the checked broker."""
+    resolved_root = Path(repo_root).expanduser().resolve()
+    try:
+        config = (
+            execution
+            if isinstance(execution, VerificationExecutionConfig)
+            else VerificationExecutionConfig.from_dict(execution)
+        )
+    except (TypeError, ValueError) as exc:
+        raw_execution = execution if isinstance(execution, dict) else {}
+        command = shlex.join(
+            redact_verification_argv(
+                raw_execution.get("argv"),
+                raw_execution.get("redact_argv_indices"),
+            )
+        )
+        return _blocked_verification_result(
+            check_name=check_name,
+            command=command,
+            execution_kind="structured",
+            reason=f"invalid structured verification execution: {exc}",
+        )
+    display_argv = redact_verification_argv(config.argv, config.redact_argv_indices)
+    command = shlex.join(display_argv)
+    if not config.argv:
+        return _blocked_verification_result(
+            check_name=check_name,
+            command=command,
+            execution_kind="structured",
+            reason="structured verification execution requires a non-empty argv",
+        )
+    requested_cwd = Path(config.cwd).expanduser() if config.cwd else resolved_root
+    if not requested_cwd.is_absolute():
+        requested_cwd = resolved_root / requested_cwd
+    allowed_env = frozenset([*config.inherit_env, *config.env.keys()])
+    try:
+        request = ExecutionRequest(
+            command=ArgvCommand(tuple(config.argv)),
+            caller="afs.verify",
+            purpose=f"verification check {check_name}",
+            cwd=requested_cwd,
+            inherit_env=tuple(config.inherit_env),
+            set_env=config.env,
+            timeout_seconds=config.timeout_seconds,
+            max_output_bytes=config.max_output_bytes,
+            redact_argv_indices=tuple(config.redact_argv_indices),
+        )
+        policy = ExecutionPolicy(
+            allowed_cwd_roots=(resolved_root,),
+            allowed_env=allowed_env,
+            allowed_executables=frozenset({config.argv[0]}),
+        )
+        record = execute_checked(request, policy)
+    except (TypeError, ValueError) as exc:
+        return _blocked_verification_result(
+            check_name=check_name,
+            command=command,
+            execution_kind="structured",
+            reason=f"invalid structured verification execution: {exc}",
+        )
+    return _result_from_execution_record(
+        check_name=check_name,
+        command=command,
+        execution_kind="structured",
+        record=record,
+        max_digest_items=max_digest_items,
+    )
 
 
 def run_verification_command(
@@ -394,27 +845,35 @@ def run_verification_command(
     check_name: str,
     command: str,
     max_digest_items: int = 5,
+    allow_legacy_shell: bool = False,
 ) -> dict[str, Any]:
-    """Execute a verification command and return a compact result payload."""
+    """Execute a deprecated shell verification command through the checked broker."""
     resolved_root = Path(repo_root).expanduser().resolve()
-    result = subprocess.run(
-        ["bash", "-lc", command],
-        cwd=resolved_root,
-        capture_output=True,
-        text=True,
-        check=False,
+    try:
+        request = ExecutionRequest(
+            command=LegacyShellCommand(command),
+            caller="afs.verify",
+            purpose=f"legacy verification check {check_name}",
+            cwd=resolved_root,
+            redact_argv_indices=(2,),
+        )
+        policy = ExecutionPolicy(
+            allowed_cwd_roots=(resolved_root,),
+            allowed_executables=frozenset({shutil.which("bash") or "bash"}),
+            allow_legacy_shell=allow_legacy_shell,
+        )
+        record = execute_checked(request, policy)
+    except (TypeError, ValueError) as exc:
+        return _blocked_verification_result(
+            check_name=check_name,
+            command="bash -lc '<redacted>'",
+            execution_kind="legacy_shell",
+            reason=f"invalid legacy verification command: {exc}",
+        )
+    return _result_from_execution_record(
+        check_name=check_name,
+        command=shlex.join(record.redacted_argv),
+        execution_kind="legacy_shell",
+        record=record,
+        max_digest_items=max_digest_items,
     )
-    combined_output = (result.stdout or "") + (result.stderr or "")
-    digest = digest_operator_output(combined_output, kind="auto", max_items=max_digest_items)
-    status = "passed" if result.returncode == 0 else "failed"
-    summary = f"{check_name}: {digest.get('summary', status)}"
-    return {
-        "check_name": check_name,
-        "command": command,
-        "status": status,
-        "returncode": result.returncode,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-        "digest": digest,
-        "summary": summary,
-    }
