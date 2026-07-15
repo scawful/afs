@@ -32,6 +32,7 @@ from afs.session_harness import (
     _verification_record_from_event,
     build_client_session_payload,
 )
+from afs.tasks import TaskQueue
 from afs.verification import verification_item_id
 
 
@@ -49,7 +50,9 @@ def _make_manager(tmp_path: Path) -> tuple[AFSManager, Path]:
         "  - Preserve a clear handoff trail for long-running work.\n"
         "verification:\n"
         "  - Verify the harness artifacts and session prompt were written.\n"
-        "---\n",
+        "---\n\n"
+        "# Background Agent Harness\n\n"
+        "Keep progress visible and leave a durable handoff for the next agent.\n",
         encoding="utf-8",
     )
 
@@ -144,11 +147,11 @@ def test_session_prepare_client_command_outputs_artifacts(
             workflow="edit_fast",
             tool_profile="edit_and_verify",
             pack_mode="focused",
-            token_budget=700,
+            token_budget=4000,
             include_content=False,
             max_query_results=4,
             max_embedding_results=2,
-            skills_prompt="background agents harness",
+            skills_prompt=None,
             skills_top_k=5,
             no_session_pack=False,
             no_skills_match=False,
@@ -179,6 +182,17 @@ def test_session_prepare_client_command_outputs_artifacts(
     assert payload["skills"]["matches"][0]["verification"] == [
         "Verify the harness artifacts and session prompt were written.",
     ]
+    expected_body = (
+        "# Background Agent Harness\n\n"
+        "Keep progress visible and leave a durable handoff for the next agent."
+    )
+    assert payload["skills"]["prompt"] == "Improve the harness loop."
+    assert payload["skills"]["matches"][0]["body"] == expected_body
+    assert payload["bootstrap"]["skills"]["matches"][0]["body"] == expected_body
+    persisted_skills = json.loads(
+        Path(payload["skills"]["artifact_paths"]["json"]).read_text(encoding="utf-8")
+    )
+    assert persisted_skills["matches"][0]["body"] == expected_body
     assert payload["prompt"]["artifact_paths"]["text"].endswith("session_system_prompt_codex.txt")
     assert Path(payload["prompt"]["artifact_paths"]["text"]).exists()
     assert payload["prompt"]["artifact_paths"]["json"].endswith("session_system_prompt_codex.json")
@@ -230,6 +244,9 @@ def test_session_prepare_client_command_outputs_artifacts(
     assert payload["repo_policy"]["planning_principles"] == ["keep plans reversible"]
     prompt_text = Path(payload["prompt"]["artifact_paths"]["text"]).read_text(encoding="utf-8")
     assert "## Skill Enforcement" in prompt_text
+    assert "## Skill Instructions" in prompt_text
+    assert prompt_text.count(expected_body) == 1
+    assert "name: agentic-background" not in prompt_text
     assert "- agentic-background: Stream background progress instead of hiding state." in prompt_text
     assert "## Skill Verification" in prompt_text
     assert "## Verification Plan" in prompt_text
@@ -295,6 +312,38 @@ def test_prepared_session_redacts_verification_secrets_from_all_artifacts(
         assert secret not in prompt_text
         assert secret not in persisted_payload
     assert "deprecated; blocked; explicit opt-in required" in prompt_text
+
+
+def test_prepared_session_uses_bootstrap_skill_fallback_without_prompt(
+    tmp_path: Path,
+) -> None:
+    manager, context_root = _make_manager(tmp_path)
+    TaskQueue(context_root).create(
+        "continue the background agents harness",
+        created_by="tester",
+        priority=1,
+    )
+
+    payload = build_client_session_payload(
+        manager,
+        context_root,
+        client="codex",
+        cwd=tmp_path,
+        include_pack=False,
+        skills_prompt="",
+        query="",
+        task="",
+        write_artifacts=True,
+    )
+
+    assert payload["skills"]["prompt_source"] == "session_state"
+    assert payload["skills"]["matches"][0]["name"] == "agentic-background"
+    expected = "Keep progress visible and leave a durable handoff for the next agent."
+    assert expected in payload["skills"]["matches"][0]["body"]
+    prompt_text = Path(payload["prompt"]["artifact_paths"]["text"]).read_text(
+        encoding="utf-8"
+    )
+    assert expected in prompt_text
 
 
 def test_prepared_session_preserves_incomplete_git_discovery(

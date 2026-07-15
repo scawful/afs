@@ -17,11 +17,16 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
   time/output, scrubbed environments, and redacted audit records.
 - Structured verification executions routed through the execution broker.
 - Focused execution-contract CI coverage on Linux, macOS, and Windows.
+- Bounded matched-skill body delivery in session bootstrap and prepared client
+  prompts, with optional CLI and MCP bootstrap focus arguments.
+- Bundled operating skills included in wheel and source distributions.
 
 ### Changed
 
 - Refreshed GitHub Actions dependencies to current Node-runtime-compatible releases.
 - Narrowed CI type checking to the release-critical slice while broader type debt remains tracked in `ROADMAP.md`.
+- Fixed hcode/OpenCode wrappers to request the supported generic session-pack
+  model while retaining their client-specific prompt profile.
 - Deprecated verification string commands; they are blocked by default, require
   an explicit legacy-shell opt-in during migration, and will be removed in
   `0.4.0`.

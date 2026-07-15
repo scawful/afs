@@ -20,7 +20,7 @@ from .profiles import resolve_active_profile
 from .repo_policy import evaluate_repo_policy, load_repo_policy
 from .session_bootstrap import build_session_bootstrap, write_session_bootstrap_artifacts
 from .session_workflows import build_session_execution_profile
-from .skills import discover_skills, resolve_skill_roots, score_skill_relevance
+from .skills import build_skill_matches, resolve_skill_roots
 from .verification import (
     build_structured_guidance,
     build_verification_plan,
@@ -1011,12 +1011,18 @@ def _bootstrap_bundle(
     *,
     client: str,
     write_artifacts: bool,
+    skills_prompt: str = "",
+    skills_top_k: int = 5,
+    include_skills: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     summary = build_session_bootstrap(
         manager,
         context_path,
         agent_name=f"{client}-client",
         record_event=False,
+        skills_prompt=skills_prompt,
+        skills_top_k=skills_top_k,
+        include_skills=include_skills,
     )
     artifact_paths = (
         write_session_bootstrap_artifacts(manager, context_path, summary)
@@ -1030,6 +1036,7 @@ def _bootstrap_bundle(
         "profile": summary["profile"],
         "stale_mounts": list(summary.get("stale_mounts", [])),
         "work_assistant": summary.get("work_assistant", {}),
+        "skills": summary.get("skills", {}),
         "recommended_actions": list(summary.get("recommended_actions", [])),
         "artifact_paths": artifact_paths,
     }
@@ -1110,37 +1117,34 @@ def _skills_summary(
     prompt: str,
     top_k: int,
     write_artifacts: bool,
+    fallback_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile = resolve_active_profile(manager.config)
     roots = resolve_skill_roots(
         list(profile.skill_roots),
         afs_root=os.getenv("AFS_ROOT", "").strip() or None,
     )
-    ranked: list[tuple[int, Any]] = []
-    for skill in discover_skills(roots, profile=profile.name):
-        score = score_skill_relevance(prompt, skill)
-        if score > 0:
-            ranked.append((score, skill))
-    ranked.sort(key=lambda item: item[0], reverse=True)
+    matches = build_skill_matches(
+        prompt,
+        roots,
+        profile=profile.name,
+        top_k=top_k,
+    )
+    prompt_source = "explicit" if prompt.strip() else "none"
+    if not matches and not prompt.strip() and isinstance(fallback_state, dict):
+        fallback_matches = fallback_state.get("matches")
+        if isinstance(fallback_matches, list):
+            matches = [dict(match) for match in fallback_matches if isinstance(match, dict)]
+            prompt_source = str(fallback_state.get("prompt_source") or "session_state")
 
     payload = {
         "available": True,
         "client": client,
         "profile": profile.name,
         "prompt": prompt,
+        "prompt_source": prompt_source,
         "roots": [str(path) for path in roots],
-        "matches": [
-            {
-                "score": score,
-                "name": skill.name,
-                "path": str(skill.path),
-                "triggers": skill.triggers,
-                "requires": skill.requires,
-                "enforcement": skill.enforcement,
-                "verification": skill.verification,
-            }
-            for score, skill in ranked[: max(top_k, 0)]
-        ],
+        "matches": matches,
         "artifact_paths": {},
     }
     if write_artifacts:
@@ -1499,11 +1503,15 @@ def build_client_session_payload(
     """Build a client-ready session payload with reusable artifact paths."""
     resolved_context = context_path.expanduser().resolve()
     resolved_cwd = (cwd or Path.cwd()).expanduser().resolve()
+    skills_focus = skills_prompt.strip() or task.strip() or query.strip()
     bootstrap_state, bootstrap_payload = _bootstrap_bundle(
         manager,
         resolved_context,
         client=client,
         write_artifacts=write_artifacts,
+        skills_prompt=skills_focus if include_skills else "",
+        skills_top_k=skills_top_k,
+        include_skills=include_skills,
     )
     model_profile = profile_for_client_model(client, model).to_dict()
     payload: dict[str, Any] = {
@@ -1552,9 +1560,14 @@ def build_client_session_payload(
             manager,
             resolved_context,
             client=client,
-            prompt=skills_prompt,
+            prompt=skills_focus,
             top_k=skills_top_k,
             write_artifacts=write_artifacts,
+            fallback_state=(
+                bootstrap_state.get("skills")
+                if isinstance(bootstrap_state.get("skills"), dict)
+                else None
+            ),
         )
 
     repo_policy = load_repo_policy(start_dir=resolved_cwd)

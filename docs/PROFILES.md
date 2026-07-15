@@ -43,6 +43,10 @@ user_prompt_submit = []
 task_completed = []
 ```
 
+Treat every configured `skill_roots` entry as an instruction trust grant.
+Matched `SKILL.md` bodies can be injected into bootstrap and client system
+prompts, so extension or shared roots should be reviewed before enabling them.
+
 ## Profile Commands
 
 ```bash

@@ -246,6 +246,7 @@ The CLI equivalent is:
 ```bash
 <afs-root>/scripts/afs session bootstrap
 <afs-root>/scripts/afs session bootstrap --json
+<afs-root>/scripts/afs session bootstrap --skills-prompt "review this Python refactor"
 <afs-root>/scripts/afs session pack
 <afs-root>/scripts/afs session prepare-client --client codex --json
 <afs-root>/scripts/afs session event task_created --client codex --session-id "$AFS_SESSION_ID" --task-id bg-1 --task-title "Index context"
@@ -289,6 +290,10 @@ when indexed search needs a refresh.
 
 `session prepare-client` packages the same bootstrap, pack, skill, and prompt
 surfaces into a single JSON artifact for wrappers and IDE adapters.
+When task focus is available, the skill and bootstrap artifacts carry up to
+three matched `SKILL.md` bodies (2,000 characters each, 6,000 total). Larger
+match sets remain metadata-only, and body instructions shed before compact
+enforcement rules under prompt-budget pressure.
 `afs-client-session` exports the resulting `AFS_SESSION_BOOTSTRAP_*`,
 `AFS_SESSION_PACK_*`, `AFS_SESSION_SKILLS_JSON`,
 `AFS_SESSION_SYSTEM_PROMPT_*`, `AFS_SESSION_CLIENT_PAYLOAD_JSON`, and
@@ -304,6 +309,9 @@ to the native client surface when available: Codex via
 `-c model_instructions_file=...`, Claude via `--append-system-prompt-file`,
 and Gemini via `GEMINI_SYSTEM_MD`. Set `AFS_CLIENT_NATIVE_PROMPT=0` or the
 client-specific `AFS_<CLIENT>_NATIVE_PROMPT=0` to disable that native handoff.
+Antigravity uses the same `GEMINI_SYSTEM_MD` handoff. Hook-only surfaces such
+as the hcode AFS plugin receive a compact pointer plus a 1,000-character
+excerpt from the top matched skill when no prepared prompt handoff is present.
 When the wrapper is launched with `--prompt`, `--prompt-file`, or `--turn-id`,
 it also exports `AFS_SESSION_DEFAULT_TURN_ID` and emits
 `user_prompt_submit`, `turn_started`, and `turn_completed` / `turn_failed`

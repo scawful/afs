@@ -250,6 +250,13 @@ def _coerce_int(
     minimum: int = 1,
     maximum: int | None = None,
 ) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, str):
+        try:
+            value = int(value.strip())
+        except ValueError:
+            return default
     if not isinstance(value, int):
         return default
     if value < minimum:
@@ -4462,6 +4469,16 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                     "description": "Maximum hivemind messages to include (default 10)",
                     "required": False,
                 },
+                {
+                    "name": "skills_prompt",
+                    "description": "Optional task prompt used to match bounded skill bodies.",
+                    "required": False,
+                },
+                {
+                    "name": "skills_top_k",
+                    "description": "Maximum skill matches to retain, capped at 10 (default 5).",
+                    "required": False,
+                },
             ],
         },
         {
@@ -4667,6 +4684,13 @@ def _get_prompt(
             context_path,
             task_limit=_coerce_int(arguments.get("task_limit"), default=10, minimum=1, maximum=100),
             message_limit=_coerce_int(arguments.get("message_limit"), default=10, minimum=1, maximum=100),
+            skills_prompt=str(arguments.get("skills_prompt", "") or ""),
+            skills_top_k=_coerce_int(
+                arguments.get("skills_top_k"),
+                default=5,
+                minimum=0,
+                maximum=10,
+            ),
         )
         text = render_session_bootstrap(payload)
         return [{"role": "user", "content": {"type": "text", "text": text}}]

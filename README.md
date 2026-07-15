@@ -337,6 +337,11 @@ include_content = true
 session_start = ["echo 'session started'"]
 ```
 
+`skill_roots` are an instruction trust boundary: task-matched `SKILL.md`
+bodies can enter generated system prompts. Configure only roots whose content
+you trust. AFS delivers at most three bodies, capped at 2,000 characters each
+and 6,000 characters in aggregate; additional matches remain metadata-only.
+
 ## Extensions
 
 Domain-specific functionality (model training, persona configurations, deployment playbooks) goes in extension packages. See [docs/EXTENSION_MIGRATION.md](docs/EXTENSION_MIGRATION.md).
