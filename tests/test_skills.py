@@ -8,6 +8,7 @@ import pytest
 from afs.skills import (
     MAX_SKILL_BODIES_CHARS,
     MAX_SKILL_BODY_CHARS,
+    MAX_SKILL_FILE_BYTES,
     build_skill_matches,
     bundled_skill_roots,
     discover_skills,
@@ -132,6 +133,118 @@ def test_discover_skills_rejects_symlinks_outside_trusted_root(tmp_path: Path) -
         pytest.skip(f"symlinks unavailable: {exc}")
 
     assert discover_skills([root]) == []
+
+
+@pytest.mark.timeout(2)
+def test_discover_skills_rejects_fifo_without_blocking(tmp_path: Path) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFOs unavailable")
+    root = tmp_path / "skills"
+    fifo = root / "blocked" / "SKILL.md"
+    fifo.parent.mkdir(parents=True)
+    os.mkfifo(fifo)
+
+    assert discover_skills([root]) == []
+
+
+def test_skill_reads_reject_oversized_files(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    skill = root / "oversized" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes(b"x" * (MAX_SKILL_FILE_BYTES + 1))
+
+    assert discover_skills([root]) == []
+    with pytest.raises(OSError, match="exceeds"):
+        read_skill_body(skill)
+
+
+def test_build_skill_matches_rejects_file_symlink_swap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skills"
+    skill = root / "demo" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: demo\ntriggers: [demo]\n---\n\nSafe body.\n",
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("SECRET_OUTSIDE_ROOT\n", encoding="utf-8")
+
+    import afs.skills as skills_module
+
+    def swap_before_body_read(prompt: str, metadata: object) -> int:
+        del prompt, metadata
+        skill.unlink()
+        try:
+            skill.symlink_to(outside)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+        return 1
+
+    monkeypatch.setattr(skills_module, "score_skill_relevance", swap_before_body_read)
+    matches = build_skill_matches("demo", [root])
+
+    assert matches[0]["body"] == ""
+    assert "SECRET_OUTSIDE_ROOT" not in str(matches)
+
+
+def test_build_skill_matches_rejects_parent_symlink_swap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skills"
+    skill_dir = root / "demo"
+    skill = skill_dir / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: demo\ntriggers: [demo]\n---\n\nSafe body.\n",
+        encoding="utf-8",
+    )
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "SKILL.md").write_text(
+        "SECRET_OUTSIDE_PARENT\n",
+        encoding="utf-8",
+    )
+
+    import afs.skills as skills_module
+
+    def swap_before_body_read(prompt: str, metadata: object) -> int:
+        del prompt, metadata
+        skill.unlink()
+        skill_dir.rmdir()
+        try:
+            skill_dir.symlink_to(outside_dir, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"directory symlinks unavailable: {exc}")
+        return 1
+
+    monkeypatch.setattr(skills_module, "score_skill_relevance", swap_before_body_read)
+    matches = build_skill_matches("demo", [root])
+
+    assert matches[0]["body"] == ""
+    assert "SECRET_OUTSIDE_PARENT" not in str(matches)
+
+
+def test_skill_reader_portable_fallback_preserves_regular_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skills"
+    skill = root / "portable" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: portable\ntriggers: [portable]\n---\n\nPortable body.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(os, "supports_dir_fd", set())
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+
+    matches = build_skill_matches("portable", [root])
+
+    assert matches[0]["body"] == "Portable body."
 
 
 def test_build_skill_matches_is_stable_and_bounds_aggregate_bodies(

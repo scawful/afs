@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+MAX_SKILL_FILE_BYTES = 256 * 1024
 MAX_SKILL_BODY_CHARS = 2_000
 MAX_SKILL_BODIES_CHARS = 6_000
 MAX_SKILL_BODY_MATCHES = 3
@@ -84,6 +86,140 @@ def _normalize_list(value: str | list[str] | None) -> list[str]:
     parts = [_clean_token(part) for part in text.split(",")]
     return [part for part in parts if part]
 
+
+def _skill_open_flags(*, directory: bool = False) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    if directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    return flags
+
+
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _read_open_skill_file(descriptor: int, *, path: Path, max_bytes: int) -> str:
+    """Read one already-opened regular skill file with a hard byte bound."""
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError(f"skill path is not a regular file: {path}")
+        if metadata.st_size > max_bytes:
+            raise OSError(f"skill file exceeds the {max_bytes}-byte limit: {path}")
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            payload = stream.read(max_bytes + 1)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if len(payload) > max_bytes:
+        raise OSError(f"skill file exceeds the {max_bytes}-byte limit: {path}")
+    return payload.decode("utf-8", errors="replace")
+
+
+def _open_skill_beneath(root: Path, relative_path: Path) -> int:
+    """Open a file beneath *root* without following path-component symlinks."""
+    root_descriptor = os.open(root, _skill_open_flags(directory=True))
+    descriptor = root_descriptor
+    try:
+        root_metadata = os.fstat(root_descriptor)
+        if not stat.S_ISDIR(root_metadata.st_mode):
+            raise OSError(f"skill root is not a directory: {root}")
+        expected_root = os.stat(root, follow_symlinks=False)
+        if not _same_file_identity(root_metadata, expected_root):
+            raise OSError(f"skill root changed while opening: {root}")
+
+        parts = relative_path.parts
+        if not parts or any(part in {"", ".", ".."} for part in parts):
+            raise OSError(f"invalid skill path beneath {root}: {relative_path}")
+        for index, part in enumerate(parts):
+            next_descriptor = os.open(
+                part,
+                _skill_open_flags(directory=index < len(parts) - 1),
+                dir_fd=descriptor,
+            )
+            if descriptor != root_descriptor:
+                os.close(descriptor)
+            descriptor = next_descriptor
+            if index < len(parts) - 1:
+                metadata = os.fstat(descriptor)
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise OSError(
+                        f"skill path parent is not a directory: {root / Path(*parts[: index + 1])}"
+                    )
+        return descriptor
+    except BaseException:
+        if descriptor != root_descriptor:
+            os.close(descriptor)
+        raise
+    finally:
+        os.close(root_descriptor)
+
+
+def _path_identity_chain(root: Path, path: Path) -> list[tuple[Path, os.stat_result]]:
+    """Snapshot a no-symlink path chain for platforms without descriptor traversal."""
+    relative = path.relative_to(root)
+    chain: list[tuple[Path, os.stat_result]] = []
+    current = root
+    for part in ("", *relative.parts):
+        if part:
+            current = current / part
+        metadata = os.stat(current, follow_symlinks=False)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise OSError(f"skill path must not contain symlinks: {current}")
+        chain.append((current, metadata))
+    return chain
+
+
+def _read_skill_text(
+    path: Path,
+    *,
+    trusted_root: Path | None = None,
+    max_bytes: int = MAX_SKILL_FILE_BYTES,
+) -> str:
+    """Read one bounded skill file while preserving a configured-root boundary."""
+    limit = max(0, max_bytes)
+    resolved_path = path.expanduser().resolve(strict=True)
+    if trusted_root is None:
+        descriptor = os.open(resolved_path, _skill_open_flags())
+        return _read_open_skill_file(descriptor, path=resolved_path, max_bytes=limit)
+
+    resolved_root = trusted_root.expanduser().resolve(strict=True)
+    try:
+        relative_path = resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise OSError(
+            f"skill path escapes configured root {resolved_root}: {resolved_path}"
+        ) from exc
+    if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+        descriptor = _open_skill_beneath(resolved_root, relative_path)
+        return _read_open_skill_file(descriptor, path=resolved_path, max_bytes=limit)
+
+    # Windows and other platforms without openat/O_NOFOLLOW support get a
+    # before/after identity check. The opened descriptor must still identify
+    # the same regular file reached through the same non-symlink parent chain.
+    before = _path_identity_chain(resolved_root, resolved_path)
+    descriptor = os.open(resolved_path, _skill_open_flags())
+    try:
+        opened_metadata = os.fstat(descriptor)
+        after = _path_identity_chain(resolved_root, resolved_path)
+        if len(before) != len(after) or any(
+            before_path != after_path
+            or not _same_file_identity(before_metadata, after_metadata)
+            for (before_path, before_metadata), (after_path, after_metadata) in zip(
+                before, after, strict=True
+            )
+        ):
+            raise OSError(f"skill path changed while opening: {resolved_path}")
+        if not _same_file_identity(opened_metadata, after[-1][1]):
+            raise OSError(f"skill file changed while opening: {resolved_path}")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return _read_open_skill_file(descriptor, path=resolved_path, max_bytes=limit)
+
+
 def _parse_frontmatter_block(lines: list[str]) -> dict[str, str | list[str]]:
     parsed: dict[str, str | list[str]] = {}
     current_list_key: str | None = None
@@ -120,9 +256,7 @@ def _parse_frontmatter_block(lines: list[str]) -> dict[str, str | list[str]]:
     return parsed
 
 
-def parse_skill_metadata(path: Path) -> SkillMetadata:
-    """Parse SKILL.md metadata frontmatter."""
-    content = path.read_text(encoding="utf-8", errors="replace")
+def _parse_skill_metadata_text(content: str, *, path: Path) -> SkillMetadata:
     lines = content.splitlines()
 
     frontmatter: dict[str, str | list[str]] = {}
@@ -160,13 +294,23 @@ def parse_skill_metadata(path: Path) -> SkillMetadata:
     )
 
 
+def parse_skill_metadata(path: Path) -> SkillMetadata:
+    """Parse SKILL.md metadata frontmatter."""
+    resolved_path = path.expanduser().resolve(strict=True)
+    return _parse_skill_metadata_text(
+        _read_skill_text(resolved_path),
+        path=resolved_path,
+    )
+
+
 def read_skill_body(
     path: Path,
     *,
     max_chars: int = MAX_SKILL_BODY_CHARS,
+    trusted_root: Path | None = None,
 ) -> tuple[str, bool]:
     """Read a bounded instruction body, excluding valid leading frontmatter."""
-    content = path.read_text(encoding="utf-8", errors="replace")
+    content = _read_skill_text(path, trusted_root=trusted_root)
     lines = content.splitlines()
     body_start = 0
     if lines and lines[0].strip() == "---":
@@ -244,9 +388,16 @@ def discover_skills(skill_roots: list[Path], profile: str | None = None) -> list
             continue
         for candidate in candidates:
             try:
-                resolved_candidate = candidate.resolve()
+                resolved_candidate = candidate.resolve(strict=True)
                 resolved_candidate.relative_to(resolved_root)
-                metadata = parse_skill_metadata(resolved_candidate)
+                content = _read_skill_text(
+                    resolved_candidate,
+                    trusted_root=resolved_root,
+                )
+                metadata = _parse_skill_metadata_text(
+                    content,
+                    path=resolved_candidate,
+                )
             except ValueError:
                 # A symlink must not turn a configured instruction root into
                 # an implicit trust grant for an unrelated filesystem path.
@@ -345,7 +496,16 @@ def build_skill_matches(
             body, body_truncated = "", False
         else:
             try:
-                body, body_truncated = read_skill_body(skill.path, max_chars=body_limit)
+                trusted_root = (
+                    resolved_roots[_root_priority]
+                    if _root_priority < len(resolved_roots)
+                    else None
+                )
+                body, body_truncated = read_skill_body(
+                    skill.path,
+                    max_chars=body_limit,
+                    trusted_root=trusted_root,
+                )
             except OSError:
                 body, body_truncated = "", False
         remaining = max(0, remaining - len(body))
