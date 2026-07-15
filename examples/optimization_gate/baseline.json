@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "candidate_id": "baseline-v1",
+  "parent_id": "root",
+  "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "artifact_ref": "git:refs/heads/main",
+  "evaluation_suite": {
+    "name": "agent-workflow-regression",
+    "version": "1.0.0",
+    "case_set_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "provenance": {
+    "run_id": "run-baseline-001",
+    "evaluator": "afs-example-evaluator",
+    "evaluator_version": "1.0.0",
+    "seed": 42,
+    "environment_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "source_revision": "baseline-v1"
+  },
+  "metrics": [
+    {
+      "name": "task_success",
+      "unit": "ratio",
+      "value": 0.8,
+      "sample_count": 200,
+      "standard_error": 0.02
+    },
+    {
+      "name": "latency",
+      "unit": "ms",
+      "value": 500.0,
+      "sample_count": 200,
+      "standard_error": 5.0
+    },
+    {
+      "name": "cost",
+      "unit": "usd",
+      "value": 0.03,
+      "sample_count": 200,
+      "standard_error": 0.001
+    }
+  ],
+  "constraints": {
+    "tests_pass": true,
+    "policy_clean": true
+  }
+}

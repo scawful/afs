@@ -4,6 +4,14 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 
 ## [Unreleased]
 
+### Added
+
+- Versioned, packaged JSON Schema contracts for optimization evaluation,
+  policy, and decision records.
+- Pure `afs optimize decide` evidence gate with deterministic hashes, stable
+  reason codes, and no execution or promotion authority.
+- Cross-language optimization protocol documentation and runnable fixtures.
+
 ### Changed
 
 - Refreshed GitHub Actions dependencies to current Node-runtime-compatible releases.

@@ -95,6 +95,35 @@ def test_builtin_fallback_matches_core_rules() -> None:
     assert any("summary" in err for err in wrong_type)
 
 
+def test_builtin_fallback_checks_nested_protocol_rules() -> None:
+    schema = get_response_schema("v1/optimization/evaluation")
+    payload = {
+        "schema_version": "1.0",
+        "candidate_id": "candidate",
+        "parent_id": "root",
+        "artifact_sha256": "a" * 64,
+        "evaluation_suite": {
+            "name": "suite",
+            "version": "1",
+            "case_set_sha256": "b" * 64,
+        },
+        "provenance": {
+            "run_id": "run",
+            "evaluator": "eval",
+            "evaluator_version": "1",
+            "seed": 1,
+            "environment_sha256": "c" * 64,
+        },
+        "metrics": [{"name": "quality", "unit": "ratio", "value": 1.0, "sample_count": 0}],
+        "constraints": {"tests": "yes"},
+    }
+
+    errors = _builtin_schema_errors(schema, payload)
+
+    assert any("sample_count" in error and ">= 1" in error for error in errors)
+    assert any("constraints/tests" in error and "boolean" in error for error in errors)
+
+
 def test_result_to_dict_shape() -> None:
     result = SchemaValidationResult(valid=False, schema="plan", errors=["e"], parse_error="")
     payload = result.to_dict()

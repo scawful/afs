@@ -60,6 +60,23 @@ Primary modules:
 - `src/afs/cli/`
 - `src/afs/mcp_server.py`
 
+### 5. Optimization Evidence Layer
+
+- Versioned JSON Schema records define candidate evaluation, policy, and
+  decision contracts independently of Python.
+- A pure Pareto-style gate compares immutable evidence and returns only a
+  review recommendation.
+- Candidate generation, execution, activation, and rollback are separate trust
+  boundaries; core does not treat an LLM proposal as authority.
+
+Primary modules:
+
+- `src/afs/protocols/optimization/`
+- `src/afs/optimization/`
+- `src/afs/cli/optimize.py`
+
+See `docs/OPTIMIZATION_PROTOCOL.md`.
+
 ## Extensibility Model
 
 AFS extension points are explicit:

@@ -1,0 +1,41 @@
+{
+  "schema_version": "1.0",
+  "algorithm_version": "pareto-gate-1.0",
+  "policy_id": "safe-agent-hill-climb-v1",
+  "metrics": [
+    {
+      "name": "task_success",
+      "unit": "ratio",
+      "direction": "maximize",
+      "role": "objective",
+      "min_delta": 0.02,
+      "max_regression": 0.0,
+      "min_samples": 100
+    },
+    {
+      "name": "latency",
+      "unit": "ms",
+      "direction": "minimize",
+      "role": "guardrail",
+      "min_delta": 0.0,
+      "max_regression": 20.0,
+      "min_samples": 100
+    },
+    {
+      "name": "cost",
+      "unit": "usd",
+      "direction": "minimize",
+      "role": "guardrail",
+      "min_delta": 0.0,
+      "max_regression": 0.005,
+      "min_samples": 100
+    }
+  ],
+  "required_constraints": [
+    "tests_pass",
+    "policy_clean"
+  ],
+  "confidence_z": 1.0,
+  "require_same_environment": true,
+  "require_human_approval": true
+}

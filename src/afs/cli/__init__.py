@@ -41,6 +41,7 @@ from . import (
     mcp,
     missions,
     next_action,
+    optimize,
     personal,
     profile,
     review,
@@ -272,6 +273,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
 
     # Register response-schema validation commands
     schema.register_parsers(subparsers)
+
+    # Register pure optimization evidence comparison commands
+    optimize.register_parsers(subparsers)
 
     # Register background-mission commands
     missions.register_parsers(subparsers)

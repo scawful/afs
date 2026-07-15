@@ -85,12 +85,17 @@ cross-agent coordination.
 
 **Context Sources** — Provider-neutral adapters for tasks, tickets, reviews, docs, messages, tests, hooks, and traces. Core AFS owns the normalized records; concrete source connectors live in extensions.
 
+**Optimization Evidence** — Versioned, language-neutral evaluation and policy
+records plus a pure decision gate for bounded hill-climbing experiments. The
+gate can recommend human review but cannot execute or promote a candidate.
+
 ## Professional/project docs
 
 - [Executive Summary](docs/EXECUTIVE_SUMMARY.md)
 - [Lineage](docs/LINEAGE.md)
 - [Setup Guide](docs/SETUP_GUIDE.md)
 - [Extension Authoring](docs/EXTENSION_AUTHORING.md)
+- [Autonomous Optimization Protocol](docs/OPTIMIZATION_PROTOCOL.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
 - [Release Process](RELEASE.md)
@@ -115,6 +120,7 @@ src/afs/
 ├── training/         # Generic dataset/run/eval/feedback primitives
 ├── sources/          # Provider-neutral context source interfaces
 ├── mcp/              # MCP extension registry and shared schemas
+├── protocols/        # Versioned, language-neutral JSON Schema contracts
 └── ...
 ```
 

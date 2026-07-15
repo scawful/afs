@@ -11,6 +11,8 @@ This roadmap keeps the core repo focused on shareable platform capabilities.
 
 ## 0.3.x — extension developer experience
 
+- Stabilize the v1 optimization evidence/policy/decision protocol and golden fixtures.
+- Add a centralized fail-closed executor before allowing autonomous candidate trials.
 - Version the extension manifest schema explicitly.
 - Add richer extension validation and diagnostics.
 - Add more complete example extensions for CLI, MCP tools, context sources, and manager actions.
@@ -18,6 +20,8 @@ This roadmap keeps the core repo focused on shareable platform capabilities.
 
 ## 0.4.x — stable agent surfaces
 
+- Add immutable experiment/trial records, transactional leases, exact-hash review, and rollback.
+- Add language adapters, beginning with a C++20 client over the stable JSON/MCP contract.
 - Stabilize the default MCP tool catalog and underscore-safe aliases.
 - Improve `afs setup` and `afs doctor` for fresh machines.
 - Add stronger release artifact checks and install smoke tests.

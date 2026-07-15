@@ -58,6 +58,7 @@ It provides filesystem-native primitives for:
 - [Memory and Context Layout](MEMORY_SYSTEM.md)
 - [CLI Reference](CLI_REFERENCE.md)
 - [Training and Feedback RFC](TRAINING_FEEDBACK_RFC.md)
+- [Autonomous Optimization Protocol](OPTIMIZATION_PROTOCOL.md)
 - [Emacs Integration](EMACS_INTEGRATION.md)
 
 ## Agent Note

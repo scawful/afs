@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "afs://schemas/v1/optimization/decision",
+  "title": "AFS Optimization Decision v1",
+  "description": "Deterministic recommendation produced by comparing two evaluation records.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "algorithm_version",
+    "decision_sha256",
+    "policy_id",
+    "baseline_id",
+    "candidate_id",
+    "decision",
+    "requires_human_approval",
+    "reason_codes",
+    "reasons",
+    "metrics",
+    "failed_constraints",
+    "missing_constraints",
+    "input_hashes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "algorithm_version": {
+      "const": "pareto-gate-1.0"
+    },
+    "decision_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "policy_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "baseline_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "candidate_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["rejected", "inconclusive", "eligible_for_human_review"]
+    },
+    "requires_human_approval": {
+      "type": "boolean"
+    },
+    "reason_codes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "approval_required",
+          "candidate_improves_objective",
+          "constraint_failed",
+          "constraint_missing",
+          "environment_mismatch",
+          "evaluator_mismatch",
+          "evaluation_suite_mismatch",
+          "insufficient_samples",
+          "lineage_mismatch",
+          "metric_missing",
+          "metric_regression",
+          "metric_unit_mismatch",
+          "no_objective_improvement",
+          "seed_mismatch",
+          "uncertainty_missing"
+        ]
+      },
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true
+    },
+    "reasons": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "metrics": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "unit",
+          "role",
+          "direction",
+          "baseline_value",
+          "candidate_value",
+          "baseline_samples",
+          "candidate_samples",
+          "adjusted_delta",
+          "conservative_delta",
+          "min_delta",
+          "max_regression",
+          "status"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": ["objective", "guardrail"]
+          },
+          "direction": {
+            "type": "string",
+            "enum": ["maximize", "minimize"]
+          },
+          "baseline_value": {
+            "type": "number"
+          },
+          "candidate_value": {
+            "type": "number"
+          },
+          "baseline_samples": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "candidate_samples": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "adjusted_delta": {
+            "type": "number"
+          },
+          "conservative_delta": {
+            "type": "number"
+          },
+          "min_delta": {
+            "type": "number",
+            "minimum": 0
+          },
+          "max_regression": {
+            "type": "number",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "enum": ["improved", "acceptable", "regressed", "insufficient"]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "failed_constraints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "missing_constraints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "input_hashes": {
+      "type": "object",
+      "required": ["baseline_sha256", "candidate_sha256", "policy_sha256"],
+      "properties": {
+        "baseline_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "candidate_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "policy_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

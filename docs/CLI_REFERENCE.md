@@ -504,6 +504,26 @@ maintenance jobs with daily dedupe keys and skips existing open jobs. Wrappers
 still print the agent job inbox command at startup so completed background
 output has an obvious review path.
 
+## Optimization Evidence
+
+```bash
+./scripts/afs optimize decide \
+  --baseline examples/optimization_gate/baseline.json \
+  --candidate examples/optimization_gate/candidate.json \
+  --policy examples/optimization_gate/policy.json \
+  --json
+
+./scripts/afs schema show v1/optimization/evaluation
+./scripts/afs schema show v1/optimization/policy
+./scripts/afs schema show v1/optimization/decision
+```
+
+`optimize decide` is a pure evidence comparator. It never executes, writes,
+activates, or promotes a candidate. Exit codes are `0` for
+`eligible_for_human_review`, `1` for `rejected`, `2` for invalid input, and `3`
+for `inconclusive`. See `docs/OPTIMIZATION_PROTOCOL.md` for the versioned
+contracts and safety boundary.
+
 ## Training
 
 ```bash

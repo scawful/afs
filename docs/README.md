@@ -24,6 +24,7 @@ This docs set covers the **core AFS platform** in `lab/afs`.
 - [CLI Reference](CLI_REFERENCE.md)
 - [Release Process](../RELEASE.md)
 - [Training and Feedback RFC](TRAINING_FEEDBACK_RFC.md)
+- [Autonomous Optimization Protocol](OPTIMIZATION_PROTOCOL.md)
 - [Workspace Integration](WORKSPACE_INTEGRATION.md)
 
 ## API and Dev

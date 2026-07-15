@@ -303,6 +303,10 @@ This RFC builds on existing AFS strengths rather than replacing them:
 The main change is to stop treating training and feedback as shell-only
 operator workflows and start treating them as first-class AFS objects.
 
+The versioned evaluation-evidence and review-decision contract is specified in
+`docs/OPTIMIZATION_PROTOCOL.md`. That gate compares already-produced evidence;
+it intentionally does not start runs or promote artifacts.
+
 ## Rollout Plan
 
 ### Phase 1: Normalize Artifacts
