@@ -3686,6 +3686,100 @@ def test_skill_read_rejects_whitespace_padded_oversized_name(tmp_path: Path) -> 
     assert "name must be at most" in response["error"]["message"]
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "line\nbreak",
+        "osc\x1b]8;;https://example.invalid\x07click\x1b]8;;\x07",
+        "delete\x7fcontrol",
+        "c1\x85control",
+    ],
+)
+def test_skill_read_rejects_control_characters_without_echoing_them(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+) -> None:
+    manager = _make_manager(tmp_path)
+    capsys.readouterr()
+
+    response = _call_tool(manager, "skill.read", {"name": name})
+
+    expected = "name must not contain ASCII or C1 control characters"
+    assert response["error"]["message"] == expected
+    assert capsys.readouterr().err == f"[afs-mcp] tool error: skill.read: {expected}\n"
+
+    history_files = sorted((manager.config.general.context_root / "history").glob("*.jsonl"))
+    event = json.loads(history_files[-1].read_text(encoding="utf-8").splitlines()[-1])
+    assert "arguments" not in event["metadata"]
+
+
+def test_skill_read_sanitizes_control_characters_in_known_skill_preview(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    hostile_name = (
+        "known\x1b]8;;https://example.invalid\x07click\x1b]8;;\x07"
+        "\nnext\x85line"
+    )
+    metadata = SkillMetadata(
+        name=hostile_name,
+        path=tmp_path / "known" / "SKILL.md",
+    )
+    manager = _make_manager(tmp_path)
+    capsys.readouterr()
+
+    with patch("afs.mcp_server.discover_skills", return_value=[metadata]):
+        response = _call_tool(manager, "skill.read", {"name": "missing"})
+
+    message = response["error"]["message"]
+    stderr = capsys.readouterr().err
+    assert "\\u001b" in message
+    assert "\\u0007" in message
+    assert "\\u000a" in message
+    assert "\\u0085" in message
+    assert not any(
+        ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
+        for char in message
+    )
+    assert stderr == f"[afs-mcp] tool error: skill.read: {message}\n"
+    assert len(message) <= 1_400
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        (
+            "skill.match",
+            {"prompt": "focus", "unexpected\x1b": "x" * 4_096},
+        ),
+        (
+            "skill.read",
+            {"name": "missing", "unexpected\x1b": "x" * 4_096},
+        ),
+    ],
+)
+def test_skill_tools_reject_unknown_arguments_without_logging_values(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    tool_name: str,
+    arguments: dict[str, object],
+) -> None:
+    manager = _make_manager(tmp_path)
+    capsys.readouterr()
+
+    response = _call_tool(manager, tool_name, arguments)
+
+    expected = f"{tool_name} received unsupported arguments"
+    assert response["error"]["message"] == expected
+    assert capsys.readouterr().err == f"[afs-mcp] tool error: {tool_name}: {expected}\n"
+    history_files = sorted((manager.config.general.context_root / "history").glob("*.jsonl"))
+    event_text = history_files[-1].read_text(encoding="utf-8").splitlines()[-1]
+    event = json.loads(event_text)
+    assert "arguments" not in event["metadata"]
+    assert "x" * 128 not in event_text
+
+
 def test_skill_read_rechecks_configured_root_containment(
     tmp_path: Path,
     monkeypatch,

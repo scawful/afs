@@ -20,7 +20,7 @@ from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from .agent_scope import allowed_tools, is_tool_allowed
 from .codebase_explorer import build_codebase_summary, render_codebase_summary
@@ -134,6 +134,8 @@ DEFAULT_MCP_TOOL_CATALOG = frozenset(
 )
 MAX_SKILL_MATCH_PROMPT_CHARS = 8_000
 MAX_SKILL_KNOWN_PREVIEW_CHARS = 1_024
+SKILL_MATCH_ARGUMENT_NAMES = frozenset({"prompt", "top_k", "include_bodies"})
+SKILL_READ_ARGUMENT_NAMES = frozenset({"name"})
 
 
 def _allowed_roots(manager: AFSManager) -> list[Path]:
@@ -2230,6 +2232,46 @@ def _profile_skill_roots(manager: AFSManager) -> tuple[str, list[Path]]:
     return profile.name, roots
 
 
+def _reject_skill_arguments(
+    arguments: dict[str, Any],
+    message: str,
+) -> NoReturn:
+    # Registry failures are recorded after the handler returns. Drop rejected
+    # payloads so invalid or unknown values cannot be persisted in history.
+    arguments.clear()
+    raise ValueError(message)
+
+
+def _require_known_skill_arguments(
+    arguments: dict[str, Any],
+    *,
+    allowed: frozenset[str],
+    tool_name: str,
+) -> None:
+    if any(key not in allowed for key in arguments):
+        _reject_skill_arguments(
+            arguments,
+            f"{tool_name} received unsupported arguments",
+        )
+
+
+def _has_ascii_or_c1_controls(value: str) -> bool:
+    return any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in value)
+
+
+def _safe_skill_error_label(value: str, *, max_chars: int) -> str:
+    """Render one bounded label without terminal control characters."""
+    escaped = "".join(
+        f"\\u{ord(char):04x}" if _has_ascii_or_c1_controls(char) else char
+        for char in str(value).strip()
+    )
+    if len(escaped) <= max_chars:
+        return escaped
+    if max_chars <= 3:
+        return escaped[:max_chars]
+    return escaped[: max_chars - 3].rstrip() + "..."
+
+
 def _skill_match_top_k(raw: Any) -> int:
     if raw is None:
         return 5
@@ -2249,19 +2291,28 @@ def _skill_match_include_bodies(raw: Any) -> bool:
 
 
 def _tool_skill_match(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    _require_known_skill_arguments(
+        arguments,
+        allowed=SKILL_MATCH_ARGUMENT_NAMES,
+        tool_name="skill.match",
+    )
     raw_prompt = arguments.get("prompt")
     if not isinstance(raw_prompt, str):
-        raise ValueError("prompt must be a non-empty string")
+        _reject_skill_arguments(arguments, "prompt must be a non-empty string")
     if len(raw_prompt) > MAX_SKILL_MATCH_PROMPT_CHARS:
-        raise ValueError(
+        _reject_skill_arguments(
+            arguments,
             f"prompt must be at most {MAX_SKILL_MATCH_PROMPT_CHARS} characters"
         )
     prompt = raw_prompt.strip()
     if not prompt:
-        raise ValueError("prompt must be a non-empty string")
+        _reject_skill_arguments(arguments, "prompt must be a non-empty string")
 
-    top_k = _skill_match_top_k(arguments.get("top_k"))
-    include_bodies = _skill_match_include_bodies(arguments.get("include_bodies"))
+    try:
+        top_k = _skill_match_top_k(arguments.get("top_k"))
+        include_bodies = _skill_match_include_bodies(arguments.get("include_bodies"))
+    except ValueError as exc:
+        _reject_skill_arguments(arguments, str(exc))
     profile_name, roots = _profile_skill_roots(manager)
     matches = build_skill_matches(
         prompt,
@@ -2295,14 +2346,27 @@ def _skill_path_within_roots(path: Path, roots: list[Path]) -> Path:
 
 
 def _tool_skill_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    _require_known_skill_arguments(
+        arguments,
+        allowed=SKILL_READ_ARGUMENT_NAMES,
+        tool_name="skill.read",
+    )
     raw_name = arguments.get("name")
     if not isinstance(raw_name, str):
-        raise ValueError("name must be a non-empty string")
+        _reject_skill_arguments(arguments, "name must be a non-empty string")
     if len(raw_name) > MAX_SKILL_NAME_CHARS:
-        raise ValueError(f"name must be at most {MAX_SKILL_NAME_CHARS} characters")
+        _reject_skill_arguments(
+            arguments,
+            f"name must be at most {MAX_SKILL_NAME_CHARS} characters",
+        )
+    if _has_ascii_or_c1_controls(raw_name):
+        _reject_skill_arguments(
+            arguments,
+            "name must not contain ASCII or C1 control characters",
+        )
     name = raw_name.strip()
     if not name:
-        raise ValueError("name must be a non-empty string")
+        _reject_skill_arguments(arguments, "name must be a non-empty string")
     wanted = name.casefold()
     profile_name, roots = _profile_skill_roots(manager)
     skills = discover_skills(roots, profile=profile_name)
@@ -2324,7 +2388,10 @@ def _tool_skill_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str
 
     known = sorted({skill.name for skill in skills}, key=str.casefold)
     preview_items = [
-        item[:MAX_SKILL_METADATA_ITEM_CHARS]
+        _safe_skill_error_label(
+            item,
+            max_chars=MAX_SKILL_METADATA_ITEM_CHARS,
+        )
         for item in known[:MAX_SKILL_MATCHES]
     ]
     preview = ", ".join(preview_items) or "none discovered"
