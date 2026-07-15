@@ -142,6 +142,24 @@ def test_environment_values_change_request_hash_but_are_not_emitted(tmp_path: Pa
     assert "s3cr3t-value-b" not in json.dumps(second.to_dict())
 
 
+def test_non_utf8_source_environment_fails_closed(tmp_path: Path) -> None:
+    request = _request(
+        tmp_path,
+        sys.executable,
+        "-c",
+        "pass",
+        inherit_env=("AFS_INVALID_TEXT",),
+    )
+    policy = _policy(tmp_path, allowed_env=frozenset({"AFS_INVALID_TEXT"}))
+
+    with pytest.raises(ExecutionInputError, match="environment value.*UTF-8"):
+        inspect_execution(
+            request,
+            policy,
+            environ={"AFS_INVALID_TEXT": "\ud800"},
+        )
+
+
 def test_cwd_outside_root_and_symlink_traversal_are_blocked(tmp_path: Path) -> None:
     root = tmp_path / "root"
     outside = tmp_path / "outside"
@@ -199,6 +217,51 @@ def test_missing_and_disallowed_executables_are_blocked(tmp_path: Path) -> None:
     denied_inspection = inspect_execution(existing, _policy(tmp_path, executable="other"))
     assert not denied_inspection.allowed
     assert "executable_not_allowed" in denied_inspection.reason_codes
+
+
+def test_basename_allowlist_cannot_be_redirected_by_request_path(
+    tmp_path: Path,
+) -> None:
+    executable_name = "afs-path-hijack.exe" if os.name == "nt" else "afs-path-hijack"
+    trusted_dir = tmp_path / "trusted"
+    attacker_dir = tmp_path / "attacker"
+    trusted_dir.mkdir()
+    attacker_dir.mkdir()
+    for directory in (trusted_dir, attacker_dir):
+        executable = directory / executable_name
+        executable.write_bytes(b"not executed")
+        executable.chmod(0o755)
+
+    source_environment = {"PATH": str(trusted_dir), "HOME": str(tmp_path)}
+    policy = ExecutionPolicy(
+        allowed_cwd_roots=(tmp_path,),
+        allowed_executables=frozenset({executable_name}),
+        allowed_env=frozenset({"PATH"}),
+    )
+    trusted = inspect_execution(
+        _request(tmp_path, executable_name),
+        policy,
+        environ=source_environment,
+    )
+    redirected = inspect_execution(
+        _request(
+            tmp_path,
+            executable_name,
+            set_env={"PATH": str(attacker_dir)},
+        ),
+        policy,
+        environ=source_environment,
+    )
+
+    assert trusted.allowed
+    assert trusted.resolved_executable == str(
+        (trusted_dir / executable_name).resolve()
+    )
+    assert not redirected.allowed
+    assert redirected.resolved_executable == str(
+        (attacker_dir / executable_name).resolve()
+    )
+    assert "executable_not_allowed" in redirected.reason_codes
 
 
 def test_spawn_failure_returns_a_record(tmp_path: Path, monkeypatch) -> None:
@@ -267,6 +330,51 @@ def test_timeout_terminates_descendant_process(tmp_path: Path) -> None:
 
     assert record.outcome == "timed_out"
     assert record.timed_out
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group regression")
+def test_timeout_kills_descendant_that_ignores_sigterm(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from afs.execution import broker
+
+    monkeypatch.setattr(broker, "_TERMINATION_GRACE_SECONDS", 0.1)
+    ready = tmp_path / "child-ready"
+    marker = tmp_path / "child-survived"
+    child_code = (
+        "import signal,time\n"
+        "from pathlib import Path\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"Path({str(ready)!r}).touch()\n"
+        "time.sleep(0.8)\n"
+        f"Path({str(marker)!r}).touch()\n"
+        "time.sleep(5)\n"
+    )
+    parent_code = (
+        "import subprocess,sys,time\n"
+        "from pathlib import Path\n"
+        f"subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+        f"ready = Path({str(ready)!r})\n"
+        "deadline = time.monotonic() + 2\n"
+        "while not ready.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.01)\n"
+        "time.sleep(30)\n"
+    )
+    request = _request(
+        tmp_path,
+        sys.executable,
+        "-c",
+        parent_code,
+        timeout_seconds=0.3,
+    )
+
+    record = execute_checked(request, _policy(tmp_path))
+    time.sleep(0.9)
+
+    assert ready.exists()
+    assert record.outcome == "timed_out"
     assert not marker.exists()
 
 

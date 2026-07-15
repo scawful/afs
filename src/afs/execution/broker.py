@@ -18,6 +18,7 @@ from ..protocols.canonical_json import canonical_json_bytes
 from .models import (
     DEFAULT_INHERITED_ENV,
     ArgvCommand,
+    ExecutionInputError,
     ExecutionInspection,
     ExecutionPolicy,
     ExecutionRecord,
@@ -66,7 +67,15 @@ def _effective_environment(
     environment: dict[str, str] = {}
     for name in sorted(DEFAULT_INHERITED_ENV | set(request.inherit_env)):
         if name in source:
-            environment[name] = str(source[name])
+            value = str(source[name])
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ExecutionInputError(
+                    f"environment value for {name!r} must contain only "
+                    "UTF-8-encodable Unicode text"
+                ) from exc
+            environment[name] = value
     environment.update(dict(request.set_env))
     return environment, reason_codes, reasons
 
@@ -110,13 +119,13 @@ def _resolve_executable(raw: str, cwd: Path, environment: Mapping[str, str]) -> 
 
 
 def _executable_allowed(
-    raw: str,
     resolved: str,
     cwd: Path,
     policy: ExecutionPolicy,
+    trusted_environment: Mapping[str, str],
 ) -> bool:
     for entry in policy.allowed_executables:
-        if entry == raw or entry == resolved:
+        if entry == resolved:
             return True
         candidate = Path(entry).expanduser()
         if candidate.is_absolute() or candidate.parent != Path("."):
@@ -126,6 +135,14 @@ def _executable_allowed(
                     return True
             except (OSError, RuntimeError):
                 continue
+        else:
+            # A basename allowlist entry names the executable resolved from the
+            # trusted caller environment.  Comparing only ``entry == raw`` would
+            # let request-controlled PATH overrides redirect that permission to
+            # an unrelated executable with the same name.
+            trusted_resolved = _resolve_executable(entry, cwd, trusted_environment)
+            if trusted_resolved and trusted_resolved == resolved:
+                return True
     return False
 
 
@@ -208,7 +225,12 @@ def inspect_execution(
     if not resolved_executable:
         reason_codes.append("executable_not_found")
         reasons.append(f"executable could not be resolved: {raw_executable}")
-    elif not _executable_allowed(raw_executable, resolved_executable, cwd, policy):
+    elif not _executable_allowed(
+        resolved_executable,
+        cwd,
+        policy,
+        source_env,
+    ):
         reason_codes.append("executable_not_allowed")
         reasons.append("resolved executable is not allowed by policy")
 
@@ -326,9 +348,9 @@ def _drain_stream(
 
 
 def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
     if os.name == "nt":
+        if process.poll() is not None:
+            return
         try:
             process.send_signal(getattr(signal, "CTRL_BREAK_EVENT", signal.SIGTERM))
             process.wait(timeout=_TERMINATION_GRACE_SECONDS)
@@ -350,25 +372,40 @@ def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
                 pass
         return
 
+    process_group = process.pid
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        os.killpg(process_group, signal.SIGTERM)
     except OSError:
         try:
             process.terminate()
         except OSError:
             pass
-    try:
-        process.wait(timeout=_TERMINATION_GRACE_SECONDS)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except OSError:
+
+    # Waiting only for the group leader is insufficient: it may exit on SIGTERM
+    # while a descendant ignores the signal and keeps the process group alive.
+    # Probe the group for the full grace period, then kill the group regardless
+    # of whether the leader has already been reaped.
+    deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
+    group_alive = True
+    while time.monotonic() < deadline:
+        process.poll()
         try:
-            process.kill()
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            group_alive = False
+            break
+        except PermissionError:
+            group_alive = True
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+    if group_alive:
+        try:
+            os.killpg(process_group, signal.SIGKILL)
         except OSError:
-            pass
+            try:
+                process.kill()
+            except OSError:
+                pass
 
 
 def execute_checked(

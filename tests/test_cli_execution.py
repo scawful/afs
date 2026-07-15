@@ -99,6 +99,33 @@ def test_execution_inspect_returns_two_for_invalid_input(tmp_path: Path, capsys)
     assert "unknown fields" in output["error"]
 
 
+def test_execution_inspect_returns_two_for_non_utf8_request_text(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    payload = _payload(tmp_path)
+    payload["command"]["argv"][2] = "\ud800"
+
+    rc = _invoke(
+        [
+            "execution",
+            "inspect",
+            "--request",
+            json.dumps(payload),
+            "--allowed-root",
+            str(tmp_path),
+            "--allowed-executable",
+            sys.executable,
+            "--json",
+        ]
+    )
+
+    assert rc == 2
+    output = json.loads(capsys.readouterr().out)
+    assert output["valid"] is False
+    assert "UTF-8-encodable" in output["error"]
+
+
 def test_execution_has_no_generic_run_subcommand() -> None:
     parser = build_parser(["execution", "run"])
     with pytest.raises(SystemExit) as exc_info:

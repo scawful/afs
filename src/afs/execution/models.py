@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -22,15 +23,28 @@ _MAX_ARGUMENT_CHARS = 32768
 _MAX_SHELL_CHARS = 1024 * 1024
 _MAX_ENV_ITEMS = 128
 _MAX_ENV_VALUE_CHARS = 1024 * 1024
+_MAX_REASON_CODE_CHARS = 128
+_MAX_REASON_CHARS = 2048
+_MAX_ERROR_CHARS = 4096
 
 
 class ExecutionInputError(ValueError):
     """Raised when an execution request is structurally invalid."""
 
 
+def _require_utf8(value: str, field_name: str) -> None:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ExecutionInputError(
+            f"{field_name} must contain only UTF-8-encodable Unicode text"
+        ) from exc
+
+
 def _require_text(value: Any, field_name: str, *, max_length: int) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ExecutionInputError(f"{field_name} must be a non-empty string")
+    _require_utf8(value, field_name)
     if "\x00" in value:
         raise ExecutionInputError(f"{field_name} must not contain NUL bytes")
     if len(value) > max_length:
@@ -42,6 +56,16 @@ def _strict_keys(payload: Mapping[str, Any], allowed: set[str], label: str) -> N
     unknown = sorted(set(payload) - allowed)
     if unknown:
         raise ExecutionInputError(f"{label} contains unknown fields: {', '.join(unknown)}")
+
+
+def _bounded_audit_text(value: str, max_length: int) -> str:
+    if len(value) <= max_length:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8", errors="backslashreplace")).hexdigest()
+    suffix = f"...<truncated:{digest}>"
+    if len(suffix) >= max_length:
+        return suffix[:max_length]
+    return value[: max_length - len(suffix)] + suffix
 
 
 @dataclass(frozen=True)
@@ -61,6 +85,7 @@ class ArgvCommand:
         for index, value in enumerate(normalized):
             if not isinstance(value, str):
                 raise ExecutionInputError(f"command.argv[{index}] must be a string")
+            _require_utf8(value, f"command.argv[{index}]")
             if "\x00" in value:
                 raise ExecutionInputError(
                     f"command.argv[{index}] must not contain NUL bytes"
@@ -181,6 +206,7 @@ class ExecutionRequest:
                 raise ExecutionInputError(f"invalid explicit environment name: {raw_name!r}")
             if not isinstance(raw_value, str):
                 raise ExecutionInputError(f"set_env[{raw_name!r}] must be a string")
+            _require_utf8(raw_value, f"set_env[{raw_name!r}]")
             if "\x00" in raw_value:
                 raise ExecutionInputError(f"set_env[{raw_name!r}] must not contain NUL bytes")
             if len(raw_value) > _MAX_ENV_VALUE_CHARS:
@@ -358,8 +384,19 @@ class ExecutionInspection:
     def __post_init__(self) -> None:
         object.__setattr__(self, "redacted_argv", tuple(self.redacted_argv))
         object.__setattr__(self, "environment_keys", tuple(self.environment_keys))
-        object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
-        object.__setattr__(self, "reasons", tuple(self.reasons))
+        object.__setattr__(
+            self,
+            "reason_codes",
+            tuple(
+                _bounded_audit_text(code, _MAX_REASON_CODE_CHARS)
+                for code in self.reason_codes
+            ),
+        )
+        object.__setattr__(
+            self,
+            "reasons",
+            tuple(_bounded_audit_text(reason, _MAX_REASON_CHARS) for reason in self.reasons),
+        )
         object.__setattr__(self, "_environment", MappingProxyType(dict(self._environment)))
 
     @property
@@ -424,6 +461,23 @@ class ExecutionRecord:
     reasons: tuple[str, ...] = ()
     schema_version: str = EXECUTION_SCHEMA_VERSION
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "redacted_argv", tuple(self.redacted_argv))
+        object.__setattr__(self, "environment_keys", tuple(self.environment_keys))
+        object.__setattr__(
+            self,
+            "reason_codes",
+            tuple(
+                _bounded_audit_text(code, _MAX_REASON_CODE_CHARS)
+                for code in self.reason_codes
+            ),
+        )
+        object.__setattr__(
+            self,
+            "reasons",
+            tuple(_bounded_audit_text(reason, _MAX_REASON_CHARS) for reason in self.reasons),
+        )
+
     @property
     def timed_out(self) -> bool:
         return self.outcome == "timed_out"
@@ -464,7 +518,7 @@ class ExecutionRecord:
             "stderr_truncated": self.stderr_truncated,
             "reason_codes": list(self.reason_codes),
             "reasons": list(self.reasons),
-            "error": "; ".join(self.reasons)
+            "error": _bounded_audit_text("; ".join(self.reasons), _MAX_ERROR_CHARS)
             if self.outcome in {"blocked", "spawn_error", "timed_out"}
             else "",
         }

@@ -25,9 +25,18 @@
             "argv": {
               "type": "array",
               "prefixItems": [
-                {"type": "string", "minLength": 1, "maxLength": 32768}
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 32768,
+                  "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
+                }
               ],
-              "items": {"type": "string", "maxLength": 32768},
+              "items": {
+                "type": "string",
+                "maxLength": 32768,
+                "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
+              },
               "minItems": 1,
               "maxItems": 256
             }
@@ -39,15 +48,35 @@
           "required": ["kind", "command"],
           "properties": {
             "kind": {"const": "legacy_shell"},
-            "command": {"type": "string", "minLength": 1, "maxLength": 1048576}
+            "command": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1048576,
+              "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
+            }
           },
           "additionalProperties": false
         }
       ]
     },
-    "caller": {"type": "string", "minLength": 1, "maxLength": 256},
-    "purpose": {"type": "string", "minLength": 1, "maxLength": 2048},
-    "cwd": {"type": "string", "minLength": 1, "maxLength": 32768},
+    "caller": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
+    },
+    "purpose": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
+    },
+    "cwd": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32768,
+      "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
+    },
     "inherit_env": {
       "type": "array",
       "items": {
@@ -65,7 +94,11 @@
         "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
         "maxLength": 256
       },
-      "additionalProperties": {"type": "string", "maxLength": 1048576},
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 1048576,
+        "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
+      },
       "maxProperties": 128,
       "default": {}
     },
