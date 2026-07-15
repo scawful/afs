@@ -291,6 +291,8 @@ audit, watches the configured knowledge/memory roots, mines skills weekly, and
 writes a daily briefing. Existing custom agent lists are never augmented.
 Disable defaults with `[agents] default_set = false` or
 `AFS_DEFAULT_AGENTS=off`. Starting the supervisor remains explicit.
+The audit does not modify workspace source files, but supervisor snapshots and
+index-health reads may initialize SQLite metadata inside the configured context.
 
 ## Gemini Integration
 

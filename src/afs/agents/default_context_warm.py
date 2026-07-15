@@ -9,7 +9,8 @@ from . import context_warm
 
 AGENT_NAME = "context-warm"
 AGENT_DESCRIPTION = (
-    "Audit discovered contexts without workspace writes, repairs, or embedding calls."
+    "Audit discovered contexts without source-tree writes, repairs, or embedding calls; "
+    "context-local index metadata may be initialized."
 )
 
 _SAFE_DEFAULT_ARGS = (

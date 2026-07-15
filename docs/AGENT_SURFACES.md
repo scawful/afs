@@ -451,6 +451,9 @@ default_set = false
 `AFS_DEFAULT_AGENTS=off` is the process-local equivalent. Invalid non-empty
 environment values disable the defaults rather than enabling background work.
 The supervisor itself is never installed or started implicitly.
+The default audit avoids source-tree writes, repairs, embeddings, and network
+calls. Supervisor snapshots and index-health reads may still initialize
+context-local SQLite metadata under the configured context root.
 
 By default it stores state under
 `.context/scratchpad/afs_agents/supervisor/`, which makes repo-local and

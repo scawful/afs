@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -242,17 +243,45 @@ def emit_result(
         output_path.write_text(text, encoding="utf-8")
 
     try:
-        from ..agent_registry import AgentRegistry
+        from ..agent_registry import (
+            AGENT_CONTEXT_ROOT_ENV,
+            AGENT_EXPECTED_RESULT_NAME_ENV,
+            AGENT_NAME_ENV,
+            AGENT_RUN_ID_ENV,
+            AGENT_SUPERVISED_ENV,
+            AgentRegistry,
+        )
 
+        supervised_name = os.environ.get(AGENT_NAME_ENV, "").strip()
+        expected_result_name = os.environ.get(
+            AGENT_EXPECTED_RESULT_NAME_ENV,
+            "",
+        ).strip()
+        supervised_context = os.environ.get(AGENT_CONTEXT_ROOT_ENV, "").strip()
+        supervised_run_id = os.environ.get(AGENT_RUN_ID_ENV, "").strip()
+        supervised = (
+            os.environ.get(AGENT_SUPERVISED_ENV, "").strip() == "1"
+            and bool(supervised_name)
+            and expected_result_name == result.name
+            and bool(supervised_context)
+            and bool(supervised_run_id)
+        )
+        metadata: dict[str, object] = {"duration_seconds": result.duration_seconds}
+        if supervised and supervised_name != result.name:
+            # Agent modules keep their canonical result name even when a
+            # profile gives the supervised instance a local alias.
+            metadata["reported_name"] = result.name
         AgentRegistry().mark_result(
-            name=result.name,
+            name=supervised_name if supervised else result.name,
             status=result.status,
             task=result.task,
+            context_root=supervised_context if supervised else "",
             started_at=result.started_at,
             finished_at=result.finished_at,
             output_path=str(output_path) if output_path else "",
             last_error=str(result.payload.get("error", "") or ""),
-            metadata={"duration_seconds": result.duration_seconds},
+            run_id=supervised_run_id if supervised else "",
+            metadata=metadata,
         )
     except Exception:
         logging.getLogger(__name__).debug("failed to update agent registry", exc_info=True)

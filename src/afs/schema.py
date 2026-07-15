@@ -1208,7 +1208,6 @@ class AFSConfig:
     hooks: HooksConfig = field(default_factory=HooksConfig)
     directories: list[DirectoryConfig] = field(default_factory=default_directory_configs)
     cognitive: CognitiveConfig = field(default_factory=CognitiveConfig)
-    agents: AgentsConfig = field(default_factory=AgentsConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     services: ServicesConfig = field(default_factory=ServicesConfig)
     history: HistoryConfig = field(default_factory=HistoryConfig)
@@ -1221,6 +1220,9 @@ class AFSConfig:
     hivemind: HivemindConfig = field(default_factory=HivemindConfig)
     session_pack_cache: SessionPackCacheConfig = field(default_factory=SessionPackCacheConfig)
     verification: VerificationConfig = field(default_factory=VerificationConfig)
+    # Keep newly added fields at the end so existing positional constructors
+    # retain their pre-0.3 meaning.
+    agents: AgentsConfig = field(default_factory=AgentsConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> AFSConfig:

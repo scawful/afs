@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import logging
 import os
@@ -15,8 +16,17 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from ..agent_registry import (
+    AGENT_CONTEXT_ROOT_ENV,
+    AGENT_EXPECTED_RESULT_NAME_ENV,
+    AGENT_NAME_ENV,
+    AGENT_RUN_ID_ENV,
+    AGENT_SUPERVISED_ENV,
+)
 from ..config import load_config_model
+from ..context_index import INDEX_SCAN_SKIP_NAMES
 from ..context_paths import resolve_agent_output_root
 from ..profiles import resolve_active_profile
 from ..schema import AFSConfig, AgentConfig
@@ -25,6 +35,15 @@ from .base import AgentResult, build_base_parser, configure_logging, emit_result
 _log = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL_SECONDS = 60
+WATCH_SIGNATURE_MAX_ENTRIES = 50_000
+WATCH_SIGNATURE_TIMEOUT_SECONDS = 5.0
+WatchSignature = tuple[bool, int, int, int, bool]
+
+# Keep handles process-wide because ``_run_once`` constructs a fresh supervisor
+# while the daemon loop remains in the same Python process. Polling these handles
+# both detects completion and reaps short-lived one-shot children.
+_OWNED_PROCESSES: dict[int, subprocess.Popen[Any]] = {}
+_INCOMPLETE_WATCH_WARNED: set[Path] = set()
 
 AGENT_NAME = "agent-supervisor"
 AGENT_DESCRIPTION = (
@@ -84,53 +103,98 @@ def _parse_schedule_interval(schedule: str) -> float | None:
     return amount * multiplier if amount > 0 else None
 
 
-def _watch_signature(path: Path) -> tuple[bool, int, int, int]:
+def _watch_signature(
+    path: Path,
+    *,
+    max_entries: int = WATCH_SIGNATURE_MAX_ENTRIES,
+    timeout_seconds: float = WATCH_SIGNATURE_TIMEOUT_SECONDS,
+) -> WatchSignature:
     if not path.exists():
-        return (False, 0, 0, 0)
+        return (False, 0, 0, 0, False)
     try:
         stat = path.stat()
     except OSError:
-        return (False, 0, 0, 0)
+        return (False, 0, 0, 0, True)
 
     if path.is_file():
-        return (True, stat.st_mtime_ns, stat.st_size, 1)
+        return (True, stat.st_mtime_ns, stat.st_size, 1, False)
 
     newest_mtime = stat.st_mtime_ns
     total_size = 0
     file_count = 0
+    entries_seen = 0
+    incomplete = False
     pending = [path]
     visited_directories: set[tuple[int, int]] = set()
+    deadline = time.monotonic() + max(timeout_seconds, 0.0)
 
     # AFS mounts are commonly directory symlinks. Path.rglob() does not walk
     # those targets, so use an inode-guarded traversal that follows them while
     # avoiding cycles and duplicate targets.
     while pending:
+        if time.monotonic() >= deadline:
+            incomplete = True
+            break
         directory = pending.pop()
         try:
             directory_stat = directory.stat()
         except OSError:
+            incomplete = True
             continue
         identity = (directory_stat.st_dev, directory_stat.st_ino)
         if identity in visited_directories:
             continue
         visited_directories.add(identity)
         newest_mtime = max(newest_mtime, directory_stat.st_mtime_ns)
+        children: list[Path] = []
+        child_iterator = None
         try:
-            for child in directory.iterdir():
-                try:
-                    child_stat = child.stat()
-                    is_directory = child.is_dir()
-                except OSError:
+            child_iterator = directory.iterdir()
+            for child in child_iterator:
+                if time.monotonic() >= deadline:
+                    incomplete = True
+                    break
+                if child.name in INDEX_SCAN_SKIP_NAMES:
                     continue
-                newest_mtime = max(newest_mtime, child_stat.st_mtime_ns)
-                if is_directory:
-                    pending.append(child)
-                else:
-                    total_size += child_stat.st_size
-                    file_count += 1
+                if entries_seen >= max(max_entries, 0):
+                    incomplete = True
+                    break
+                entries_seen += 1
+                children.append(child)
         except OSError:
-            continue
-    return (True, newest_mtime, total_size, file_count)
+            incomplete = True
+        finally:
+            close_iterator = getattr(child_iterator, "close", None)
+            if callable(close_iterator):
+                close_iterator()
+
+        # Only the bounded, observed prefix is sorted. This keeps traversal
+        # stable without eagerly materializing an arbitrarily large directory.
+        children.sort(key=lambda child: child.name)
+
+        child_directories: list[Path] = []
+        for child in children:
+            if time.monotonic() >= deadline:
+                incomplete = True
+                break
+            try:
+                child_stat = child.stat()
+                is_directory = child.is_dir()
+            except OSError:
+                incomplete = True
+                continue
+            newest_mtime = max(newest_mtime, child_stat.st_mtime_ns)
+            if is_directory:
+                child_directories.append(child)
+            else:
+                total_size += child_stat.st_size
+                file_count += 1
+        if incomplete:
+            break
+        # Reverse before stack insertion so traversal remains lexical and the
+        # capped prefix is deterministic across runs.
+        pending.extend(reversed(child_directories))
+    return (True, newest_mtime, total_size, file_count, incomplete)
 
 
 @dataclass
@@ -142,6 +206,7 @@ class RunningAgent:
     module: str = ""
     args: list[str] = field(default_factory=list)
     session_id: str = ""
+    run_id: str = ""
     launch_reason: str = ""
     last_error: str = ""
     last_event: str = ""
@@ -159,6 +224,7 @@ class RunningAgent:
             "module": self.module,
             "args": list(self.args),
             "session_id": self.session_id,
+            "run_id": self.run_id,
             "launch_reason": self.launch_reason,
             "last_error": self.last_error,
             "last_event": self.last_event,
@@ -282,17 +348,27 @@ class AgentSupervisor:
             last_output_at=agent.last_seen_at,
             last_error=agent.last_error,
             pid=agent.pid,
+            run_id=agent.run_id,
             metadata=metadata,
         )
 
     def _registry_completion(self, agent: RunningAgent) -> dict[str, Any] | None:
         from ..agent_registry import ACTIVE_AGENT_STATES, AgentRegistry
 
-        entry = AgentRegistry().get(agent.name, context_root=self._context_root_str())
+        registry = AgentRegistry()
+        entry = registry.get(agent.name, context_root=self._context_root_str())
+        if entry is None and not agent.run_id:
+            # Legacy/unsupervised agents did not publish a context or run ID.
+            # Keep reading those records while requiring exact scoping for all
+            # newly supervised launches.
+            entry = registry.get(agent.name)
         if entry is None:
             return None
         status = str(entry.get("status", ""))
         if status in ACTIVE_AGENT_STATES:
+            return None
+        entry_run_id = str(entry.get("run_id", "") or "")
+        if agent.run_id and entry_run_id != agent.run_id:
             return None
         entry_output = _parse_timestamp(str(entry.get("last_output_at", "") or ""))
         agent_started = _parse_timestamp(agent.started_at)
@@ -321,6 +397,7 @@ class AgentSupervisor:
             module=data.get("module", ""),
             args=[str(item) for item in args if isinstance(item, str)],
             session_id=str(data.get("session_id", "") or ""),
+            run_id=str(data.get("run_id", "") or ""),
             launch_reason=str(data.get("launch_reason", "") or ""),
             last_error=data.get("last_error", ""),
             last_event=data.get("last_event", ""),
@@ -331,6 +408,17 @@ class AgentSupervisor:
         )
 
     def _pid_alive(self, pid: int) -> bool:
+        owned = _OWNED_PROCESSES.get(pid)
+        if owned is not None:
+            try:
+                return_code = owned.poll()
+            except OSError:
+                _OWNED_PROCESSES.pop(pid, None)
+            else:
+                if return_code is None:
+                    return True
+                _OWNED_PROCESSES.pop(pid, None)
+                return False
         try:
             os.kill(pid, 0)
             return True
@@ -698,12 +786,27 @@ class AgentSupervisor:
         return started
 
     def _build_agent_env(
-        self, name: str, agent_config: AgentConfig | None,
+        self,
+        name: str,
+        agent_config: AgentConfig | None,
+        *,
+        expected_result_name: str = "",
+        run_id: str = "",
     ) -> dict[str, str] | None:
         """Build environment dict with sandbox vars and context snapshot."""
         # Always build env so we can inject context snapshot
         env = dict(os.environ)
-        env["AFS_AGENT_NAME"] = name
+        env[AGENT_NAME_ENV] = name
+        env[AGENT_EXPECTED_RESULT_NAME_ENV] = expected_result_name or name
+        env[AGENT_CONTEXT_ROOT_ENV] = self._context_root_str()
+        if run_id:
+            env[AGENT_RUN_ID_ENV] = run_id
+            env[AGENT_SUPERVISED_ENV] = "1"
+        else:
+            # Private callers predating run IDs remain unsupervised and must
+            # not accidentally inherit a parent agent's run scope.
+            env.pop(AGENT_RUN_ID_ENV, None)
+            env.pop(AGENT_SUPERVISED_ENV, None)
         if self._config_path is not None:
             env["AFS_CONFIG_PATH"] = str(self._config_path)
 
@@ -751,6 +854,17 @@ class AgentSupervisor:
             if "AFS_ALLOWED_TOOLS" not in env and agent_spec.capabilities.tools:
                 env["AFS_ALLOWED_TOOLS"] = ",".join(agent_spec.capabilities.tools)
         return env
+
+    def _expected_result_name(self, name: str, module: str) -> str:
+        """Resolve the canonical result name while preserving profile aliases."""
+        try:
+            loaded = importlib.import_module(module)
+        except Exception:
+            return name
+        result_name = getattr(loaded, "AGENT_NAME", "")
+        if isinstance(result_name, str) and result_name.strip():
+            return result_name.strip()
+        return name
 
     def _terminate_pid(self, pid: int, *, grace_seconds: float = 1.0) -> bool:
         try:
@@ -811,7 +925,37 @@ class AgentSupervisor:
         launch_count = (existing.launch_count if existing else 0) + 1
         started_at = _now_utc().isoformat()
         session_id = os.environ.get("AFS_SESSION_ID", "").strip()
-        agent_env = self._build_agent_env(name, agent_config)
+        run_id = uuid4().hex
+        agent_env = self._build_agent_env(
+            name,
+            agent_config,
+            expected_result_name=self._expected_result_name(name, module),
+            run_id=run_id,
+        )
+        agent = RunningAgent(
+            name=name,
+            state="running",
+            module=module,
+            args=list(args or []),
+            session_id=session_id,
+            run_id=run_id,
+            launch_reason=reason,
+            started_at=started_at,
+            last_event=reason,
+            last_seen_at=started_at,
+            launch_count=launch_count,
+        )
+        metadata = {"launch_reason": reason, "run_id": run_id}
+        if session_id:
+            metadata["session_id"] = session_id
+        # Establish the current context+run row before the child can emit a
+        # terminal result. A later PID update for this same run is forbidden
+        # from regressing a terminal status back to running.
+        self._update_registry(
+            agent,
+            task=self._resolve_task(name, module, agent_config),
+            metadata=metadata,
+        )
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -821,23 +965,9 @@ class AgentSupervisor:
                 env=agent_env,
             )
         except Exception as exc:
-            agent = RunningAgent(
-                name=name,
-                state="failed",
-                module=module,
-                args=list(args or []),
-                session_id=session_id,
-                launch_reason=reason,
-                started_at=started_at,
-                last_error=str(exc),
-                last_event=reason,
-                last_seen_at=started_at,
-                launch_count=launch_count,
-            )
+            agent.state = "failed"
+            agent.last_error = str(exc)
             self._write_state(agent)
-            metadata = {"launch_reason": reason}
-            if session_id:
-                metadata["session_id"] = session_id
             self._update_registry(
                 agent,
                 task=self._resolve_task(name, module, agent_config),
@@ -848,6 +978,7 @@ class AgentSupervisor:
                 "spawn_failed",
                 metadata={
                     "session_id": session_id,
+                    "run_id": run_id,
                     "launch_reason": reason,
                     "module": module,
                     "error": str(exc),
@@ -855,23 +986,10 @@ class AgentSupervisor:
             )
             raise RuntimeError(f"Failed to spawn agent {name}: {exc}") from exc
 
-        agent = RunningAgent(
-            name=name,
-            pid=proc.pid,
-            state="running",
-            started_at=started_at,
-            module=module,
-            args=list(args or []),
-            session_id=session_id,
-            launch_reason=reason,
-            last_event=reason,
-            last_seen_at=started_at,
-            launch_count=launch_count,
-        )
+        agent.pid = proc.pid
+        if callable(getattr(proc, "poll", None)):
+            _OWNED_PROCESSES[proc.pid] = proc
         self._write_state(agent)
-        metadata = {"launch_reason": reason}
-        if session_id:
-            metadata["session_id"] = session_id
         self._update_registry(
             agent,
             task=self._resolve_task(name, module, agent_config),
@@ -882,6 +1000,7 @@ class AgentSupervisor:
             "spawned",
             metadata={
                 "session_id": session_id,
+                "run_id": run_id,
                 "launch_reason": reason,
                 "module": module,
                 "pid": proc.pid,
@@ -1233,20 +1352,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _snapshot_watch_paths(agent_configs: list[AgentConfig]) -> dict[Path, tuple[bool, int, int, int]]:
-    paths: dict[Path, tuple[bool, int, int, int]] = {}
+def _snapshot_watch_paths(agent_configs: list[AgentConfig]) -> dict[Path, WatchSignature]:
+    paths: dict[Path, WatchSignature] = {}
     for config in agent_configs:
         for watch_path in config.watch_paths:
             resolved = watch_path.expanduser().resolve()
             if resolved in paths:
                 continue
-            paths[resolved] = _watch_signature(resolved)
+            signature = _watch_signature(resolved)
+            paths[resolved] = signature
+            if signature[-1]:
+                if resolved not in _INCOMPLETE_WATCH_WARNED:
+                    _log.warning(
+                        "Watch signature for %s was bounded or incomplete; "
+                        "changes outside the scanned prefix may require a manual index refresh",
+                        resolved,
+                    )
+                    _INCOMPLETE_WATCH_WARNED.add(resolved)
+            else:
+                _INCOMPLETE_WATCH_WARNED.discard(resolved)
     return paths
 
 
 def _diff_watch_paths(
-    previous: dict[Path, tuple[bool, int, int, int]],
-    current: dict[Path, tuple[bool, int, int, int]],
+    previous: dict[Path, WatchSignature],
+    current: dict[Path, WatchSignature],
 ) -> list[Path]:
     changed: list[Path] = []
     keys = set(previous) | set(current)
@@ -1258,10 +1388,10 @@ def _diff_watch_paths(
 
 def _run_once(
     args: argparse.Namespace,
-    previous_watch_state: dict[Path, tuple[bool, int, int, int]],
+    previous_watch_state: dict[Path, WatchSignature],
     *,
     first_run: bool,
-) -> tuple[AgentResult, dict[Path, tuple[bool, int, int, int]]]:
+) -> tuple[AgentResult, dict[Path, WatchSignature]]:
     started_at = now_iso()
     start = time.time()
     config = load_config_model(
@@ -1319,7 +1449,7 @@ def _run_once(
 
 def run(args: argparse.Namespace) -> int:
     configure_logging(args.quiet)
-    watch_state: dict[Path, tuple[bool, int, int, int]] = {}
+    watch_state: dict[Path, WatchSignature] = {}
     runs = 0
 
     while True:

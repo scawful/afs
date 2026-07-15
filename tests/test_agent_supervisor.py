@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import json
 import signal
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from afs.agent_registry import AgentRegistry
+from afs.agent_registry import (
+    AGENT_CONTEXT_ROOT_ENV,
+    AGENT_EXPECTED_RESULT_NAME_ENV,
+    AGENT_RUN_ID_ENV,
+    AGENT_SUPERVISED_ENV,
+    AgentRegistry,
+)
 from afs.agents.base import now_iso
 from afs.agents.supervisor import AgentSupervisor, RunningAgent, _watch_signature
 from afs.event_log import read_agent_events
@@ -144,10 +151,64 @@ def test_supervisor_injects_explicit_config_path_into_child_environment(
     mock_proc = type("MockProc", (), {"pid": 99999})()
 
     with patch("subprocess.Popen", return_value=mock_proc) as popen:
-        supervisor.spawn("configured-agent", "pkg.agent")
+        agent = supervisor.spawn("configured-agent", "pkg.agent")
 
     child_env = popen.call_args.kwargs["env"]
     assert child_env["AFS_CONFIG_PATH"] == str(config_path.resolve())
+    assert child_env[AGENT_CONTEXT_ROOT_ENV] == str((tmp_path / "context").resolve())
+    assert child_env[AGENT_EXPECTED_RESULT_NAME_ENV] == "configured-agent"
+    assert child_env[AGENT_RUN_ID_ENV] == agent.run_id
+    assert child_env[AGENT_SUPERVISED_ENV] == "1"
+    assert agent.run_id
+
+
+def test_supervisor_reaps_short_lived_agent_and_records_completion(
+    tmp_path: Path,
+) -> None:
+    context_root = tmp_path / "context"
+    context_root.mkdir()
+    config_path = tmp_path / "afs.toml"
+    config_path.write_text(
+        f'[general]\ncontext_root = "{context_root}"\n',
+        encoding="utf-8",
+    )
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+    supervisor = AgentSupervisor(
+        state_dir=tmp_path / "state",
+        config=config,
+        config_path=config_path,
+    )
+
+    spawned = supervisor.spawn(
+        "custom-briefing",
+        "afs.agents.briefing_agent",
+        agent_config=AgentConfig(
+            name="custom-briefing",
+            module="afs.agents.briefing_agent",
+        ),
+    )
+    deadline = time.monotonic() + 5.0
+    completed = supervisor.status(spawned.name)
+    while (
+        completed is not None
+        and completed.state == "running"
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.05)
+        completed = supervisor.status(spawned.name)
+
+    assert completed is not None
+    assert completed.state == "stopped"
+    assert completed.pid is None
+    assert completed.run_id == spawned.run_id
+    registry_entry = AgentRegistry().get(
+        spawned.name,
+        context_root=str(context_root.resolve()),
+    )
+    assert registry_entry is not None
+    assert registry_entry["status"] == "stopped"
+    assert registry_entry["run_id"] == spawned.run_id
+    assert registry_entry["metadata"]["reported_name"] == "morning-briefing"
 
 
 def test_supervisor_logs_lifecycle_events(tmp_path: Path, monkeypatch) -> None:
@@ -269,6 +330,8 @@ def test_supervisor_uses_registry_completion_for_clean_exit(
         name="clean-exit",
         status="ok",
         task="Sync workspace paths, discover contexts, and refresh embeddings.",
+        context_root=str(context_root.resolve()),
+        run_id=spawned.run_id,
         started_at=spawned.started_at,
         finished_at=(datetime.fromisoformat(spawned.started_at) + timedelta(seconds=10)).isoformat(),
     )
@@ -387,6 +450,105 @@ def test_watch_signature_detects_edit_through_directory_symlink(tmp_path: Path) 
     after = _watch_signature(watch_root)
 
     assert after != before
+
+
+def test_watch_signature_ignores_index_excluded_directories(tmp_path: Path) -> None:
+    watch_root = tmp_path / "knowledge"
+    target = tmp_path / "repo"
+    git_dir = target / ".git"
+    node_modules = target / "node_modules"
+    watch_root.mkdir()
+    git_dir.mkdir(parents=True)
+    node_modules.mkdir()
+    git_head = git_dir / "HEAD"
+    dependency = node_modules / "package.js"
+    git_head.write_text("before", encoding="utf-8")
+    dependency.write_text("before", encoding="utf-8")
+    try:
+        (watch_root / "repo").symlink_to(target, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    before = _watch_signature(watch_root)
+    git_head.write_text("after with different size", encoding="utf-8")
+    dependency.write_text("after with different size", encoding="utf-8")
+
+    assert _watch_signature(watch_root) == before
+
+
+def test_watch_signature_handles_directory_symlink_cycle(tmp_path: Path) -> None:
+    watch_root = tmp_path / "knowledge"
+    target = tmp_path / "mounted-notes"
+    watch_root.mkdir()
+    target.mkdir()
+    (target / "note.md").write_text("note", encoding="utf-8")
+    try:
+        (watch_root / "notes").symlink_to(target, target_is_directory=True)
+        (target / "cycle").symlink_to(target, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    signature = _watch_signature(watch_root)
+
+    assert signature[3] == 1
+    assert signature[4] is False
+
+
+def test_watch_signature_cap_is_deterministic(tmp_path: Path) -> None:
+    watch_root = tmp_path / "knowledge"
+    watch_root.mkdir()
+    for name in ("a.md", "b.md", "c.md"):
+        (watch_root / name).write_text(name, encoding="utf-8")
+
+    first = _watch_signature(watch_root, max_entries=2)
+    second = _watch_signature(watch_root, max_entries=2)
+
+    assert first == second
+    assert first[3] == 2
+    assert first[4] is True
+
+
+def test_watch_signature_cap_does_not_materialize_entire_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    watch_root = tmp_path / "knowledge"
+    watch_root.mkdir()
+    for name in ("a.md", "b.md"):
+        (watch_root / name).write_text(name, encoding="utf-8")
+    consumed = 0
+
+    def guarded_iterdir(path: Path):
+        nonlocal consumed
+        assert path == watch_root
+        for name in ("a.md", "b.md", "unread.md", "must-not-be-read.md"):
+            consumed += 1
+            if consumed > 3:
+                raise AssertionError("watch scan read past its entry cap")
+            yield watch_root / name
+
+    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
+
+    signature = _watch_signature(watch_root, max_entries=2)
+
+    assert consumed == 3
+    assert signature[3] == 2
+    assert signature[4] is True
+
+
+def test_watch_signature_stops_at_monotonic_deadline(tmp_path: Path) -> None:
+    watch_root = tmp_path / "knowledge"
+    watch_root.mkdir()
+    (watch_root / "note.md").write_text("note", encoding="utf-8")
+
+    with patch(
+        "afs.agents.supervisor.time.monotonic",
+        side_effect=(100.0, 100.0, 101.0),
+    ):
+        signature = _watch_signature(watch_root, timeout_seconds=0.5)
+
+    assert signature[3] == 0
+    assert signature[4] is True
 
 
 def test_supervisor_audit_reports_failed_and_manual_stop(tmp_path: Path) -> None:
