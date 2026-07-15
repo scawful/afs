@@ -126,6 +126,7 @@ jobs:
         tests/test_session_harness.py
         tests/test_model_prompts.py
         tests/test_optimization_decision.py
+        tests/test_guardrails.py
 
   build-docs:
     name: Build Documentation

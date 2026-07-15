@@ -63,6 +63,8 @@ def _try_lock(fd: int) -> None:
             os.write(fd, b"\0")
         os.lseek(fd, 0, os.SEEK_SET)
         msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        return
+    raise RuntimeError("No supported advisory file-lock backend is available")
 
 
 def _unlock(fd: int) -> None:
@@ -80,25 +82,29 @@ def _file_lock(path: Path, *, timeout: float = 5.0):
     lock_path = path.with_suffix(path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = None
+    acquired = False
     try:
         fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
         deadline = time.monotonic() + timeout
         while True:
             try:
                 _try_lock(fd)
+                acquired = True
                 break
-            except OSError:
+            except OSError as exc:
                 if time.monotonic() >= deadline:
-                    logger.warning("Lock timeout on %s after %.1fs", lock_path, timeout)
-                    break  # proceed without lock rather than deadlocking
+                    message = f"Lock timeout on {lock_path} after {timeout:.1f}s"
+                    logger.error(message)
+                    raise TimeoutError(message) from exc
                 time.sleep(0.05)
         yield
     finally:
-        if fd is not None:
+        if fd is not None and acquired:
             try:
                 _unlock(fd)
             except OSError:
                 pass
+        if fd is not None:
             os.close(fd)
 
 
@@ -158,50 +164,32 @@ class QuotaTracker:
             return
         with _file_lock(self._path):
             try:
-                data = json.loads(self._path.read_text(encoding="utf-8"))
-                for key, val in data.items():
-                    self._entries[key] = QuotaEntry(
-                        provider=key,
-                        calls_this_hour=val.get("calls_this_hour", 0),
-                        calls_today=val.get("calls_today", 0),
-                        cost_today_usd=val.get("cost_today_usd", 0.0),
-                        hour_window=val.get("hour_window", ""),
-                        day_window=val.get("day_window", ""),
-                    )
+                self._entries = self._read_entries_unlocked()
             except (json.JSONDecodeError, OSError):
                 logger.warning("Failed to load quota file %s", self._path)
+
+    def _read_entries_unlocked(self) -> dict[str, QuotaEntry]:
+        data = json.loads(self._path.read_text(encoding="utf-8"))
+        return {
+            key: QuotaEntry(
+                provider=key,
+                calls_this_hour=val.get("calls_this_hour", 0),
+                calls_today=val.get("calls_today", 0),
+                cost_today_usd=val.get("cost_today_usd", 0.0),
+                hour_window=val.get("hour_window", ""),
+                day_window=val.get("day_window", ""),
+            )
+            for key, val in data.items()
+        }
+
+    def _write_entries_unlocked(self) -> None:
+        data = {key: entry.to_dict() for key, entry in self._entries.items()}
+        self._path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def _save(self) -> None:
         with _file_lock(self._path):
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            # Re-read before writing to merge concurrent updates
-            fresh: dict[str, QuotaEntry] = {}
-            if self._path.exists():
-                try:
-                    disk_data = json.loads(self._path.read_text(encoding="utf-8"))
-                    for key, val in disk_data.items():
-                        fresh[key] = QuotaEntry(
-                            provider=key,
-                            calls_this_hour=val.get("calls_this_hour", 0),
-                            calls_today=val.get("calls_today", 0),
-                            cost_today_usd=val.get("cost_today_usd", 0.0),
-                            hour_window=val.get("hour_window", ""),
-                            day_window=val.get("day_window", ""),
-                        )
-                except (json.JSONDecodeError, OSError):
-                    pass
-            # Merge: our in-memory values take precedence for providers we touched
-            for key, entry in self._entries.items():
-                disk_entry = fresh.get(key)
-                if disk_entry and disk_entry.hour_window == entry.hour_window:
-                    # Same window — take the max to avoid losing concurrent writes
-                    entry.calls_this_hour = max(entry.calls_this_hour, disk_entry.calls_this_hour)
-                if disk_entry and disk_entry.day_window == entry.day_window:
-                    entry.calls_today = max(entry.calls_today, disk_entry.calls_today)
-                    entry.cost_today_usd = max(entry.cost_today_usd, disk_entry.cost_today_usd)
-                fresh[key] = entry
-            data = {k: v.to_dict() for k, v in fresh.items()}
-            self._path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            self._write_entries_unlocked()
 
     def _roll_windows(self, entry: QuotaEntry) -> QuotaEntry:
         now = datetime.now(timezone.utc)
@@ -253,11 +241,18 @@ class QuotaTracker:
 
     def record_call(self, provider: str, cost_usd: float = 0.0) -> None:
         """Record an API call for quota tracking."""
-        entry = self._get_entry(provider)
-        entry.calls_this_hour += 1
-        entry.calls_today += 1
-        entry.cost_today_usd += cost_usd
-        self._save()
+        with _file_lock(self._path):
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            if self._path.exists():
+                try:
+                    self._entries = self._read_entries_unlocked()
+                except (json.JSONDecodeError, OSError):
+                    logger.warning("Failed to load quota file %s", self._path)
+            entry = self._get_entry(provider)
+            entry.calls_this_hour += 1
+            entry.calls_today += 1
+            entry.cost_today_usd += cost_usd
+            self._write_entries_unlocked()
 
     def usage_summary(self) -> dict[str, Any]:
         """Return current usage across all providers."""

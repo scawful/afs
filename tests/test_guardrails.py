@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -384,9 +385,10 @@ class TestGuardrailedAgent:
 # ---------------------------------------------------------------------------
 
 
-def _concurrent_writer(path: str, provider: str, count: int) -> None:
+def _concurrent_writer(path: str, provider: str, count: int, barrier: Any) -> None:
     """Worker function for concurrent locking test."""
     tracker = QuotaTracker(path=Path(path))
+    barrier.wait(timeout=10)
     for _ in range(count):
         tracker.record_call(provider, cost_usd=0.01)
 
@@ -436,33 +438,52 @@ class TestFileLocking:
 
         assert calls == [(FakeMsvcrt.LK_NBLCK, 1), (FakeMsvcrt.LK_UNLCK, 1)]
 
+    def test_lock_timeout_does_not_enter_protected_body(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        entered = False
+
+        def always_contended(_fd: int) -> None:
+            raise BlockingIOError("lock held")
+
+        monkeypatch.setattr(guardrails, "_try_lock", always_contended)
+
+        with pytest.raises(TimeoutError, match="Lock timeout"):
+            with _file_lock(tmp_path / "test.json", timeout=0):
+                entered = True
+
+        assert entered is False
+
     def test_concurrent_quota_writes(self, tmp_path: Path) -> None:
-        """Verify concurrent writers don't corrupt the quota file."""
+        """Verify synchronized writers preserve every quota and cost increment."""
         path = tmp_path / "quota.json"
         calls_per_process = 10
         num_processes = 4
+        context = multiprocessing.get_context("spawn")
+        barrier = context.Barrier(num_processes)
 
         procs = []
         for _i in range(num_processes):
-            p = multiprocessing.Process(
+            p = context.Process(
                 target=_concurrent_writer,
-                args=(str(path), "claude", calls_per_process),
+                args=(str(path), "claude", calls_per_process, barrier),
             )
             procs.append(p)
             p.start()
 
         for p in procs:
-            p.join(timeout=10)
+            p.join(timeout=30)
+            assert p.exitcode == 0
 
-        # File should be valid JSON and have merged counts
+        expected_calls = calls_per_process * num_processes
         assert path.exists()
         data = json.loads(path.read_text(encoding="utf-8"))
-        assert "claude" in data
-        # Total should be at least calls_per_process (last writer wins for max)
-        assert data["claude"]["calls_this_hour"] >= calls_per_process
+        assert data["claude"]["calls_this_hour"] == expected_calls
+        assert data["claude"]["calls_today"] == expected_calls
+        assert data["claude"]["cost_today_usd"] == pytest.approx(0.4)
 
-    def test_quota_tracker_save_merges(self, tmp_path: Path) -> None:
-        """Verify _save re-reads and merges with disk state."""
+    def test_quota_tracker_accumulates_across_instances(self, tmp_path: Path) -> None:
+        """Verify each record_call transaction starts from current disk state."""
         path = tmp_path / "quota.json"
         quotas = {"claude": {"hourly": 100, "daily": 1000, "cost_ceiling_usd": 50.0}}
 
@@ -476,11 +497,10 @@ class TestFileLocking:
         for _ in range(5):
             tracker_b.record_call("claude")
 
-        # Verify final state — should have max(3+5=8 from B's perspective, 3 from A)
         final = QuotaTracker(path=path, quotas=quotas)
         entry = final._get_entry("claude")
-        # B read A's 3, then added 5 = 8
-        assert entry.calls_this_hour >= 5
+        assert entry.calls_this_hour == 8
+        assert entry.calls_today == 8
 
 
 # ---------------------------------------------------------------------------
