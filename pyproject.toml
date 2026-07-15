@@ -79,6 +79,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "afs.protocols.optimization.v1" = ["*.json"]
+"afs.protocols.execution.v1" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

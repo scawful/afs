@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any
 
+from ..protocols.canonical_json import (
+    CanonicalJSONError,
+    canonical_json_bytes,
+    ensure_finite,
+    sha256_canonical_json,
+)
 from ..response_schemas import validate_structured_response
 
 ALGORITHM_VERSION = "pareto-gate-1.0"
@@ -22,21 +27,10 @@ class OptimizationInputError(ValueError):
 
 
 def _ensure_finite(value: Any, location: str = "(root)") -> None:
-    if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
-        try:
-            binary64 = float(value)
-        except (OverflowError, TypeError, ValueError) as exc:
-            raise OptimizationInputError(
-                f"{location}: number is outside the supported finite range"
-            ) from exc
-        if not math.isfinite(binary64):
-            raise OptimizationInputError(f"{location}: non-finite numbers are not allowed")
-    if isinstance(value, dict):
-        for key, item in value.items():
-            _ensure_finite(item, f"{location}/{key}")
-    elif isinstance(value, list):
-        for index, item in enumerate(value):
-            _ensure_finite(item, f"{location}/{index}")
+    try:
+        ensure_finite(value, location)
+    except CanonicalJSONError as exc:
+        raise OptimizationInputError(str(exc)) from exc
 
 
 def _decimal_number(value: Any, location: str) -> Decimal:
@@ -100,62 +94,10 @@ def _normalize_for_canonical_json(value: Any, parent_key: str = "") -> Any:
 def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
     _ensure_finite(payload)
     normalized = _normalize_for_canonical_json(payload)
-    return _encode_canonical_json(normalized).encode("utf-8")
-
-
-def _canonical_number_text(value: int | float | Decimal) -> str:
-    """Render one finite number using the AFS v1 plain-decimal hash format."""
-    number = Decimal(str(value))
-    if number == 0:
-        return "0"
-
-    sign, raw_digits, raw_exponent = number.as_tuple()
-    if not isinstance(raw_exponent, int):
-        raise OptimizationInputError("canonical JSON requires a finite number")
-    exponent = raw_exponent
-    digits = list(raw_digits)
-    while len(digits) > 1 and digits[-1] == 0:
-        digits.pop()
-        exponent += 1
-    digit_text = "".join(str(digit) for digit in digits)
-
-    if exponent >= 0:
-        body = digit_text + "0" * exponent
-    else:
-        point = len(digit_text) + exponent
-        if point > 0:
-            body = f"{digit_text[:point]}.{digit_text[point:]}"
-        else:
-            body = f"0.{('0' * -point)}{digit_text}"
-    return ("-" if sign else "") + body
-
-
-def _encode_canonical_json(value: Any) -> str:
-    """Encode JSON with stable object order and normalized numeric tokens."""
-    if value is None:
-        return "null"
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    if isinstance(value, str):
-        return json.dumps(value, ensure_ascii=False)
-    if isinstance(value, (int, float, Decimal)):
-        return _canonical_number_text(value)
-    if isinstance(value, list):
-        return "[" + ",".join(_encode_canonical_json(item) for item in value) + "]"
-    if isinstance(value, dict):
-        return (
-            "{"
-            + ",".join(
-                json.dumps(str(key), ensure_ascii=False) + ":" + _encode_canonical_json(item)
-                for key, item in sorted(value.items())
-            )
-            + "}"
-        )
-    raise OptimizationInputError(
-        f"canonical JSON does not support values of type {type(value).__name__}"
-    )
+    try:
+        return canonical_json_bytes(normalized)
+    except CanonicalJSONError as exc:
+        raise OptimizationInputError(str(exc)) from exc
 
 
 def canonical_json_text(payload: dict[str, Any]) -> str:
@@ -175,7 +117,12 @@ def canonical_json_text(payload: dict[str, Any]) -> str:
 
 
 def _sha256_payload(payload: dict[str, Any]) -> str:
-    return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
+    _ensure_finite(payload)
+    normalized = _normalize_for_canonical_json(payload)
+    try:
+        return sha256_canonical_json(normalized)
+    except CanonicalJSONError as exc:
+        raise OptimizationInputError(str(exc)) from exc
 
 
 def _validated_payload(

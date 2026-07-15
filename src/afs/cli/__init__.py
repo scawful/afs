@@ -33,6 +33,7 @@ from . import (
     doctor,
     embeddings,
     events,
+    execution,
     fs,
     gemini,
     guide,
@@ -276,6 +277,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
 
     # Register pure optimization evidence comparison commands
     optimize.register_parsers(subparsers)
+
+    # Register read-only policy inspection for typed execution requests.
+    execution.register_parsers(subparsers)
 
     # Register background-mission commands
     missions.register_parsers(subparsers)

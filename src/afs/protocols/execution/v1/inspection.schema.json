@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "afs://schemas/v1/execution/inspection",
+  "title": "AFS Execution Inspection v1",
+  "description": "Read-only policy decision and redacted execution fingerprint.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "allowed",
+    "reason_codes",
+    "reasons",
+    "request_sha256",
+    "resolved_executable",
+    "resolved_cwd",
+    "redacted_argv",
+    "environment_keys",
+    "environment_sha256",
+    "timeout_seconds",
+    "max_output_bytes",
+    "isolation",
+    "network"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "allowed": {"type": "boolean"},
+    "reason_codes": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "maxLength": 128},
+      "maxItems": 64,
+      "uniqueItems": true
+    },
+    "reasons": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "maxLength": 2048},
+      "maxItems": 64,
+      "uniqueItems": true
+    },
+    "request_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "resolved_executable": {"type": "string", "maxLength": 32768},
+    "resolved_cwd": {"type": "string", "minLength": 1, "maxLength": 32768},
+    "redacted_argv": {
+      "type": "array",
+      "items": {"type": "string", "maxLength": 32768},
+      "maxItems": 256
+    },
+    "environment_keys": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+      "maxItems": 256,
+      "uniqueItems": true
+    },
+    "environment_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600},
+    "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 10485760},
+    "isolation": {"type": "string", "enum": ["process", "sandbox", "container"]},
+    "network": {"type": "string", "enum": ["inherit", "deny"]}
+  },
+  "additionalProperties": false
+}
