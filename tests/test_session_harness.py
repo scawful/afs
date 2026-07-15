@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import shlex
 from argparse import Namespace
 from pathlib import Path
 
+import pytest
+
 import afs.cli.core as cli_core_module
+import afs.verification as verification_module
 from afs.cli.core import (
     session_event_command,
     session_hook_command,
@@ -19,8 +23,16 @@ from afs.schema import (
     ProfilesConfig,
     VerificationCheckConfig,
     VerificationConfig,
+    VerificationExecutionConfig,
     VerificationProfileConfig,
 )
+from afs.session_harness import (
+    _build_session_feedback_state,
+    _build_session_verification_state,
+    _verification_record_from_event,
+    build_client_session_payload,
+)
+from afs.verification import verification_item_id
 
 
 def _make_manager(tmp_path: Path) -> tuple[AFSManager, Path]:
@@ -59,7 +71,17 @@ def _make_manager(tmp_path: Path) -> tuple[AFSManager, Path]:
                             name="harness-artifacts",
                             skills=["agentic-background"],
                             workflows=["edit_fast"],
-                            commands=["pytest -q tests/test_session_harness.py"],
+                            executions=[
+                                VerificationExecutionConfig(
+                                    argv=[
+                                        "python3",
+                                        "-m",
+                                        "pytest",
+                                        "-q",
+                                        "tests/test_session_harness.py",
+                                    ]
+                                )
+                            ],
                         )
                     ],
                 )
@@ -162,26 +184,41 @@ def test_session_prepare_client_command_outputs_artifacts(
     assert payload["prompt"]["artifact_paths"]["json"].endswith("session_system_prompt_codex.json")
     assert Path(payload["prompt"]["artifact_paths"]["json"]).exists()
     assert payload["cli_hints"]["workspace_path"] == str(tmp_path.resolve())
-    assert payload["cli_hints"]["query_shortcut"] == f"afs query <text> --path {tmp_path.resolve()}"
+    quoted_workspace = shlex.quote(str(tmp_path.resolve()))
+    assert payload["cli_hints"]["query_shortcut"] == f"afs query <text> --path {quoted_workspace}"
     assert (
         payload["cli_hints"]["query_canonical"]
-        == f"afs context query <text> --path {tmp_path.resolve()}"
+        == f"afs context query <text> --path {quoted_workspace}"
     )
-    assert payload["cli_hints"]["index_rebuild"] == f"afs index rebuild --path {tmp_path.resolve()}"
-    assert payload["cli_hints"]["agent_jobs_inbox"] == f"afs agent-jobs inbox --path {tmp_path.resolve()}"
-    assert payload["cli_hints"]["work_summary"] == f"afs work --path {tmp_path.resolve()}"
-    assert payload["cli_hints"]["work_approvals"] == f"afs work approvals list --path {tmp_path.resolve()}"
+    assert payload["cli_hints"]["index_rebuild"] == f"afs index rebuild --path {quoted_workspace}"
+    assert payload["cli_hints"]["agent_jobs_inbox"] == f"afs agent-jobs inbox --path {quoted_workspace}"
+    assert payload["cli_hints"]["work_summary"] == f"afs work --path {quoted_workspace}"
+    assert payload["cli_hints"]["work_approvals"] == f"afs work approvals list --path {quoted_workspace}"
     assert (
         payload["cli_hints"]["work_communication"]
-        == f"afs work communication preflight --path {tmp_path.resolve()}"
+        == f"afs work communication preflight --path {quoted_workspace}"
     )
     assert payload["cli_hints"]["verify_plan"].startswith("afs verify plan --payload-file ")
     assert payload["cli_hints"]["verify_run"].startswith("afs verify run --payload-file ")
     assert isinstance(payload["cli_hints"]["notes"], list)
     assert payload["verification_plan"]["profile"] == "repo"
     assert payload["verification_plan"]["selected_checks"][0]["name"] == "harness-artifacts"
-    assert payload["verification_plan"]["selected_checks"][0]["commands"] == [
-        "pytest -q tests/test_session_harness.py"
+    assert payload["verification_plan"]["selected_checks"][0]["executions"] == [
+        {
+            "argv": [
+                "python3",
+                "-m",
+                "pytest",
+                "-q",
+                "tests/test_session_harness.py",
+            ],
+            "cwd": "",
+            "timeout_seconds": 300.0,
+            "max_output_bytes": 1024 * 1024,
+            "inherit_env": [],
+            "env": {},
+            "redact_argv_indices": [],
+        }
     ]
     assert payload["structured_guidance"]["recommended_schema"] == "design-brief"
     assert payload["structured_guidance"]["followup_schema"] == "verification-summary"
@@ -196,7 +233,10 @@ def test_session_prepare_client_command_outputs_artifacts(
     assert "- agentic-background: Stream background progress instead of hiding state." in prompt_text
     assert "## Skill Verification" in prompt_text
     assert "## Verification Plan" in prompt_text
-    assert "- harness-artifacts: pytest -q tests/test_session_harness.py" in prompt_text
+    assert (
+        "- harness-artifacts: python3 -m pytest -q tests/test_session_harness.py"
+        in prompt_text
+    )
     assert "## Repo Policy" in prompt_text
     assert "- order findings by severity" in prompt_text
     assert "## Structured Workflow" in prompt_text
@@ -210,6 +250,406 @@ def test_session_prepare_client_command_outputs_artifacts(
     supported_names = {entry["name"] for entry in payload["integration"]["supported_events"]}
     assert "user_prompt_submit" in supported_names
     assert "task_completed" in supported_names
+
+
+def test_prepared_session_redacts_verification_secrets_from_all_artifacts(
+    tmp_path: Path,
+) -> None:
+    manager, context_root = _make_manager(tmp_path)
+    check = manager.config.verification.profiles["repo"].checks[0]
+    execution = check.executions[0]
+    execution.argv.append("argv-secret")
+    execution.redact_argv_indices = [len(execution.argv) - 1]
+    execution.env = {"AFS_SECRET": "env-secret"}
+    check.commands = ["printf legacy-secret"]
+
+    payload = build_client_session_payload(
+        manager,
+        context_root,
+        client="codex",
+        session_id="session-redaction",
+        cwd=tmp_path,
+        model="codex",
+        workflow="edit_fast",
+        tool_profile="edit_and_verify",
+        skills_prompt="background agents harness",
+        write_artifacts=True,
+    )
+
+    check_payload = payload["verification_plan"]["selected_checks"][0]
+    execution_payload = check_payload["executions"][0]
+    assert execution_payload["argv"][-1] == "<redacted>"
+    assert execution_payload["env"] == {"AFS_SECRET": "<redacted>"}
+    assert check_payload["commands"] == ["<redacted legacy shell command>"]
+    assert all(
+        secret not in json.dumps(payload)
+        for secret in ("argv-secret", "env-secret", "legacy-secret")
+    )
+    prompt_text = Path(payload["prompt"]["artifact_paths"]["text"]).read_text(
+        encoding="utf-8"
+    )
+    persisted_payload = Path(payload["artifact_paths"]["json"]).read_text(
+        encoding="utf-8"
+    )
+    for secret in ("argv-secret", "env-secret", "legacy-secret"):
+        assert secret not in prompt_text
+        assert secret not in persisted_payload
+    assert "deprecated; blocked; explicit opt-in required" in prompt_text
+
+
+def test_prepared_session_preserves_incomplete_git_discovery(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager, context_root = _make_manager(tmp_path)
+
+    def fail_discovery(_start_dir=None):
+        raise verification_module.VerificationDiscoveryError(
+            "simulated repository discovery failure"
+        )
+
+    monkeypatch.setattr(
+        verification_module,
+        "discover_git_repo_root",
+        lambda _start_dir=None: tmp_path,
+    )
+    monkeypatch.setattr(
+        verification_module,
+        "discover_changed_paths",
+        fail_discovery,
+    )
+
+    payload = build_client_session_payload(
+        manager,
+        context_root,
+        client="codex",
+        session_id="session-discovery-failure",
+        cwd=tmp_path,
+        workflow="edit_fast",
+        tool_profile="edit_and_verify",
+        skills_prompt="background agents harness",
+        write_artifacts=False,
+    )
+
+    assert payload["verification_plan"]["discovery_complete"] is False
+    assert (
+        payload["verification_plan"]["discovery_error"]
+        == "simulated repository discovery failure"
+    )
+
+
+def test_blocked_verification_event_remains_blocked_in_session_state() -> None:
+    record = _verification_record_from_event(
+        event_name="verification_recorded",
+        event_payload={
+            "verification_status": "blocked",
+            "verification_command": "python3 -c '<redacted>'",
+            "summary": "required: blocked",
+        },
+        timestamp="2026-07-15T00:00:00Z",
+    )
+    payload = {
+        "verification_plan": {
+            "available": True,
+            "selected_checks": [
+                {
+                    "name": "required",
+                    "required": True,
+                    "executions": [{"argv": ["python3"], "redact_argv_indices": []}],
+                    "commands": [],
+                }
+            ],
+        },
+        "activity": {"verification": {"records": [record]}},
+        "repo_policy": {},
+    }
+
+    state = _build_session_verification_state(payload, final=False)
+    payload["activity"]["verification"] = state
+    feedback = _build_session_feedback_state(payload)
+
+    assert record["status"] == "blocked"
+    assert state["status"] == "blocked"
+    assert state["record_count"] == 1
+    assert feedback["signals"] == ["verification_blocked"]
+    assert feedback["counts"] == {"verification_blocked": 1}
+
+
+def test_one_focused_check_cannot_satisfy_multiple_required_checks() -> None:
+    first = _verification_record_from_event(
+        event_name="verification_recorded",
+        event_payload={
+            "verification_status": "passed",
+            "verification_command": "python3 -m pytest tests/easy.py",
+            "verification_check": "easy",
+            "verification_item_id": verification_item_id("easy", "execution", 0),
+        },
+        timestamp="2026-07-15T00:00:00Z",
+    )
+    second = _verification_record_from_event(
+        event_name="verification_recorded",
+        event_payload={
+            "verification_status": "passed",
+            "verification_command": "python3 -m pytest tests/hard.py",
+            "verification_check": "hard",
+            "verification_item_id": verification_item_id("hard", "execution", 0),
+        },
+        timestamp="2026-07-15T00:00:01Z",
+    )
+    payload = {
+        "verification_plan": {
+            "available": True,
+            "selected_checks": [
+                {
+                    "name": "easy",
+                    "required": True,
+                    "executions": [{"argv": ["python3"], "redact_argv_indices": []}],
+                    "commands": [],
+                },
+                {
+                    "name": "hard",
+                    "required": True,
+                    "executions": [{"argv": ["python3"], "redact_argv_indices": []}],
+                    "commands": [],
+                },
+            ],
+        },
+        "activity": {"verification": {"records": [first]}},
+    }
+
+    partial = _build_session_verification_state(payload, final=False)
+    payload["activity"]["verification"]["records"].append(second)
+    complete = _build_session_verification_state(payload, final=False)
+
+    assert first["check_name"] == "easy"
+    assert partial["status"] == "pending"
+    assert partial["completed_required_checks"] == ["easy"]
+    assert complete["status"] == "passed"
+    assert complete["completed_required_checks"] == ["easy", "hard"]
+
+
+def test_duplicate_item_passes_do_not_cover_a_distinct_required_item() -> None:
+    first_item = verification_item_id("combo", "execution", 0)
+    second_item = verification_item_id("combo", "execution", 1)
+    duplicate = {
+        "timestamp": "2026-07-15T00:00:00Z",
+        "event": "verification_recorded",
+        "status": "passed",
+        "command": "first-command",
+        "check_name": "combo",
+        "item_id": first_item,
+    }
+    payload = {
+        "verification_plan": {
+            "available": True,
+            "selected_checks": [
+                {
+                    "name": "combo",
+                    "required": True,
+                    "executions": [
+                        {"argv": ["first-command"], "redact_argv_indices": []},
+                        {"argv": ["second-command"], "redact_argv_indices": []},
+                    ],
+                    "execution_item_ids": [
+                        first_item,
+                        second_item,
+                    ],
+                    "commands": [],
+                    "command_item_ids": [],
+                }
+            ],
+        },
+        "activity": {"verification": {"records": [duplicate, dict(duplicate)]}},
+    }
+
+    state = _build_session_verification_state(payload, final=True)
+
+    assert state["status"] == "missing"
+    assert state["completed_required_items"] == [first_item]
+    assert "completed_required_checks" not in state
+
+
+def test_fresh_verification_run_ignores_stale_item_records() -> None:
+    base_item = verification_item_id("required", "execution", 0)
+    current_item = f"verification-run-v1:current:{base_item}"
+    payload = {
+        "verification_plan": {
+            "available": True,
+            "verification_run_id": "current",
+            "selected_checks": [
+                {
+                    "name": "required",
+                    "required": True,
+                    "executions": [
+                        {"argv": ["python3"], "redact_argv_indices": []}
+                    ],
+                    "execution_item_ids": [current_item],
+                    "commands": [],
+                    "command_item_ids": [],
+                }
+            ],
+        },
+        "activity": {
+            "verification": {
+                "records": [
+                    {
+                        "status": "passed",
+                        "check_name": "required",
+                        "item_id": f"verification-run-v1:old:{base_item}",
+                    }
+                ]
+            }
+        },
+    }
+
+    pending = _build_session_verification_state(payload, final=False)
+    payload["activity"]["verification"]["records"].append(
+        {
+            "status": "passed",
+            "check_name": "required",
+            "item_id": current_item,
+        }
+    )
+    passed = _build_session_verification_state(payload, final=False)
+
+    assert pending["status"] == "pending"
+    assert passed["status"] == "passed"
+
+
+def test_verification_coverage_retains_more_than_ten_required_items() -> None:
+    item_ids = [verification_item_id("required", "execution", index) for index in range(11)]
+    payload = {
+        "verification_plan": {
+            "available": True,
+            "selected_checks": [
+                {
+                    "name": "required",
+                    "required": True,
+                    "executions": [
+                        {"argv": ["true", str(index)], "redact_argv_indices": []}
+                        for index in range(11)
+                    ],
+                    "execution_item_ids": item_ids,
+                    "commands": [],
+                    "command_item_ids": [],
+                }
+            ],
+        },
+        "activity": {
+            "verification": {
+                "records": [
+                    {
+                        "status": "passed",
+                        "check_name": "required",
+                        "item_id": item_id,
+                    }
+                    for item_id in item_ids
+                ]
+            }
+        },
+    }
+
+    state = _build_session_verification_state(payload, final=True)
+
+    assert state["status"] == "passed"
+    assert state["record_count"] == 11
+    assert state["completed_required_items"] == sorted(item_ids)
+
+
+def test_empty_available_plan_preserves_workflow_verification_requirement() -> None:
+    payload = {
+        "verification_plan": {"available": True, "selected_checks": []},
+        "pack": {"workflow": "edit_fast", "tool_profile": "edit_and_verify"},
+        "prompt": {"model_family": "codex"},
+        "activity": {"verification": {"records": []}},
+    }
+
+    state = _build_session_verification_state(payload, final=True)
+
+    assert state["required"] is True
+    assert state["status"] == "missing"
+
+
+def test_current_optional_failure_keeps_session_failed() -> None:
+    required_item = verification_item_id("required", "execution", 0)
+    optional_item = verification_item_id("optional", "execution", 0)
+    payload = {
+        "verification_plan": {
+            "available": True,
+            "selected_checks": [
+                {
+                    "name": "required",
+                    "required": True,
+                    "executions": [{"argv": ["true"], "redact_argv_indices": []}],
+                    "execution_item_ids": [required_item],
+                    "commands": [],
+                    "command_item_ids": [],
+                },
+                {
+                    "name": "optional",
+                    "required": False,
+                    "executions": [{"argv": ["false"], "redact_argv_indices": []}],
+                    "execution_item_ids": [optional_item],
+                    "commands": [],
+                    "command_item_ids": [],
+                },
+            ],
+        },
+        "activity": {
+            "verification": {
+                "records": [
+                    {
+                        "status": "passed",
+                        "check_name": "required",
+                        "item_id": required_item,
+                    },
+                    {
+                        "status": "failed",
+                        "check_name": "optional",
+                        "item_id": optional_item,
+                    },
+                ]
+            }
+        },
+    }
+
+    state = _build_session_verification_state(payload, final=True)
+
+    assert state["status"] == "failed"
+
+
+def test_all_optional_current_failure_is_not_hidden_as_not_required() -> None:
+    optional_item = verification_item_id("optional", "execution", 0)
+    payload = {
+        "verification_plan": {
+            "available": True,
+            "selected_checks": [
+                {
+                    "name": "optional",
+                    "required": False,
+                    "executions": [{"argv": ["false"], "redact_argv_indices": []}],
+                    "execution_item_ids": [optional_item],
+                    "commands": [],
+                    "command_item_ids": [],
+                }
+            ],
+        },
+        "activity": {
+            "verification": {
+                "records": [
+                    {
+                        "status": "failed",
+                        "check_name": "optional",
+                        "item_id": optional_item,
+                    }
+                ]
+            }
+        },
+    }
+
+    state = _build_session_verification_state(payload, final=True)
+
+    assert state["status"] == "failed"
 
 
 def test_session_hook_command_uses_payload_file(
@@ -585,3 +1025,102 @@ def test_session_hook_command_errors_in_strict_mode_when_verification_missing(
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "error"
     assert payload["verification"]["status"] == "missing"
+
+
+@pytest.mark.parametrize(
+    ("verification_mode", "expected_rc", "expected_status"),
+    [("warn", 0, "warning"), ("error", 2, "error")],
+)
+@pytest.mark.parametrize("preflight_only", [False, True], ids=["check", "preflight"])
+def test_session_hook_gates_blocked_required_verification(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    verification_mode: str,
+    expected_rc: int,
+    expected_status: str,
+    preflight_only: bool,
+) -> None:
+    manager, context_root = _make_manager(tmp_path)
+    config_path = tmp_path / "afs.toml"
+    monkeypatch.setattr(
+        cli_core_module,
+        "_load_manager_context_and_config_path",
+        lambda _args: (manager, context_root, config_path),
+    )
+    assert session_prepare_client_command(
+        Namespace(
+            client="codex",
+            session_id=f"sess-blocked-{verification_mode}-{preflight_only}",
+            cwd=str(tmp_path),
+            query="background agents harness",
+            task="Exercise the blocked verification gate.",
+            model="codex",
+            workflow="edit_fast",
+            tool_profile="edit_and_verify",
+            pack_mode="focused",
+            token_budget=700,
+            include_content=False,
+            max_query_results=4,
+            max_embedding_results=2,
+            skills_prompt="background agents harness",
+            skills_top_k=5,
+            no_session_pack=False,
+            no_skills_match=False,
+            no_write_artifacts=False,
+            json=True,
+            config=None,
+            path=None,
+            context_root=context_root,
+            context_dir=None,
+        )
+    ) == 0
+    prepared = json.loads(capsys.readouterr().out)
+    payload_path = Path(prepared["artifact_paths"]["json"])
+    session_payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    if preflight_only:
+        item_id = "verification-run-v1:test:preflight"
+        check_name = "verification-preflight"
+        session_payload["verification_plan"] = {
+            "available": True,
+            "selected_checks": [],
+            "preflight_required": True,
+            "preflight_item_id": item_id,
+            "verification_run_id": "test",
+        }
+    else:
+        check = session_payload["verification_plan"]["selected_checks"][0]
+        item_id = check["execution_item_ids"][0]
+        check_name = check["name"]
+    session_payload["activity"]["verification"]["records"] = [
+        {
+            "status": "blocked",
+            "check_name": check_name,
+            "item_id": item_id,
+        }
+    ]
+    payload_path.write_text(json.dumps(session_payload, indent=2), encoding="utf-8")
+
+    rc = session_hook_command(
+        Namespace(
+            event="session_end",
+            client=None,
+            session_id=None,
+            cwd=str(tmp_path),
+            payload_file=str(payload_path),
+            exit_code=0,
+            reason="client_exit",
+            verification_mode=verification_mode,
+            json=True,
+            config=None,
+            path=None,
+            context_root=context_root,
+            context_dir=None,
+        )
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert rc == expected_rc
+    assert output["status"] == expected_status
+    assert output["verification"]["required"] is True
+    assert output["verification"]["status"] == "blocked"

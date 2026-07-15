@@ -130,7 +130,11 @@ def test_build_model_system_prompt_includes_session_state_summary() -> None:
     assert "- agentic-context: Write the updated handoff note before ending the session." in prompt
     assert "## Verification Plan" in prompt
     assert "Verification profile: repo" in prompt
-    assert "- python: ruff check src/afs tests" in prompt
+    assert (
+        "- python: legacy shell (deprecated; blocked; explicit opt-in required): "
+        "<redacted legacy shell command>"
+    ) in prompt
+    assert "ruff check src/afs tests" not in prompt
     assert "## Repo Policy" in prompt
     assert "- order findings by severity" in prompt
     assert "- public-api: src/afs/mcp_server.py" in prompt
@@ -155,6 +159,39 @@ def test_build_model_system_prompt_includes_session_state_summary() -> None:
     assert "Never post, send, submit, or edit an external work system" in prompt
     assert "Last session next steps:" in prompt
     assert "- Ship the MCP refactor." in prompt
+
+
+def test_verification_prompt_redacts_argv_and_opaque_legacy_shell_text() -> None:
+    prompt = build_model_system_prompt(
+        base_prompt="Base behavior.",
+        verification_state={
+            "available": True,
+            "selected_checks": [
+                {
+                    "name": "secrets",
+                    "executions": [
+                        {
+                            "argv": ["tool", "--token", "argv-secret"],
+                            "redact_argv_indices": [2],
+                        },
+                        {
+                            "argv": ["unsafe-tool", "malformed-secret"],
+                            "redact_argv_indices": ["1"],
+                        },
+                    ],
+                    "commands": ["printf legacy-secret"],
+                }
+            ],
+        },
+    )
+
+    assert "argv-secret" not in prompt
+    assert "malformed-secret" not in prompt
+    assert "unsafe-tool" not in prompt
+    assert "legacy-secret" not in prompt
+    assert "<redacted>" in prompt
+    assert "<redacted legacy shell command>" in prompt
+    assert "deprecated; blocked; explicit opt-in required" in prompt
 
 
 def test_build_model_system_prompt_budget_drops_dynamic_sections_first() -> None:

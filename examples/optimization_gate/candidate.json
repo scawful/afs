@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "candidate_id": "candidate-v2",
+  "parent_id": "baseline-v1",
+  "artifact_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "artifact_ref": "git:refs/heads/experiment/candidate-v2",
+  "evaluation_suite": {
+    "name": "agent-workflow-regression",
+    "version": "1.0.0",
+    "case_set_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "provenance": {
+    "run_id": "run-candidate-002",
+    "evaluator": "afs-example-evaluator",
+    "evaluator_version": "1.0.0",
+    "seed": 42,
+    "environment_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "source_revision": "candidate-v2"
+  },
+  "metrics": [
+    {
+      "name": "cost",
+      "unit": "usd",
+      "value": 0.031,
+      "sample_count": 200,
+      "standard_error": 0.001
+    },
+    {
+      "name": "task_success",
+      "unit": "ratio",
+      "value": 0.86,
+      "sample_count": 200,
+      "standard_error": 0.018
+    },
+    {
+      "name": "latency",
+      "unit": "ms",
+      "value": 510.0,
+      "sample_count": 200,
+      "standard_error": 5.0
+    }
+  ],
+  "constraints": {
+    "policy_clean": true,
+    "tests_pass": true
+  }
+}

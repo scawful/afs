@@ -4,10 +4,27 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 
 ## [Unreleased]
 
+### Added
+
+- Versioned, packaged JSON Schema contracts for optimization evaluation,
+  policy, and decision records.
+- Pure `afs optimize decide` evidence gate with deterministic hashes, stable
+  reason codes, and no execution or promotion authority.
+- Cross-language optimization protocol documentation and runnable fixtures.
+- Versioned execution request, inspection, and record schemas plus a public
+  typed Python policy-checking API.
+- Read-only `afs execution inspect` and a portable process backend with bounded
+  time/output, scrubbed environments, and redacted audit records.
+- Structured verification executions routed through the execution broker.
+- Focused execution-contract CI coverage on Linux, macOS, and Windows.
+
 ### Changed
 
 - Refreshed GitHub Actions dependencies to current Node-runtime-compatible releases.
 - Narrowed CI type checking to the release-critical slice while broader type debt remains tracked in `ROADMAP.md`.
+- Deprecated verification string commands; they are blocked by default, require
+  an explicit legacy-shell opt-in during migration, and will be removed in
+  `0.4.0`.
 
 ## [0.2.0] - 2026-07-09
 

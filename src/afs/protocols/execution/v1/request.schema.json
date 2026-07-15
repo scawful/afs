@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "afs://schemas/v1/execution/request",
+  "title": "AFS Execution Request v1",
+  "description": "Immutable request for policy inspection or checked process execution.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "command",
+    "caller",
+    "purpose",
+    "cwd"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "command": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "argv"],
+          "properties": {
+            "kind": {"const": "argv"},
+            "argv": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 32768,
+                  "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000\\uD800-\\uDFFF]*$"
+                }
+              ],
+              "items": {
+                "type": "string",
+                "maxLength": 32768,
+                "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["kind", "command"],
+          "properties": {
+            "kind": {"const": "legacy_shell"},
+            "command": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1048576,
+              "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000\\uD800-\\uDFFF]*$"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "caller": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000\\uD800-\\uDFFF]*$"
+    },
+    "purpose": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000\\uD800-\\uDFFF]*$"
+    },
+    "cwd": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32768,
+      "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000\\uD800-\\uDFFF]*$"
+    },
+    "inherit_env": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+        "maxLength": 256
+      },
+      "maxItems": 128,
+      "uniqueItems": true,
+      "default": []
+    },
+    "set_env": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 1048576,
+        "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
+      },
+      "maxProperties": 128,
+      "default": {}
+    },
+    "timeout_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 3600,
+      "default": 300
+    },
+    "max_output_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10485760,
+      "default": 1048576
+    },
+    "isolation": {
+      "type": "string",
+      "enum": ["process", "sandbox", "container"],
+      "default": "process"
+    },
+    "network": {
+      "type": "string",
+      "enum": ["inherit", "deny"],
+      "default": "inherit"
+    },
+    "redact_argv_indices": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 1, "maximum": 255},
+      "maxItems": 256,
+      "uniqueItems": true,
+      "default": []
+    }
+  },
+  "additionalProperties": false
+}

@@ -77,6 +77,10 @@ Changelog = "https://github.com/scawful/afs/blob/main/CHANGELOG.md"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"afs.protocols.optimization.v1" = ["*.json"]
+"afs.protocols.execution.v1" = ["*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]

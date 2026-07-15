@@ -330,6 +330,17 @@ workflows. Built-in names currently include:
 - `verification-summary`
 - `handoff-summary`
 
+Versioned protocol schemas are also exposed through the same resource surface:
+
+- `v1/optimization/evaluation`, `v1/optimization/policy`, and
+  `v1/optimization/decision`
+- `v1/execution/request`, `v1/execution/inspection`, and
+  `v1/execution/record`
+
+For example, an MCP client can read
+`afs://schemas/v1/execution/request`. Execution schemas describe portable
+request and audit records; reading or validating one never launches a process.
+
 These resources return `application/schema+json` so Gemini or other MCP clients
 can request a tiny output contract before asking for a structured response.
 

@@ -6,12 +6,23 @@ import json
 import re
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
+
+from .protocols import load_protocol_schemas
+from .protocols.canonical_json import (
+    CanonicalJSONError,
+    ensure_interoperable_json,
+    strict_json_loads,
+)
 
 SCHEMA_MIME_TYPE = "application/schema+json"
 SCHEMA_URI_PREFIX = "afs://schemas/"
 
 _CODE_FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*(.*?)\s*```\s*$", re.DOTALL)
+_RFC3339_DATETIME_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
+)
 
 _BASE_SCHEMA = "https://json-schema.org/draft/2020-12/schema"
 
@@ -255,6 +266,10 @@ _SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
 }
 
+# Protocol schemas are standalone package data so non-Python clients can consume
+# the exact same contracts that the CLI and MCP resource surface advertise.
+_SCHEMA_DEFINITIONS.update(load_protocol_schemas())
+
 
 def list_response_schema_specs() -> list[dict[str, str]]:
     """Return MCP resource descriptors for the built-in response schemas."""
@@ -323,6 +338,10 @@ def coerce_response_payload(data: Any) -> tuple[Any, str]:
     ``parse_error`` is empty on success.
     """
     if isinstance(data, (dict, list)):
+        try:
+            ensure_interoperable_json(data)
+        except CanonicalJSONError as exc:
+            return None, f"invalid JSON value: {exc}"
         return data, ""
     if not isinstance(data, str):
         return None, f"expected a JSON object or string, got {type(data).__name__}"
@@ -330,9 +349,11 @@ def coerce_response_payload(data: Any) -> tuple[Any, str]:
     if not text:
         return None, "empty response"
     try:
-        return json.loads(text), ""
+        return strict_json_loads(text), ""
     except json.JSONDecodeError as exc:
         return None, f"invalid JSON: {exc.msg} (line {exc.lineno}, column {exc.colno})"
+    except CanonicalJSONError as exc:
+        return None, f"invalid JSON: {exc}"
 
 
 def validate_structured_response(name: str, data: Any) -> SchemaValidationResult:
@@ -380,11 +401,13 @@ def build_schema_correction(result: SchemaValidationResult) -> str:
 def _collect_schema_errors(schema: dict[str, Any], instance: Any) -> list[str]:
     """Collect human-readable schema violations, preferring jsonschema when present."""
     try:
-        from jsonschema import Draft202012Validator
+        from jsonschema import Draft202012Validator, FormatChecker
     except ImportError:
         return _builtin_schema_errors(schema, instance)
 
-    validator = Draft202012Validator(schema)
+    format_checker = FormatChecker()
+    format_checker.checkers["date-time"] = (_is_rfc3339_datetime, ())
+    validator = Draft202012Validator(schema, format_checker=format_checker)
     errors: list[str] = []
     for error in sorted(validator.iter_errors(instance), key=lambda e: list(e.path)):
         location = "/".join(str(part) for part in error.path) or "(root)"
@@ -392,57 +415,119 @@ def _collect_schema_errors(schema: dict[str, Any], instance: Any) -> list[str]:
     return errors
 
 
+def _is_rfc3339_datetime(value: object) -> bool:
+    if not isinstance(value, str) or _RFC3339_DATETIME_RE.fullmatch(value) is None:
+        return False
+    normalized = value[:-1] + "+00:00" if value[-1:].casefold() == "z" else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
 def _builtin_schema_errors(schema: dict[str, Any], instance: Any) -> list[str]:
     """Minimal structural fallback when jsonschema is unavailable.
 
-    Covers the features the built-in response schemas actually use: object typing,
-    ``required`` keys, ``additionalProperties: false``, and per-property type plus
-    ``minItems``/``maxItems`` on arrays. Not a full JSON Schema implementation.
+    Covers the structural constraints used by AFS's built-in response and protocol
+    schemas. It is intentionally not a complete JSON Schema implementation.
     """
     errors: list[str] = []
-    if schema.get("type") == "object" and not isinstance(instance, dict):
-        return [f"(root): expected object, got {type(instance).__name__}"]
-    if not isinstance(instance, dict):
-        return errors
-
-    for key in schema.get("required", []):
-        if key not in instance:
-            errors.append(f"(root): missing required property '{key}'")
-
-    properties = schema.get("properties", {})
-    if schema.get("additionalProperties") is False:
-        for key in instance:
-            if key not in properties:
-                errors.append(f"(root): additional property '{key}' is not allowed")
-
-    type_map = {
-        "string": str,
-        "array": list,
-        "object": dict,
-        "boolean": bool,
-        "number": (int, float),
-        "integer": int,
-    }
-    for key, spec in properties.items():
-        if key not in instance or not isinstance(spec, dict):
-            continue
-        value = instance[key]
-        expected = spec.get("type")
-        py_type = type_map.get(expected) if isinstance(expected, str) else None
-        if py_type is not None and not isinstance(value, py_type):
-            errors.append(f"{key}: expected {expected}, got {type(value).__name__}")
-            continue
-        if expected == "array" and isinstance(value, list):
-            min_items = spec.get("minItems")
-            max_items = spec.get("maxItems")
-            if isinstance(min_items, int) and len(value) < min_items:
-                errors.append(f"{key}: expected at least {min_items} item(s)")
-            if isinstance(max_items, int) and len(value) > max_items:
-                errors.append(f"{key}: expected at most {max_items} item(s)")
-            item_type = (spec.get("items") or {}).get("type")
-            item_py = type_map.get(item_type) if isinstance(item_type, str) else None
-            if item_py is not None:
-                for idx, item in enumerate(value):
-                    if not isinstance(item, item_py):
-                        errors.append(f"{key}/{idx}: expected {item_type}")
+    _validate_schema_node(schema, instance, "(root)", errors)
     return errors
+
+
+def _matches_json_type(expected: str, value: Any) -> bool:
+    if expected == "object":
+        return isinstance(value, dict)
+    if expected == "array":
+        return isinstance(value, list)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected == "null":
+        return value is None
+    return True
+
+
+def _validate_schema_node(
+    schema: dict[str, Any],
+    instance: Any,
+    location: str,
+    errors: list[str],
+) -> None:
+    if "const" in schema and instance != schema["const"]:
+        errors.append(f"{location}: expected constant {schema['const']!r}")
+        return
+    if "enum" in schema and instance not in schema["enum"]:
+        errors.append(f"{location}: expected one of {schema['enum']!r}")
+        return
+
+    expected = schema.get("type")
+    if isinstance(expected, str) and not _matches_json_type(expected, instance):
+        errors.append(f"{location}: expected {expected}, got {type(instance).__name__}")
+        return
+    if isinstance(expected, list) and not any(
+        isinstance(item, str) and _matches_json_type(item, instance) for item in expected
+    ):
+        errors.append(f"{location}: expected one of {expected!r}, got {type(instance).__name__}")
+        return
+
+    if isinstance(instance, dict):
+        properties = schema.get("properties", {})
+        min_properties = schema.get("minProperties")
+        max_properties = schema.get("maxProperties")
+        if isinstance(min_properties, int) and len(instance) < min_properties:
+            errors.append(f"{location}: expected at least {min_properties} properties")
+        if isinstance(max_properties, int) and len(instance) > max_properties:
+            errors.append(f"{location}: expected at most {max_properties} properties")
+        for key in schema.get("required", []):
+            if key not in instance:
+                errors.append(f"{location}: missing required property '{key}'")
+        additional = schema.get("additionalProperties", True)
+        for key, value in instance.items():
+            child_location = key if location == "(root)" else f"{location}/{key}"
+            child_schema = properties.get(key) if isinstance(properties, dict) else None
+            if isinstance(child_schema, dict):
+                _validate_schema_node(child_schema, value, child_location, errors)
+            elif additional is False:
+                errors.append(f"{location}: additional property '{key}' is not allowed")
+            elif isinstance(additional, dict):
+                _validate_schema_node(additional, value, child_location, errors)
+
+    if isinstance(instance, list):
+        min_items = schema.get("minItems")
+        max_items = schema.get("maxItems")
+        if isinstance(min_items, int) and len(instance) < min_items:
+            errors.append(f"{location}: expected at least {min_items} item(s)")
+        if isinstance(max_items, int) and len(instance) > max_items:
+            errors.append(f"{location}: expected at most {max_items} item(s)")
+        if schema.get("uniqueItems") is True:
+            encoded = [json.dumps(item, sort_keys=True) for item in instance]
+            if len(encoded) != len(set(encoded)):
+                errors.append(f"{location}: expected unique items")
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(instance):
+                _validate_schema_node(item_schema, item, f"{location}/{index}", errors)
+
+    if isinstance(instance, str):
+        min_length = schema.get("minLength")
+        if isinstance(min_length, int) and len(instance) < min_length:
+            errors.append(f"{location}: expected length >= {min_length}")
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.search(pattern, instance) is None:
+            errors.append(f"{location}: does not match {pattern!r}")
+
+    if isinstance(instance, (int, float)) and not isinstance(instance, bool):
+        minimum = schema.get("minimum")
+        if isinstance(minimum, (int, float)) and instance < minimum:
+            errors.append(f"{location}: expected value >= {minimum}")
+        maximum = schema.get("maximum")
+        if isinstance(maximum, (int, float)) and instance > maximum:
+            errors.append(f"{location}: expected value <= {maximum}")
