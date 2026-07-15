@@ -6,7 +6,20 @@ import pytest
 
 from afs.cli._utils import write_config
 from afs.config import load_config, load_config_model, load_runtime_config_model
-from afs.schema import AFSConfig, VerificationConfigError
+from afs.profiles import resolve_active_profile
+from afs.schema import (
+    AFSConfig,
+    AgentsConfig,
+    CognitiveConfig,
+    ExtensionsConfig,
+    GeneralConfig,
+    HooksConfig,
+    OrchestratorConfig,
+    PluginsConfig,
+    ProfilesConfig,
+    VerificationConfigError,
+    default_directory_configs,
+)
 
 
 def test_load_config_merges_workspace_registry(tmp_path, monkeypatch) -> None:
@@ -47,6 +60,47 @@ def test_load_config_model_uses_explicit_path(tmp_path) -> None:
 
     model = load_config_model(config_path=config_path, merge_user=False)
     assert model.general.context_root == context_root.resolve()
+
+
+def test_write_config_round_trips_default_agents_opt_out(tmp_path: Path) -> None:
+    config_path = tmp_path / "afs.toml"
+    config = AFSConfig.from_dict({"agents": {"default_set": False}})
+
+    write_config(config_path, config)
+
+    text = config_path.read_text(encoding="utf-8")
+    roundtrip = load_config_model(config_path=config_path, merge_user=False)
+    assert "[agents]" in text
+    assert roundtrip.agents.default_set is False
+
+
+def test_afs_config_preserves_pre_agents_positional_constructor(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AFS_DEFAULT_AGENTS", raising=False)
+    general = GeneralConfig()
+    plugins = PluginsConfig()
+    extensions = ExtensionsConfig()
+    profiles = ProfilesConfig()
+    hooks = HooksConfig()
+    directories = default_directory_configs()
+    cognitive = CognitiveConfig()
+    orchestrator = OrchestratorConfig(enabled=True)
+
+    config = AFSConfig(
+        general,
+        plugins,
+        extensions,
+        profiles,
+        hooks,
+        directories,
+        cognitive,
+        orchestrator,
+    )
+
+    assert config.orchestrator is orchestrator
+    assert isinstance(config.agents, AgentsConfig)
+    assert resolve_active_profile(config).agent_configs
 
 
 def test_load_runtime_config_model_uses_nearest_repo_config(tmp_path, monkeypatch) -> None:

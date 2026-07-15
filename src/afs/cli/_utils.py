@@ -312,6 +312,11 @@ def write_config(path: Path, config: AFSConfig) -> None:
         prof_table[name] = p_table
     doc["profiles"] = prof_table
 
+    # --- [agents] ---
+    agents_table = _table()
+    agents_table["default_set"] = config.agents.default_set
+    doc["agents"] = agents_table
+
     # --- [hooks] ---
     hooks_table = _table()
     hooks_table["before_context_read"] = list(config.hooks.before_context_read)

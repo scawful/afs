@@ -1219,7 +1219,7 @@ class ContextSQLiteIndex:
         return normalized
 
 
-_SKIP_DIRS = {
+INDEX_SCAN_SKIP_NAMES = {
     "__pycache__",
     "node_modules",
     ".venv",
@@ -1255,7 +1255,7 @@ def _iter_mount_entries(mount_root: Path):
         return
 
     for child in children:
-        if child.name in _SKIP_DIRS:
+        if child.name in INDEX_SCAN_SKIP_NAMES:
             continue
         yield child, child.relative_to(mount_root).as_posix()
 
@@ -1292,7 +1292,7 @@ def _walk_skipping(root: Path):
     except OSError:
         return
     for child in children:
-        if child.name in _SKIP_DIRS:
+        if child.name in INDEX_SCAN_SKIP_NAMES:
             continue
         yield child
         if child.is_dir() and not child.is_symlink():

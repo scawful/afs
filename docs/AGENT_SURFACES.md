@@ -437,6 +437,24 @@ agents. It applies:
 - interval-style `schedule` values such as `5m`, `1h`, `daily`, or `weekly`
 - `watch_paths` change detection
 
+An active profile with no `agent_configs` receives four conservative defaults:
+`context-warm` (network-free daily audit), `index-rebuild` (configured
+knowledge/memory changes), `skills-mine` (weekly), and `morning-briefing`
+(daily interval, not a wall-clock alarm). A custom agent list is left unchanged.
+Disable the set with:
+
+```toml
+[agents]
+default_set = false
+```
+
+`AFS_DEFAULT_AGENTS=off` is the process-local equivalent. Invalid non-empty
+environment values disable the defaults rather than enabling background work.
+The supervisor itself is never installed or started implicitly.
+The default audit avoids source-tree writes, repairs, embeddings, and network
+calls. Supervisor snapshots and index-health reads may still initialize
+context-local SQLite metadata under the configured context root.
+
 By default it stores state under
 `.context/scratchpad/afs_agents/supervisor/`, which makes repo-local and
 context-local configs safer than a single user-global state cache.

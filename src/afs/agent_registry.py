@@ -19,6 +19,11 @@ except ImportError:  # pragma: no cover - platform specific
 
 ACTIVE_AGENT_STATES = {"running", "awaiting_review"}
 RECENT_AGENT_WINDOW = timedelta(hours=24)
+AGENT_CONTEXT_ROOT_ENV = "AFS_CONTEXT_ROOT"
+AGENT_EXPECTED_RESULT_NAME_ENV = "AFS_AGENT_EXPECTED_RESULT_NAME"
+AGENT_NAME_ENV = "AFS_AGENT_NAME"
+AGENT_RUN_ID_ENV = "AFS_AGENT_RUN_ID"
+AGENT_SUPERVISED_ENV = "AFS_AGENT_SUPERVISED"
 
 
 def _nearest_existing_parent(path: Path) -> Path:
@@ -177,7 +182,7 @@ class AgentRegistry:
             if str(entry.get("name", "")) != name:
                 continue
             existing_context = str(entry.get("context_root", "") or "")
-            if context_root and existing_context and existing_context != context_root:
+            if context_root and existing_context != context_root:
                 continue
             return entry
         return None
@@ -196,13 +201,71 @@ class AgentRegistry:
         output_path: str = "",
         last_error: str = "",
         pid: int | None = None,
+        run_id: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self._locked_entries() as entries:
-            entry = self._find_entry(entries, name=name, context_root=context_root)
+            if context_root:
+                entry = self._find_entry(
+                    entries,
+                    name=name,
+                    context_root=context_root,
+                )
+            else:
+                # Preserve the legacy unscoped row without letting a manual
+                # foreground result overwrite a supervised context+run row.
+                entry = next(
+                    (
+                        candidate
+                        for candidate in entries
+                        if str(candidate.get("name", "")) == name
+                        and not str(candidate.get("context_root", "") or "")
+                    ),
+                    None,
+                )
             if entry is None:
                 entry = {"name": name}
                 entries.append(entry)
+
+            existing_run_id = str(entry.get("run_id", "") or "")
+            existing_status = str(entry.get("status", "") or "")
+            if run_id and existing_run_id and existing_run_id != run_id:
+                # A terminal result from an older process must not overwrite a
+                # newer launch occupying the compact name+context registry row.
+                if status not in ACTIVE_AGENT_STATES:
+                    return dict(entry)
+                existing_started = _parse_timestamp(
+                    str(entry.get("started_at", "") or "")
+                )
+                incoming_started = _parse_timestamp(started_at)
+                if existing_started is not None and (
+                    incoming_started is None or incoming_started <= existing_started
+                ):
+                    # Concurrent supervisors may both attempt a PID update.
+                    # Only the newest launch may claim the compact row.
+                    return dict(entry)
+            elif (
+                run_id
+                and existing_run_id == run_id
+                and status in ACTIVE_AGENT_STATES
+                and existing_status
+                and existing_status not in ACTIVE_AGENT_STATES
+            ):
+                # A fast child can finish before spawn() records its PID. Do
+                # not regress that matching terminal result back to running.
+                return dict(entry)
+
+            new_run = bool(run_id and existing_run_id != run_id)
+            if new_run:
+                for key in (
+                    "finished_at",
+                    "last_output_at",
+                    "last_error",
+                    "output_path",
+                    "pid",
+                    "metadata",
+                ):
+                    entry.pop(key, None)
 
             resolved_task = task.strip() or str(entry.get("task", "") or "")
             if not resolved_task:
@@ -214,6 +277,8 @@ class AgentRegistry:
             entry["module"] = module or str(entry.get("module", "") or "")
             if context_root:
                 entry["context_root"] = context_root
+            if run_id:
+                entry["run_id"] = run_id
             if started_at:
                 entry["started_at"] = started_at
             if finished_at:
@@ -249,6 +314,7 @@ class AgentRegistry:
         context_root: str = "",
         started_at: str = "",
         pid: int | None = None,
+        run_id: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self.update(
@@ -259,6 +325,7 @@ class AgentRegistry:
             context_root=context_root,
             started_at=started_at or datetime.now().isoformat(),
             pid=pid,
+            run_id=run_id,
             metadata=metadata,
         )
 
@@ -274,6 +341,7 @@ class AgentRegistry:
         finished_at: str = "",
         output_path: str = "",
         last_error: str = "",
+        run_id: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         finished_value = finished_at or datetime.now().isoformat()
@@ -288,5 +356,6 @@ class AgentRegistry:
             last_output_at=finished_value,
             output_path=output_path,
             last_error=last_error,
+            run_id=run_id,
             metadata=metadata,
         )
