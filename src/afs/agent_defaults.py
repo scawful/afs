@@ -74,6 +74,10 @@ def default_agent_configs(config: AFSConfig | None = None) -> list[AgentConfig]:
             description="Rebuild the context SQLite index when knowledge or memory mounts change.",
             tags=[DEFAULT_AGENT_TAG],
             watch_paths=[knowledge_root, memory_root],
+            # afs watch announces change batches on this hivemind topic; the
+            # reactor makes it the first consumed signal (watch_paths still
+            # cover mutations that bypass afs watch).
+            on_event=["hivemind:context:repair"],
             module="afs.agents.index_rebuild",
         ),
         AgentConfig(

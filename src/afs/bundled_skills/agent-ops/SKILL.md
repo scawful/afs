@@ -45,6 +45,16 @@ the same explicit-user gates apply.
 Lifecycle is `stopped -> running -> stopped|failed`; review-gated work pauses
 at `awaiting_review` until the user approves or rejects it.
 
+## Triggers
+
+AgentConfig supports four start conditions: `auto_start`, `schedule`
+(`hourly`/`daily`/`weekly`/`30m`), `watch_paths` (file changes), and
+`on_event` — fnmatch patterns like `error`, `mcp_tool:call`, or
+`hivemind:context:repair` matched against new event-log entries and hivemind
+topics each reconcile cycle. `on_event_action = "job"` enqueues a deduped
+agent-job instead of spawning; `event_debounce` (default 300s) suppresses
+re-spawn bursts.
+
 ## Jobs, Runs, and Hooks
 
 | Command | Description |

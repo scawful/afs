@@ -41,6 +41,9 @@ dumping the full log.
 - Auditing: `replay` reconstructs what an agent session actually did
 - Skill mining reads this log — a healthy event stream feeds
   `afs skills mine` (see the skill-authoring skill)
+- The supervisor's event reactor consumes it: `AgentConfig.on_event` patterns
+  (e.g. `error`, `hivemind:context:repair`) start agents or enqueue jobs when
+  matching entries appear (see the agent-ops skill)
 
 Events are recorded automatically by MCP tools, session hooks, and CLI flows;
 `afs session event` is for client wrappers that need to record activity

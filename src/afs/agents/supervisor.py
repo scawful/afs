@@ -31,6 +31,12 @@ from ..context_paths import resolve_agent_output_root
 from ..profiles import resolve_active_profile
 from ..schema import AFSConfig, AgentConfig
 from .base import AgentResult, build_base_parser, configure_logging, emit_result, now_iso
+from .event_reactor import (
+    DEFAULT_EVENT_DEBOUNCE_SECONDS,
+    ReactorEvent,
+    collect_new_events,
+    match_event_rules,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -1231,12 +1237,98 @@ class AgentSupervisor:
                 due.append(config)
         return due
 
+    def _event_debounce_seconds(self, config: AgentConfig) -> float:
+        if config.event_debounce:
+            parsed = _parse_schedule_interval(config.event_debounce)
+            if parsed is not None:
+                return parsed
+        return DEFAULT_EVENT_DEBOUNCE_SECONDS
+
+    def evaluate_event_records(
+        self,
+        events: list[ReactorEvent],
+        agent_configs: list[AgentConfig],
+        *,
+        now: datetime | None = None,
+    ) -> list[tuple[AgentConfig, str]]:
+        """Match reactor events against on_event rules with per-agent debounce."""
+        current = now or _now_utc()
+        results: list[tuple[AgentConfig, str]] = []
+        for config, reason in match_event_rules(events, agent_configs):
+            existing = self.status(config.name)
+            if existing:
+                last_start = _parse_timestamp(existing.started_at)
+                if (
+                    last_start
+                    and (current - last_start).total_seconds()
+                    < self._event_debounce_seconds(config)
+                ):
+                    continue
+            results.append((config, reason))
+        return results
+
+    def enqueue_event_jobs(
+        self,
+        events: list[ReactorEvent],
+        agent_configs: list[AgentConfig],
+        *,
+        now: datetime | None = None,
+    ) -> list[str]:
+        """Enqueue agent-jobs for on_event matches with action \"job\".
+
+        A job is skipped while another job with the same dedupe key is still
+        queued or running, so event bursts collapse into one pending job.
+        """
+        matches = [
+            (config, reason)
+            for config, reason in self.evaluate_event_records(
+                events, agent_configs, now=now
+            )
+            if config.on_event_action == "job"
+        ]
+        if not matches:
+            return []
+        from ..agent_jobs import AgentJobQueue
+
+        resolved_config = self._config or load_config_model(merge_user=True)
+        queue = AgentJobQueue(resolved_config.general.context_root)
+        queue.ensure()
+        active_keys = {
+            job.dedupe_key
+            for status in ("queue", "running")
+            for job in queue.list(status=status)
+            if job.dedupe_key
+        }
+        created: list[str] = []
+        for config, reason in matches:
+            dedupe_key = f"on_event:{config.name}"
+            if dedupe_key in active_keys:
+                continue
+            prompt = (
+                f"Agent config '{config.name}' matched {reason}. "
+                + (
+                    f"Run `python -m {config.module}` and review its result."
+                    if config.module
+                    else config.description
+                )
+            ).strip()
+            job = queue.create(
+                title=f"{config.name}: react to {reason}",
+                prompt=prompt,
+                created_by=AGENT_NAME,
+                dedupe_key=dedupe_key,
+            )
+            active_keys.add(dedupe_key)
+            created.append(job.id)
+        return created
+
     def reconcile(
         self,
         agent_configs: list[AgentConfig],
         *,
         event: str | None = None,
         changed_paths: list[Path] | None = None,
+        event_records: list[ReactorEvent] | None = None,
         now: datetime | None = None,
     ) -> list[RunningAgent]:
         candidates: dict[str, tuple[AgentConfig, str]] = {}
@@ -1249,6 +1341,13 @@ class AgentSupervisor:
         if changed_paths:
             for config in self.evaluate_watch_paths(changed_paths, agent_configs):
                 candidates.setdefault(config.name, (config, "file_watch"))
+        if event_records:
+            for config, reason in self.evaluate_event_records(
+                event_records, agent_configs, now=now
+            ):
+                if config.on_event_action == "job":
+                    continue  # enqueue_event_jobs owns the job action
+                candidates.setdefault(config.name, (config, reason))
         for config in self.due_schedules(agent_configs, now=now):
             candidates.setdefault(config.name, (config, f"schedule:{config.schedule}"))
 
@@ -1409,16 +1508,30 @@ def _run_once(
         if previous_watch_state
         else []
     )
+    event_records = collect_new_events(
+        config.general.context_root,
+        supervisor._state_dir,
+        config=config,
+        now=_now_utc(),
+    )
     started_agents = supervisor.reconcile(
         profile.agent_configs,
         event="on_boot" if first_run else None,
         changed_paths=changed_paths,
+        event_records=event_records,
+        now=_now_utc(),
+    )
+    event_jobs = supervisor.enqueue_event_jobs(
+        event_records,
+        profile.agent_configs,
         now=_now_utc(),
     )
     audit = supervisor.audit()
     notes: list[str] = []
     if changed_paths:
         notes.append("watch-path changes detected")
+    if event_records:
+        notes.append(f"{len(event_records)} new reactor events")
     if first_run:
         notes.append("boot reconciliation complete")
     result = AgentResult(
@@ -1431,6 +1544,8 @@ def _run_once(
             "configured_agents": len(profile.agent_configs),
             "started_agents": len(started_agents),
             "changed_watch_paths": len(changed_paths),
+            "reactor_events": len(event_records),
+            "event_jobs": len(event_jobs),
             "running_agents": int(audit["counts"]["running"]),
             "failed_agents": int(audit["counts"]["failed"]),
         },

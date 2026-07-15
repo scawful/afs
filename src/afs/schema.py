@@ -347,6 +347,12 @@ class AgentConfig:
     schedule: str = ""
     module: str = ""
     watch_paths: list[Path] = field(default_factory=list)
+    # Event reactor: fnmatch patterns "<kind>[:<detail>]" against history
+    # event type:op or hivemind:<topic>. Action "spawn" starts the module via
+    # the normal reconcile path; "job" enqueues an agent-job instead.
+    on_event: list[str] = field(default_factory=list)
+    on_event_action: str = "spawn"
+    event_debounce: str = ""
     allowed_mounts: list[str] = field(default_factory=list)
     allowed_tools: list[str] = field(default_factory=list)
     workspace_isolated: bool = False
@@ -373,6 +379,9 @@ class AgentConfig:
             schedule=str(data.get("schedule", "")).strip(),
             module=str(data.get("module", "")).strip(),
             watch_paths=_as_path_list(data.get("watch_paths")),
+            on_event=_as_str_list(data.get("on_event")),
+            on_event_action=str(data.get("on_event_action", "spawn")).strip() or "spawn",
+            event_debounce=str(data.get("event_debounce", "")).strip(),
             allowed_mounts=_as_str_list(data.get("allowed_mounts")),
             allowed_tools=_as_str_list(data.get("allowed_tools")),
             workspace_isolated=bool(data.get("workspace_isolated", False)),
@@ -394,6 +403,9 @@ class AgentConfig:
             "schedule": self.schedule,
             "module": self.module,
             "watch_paths": [str(path) for path in self.watch_paths],
+            "on_event": list(self.on_event),
+            "on_event_action": self.on_event_action,
+            "event_debounce": self.event_debounce,
             "allowed_mounts": list(self.allowed_mounts),
             "allowed_tools": list(self.allowed_tools),
             "workspace_isolated": self.workspace_isolated,
