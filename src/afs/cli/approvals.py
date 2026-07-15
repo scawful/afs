@@ -15,6 +15,19 @@ def _load_gate(args: argparse.Namespace) -> ApprovalGate:
     return ApprovalGate(path=path)
 
 
+def _require_rationale(args: argparse.Namespace, decision: str) -> str | None:
+    """Return the stripped --because rationale, or None if missing/empty."""
+    rationale = (getattr(args, "because", None) or "").strip()
+    if rationale:
+        return rationale
+    print(
+        f"A rationale is required to {decision}: pass --because "
+        '"<why this is the right call>".\n'
+        "It is stored in approvals history and resurfaced during calibration review."
+    )
+    return None
+
+
 def approvals_list_command(args: argparse.Namespace) -> int:
     """List pending approval requests."""
     gate = _load_gate(args)
@@ -52,8 +65,11 @@ def approvals_list_command(args: argparse.Namespace) -> int:
 
 def approvals_approve_command(args: argparse.Namespace) -> int:
     """Approve a pending request."""
+    rationale = _require_rationale(args, "approve")
+    if rationale is None:
+        return 2
     gate = _load_gate(args)
-    ok = gate.approve(args.agent, args.action, reviewer="cli")
+    ok = gate.approve(args.agent, args.action, reviewer="cli", rationale=rationale)
     if ok:
         print(f"Approved: agent={args.agent} action={args.action}")
         return 0
@@ -63,8 +79,11 @@ def approvals_approve_command(args: argparse.Namespace) -> int:
 
 def approvals_reject_command(args: argparse.Namespace) -> int:
     """Reject a pending request."""
+    rationale = _require_rationale(args, "reject")
+    if rationale is None:
+        return 2
     gate = _load_gate(args)
-    ok = gate.reject(args.agent, args.action, reviewer="cli")
+    ok = gate.reject(args.agent, args.action, reviewer="cli", rationale=rationale)
     if ok:
         print(f"Rejected: agent={args.agent} action={args.action}")
         return 0
@@ -125,6 +144,8 @@ def approvals_history_command(args: argparse.Namespace) -> int:
             f"{req.agent:<{agent_w}}  {req.action:<{action_w}}  "
             f"{req.status:<{status_w}}  {req.detail:<{detail_w}}  {ts}"
         )
+        if req.rationale:
+            print(f"  because: {req.rationale}")
 
     pending_count = sum(1 for r in all_requests if r.status == "pending")
     print()
@@ -153,6 +174,10 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     approve_parser.add_argument("--approvals-file", help="Path to approvals JSON file.")
     approve_parser.add_argument("agent", help="Agent name.")
     approve_parser.add_argument("action", help="Action name.")
+    approve_parser.add_argument(
+        "--because",
+        help="Required rationale for the decision; stored in approvals history.",
+    )
     approve_parser.set_defaults(func=approvals_approve_command)
 
     # reject
@@ -160,6 +185,10 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     reject_parser.add_argument("--approvals-file", help="Path to approvals JSON file.")
     reject_parser.add_argument("agent", help="Agent name.")
     reject_parser.add_argument("action", help="Action name.")
+    reject_parser.add_argument(
+        "--because",
+        help="Required rationale for the decision; stored in approvals history.",
+    )
     reject_parser.set_defaults(func=approvals_reject_command)
 
     # clear

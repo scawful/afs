@@ -332,6 +332,7 @@ class WorkAssistantStore:
                     permission_required TEXT NOT NULL,
                     requested_by TEXT NOT NULL,
                     approved_by TEXT NOT NULL DEFAULT '',
+                    rationale TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     expires_at TEXT,
@@ -378,6 +379,18 @@ class WorkAssistantStore:
                 CREATE INDEX IF NOT EXISTS idx_communication_samples_person
                     ON communication_samples(person_id, updated_at);
                 """
+            )
+            self._migrate_schema(connection)
+
+    @staticmethod
+    def _migrate_schema(connection: sqlite3.Connection) -> None:
+        """Add columns that pre-existing databases are missing."""
+        approval_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(approvals)")
+        }
+        if "rationale" not in approval_columns:
+            connection.execute(
+                "ALTER TABLE approvals ADD COLUMN rationale TEXT NOT NULL DEFAULT ''"
             )
 
     def upsert_person(self, person: dict[str, Any]) -> str:
@@ -707,11 +720,19 @@ class WorkAssistantStore:
             ).fetchone()
         return self._approval_row_to_dict(row) if row else None
 
-    def approve(self, approval_id: str, *, approved_by: str = "human") -> bool:
-        return self._set_approval_status(approval_id, "approved", approved_by=approved_by)
+    def approve(
+        self, approval_id: str, *, approved_by: str = "human", rationale: str = ""
+    ) -> bool:
+        return self._set_approval_status(
+            approval_id, "approved", approved_by=approved_by, rationale=rationale
+        )
 
-    def reject(self, approval_id: str, *, rejected_by: str = "human") -> bool:
-        return self._set_approval_status(approval_id, "rejected", approved_by=rejected_by)
+    def reject(
+        self, approval_id: str, *, rejected_by: str = "human", rationale: str = ""
+    ) -> bool:
+        return self._set_approval_status(
+            approval_id, "rejected", approved_by=rejected_by, rationale=rationale
+        )
 
     def record_approval_result(
         self,
@@ -1119,15 +1140,16 @@ class WorkAssistantStore:
         status: str,
         *,
         approved_by: str,
+        rationale: str = "",
     ) -> bool:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE approvals
-                SET status = ?, approved_by = ?, updated_at = ?
+                SET status = ?, approved_by = ?, rationale = ?, updated_at = ?
                 WHERE approval_id = ? AND status = 'pending'
                 """,
-                (status, approved_by, _now(), approval_id),
+                (status, approved_by, rationale.strip(), _now(), approval_id),
             )
             return cursor.rowcount > 0
 
@@ -1279,6 +1301,7 @@ class WorkAssistantStore:
             "permission_required": row["permission_required"],
             "requested_by": row["requested_by"],
             "approved_by": row["approved_by"],
+            "rationale": row["rationale"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "expires_at": row["expires_at"],

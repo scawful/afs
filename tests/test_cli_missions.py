@@ -86,3 +86,49 @@ def test_cli_update_invalid_status_returns_2(tmp_path, monkeypatch, capsys) -> N
 def test_cli_show_missing_returns_1(tmp_path, monkeypatch, capsys) -> None:
     _wire(tmp_path, monkeypatch)
     assert mission_show_command(_args(mission_id="mission_missing")) == 1
+
+
+def test_cli_create_with_acceptance(tmp_path, monkeypatch, capsys) -> None:
+    _wire(tmp_path, monkeypatch)
+    rc = mission_create_command(
+        _args(title="Ship it", acceptance="all five steps land with tests", json=True)
+    )
+    assert rc == 0
+    created = json.loads(capsys.readouterr().out)
+    assert created["acceptance"] == "all five steps land with tests"
+
+
+def test_cli_create_without_tty_skips_prompt_and_nudges(tmp_path, monkeypatch, capsys) -> None:
+    _wire(tmp_path, monkeypatch)
+    # Simulate a headless caller: no prompt may block, a nudge is printed.
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    rc = mission_create_command(_args(title="Background job", acceptance=None))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "acceptance not set" in out
+    assert "--acceptance" in out
+
+
+def test_cli_update_acceptance(tmp_path, monkeypatch, capsys) -> None:
+    _wire(tmp_path, monkeypatch)
+    mission_create_command(_args(title="Ship it", acceptance="v1", json=True))
+    mid = json.loads(capsys.readouterr().out)["mission_id"]
+    rc = mission_update_command(
+        _args(
+            mission_id=mid,
+            status=None,
+            summary=None,
+            owner=None,
+            acceptance="v2 with docs",
+            next_step=None,
+            blocker=None,
+            link_session=None,
+            link_handoff=None,
+            tag=None,
+            note=None,
+            actor=None,
+            json=True,
+        )
+    )
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["acceptance"] == "v2 with docs"

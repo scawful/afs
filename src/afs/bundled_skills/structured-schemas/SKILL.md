@@ -10,6 +10,9 @@ profiles:
   - general
 requires:
   - afs
+enforcement:
+  - Never write, fill, or edit the human_intent section of an implementation
+    plan; reproduce it exactly as the human provided it, or leave it absent.
 ---
 
 # Structured Response Schemas
@@ -24,6 +27,8 @@ afs schema list                          # available schema names
 afs schema show <name>                   # print schema as JSON
 afs schema validate --schema <name> --file response.json
 afs schema validate --workflow review_deep --text '{"..."}'
+afs schema validate --schema implementation-plan --file plan.json \
+  --skeleton human_plan.json   # fails if human_intent was edited/authored
 ```
 
 ## Validation

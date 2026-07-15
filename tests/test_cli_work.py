@@ -231,7 +231,9 @@ def test_work_approval_request_and_approve(tmp_path: Path, capsys, monkeypatch) 
         "afs.work_execution._default_tty_reader",
         lambda tty_path: (lambda prompt: approval_id),
     )
-    assert approvals_approve_command(_args(context_root, approval_id=approval_id, by="human")) == 0
+    assert approvals_approve_command(
+        _args(context_root, approval_id=approval_id, by="human", because="ticket comment reviewed")
+    ) == 0
     assert "Approved" in capsys.readouterr().out
 
     assert approvals_show_command(_args(context_root, approval_id=approval_id, json=True)) == 0
@@ -275,7 +277,9 @@ def test_work_approval_external_write_refused_without_tty(tmp_path: Path, capsys
         "afs.work_execution._default_tty_reader",
         lambda tty_path: (lambda prompt: None),
     )
-    assert approvals_approve_command(_args(context_root, approval_id=approval_id, by="human")) == 2
+    assert approvals_approve_command(
+        _args(context_root, approval_id=approval_id, by="human", because="email content verified")
+    ) == 2
     assert "interactive human confirmation" in capsys.readouterr().out
     # The approval must remain pending — the agent could not self-approve.
     assert store.get_approval(approval_id)["status"] == "pending"  # type: ignore[index]
@@ -292,8 +296,29 @@ def test_work_approval_internal_action_skips_confirmation(tmp_path: Path, capsys
         summary="Record an internal note",
     )
     # No tty monkeypatch: a non-external action must approve without any prompt.
-    assert approvals_approve_command(_args(context_root, approval_id=approval_id, by="human")) == 0
-    assert store.get_approval(approval_id)["status"] == "approved"  # type: ignore[index]
+    assert approvals_approve_command(
+        _args(context_root, approval_id=approval_id, by="human", because="internal note is safe")
+    ) == 0
+    approved = store.get_approval(approval_id)
+    assert approved["status"] == "approved"  # type: ignore[index]
+    assert approved["rationale"] == "internal note is safe"  # type: ignore[index]
+
+
+def test_work_approval_requires_rationale(tmp_path: Path, capsys) -> None:
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    approval_id = store.create_approval(
+        target_system="local",
+        target_id="note-2",
+        action="internal_note",
+        summary="Record an internal note",
+    )
+    assert approvals_approve_command(
+        _args(context_root, approval_id=approval_id, by="human", because="  ")
+    ) == 2
+    assert "--because" in capsys.readouterr().out
+    assert store.get_approval(approval_id)["status"] == "pending"  # type: ignore[index]
 
 
 def test_work_approval_execute_command(tmp_path: Path, capsys, monkeypatch) -> None:

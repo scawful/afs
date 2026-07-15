@@ -201,7 +201,23 @@ def approvals_request_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _require_decision_rationale(args: argparse.Namespace, decision: str) -> str | None:
+    """Return the stripped --because rationale, or None if missing/empty."""
+    rationale = (getattr(args, "because", None) or "").strip()
+    if rationale:
+        return rationale
+    print(
+        f"A rationale is required to {decision}: pass --because "
+        '"<why this is the right call>".\n'
+        "It is stored in approvals history and resurfaced during calibration review."
+    )
+    return None
+
+
 def approvals_approve_command(args: argparse.Namespace) -> int:
+    rationale = _require_decision_rationale(args, "approve")
+    if rationale is None:
+        return 2
     store, _context_path = _store_from_args(args)
     approval = store.get_approval(args.approval_id)
     if approval is None or approval.get("status") != "pending":
@@ -215,7 +231,7 @@ def approvals_approve_command(args: argparse.Namespace) -> int:
     except HumanApprovalRequiredError as exc:
         print(str(exc))
         return 2
-    if store.approve(args.approval_id, approved_by=args.by):
+    if store.approve(args.approval_id, approved_by=args.by, rationale=rationale):
         print(f"Approved: {args.approval_id}")
         return 0
     print(f"No pending approval found: {args.approval_id}")
@@ -223,8 +239,11 @@ def approvals_approve_command(args: argparse.Namespace) -> int:
 
 
 def approvals_reject_command(args: argparse.Namespace) -> int:
+    rationale = _require_decision_rationale(args, "reject")
+    if rationale is None:
+        return 2
     store, _context_path = _store_from_args(args)
-    if store.reject(args.approval_id, rejected_by=args.by):
+    if store.reject(args.approval_id, rejected_by=args.by, rationale=rationale):
         print(f"Rejected: {args.approval_id}")
         return 0
     print(f"No pending approval found: {args.approval_id}")
@@ -508,12 +527,20 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     _add_context_args(approvals_approve)
     approvals_approve.add_argument("approval_id", help="Approval id.")
     approvals_approve.add_argument("--by", default="human", help="Approver identity.")
+    approvals_approve.add_argument(
+        "--because",
+        help="Required rationale for the decision; stored in approvals history.",
+    )
     approvals_approve.set_defaults(func=approvals_approve_command)
 
     approvals_reject = approvals_sub.add_parser("reject", help="Reject one request.")
     _add_context_args(approvals_reject)
     approvals_reject.add_argument("approval_id", help="Approval id.")
     approvals_reject.add_argument("--by", default="human", help="Reviewer identity.")
+    approvals_reject.add_argument(
+        "--because",
+        help="Required rationale for the decision; stored in approvals history.",
+    )
     approvals_reject.set_defaults(func=approvals_reject_command)
 
     approvals_execute = approvals_sub.add_parser(

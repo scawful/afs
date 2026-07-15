@@ -38,6 +38,10 @@ class Mission:
     updated_at: str
     summary: str = ""
     owner: str = ""
+    # Human-authored definition of done ("what does finished look like?").
+    # Agents must not fabricate this; it is the calibration anchor the outcome
+    # is later scored against.
+    acceptance: str = ""
     next_steps: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     linked_sessions: list[str] = field(default_factory=list)
@@ -56,6 +60,7 @@ class Mission:
             "updated_at": self.updated_at,
             "summary": self.summary,
             "owner": self.owner,
+            "acceptance": self.acceptance,
             "next_steps": list(self.next_steps),
             "blockers": list(self.blockers),
             "linked_sessions": list(self.linked_sessions),
@@ -81,6 +86,7 @@ class Mission:
             updated_at=str(data.get("updated_at", "")),
             summary=str(data.get("summary", "")),
             owner=str(data.get("owner", "")),
+            acceptance=str(data.get("acceptance", "")),
             next_steps=_str_list(data.get("next_steps")),
             blockers=_str_list(data.get("blockers")),
             linked_sessions=_str_list(data.get("linked_sessions")),
@@ -177,6 +183,7 @@ class MissionStore:
         title: str,
         summary: str = "",
         owner: str = "",
+        acceptance: str = "",
         next_steps: list[str] | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
@@ -192,6 +199,7 @@ class MissionStore:
             updated_at=now,
             summary=summary.strip(),
             owner=owner.strip(),
+            acceptance=acceptance.strip(),
             next_steps=list(next_steps or []),
             tags=list(tags or []),
             metadata=dict(metadata or {}),
@@ -241,6 +249,7 @@ class MissionStore:
         status: str | None = None,
         summary: str | None = None,
         owner: str | None = None,
+        acceptance: str | None = None,
         next_steps: list[str] | None = None,
         blockers: list[str] | None = None,
         link_session: str | None = None,
@@ -264,6 +273,8 @@ class MissionStore:
             mission.summary = summary.strip()
         if owner is not None:
             mission.owner = owner.strip()
+        if acceptance is not None:
+            mission.acceptance = acceptance.strip()
         if next_steps is not None:
             mission.next_steps = list(next_steps)
         if blockers is not None:

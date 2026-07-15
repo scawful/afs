@@ -151,3 +151,49 @@ def test_result_to_dict_shape() -> None:
     result = SchemaValidationResult(valid=False, schema="plan", errors=["e"], parse_error="")
     payload = result.to_dict()
     assert payload == {"valid": False, "schema": "plan", "errors": ["e"], "parse_error": ""}
+
+
+# ---------------------------------------------------------------------------
+# human_intent (skeleton-first planning)
+# ---------------------------------------------------------------------------
+
+
+def test_plan_accepts_human_intent_section() -> None:
+    payload = {
+        **_VALID_PLAN,
+        "human_intent": {
+            "goal": "friction on decisions, not mechanics",
+            "non_goals": ["blocking headless agents"],
+            "done_when": ["all five steps land with tests"],
+        },
+    }
+    result = validate_structured_response("implementation-plan", payload)
+    assert result.valid is True
+
+
+def test_plan_human_intent_rejects_unknown_keys() -> None:
+    payload = {**_VALID_PLAN, "human_intent": {"agent_notes": "sneaky"}}
+    result = validate_structured_response("implementation-plan", payload)
+    assert result.valid is False
+
+
+def test_human_intent_preserved_checks() -> None:
+    from afs.response_schemas import verify_human_intent_preserved
+
+    intent = {"goal": "the human goal", "done_when": ["tests pass"]}
+    skeleton = {"human_intent": intent, "summary": "seed"}
+    faithful = {**_VALID_PLAN, "human_intent": dict(intent)}
+    assert verify_human_intent_preserved(skeleton, faithful) == []
+
+    edited = {**_VALID_PLAN, "human_intent": {**intent, "goal": "reworded"}}
+    assert any("modified" in v for v in verify_human_intent_preserved(skeleton, edited))
+
+    dropped = dict(_VALID_PLAN)
+    assert any("removed" in v for v in verify_human_intent_preserved(skeleton, dropped))
+
+    # No skeleton intent: the agent must not author one.
+    fabricated = {**_VALID_PLAN, "human_intent": {"goal": "agent-invented"}}
+    assert any(
+        "authored" in v for v in verify_human_intent_preserved({}, fabricated)
+    )
+    assert verify_human_intent_preserved({}, dict(_VALID_PLAN)) == []

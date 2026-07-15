@@ -6,6 +6,19 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 
 ### Added
 
+- Engagement primitives that keep human judgment in the loop: approvals
+  approve/reject on both surfaces now require a `--because` rationale and an
+  interactive human confirmation (headless approval fails closed), with
+  reviewer provenance recorded in history; missions carry a human-authored
+  `acceptance` field with recorded provenance; `afs calibration review`
+  resurfaces the window's decisions with their rationales for outcome scoring
+  against context-scoped decision refs (`afs calibration score` rejects
+  unknown refs; `--markdown` emits a weekly-review digest);
+  `afs session bootstrap --engage` asks for a top-priority prediction before
+  revealing the queue (never in `--json` mode) and logs it to the calibration
+  trail; and the `implementation-plan` schema gains a `human_intent` section
+  agents must never author, enforced structurally by
+  `afs schema validate --skeleton`.
 - Versioned, packaged JSON Schema contracts for optimization evaluation,
   policy, and decision records.
 - Pure `afs optimize decide` evidence gate with deterministic hashes, stable

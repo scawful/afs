@@ -93,3 +93,55 @@ def test_validate_rejects_non_utf8_stdin(monkeypatch, capsys) -> None:
 
 def test_validate_unknown_schema_returns_2(capsys) -> None:
     assert schema_validate_command(_args(schema="nope", text="{}")) == 2
+
+
+def test_validate_skeleton_flags_modified_intent(tmp_path, capsys) -> None:
+    skeleton = {
+        "human_intent": {"goal": "human goal"},
+        "summary": "seed",
+    }
+    skeleton_path = tmp_path / "skeleton.json"
+    skeleton_path.write_text(json.dumps(skeleton), encoding="utf-8")
+
+    plan = {
+        "human_intent": {"goal": "agent reworded goal"},
+        "summary": "expanded",
+        "steps": ["do it"],
+        "verification": ["pytest"],
+        "risks": ["none"],
+    }
+    rc = schema_validate_command(
+        _args(
+            schema="implementation-plan",
+            text=json.dumps(plan),
+            skeleton=str(skeleton_path),
+        )
+    )
+    assert rc == 1
+    assert "modified" in capsys.readouterr().out
+
+
+def test_validate_skeleton_passes_when_intent_preserved(tmp_path, capsys) -> None:
+    intent = {"goal": "human goal", "done_when": ["tests pass"]}
+    skeleton_path = tmp_path / "skeleton.json"
+    skeleton_path.write_text(json.dumps({"human_intent": intent}), encoding="utf-8")
+
+    plan = {
+        "human_intent": intent,
+        "summary": "expanded",
+        "steps": ["do it"],
+        "verification": ["pytest"],
+        "risks": ["none"],
+    }
+    rc = schema_validate_command(
+        _args(
+            schema="implementation-plan",
+            text=json.dumps(plan),
+            skeleton=str(skeleton_path),
+            json=True,
+        )
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is True
+    assert payload["human_intent_violations"] == []

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import shlex
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1423,3 +1424,85 @@ def _indent_block(text: str, *, bullet: str | None = None) -> list[str]:
         output.append(bullet)
     output.extend(f"  {line}" for line in lines)
     return output
+
+# -- engage mode ---------------------------------------------------------------
+
+
+def top_priority_item(summary: dict[str, Any]) -> str:
+    """The single item a human triaging this session should name first.
+
+    Precedence mirrors how the rendered bootstrap leads: the latest handoff's
+    first next step, then the newest active mission, then the first open task.
+    """
+    handoff = summary.get("handoff") or {}
+    for step in handoff.get("next_steps") or []:
+        text = str(step).strip()
+        if text:
+            return text
+    for mission in (summary.get("missions") or {}).get("active") or []:
+        if isinstance(mission, dict):
+            title = str(mission.get("title") or "").strip()
+            if title:
+                return title
+    for task in (summary.get("tasks") or {}).get("items") or []:
+        if isinstance(task, dict):
+            title = str(task.get("title") or "").strip()
+            if title:
+                return title
+    return ""
+
+
+def _prediction_matches(predicted: str, actual: str) -> bool:
+    left = " ".join(predicted.lower().split())
+    right = " ".join(actual.lower().split())
+    if not left or not right:
+        return False
+    return left in right or right in left
+
+
+def run_engage_prediction(
+    context_path: Path,
+    summary: dict[str, Any],
+    *,
+    config: Any = None,
+    input_fn: Any = input,
+    interactive: bool | None = None,
+) -> dict[str, Any] | None:
+    """Predict-before-reveal micro-question for session bootstrap ``--engage``.
+
+    Asks the human to guess the top queued item before the packet is shown,
+    then logs prediction vs actual to the calibration trail. Generation before
+    reveal is the engagement point; skipping (empty input, no tty) is always
+    allowed and never blocks the bootstrap itself.
+    """
+    if interactive is None:
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    if not interactive:
+        print("engage: skipped (requires an interactive terminal)")
+        return None
+    try:
+        predicted = str(
+            input_fn("Before the reveal — what is the top queued item right now? ")
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if not predicted:
+        return None
+    actual = top_priority_item(summary)
+    match = _prediction_matches(predicted, actual) if actual else None
+    try:
+        from .calibration import record_prediction
+
+        entry = record_prediction(
+            context_path,
+            kind="bootstrap_top_priority",
+            predicted=predicted,
+            actual=actual,
+            match=match,
+            config=config,
+        )
+    except Exception:
+        entry = None
+    marker = {True: "matched", False: "different", None: "unresolved"}[match]
+    print(f"engage: you predicted {predicted!r}; the queue says {actual!r} ({marker})")
+    return entry

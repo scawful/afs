@@ -438,6 +438,7 @@ class ApprovalRequest:
     status: str = "pending"  # pending, approved, rejected, auto_approved
     reviewed_by: str = ""
     reviewed_at: str = ""
+    rationale: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -448,6 +449,7 @@ class ApprovalRequest:
             "status": self.status,
             "reviewed_by": self.reviewed_by,
             "reviewed_at": self.reviewed_at,
+            "rationale": self.rationale,
         }
 
 
@@ -520,22 +522,28 @@ class ApprovalGate:
     def pending_requests(self) -> list[ApprovalRequest]:
         return [r for r in self._pending if r.status == "pending"]
 
-    def approve(self, agent: str, action: str, reviewer: str = "human") -> bool:
+    def approve(
+        self, agent: str, action: str, reviewer: str = "human", *, rationale: str = ""
+    ) -> bool:
         for req in self._pending:
             if req.agent == agent and req.action == action and req.status == "pending":
                 req.status = "approved"
                 req.reviewed_by = reviewer
                 req.reviewed_at = datetime.now(timezone.utc).isoformat()
+                req.rationale = rationale.strip()
                 self._save()
                 return True
         return False
 
-    def reject(self, agent: str, action: str, reviewer: str = "human") -> bool:
+    def reject(
+        self, agent: str, action: str, reviewer: str = "human", *, rationale: str = ""
+    ) -> bool:
         for req in self._pending:
             if req.agent == agent and req.action == action and req.status == "pending":
                 req.status = "rejected"
                 req.reviewed_by = reviewer
                 req.reviewed_at = datetime.now(timezone.utc).isoformat()
+                req.rationale = rationale.strip()
                 self._save()
                 return True
         return False

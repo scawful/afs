@@ -110,27 +110,45 @@ def test_approve_flow(tmp_path: Path, capsys) -> None:
     approvals_file = _make_gate(tmp_path, requests)
 
     exit_code = approvals_approve_command(
-        _ns(approvals_file, agent="scout", action="git_push")
+        _ns(approvals_file, agent="scout", action="git_push", because="push is release-gated")
     )
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "Approved" in out
 
-    # Verify it's now approved in the file
+    # Verify it's now approved in the file, with the rationale stored
     gate = ApprovalGate(path=approvals_file)
     assert len(gate.pending_requests()) == 0
     assert gate._pending[0].status == "approved"
     assert gate._pending[0].reviewed_by == "cli"
+    assert gate._pending[0].rationale == "push is release-gated"
 
 
 def test_approve_not_found(tmp_path: Path, capsys) -> None:
     approvals_file = _make_gate(tmp_path)
     exit_code = approvals_approve_command(
-        _ns(approvals_file, agent="ghost", action="nope")
+        _ns(approvals_file, agent="ghost", action="nope", because="checked the diff")
     )
     assert exit_code == 1
     out = capsys.readouterr().out
     assert "No pending request" in out
+
+
+def test_approve_requires_rationale(tmp_path: Path, capsys) -> None:
+    requests = [_sample_request()]
+    approvals_file = _make_gate(tmp_path, requests)
+
+    for because in (None, "", "   "):
+        exit_code = approvals_approve_command(
+            _ns(approvals_file, agent="scout", action="git_push", because=because)
+        )
+        assert exit_code == 2
+        out = capsys.readouterr().out
+        assert "--because" in out
+
+    # The request must remain pending — no rubber-stamp path.
+    gate = ApprovalGate(path=approvals_file)
+    assert len(gate.pending_requests()) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -143,27 +161,42 @@ def test_reject_flow(tmp_path: Path, capsys) -> None:
     approvals_file = _make_gate(tmp_path, requests)
 
     exit_code = approvals_reject_command(
-        _ns(approvals_file, agent="scout", action="git_push")
+        _ns(approvals_file, agent="scout", action="git_push", because="branch is frozen")
     )
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "Rejected" in out
 
-    # Verify it's now rejected in the file
+    # Verify it's now rejected in the file, with the rationale stored
     gate = ApprovalGate(path=approvals_file)
     assert len(gate.pending_requests()) == 0
     assert gate._pending[0].status == "rejected"
     assert gate._pending[0].reviewed_by == "cli"
+    assert gate._pending[0].rationale == "branch is frozen"
 
 
 def test_reject_not_found(tmp_path: Path, capsys) -> None:
     approvals_file = _make_gate(tmp_path)
     exit_code = approvals_reject_command(
-        _ns(approvals_file, agent="ghost", action="nope")
+        _ns(approvals_file, agent="ghost", action="nope", because="not a known agent")
     )
     assert exit_code == 1
     out = capsys.readouterr().out
     assert "No pending request" in out
+
+
+def test_reject_requires_rationale(tmp_path: Path, capsys) -> None:
+    requests = [_sample_request()]
+    approvals_file = _make_gate(tmp_path, requests)
+
+    exit_code = approvals_reject_command(
+        _ns(approvals_file, agent="scout", action="git_push", because="  ")
+    )
+    assert exit_code == 2
+    assert "--because" in capsys.readouterr().out
+
+    gate = ApprovalGate(path=approvals_file)
+    assert len(gate.pending_requests()) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +273,19 @@ def test_history_shows_all(tmp_path: Path, capsys) -> None:
     assert "rejected" in out
     assert "3 total" in out
     assert "1 pending" in out
+
+
+def test_history_shows_rationale(tmp_path: Path, capsys) -> None:
+    requests = [_sample_request()]
+    approvals_file = _make_gate(tmp_path, requests)
+    approvals_approve_command(
+        _ns(approvals_file, agent="scout", action="git_push", because="verified locally")
+    )
+    capsys.readouterr()
+
+    exit_code = approvals_history_command(_ns(approvals_file))
+    assert exit_code == 0
+    assert "because: verified locally" in capsys.readouterr().out
 
 
 def test_history_empty(tmp_path: Path, capsys) -> None:

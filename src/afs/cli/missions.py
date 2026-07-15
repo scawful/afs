@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from ..missions import MissionNotFoundError, MissionStore
@@ -30,12 +31,32 @@ def _print_mission_line(mission) -> None:
     print(f"{mission.mission_id}  ({mission.status}){owner}  {mission.title}{steps}")
 
 
+def _prompt_for_acceptance(args: argparse.Namespace) -> str:
+    """Ask the human to author acceptance when creating a mission interactively.
+
+    Acceptance is the human-authored definition of done that later outcome
+    scoring calibrates against, so it is prompted for rather than defaulted.
+    Headless callers (agents, scripts) are never blocked: without a tty the
+    prompt is skipped and a follow-up nudge is printed instead.
+    """
+    if getattr(args, "acceptance", None):
+        return str(args.acceptance)
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return ""
+    try:
+        return input("Acceptance — what does done look like? (enter to skip): ")
+    except (EOFError, KeyboardInterrupt):
+        return ""
+
+
 def mission_create_command(args: argparse.Namespace) -> int:
     store = _store(args)
+    acceptance = _prompt_for_acceptance(args)
     mission = store.create(
         title=args.title,
         summary=getattr(args, "summary", "") or "",
         owner=getattr(args, "owner", "") or "",
+        acceptance=acceptance,
         next_steps=list(getattr(args, "next_step", None) or []),
         tags=list(getattr(args, "tag", None) or []),
     )
@@ -44,6 +65,11 @@ def mission_create_command(args: argparse.Namespace) -> int:
     else:
         print(f"created: {mission.mission_id}")
         _print_mission_line(mission)
+        if not mission.acceptance:
+            print(
+                "acceptance not set; add one with: "
+                f"afs mission update {mission.mission_id} --acceptance '<what done looks like>'"
+            )
     return 0
 
 
@@ -80,6 +106,7 @@ def mission_update_command(args: argparse.Namespace) -> int:
             status=getattr(args, "status", None),
             summary=getattr(args, "summary", None),
             owner=getattr(args, "owner", None),
+            acceptance=getattr(args, "acceptance", None),
             next_steps=list(args.next_step) if getattr(args, "next_step", None) else None,
             blockers=list(args.blocker) if getattr(args, "blocker", None) else None,
             link_session=getattr(args, "link_session", None),
@@ -121,6 +148,10 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     create_parser.add_argument("--summary", help="One-line mission summary.")
     create_parser.add_argument("--owner", help="Owning agent or session.")
     create_parser.add_argument(
+        "--acceptance",
+        help="Human-authored definition of done; prompted for on a tty when omitted.",
+    )
+    create_parser.add_argument(
         "--next-step", action="append", help="A next step (repeatable)."
     )
     create_parser.add_argument("--tag", action="append", help="A tag (repeatable).")
@@ -149,6 +180,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     update_parser.add_argument("--summary", help="Replace the summary.")
     update_parser.add_argument("--owner", help="Replace the owner.")
+    update_parser.add_argument(
+        "--acceptance", help="Replace the human-authored definition of done."
+    )
     update_parser.add_argument(
         "--next-step", action="append", help="Replace next steps (repeatable)."
     )

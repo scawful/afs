@@ -210,6 +210,34 @@ _SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": "object",
         "required": ["summary", "steps", "verification", "risks"],
         "properties": {
+            "human_intent": {
+                "type": "object",
+                "description": (
+                    "Human-authored skeleton the plan expands on: goal, "
+                    "non-goals, and done-when in the human's own words. "
+                    "Agents must never write, fill, or edit this section — "
+                    "reproduce it exactly as provided (or omit it when the "
+                    "human gave none). Plan review diffs the agent-authored "
+                    "sections against this intent."
+                ),
+                "properties": {
+                    "goal": {
+                        "type": "string",
+                        "description": "The outcome in the human's own words.",
+                    },
+                    "non_goals": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 8,
+                    },
+                    "done_when": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 8,
+                    },
+                },
+                "additionalProperties": False,
+            },
             "summary": {"type": "string", "description": "One-line implementation summary."},
             "steps": {
                 "type": "array",
@@ -372,6 +400,35 @@ def validate_structured_response(name: str, data: Any) -> SchemaValidationResult
     return SchemaValidationResult(
         valid=not errors, schema=name, errors=errors, parsed=parsed
     )
+
+
+def verify_human_intent_preserved(skeleton: Any, expanded: Any) -> list[str]:
+    """Check that an agent expansion left the human-authored skeleton untouched.
+
+    ``skeleton`` is the human's original plan (or plan fragment) and
+    ``expanded`` is the agent-produced plan. The ``human_intent`` section is
+    the one part agents must never author: it must survive expansion
+    byte-for-byte, and it must not appear from nowhere. Returns a list of
+    violations (empty when preserved).
+    """
+    skeleton_intent = skeleton.get("human_intent") if isinstance(skeleton, dict) else None
+    expanded_intent = expanded.get("human_intent") if isinstance(expanded, dict) else None
+
+    if skeleton_intent:
+        if expanded_intent is None:
+            return ["human_intent was removed by the expansion; restore it verbatim"]
+        if expanded_intent != skeleton_intent:
+            return [
+                "human_intent was modified by the expansion; agents must "
+                "reproduce it exactly as the human wrote it"
+            ]
+        return []
+    if expanded_intent:
+        return [
+            "human_intent was authored by the expansion; this section is "
+            "human-written only — leave it empty and ask instead"
+        ]
+    return []
 
 
 def build_schema_correction(result: SchemaValidationResult) -> str:

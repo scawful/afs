@@ -52,9 +52,11 @@ def test_store_tracks_people_relationships_reviewers_and_approvals(tmp_path: Pat
     assert approvals[0]["approval_id"] == approval_id
     assert approvals[0]["preview"]["replace"] == "old"
 
-    assert store.approve(approval_id, approved_by="human")
+    assert store.approve(approval_id, approved_by="human", rationale="intro edit matches style guide")
     assert store.list_approvals(status="pending") == []
-    assert store.list_approvals(status="approved")[0]["approved_by"] == "human"
+    approved = store.list_approvals(status="approved")[0]
+    assert approved["approved_by"] == "human"
+    assert approved["rationale"] == "intro edit matches style guide"
 
     sample_id = store.record_communication_sample(
         person_id=person_id,
@@ -236,3 +238,30 @@ def test_communication_preflight_flags_missing_style_evidence(tmp_path: Path) ->
     assert preflight["checklist"][0]["status"] == "not_loaded"
     assert preflight["checklist"][1]["status"] == "missing"
     assert any("Style evidence is missing" in line for line in preflight["guidance"])
+
+
+def test_rationale_column_migrated_into_existing_database(tmp_path: Path) -> None:
+    import sqlite3
+
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    approval_id = store.create_approval(
+        target_system="local",
+        target_id="note",
+        action="internal_note",
+        summary="Pre-migration approval",
+    )
+
+    # Simulate a database created before the rationale column existed.
+    db_path = store._db_path if hasattr(store, "_db_path") else None
+    if db_path is None:
+        candidates = list(context_root.rglob("*.db")) + list(context_root.rglob("*.sqlite*"))
+        assert candidates, "work assistant database not found"
+        db_path = candidates[0]
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("ALTER TABLE approvals DROP COLUMN rationale")
+
+    migrated = WorkAssistantStore(context_root)
+    assert migrated.approve(approval_id, approved_by="human", rationale="restored after migration")
+    assert migrated.get_approval(approval_id)["rationale"] == "restored after migration"

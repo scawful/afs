@@ -1040,6 +1040,7 @@ def session_bootstrap_command(args: argparse.Namespace) -> int:
     from ..session_bootstrap import (
         build_session_bootstrap,
         render_session_bootstrap,
+        run_engage_prediction,
         write_session_bootstrap_artifacts,
     )
 
@@ -1069,6 +1070,9 @@ def session_bootstrap_command(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(summary, indent=2))
         return 0
+
+    if getattr(args, "engage", False):
+        run_engage_prediction(context_path, summary, config=manager.config)
 
     print(render_session_bootstrap(summary))
     return 0
@@ -2283,6 +2287,12 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--no-write-artifacts",
         action="store_true",
         help="Do not update scratchpad/afs_agents/session_bootstrap.{json,md}.",
+    )
+    session_bootstrap.add_argument(
+        "--engage",
+        action="store_true",
+        help="Predict-before-reveal: guess the top queued item before the packet "
+        "is shown; the prediction is logged to the calibration trail.",
     )
     session_bootstrap.add_argument("--json", action="store_true", help="Output JSON.")
     session_bootstrap.set_defaults(func=session_bootstrap_command)

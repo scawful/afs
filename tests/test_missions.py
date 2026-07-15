@@ -142,3 +142,20 @@ def test_mission_dataclass_round_trip() -> None:
         next_steps=["s"],
     )
     assert Mission.from_dict(mission.to_dict()) == mission
+
+
+def test_acceptance_round_trips_and_updates(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    mission = store.create(
+        title="Ship the reactor",
+        acceptance="reactor starts agents from history events with tests",
+    )
+    loaded = store.get(mission.mission_id)
+    assert loaded is not None
+    assert loaded.acceptance == "reactor starts agents from history events with tests"
+
+    store.update(mission.mission_id, acceptance="also covers hivemind topics")
+    assert store.get(mission.mission_id).acceptance == "also covers hivemind topics"
+
+    # Records written before the field existed load with an empty acceptance.
+    assert Mission.from_dict({"mission_id": "mission_old", "title": "Old"}).acceptance == ""

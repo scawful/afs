@@ -14,9 +14,11 @@ from pathlib import Path
 
 from ..response_schemas import (
     build_schema_correction,
+    coerce_response_payload,
     get_response_schema,
     list_response_schema_names,
     validate_structured_response,
+    verify_human_intent_preserved,
 )
 
 
@@ -98,16 +100,37 @@ def schema_validate_command(args: argparse.Namespace) -> int:
         return 2
     result = validate_structured_response(schema_name, response_text)
 
+    intent_violations: list[str] = []
+    skeleton_arg = getattr(args, "skeleton", None)
+    if skeleton_arg:
+        try:
+            skeleton_text = Path(skeleton_arg).expanduser().read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"cannot read skeleton: {exc}", file=sys.stderr)
+            return 2
+        skeleton, skeleton_error = coerce_response_payload(skeleton_text)
+        if skeleton_error:
+            print(f"invalid skeleton: {skeleton_error}", file=sys.stderr)
+            return 2
+        intent_violations = verify_human_intent_preserved(skeleton, result.parsed)
+
+    valid = result.valid and not intent_violations
     if getattr(args, "json", False):
         payload = result.to_dict()
+        payload["valid"] = valid
+        payload["human_intent_violations"] = intent_violations
         payload["correction"] = build_schema_correction(result)
         print(json.dumps(payload, indent=2))
-    elif result.valid:
+    elif valid:
         print(f"valid: response matches `{schema_name}`")
     else:
-        print(build_schema_correction(result))
+        correction = build_schema_correction(result)
+        if correction:
+            print(correction)
+        for violation in intent_violations:
+            print(f"- {violation}")
 
-    return 0 if result.valid else 1
+    return 0 if valid else 1
 
 
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
@@ -138,6 +161,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     source.add_argument("--text", help="Response text to validate (inline).")
     source.add_argument(
         "--file", help="Read response from a file ('-' or omitted reads stdin)."
+    )
+    validate_parser.add_argument(
+        "--skeleton",
+        help="Human-authored skeleton plan (JSON file); fails validation if "
+        "the response modified or authored its human_intent section.",
     )
     validate_parser.add_argument(
         "--json",

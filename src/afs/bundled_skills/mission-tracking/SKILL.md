@@ -27,6 +27,11 @@ afs mission show <mission_id>           # full JSON
 afs mission update <mission_id> --status done --note "commit abc123"
 ```
 
+`--acceptance` is the human's definition of done — never author it as an
+agent; leave it unset and let the human add it (a tty prompt asks at create).
+Closed missions are resurfaced by `afs calibration review` for outcome
+scoring against that acceptance.
+
 ## Lifecycle
 
 Statuses: `active` -> `blocked` | `done` | `abandoned`.
