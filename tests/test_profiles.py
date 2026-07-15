@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from afs.agent_defaults import DEFAULT_AGENT_TAG
 from afs.manager import AFSManager
 from afs.models import MountType
 from afs.profiles import apply_profile_mounts, resolve_active_profile
 from afs.schema import (
     AFSConfig,
     AgentConfig,
+    AgentsConfig,
     DirectoryConfig,
     ExtensionsConfig,
     GeneralConfig,
@@ -152,7 +154,7 @@ def test_profile_merges_mcp_tools_through_inheritance() -> None:
             ),
         },
     )
-    config = AFSConfig(profiles=profiles)
+    config = AFSConfig(profiles=profiles, agents=AgentsConfig(default_set=False))
     resolved = resolve_active_profile(config)
 
     assert "base.tools" in resolved.mcp_tools
@@ -178,7 +180,7 @@ def test_profile_agent_configs_child_wins() -> None:
             ),
         },
     )
-    config = AFSConfig(profiles=profiles)
+    config = AFSConfig(profiles=profiles, agents=AgentsConfig(default_set=False))
     resolved = resolve_active_profile(config)
 
     assert len(resolved.agent_configs) == 1
@@ -191,7 +193,10 @@ def test_resolved_profile_new_fields_default_empty() -> None:
     resolved = resolve_active_profile(config)
     assert resolved.mcp_tools == []
     assert resolved.cli_modules == []
-    assert resolved.agent_configs == []
+    # Profiles without their own agent_configs receive only the shipped
+    # default supervised set, each carrying the default tag.
+    assert resolved.agent_configs
+    assert all(DEFAULT_AGENT_TAG in agent.tags for agent in resolved.agent_configs)
 
 
 def test_profile_mount_guard_uses_resolved_mount_directory_names(tmp_path: Path) -> None:

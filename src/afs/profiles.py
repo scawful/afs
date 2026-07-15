@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .agent_defaults import merge_default_agent_configs
 from .extensions import load_extensions
 from .models import MountType
 from .schema import AFSConfig, AgentConfig, ProfileConfig
@@ -238,7 +239,10 @@ def resolve_active_profile(
             resolved_profile.cli_modules,
             extension_cli_modules,
         ),
-        agent_configs=resolved_profile.agent_configs,
+        agent_configs=merge_default_agent_configs(
+            resolved_profile.agent_configs,
+            config=config,
+        ),
     )
 
 

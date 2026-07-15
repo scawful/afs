@@ -146,7 +146,15 @@ override an older user-global install with the same name.
 [mcp_tools]
 module = "my_extension.mcp_tools"
 factory = "register_mcp_tools"
+# Optional; defaults to "full".
+catalog = "slim"
 ```
+
+`[mcp_tools].catalog` is an extension-wide default for that factory only.
+Individual tool definitions can override it with `catalog = "full"` or
+`catalog = "slim"`. `[mcp_server]` and profile tools default to `"full"` and
+require a per-tool opt-in to enter the slim catalog. Values outside `"full"`
+and `"slim"` reject the affected manifest or MCP contribution.
 
 `[mcp_server]` is the broader surface. It can register tools, resources, and
 prompts from one extension module:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from ..claude.doctor import inspect_claude_sessions, reap_claude_sessions
@@ -177,6 +178,7 @@ def claude_hook_command(args: argparse.Namespace) -> int:
     import sys
 
     from ..model_prompts import build_hook_injection
+    from ..session_bootstrap import build_session_bootstrap
 
     stdin_payload: dict = {}
     try:
@@ -209,8 +211,27 @@ def claude_hook_command(args: argparse.Namespace) -> int:
         _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
             args, manager
         )
+        session_state = None
+        if event != "UserPromptSubmit":
+            skills_enabled = os.getenv("AFS_SESSION_SKILLS_MATCH_ENABLED", "1") != "0"
+            skills_prompt = (
+                os.getenv("AFS_SESSION_SKILLS_PROMPT", "").strip()[:8192]
+                if skills_enabled
+                else ""
+            )
+            session_state = build_session_bootstrap(
+                manager,
+                context_path,
+                token_budget=0,
+                record_event=False,
+                skills_prompt=skills_prompt,
+                include_skills=skills_enabled,
+            )
         injection = build_hook_injection(
-            event=event, context_path=context_path, prompt=prompt
+            event=event,
+            context_path=context_path,
+            session_state=session_state,
+            prompt=prompt,
         )
     except Exception:
         injection = ""

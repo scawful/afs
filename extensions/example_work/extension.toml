@@ -1,5 +1,6 @@
 name = "example_work"
 description = "Example extension manifest"
+api_version = 1
 
 knowledge_mounts = ["knowledge"]
 skill_roots = ["skills"]
@@ -13,6 +14,8 @@ before_context_read = []
 after_context_write = []
 before_agent_dispatch = []
 
-[mcp_tools]
-module = ""
-factory = "register_mcp_tools"
+# To contribute MCP tools, declare the section with a real module:
+# [mcp_tools]
+# module = "example_work.mcp_tools"
+# factory = "register_mcp_tools"
+# catalog = "slim"

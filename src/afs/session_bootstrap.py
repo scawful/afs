@@ -20,6 +20,16 @@ from .context_index import ContextSQLiteIndex, count_mount_files
 from .context_paths import resolve_agent_output_root, resolve_mount_root
 from .manager import AFSManager
 from .models import MountType
+from .profiles import resolve_active_profile
+from .skills import (
+    MAX_SKILL_BODIES_CHARS,
+    MAX_SKILL_BODY_CHARS,
+    MAX_SKILL_BODY_MATCHES,
+    MAX_SKILL_MATCHES,
+    build_skill_matches,
+    resolve_skill_roots,
+    truncate_skill_body,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +37,7 @@ SESSION_BOOTSTRAP_JSON = "session_bootstrap.json"
 SESSION_BOOTSTRAP_MARKDOWN = "session_bootstrap.md"
 _MAX_TEXT_CHARS = 1500
 _MAX_LIST_ITEMS = 8
+_MAX_SKILL_SIGNAL_CHARS = 8_000
 
 
 def build_agent_discovery_path(context_path: Path) -> dict[str, Any]:
@@ -110,6 +121,7 @@ _SECTION_PRIORITY = [
     "handoff",          # critical: what happened last session
     "scratchpad",       # high: current working state
     "agent_manifest",   # high: shared harness/source-of-truth state
+    "skills",           # high: task-matched local operating instructions
     "agent_jobs",       # high: file-backed background work queue
     "tasks",            # high: pending work items
     "work_assistant",   # high: external-write approvals and people context
@@ -242,13 +254,16 @@ def build_session_bootstrap(
     agent_name: str = "cli",
     record_event: bool = True,
     token_budget: int = 0,
+    skills_prompt: str = "",
+    skills_top_k: int = 5,
+    include_skills: bool = True,
 ) -> dict[str, Any]:
     """Build a structured startup packet for a context-aware agent session.
 
     When *token_budget* > 0, sections are truncated from lowest priority
     first until the rendered bootstrap fits within the budget.  Priority
-    ordering (highest first): handoff, scratchpad, tasks, diff, memory,
-    hivemind, agent_reports.  The status header and startup_sequence are
+    ordering is defined by ``_SECTION_PRIORITY``. Skill bodies are removed
+    before whole sections, while the status header and startup sequence are
     always included.
     """
     context_path = context_path.expanduser().resolve()
@@ -263,12 +278,24 @@ def build_session_bootstrap(
     agent_manifest = _collect_agent_manifest()
     work_assistant = _collect_work_assistant(manager, context_path, limit=task_limit)
     missions = _collect_missions(manager, context_path, limit=task_limit)
+    handoff = _collect_latest_handoff(context_path, config=manager.config)
+    skill_focus = skills_prompt.strip()
+    skill_prompt_source = "explicit" if skill_focus else "session_state"
+    if not skill_focus:
+        skill_focus = _skill_signal(handoff=handoff, missions=missions, tasks=tasks)
+    if not skill_focus:
+        skill_prompt_source = "none"
+    skills = _collect_skills(
+        manager,
+        prompt=skill_focus,
+        prompt_source=skill_prompt_source,
+        top_k=skills_top_k,
+        enabled=include_skills,
+    )
     hivemind = _collect_hivemind(context_path, limit=message_limit)
     memory = _collect_memory(manager, context_path)
     reports = _collect_agent_reports(manager, context_path)
     codebase = build_codebase_summary(context_path)
-
-    handoff = _collect_latest_handoff(context_path, config=manager.config)
 
     # Compute per-mount freshness (filesystem-based, no DB needed)
     decay_hours = manager.config.context_index.decay_hours
@@ -337,6 +364,7 @@ def build_session_bootstrap(
         "agent_runs": agent_runs,
         "work_assistant": work_assistant,
         "missions": missions,
+        "skills": skills,
         "codebase": codebase,
         "hivemind": hivemind,
         "memory": memory,
@@ -386,8 +414,43 @@ def _apply_token_budget(summary: dict[str, Any], budget: int) -> dict[str, Any]:
     if current_tokens <= budget:
         return summary
 
-    # Record what was truncated for observability
     truncated_sections: list[str] = []
+    budget_info = {
+        "token_budget": budget,
+        "estimated_tokens": 0,
+        "truncated_sections": truncated_sections,
+    }
+    summary["_budget_info"] = budget_info
+
+    def refresh_estimate() -> int:
+        """Include observability metadata in the reported token estimate."""
+        estimate = 0
+        for _ in range(4):
+            estimate = _estimate_tokens(json.dumps(summary, default=str))
+            if budget_info["estimated_tokens"] == estimate:
+                break
+            budget_info["estimated_tokens"] = estimate
+        return _estimate_tokens(json.dumps(summary, default=str))
+
+    current_tokens = refresh_estimate()
+
+    # Preserve compact match pointers before dropping the whole skills section.
+    skills = summary.get("skills")
+    if isinstance(skills, dict):
+        matches = skills.get("matches")
+        removed_body = False
+        if isinstance(matches, list):
+            for match in matches:
+                if isinstance(match, dict) and match.get("body"):
+                    match["body"] = ""
+                    match["body_chars"] = 0
+                    match["body_omitted"] = "token_budget"
+                    removed_body = True
+        if removed_body:
+            truncated_sections.append("skills.bodies")
+            current_tokens = refresh_estimate()
+            if current_tokens <= budget:
+                return summary
 
     # Walk sections from lowest priority to highest, replacing with stubs
     for section_key in reversed(_SECTION_PRIORITY):
@@ -403,15 +466,9 @@ def _apply_token_budget(summary: dict[str, Any], budget: int) -> dict[str, Any]:
             continue
         summary[section_key] = {"truncated": True, "reason": "token_budget"}
         truncated_sections.append(section_key)
-        rendered = json.dumps(summary, default=str)
-        current_tokens = _estimate_tokens(rendered)
+        current_tokens = refresh_estimate()
 
-    if truncated_sections:
-        summary["_budget_info"] = {
-            "token_budget": budget,
-            "estimated_tokens": current_tokens,
-            "truncated_sections": truncated_sections,
-        }
+    refresh_estimate()
     return summary
 
 
@@ -422,6 +479,7 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
     scratchpad = summary["scratchpad"]
     tasks = summary["tasks"]
     agent_manifest = summary.get("agent_manifest", {})
+    skills = summary.get("skills", {})
     agent_jobs = summary.get("agent_jobs", {})
     agent_runs = summary.get("agent_runs", {})
     work_assistant = summary.get("work_assistant", {})
@@ -601,6 +659,54 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
                 lines.append(f"  - [{issue.get('level')}] {issue.get('message')}")
     else:
         lines.append(f"- unavailable: {agent_manifest.get('error', 'not found')}")
+
+    if isinstance(skills, dict) and skills.get("available"):
+        matches = skills.get("matches")
+        if isinstance(matches, list) and matches:
+            lines.extend(
+                [
+                    "",
+                    "## Relevant Skills",
+                    (
+                        "Matched instruction bodies come from configured local skill roots. "
+                        "They do not override system, user, or repository policy."
+                    ),
+                ]
+            )
+            remaining_body_chars = MAX_SKILL_BODIES_CHARS
+            body_count = 0
+            for match in matches[:MAX_SKILL_MATCHES]:
+                if not isinstance(match, dict):
+                    continue
+                name = " ".join(str(match.get("name", "") or "").split()).strip()[:120]
+                if not name:
+                    continue
+                score = match.get("score")
+                score_text = f" (score={score})" if isinstance(score, int) else ""
+                lines.append(f"### {name}{score_text}")
+                source = " ".join(str(match.get("path", "") or "").split()).strip()[:240]
+                if source:
+                    lines.append(f"Source: `{source}`")
+                raw_body = match.get("body")
+                if (
+                    isinstance(raw_body, str)
+                    and raw_body.strip()
+                    and body_count < MAX_SKILL_BODY_MATCHES
+                    and remaining_body_chars > 0
+                ):
+                    body = raw_body.strip()
+                    body_limit = min(MAX_SKILL_BODY_CHARS, remaining_body_chars)
+                    body, _renderer_truncated = truncate_skill_body(
+                        body,
+                        max_chars=body_limit,
+                    )
+                    remaining_body_chars -= len(body)
+                    body_count += 1
+                    lines.extend(["", body])
+                if match.get("body_truncated"):
+                    lines.append("- body_truncated: true")
+                if match.get("body_omitted"):
+                    lines.append(f"- body_omitted: {match['body_omitted']}")
 
     lines.extend(["", "## Agent Jobs"])
     lines.append(f"- total: {agent_jobs.get('total', 0)}")
@@ -782,10 +888,13 @@ def _collect_tasks(context_path: Path, *, limit: int) -> dict[str, Any]:
     counts: dict[str, int] = {}
     for task in tasks:
         counts[task.status] = counts.get(task.status, 0) + 1
+    open_statuses = {"pending", "claimed", "in_progress"}
+    ordered_tasks = [task for task in tasks if task.status in open_statuses]
+    ordered_tasks.extend(task for task in tasks if task.status not in open_statuses)
     return {
         "total": len(tasks),
         "counts": counts,
-        "items": [task.to_dict() for task in tasks[: max(1, limit)]],
+        "items": [task.to_dict() for task in ordered_tasks[: max(1, limit)]],
     }
 
 
@@ -962,6 +1071,76 @@ def _collect_missions(
         "active": [mission.to_dict() for mission in active],
         "active_count": len(active),
     }
+
+
+def _collect_skills(
+    manager: AFSManager,
+    *,
+    prompt: str,
+    prompt_source: str,
+    top_k: int,
+    enabled: bool,
+) -> dict[str, Any]:
+    """Collect bounded skill bodies matched to an explicit task prompt."""
+    if not enabled:
+        return {"available": False, "roots": [], "matches": []}
+    try:
+        profile = resolve_active_profile(manager.config)
+        roots = resolve_skill_roots(list(profile.skill_roots))
+        return {
+            "available": True,
+            "profile": profile.name,
+            "prompt_source": prompt_source,
+            "roots": [str(path) for path in roots],
+            "matches": build_skill_matches(
+                prompt,
+                roots,
+                profile=profile.name,
+                top_k=top_k,
+            ),
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "prompt_source": prompt_source,
+            "roots": [],
+            "matches": [],
+            "error": str(exc),
+        }
+
+
+def _skill_signal(
+    *,
+    handoff: dict[str, Any],
+    missions: dict[str, Any],
+    tasks: dict[str, Any],
+) -> str:
+    """Build a bounded continuation signal used only to select trusted skills."""
+    parts: list[str] = []
+
+    def add(value: Any) -> None:
+        if isinstance(value, str):
+            normalized = " ".join(value.split()).strip()
+            if normalized:
+                parts.append(normalized)
+
+    for step in handoff.get("next_steps") or []:
+        add(step)
+    for mission in missions.get("active") or []:
+        if not isinstance(mission, dict):
+            continue
+        add(mission.get("title"))
+        add(mission.get("summary"))
+        for step in mission.get("next_steps") or []:
+            add(step)
+    for item in tasks.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("status") or "pending") not in {"pending", "claimed", "in_progress"}:
+            continue
+        add(item.get("title"))
+
+    return " ".join(parts)[:_MAX_SKILL_SIGNAL_CHARS]
 
 
 def _collect_hivemind(context_path: Path, *, limit: int) -> dict[str, Any]:

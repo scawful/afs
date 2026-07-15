@@ -2,9 +2,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from afs.cli._utils import write_config
 from afs.config import load_config, load_config_model, load_runtime_config_model
-from afs.schema import AFSConfig
+from afs.profiles import resolve_active_profile
+from afs.schema import (
+    AFSConfig,
+    AgentsConfig,
+    CognitiveConfig,
+    ExtensionsConfig,
+    GeneralConfig,
+    HooksConfig,
+    OrchestratorConfig,
+    PluginsConfig,
+    ProfilesConfig,
+    VerificationConfigError,
+    default_directory_configs,
+)
 
 
 def test_load_config_merges_workspace_registry(tmp_path, monkeypatch) -> None:
@@ -17,14 +32,14 @@ def test_load_config_merges_workspace_registry(tmp_path, monkeypatch) -> None:
     registry_path = context_root / "workspaces.toml"
     registry_path.write_text(
         "[[workspaces]]\n"
-        f"path = \"{workspace_dir}\"\n"
+        f"path = \"{workspace_dir.as_posix()}\"\n"
         "description = \"Example\"\n",
         encoding="utf-8",
     )
 
     config_path = tmp_path / "afs.toml"
     config_path.write_text(
-        f"[general]\ncontext_root = \"{context_root}\"\n",
+        f"[general]\ncontext_root = \"{context_root.as_posix()}\"\n",
         encoding="utf-8",
     )
 
@@ -39,12 +54,53 @@ def test_load_config_model_uses_explicit_path(tmp_path) -> None:
     context_root = tmp_path / "context"
     config_path = tmp_path / "custom.toml"
     config_path.write_text(
-        f"[general]\ncontext_root = \"{context_root}\"\n",
+        f"[general]\ncontext_root = \"{context_root.as_posix()}\"\n",
         encoding="utf-8",
     )
 
     model = load_config_model(config_path=config_path, merge_user=False)
     assert model.general.context_root == context_root.resolve()
+
+
+def test_write_config_round_trips_default_agents_opt_out(tmp_path: Path) -> None:
+    config_path = tmp_path / "afs.toml"
+    config = AFSConfig.from_dict({"agents": {"default_set": False}})
+
+    write_config(config_path, config)
+
+    text = config_path.read_text(encoding="utf-8")
+    roundtrip = load_config_model(config_path=config_path, merge_user=False)
+    assert "[agents]" in text
+    assert roundtrip.agents.default_set is False
+
+
+def test_afs_config_preserves_pre_agents_positional_constructor(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AFS_DEFAULT_AGENTS", raising=False)
+    general = GeneralConfig()
+    plugins = PluginsConfig()
+    extensions = ExtensionsConfig()
+    profiles = ProfilesConfig()
+    hooks = HooksConfig()
+    directories = default_directory_configs()
+    cognitive = CognitiveConfig()
+    orchestrator = OrchestratorConfig(enabled=True)
+
+    config = AFSConfig(
+        general,
+        plugins,
+        extensions,
+        profiles,
+        hooks,
+        directories,
+        cognitive,
+        orchestrator,
+    )
+
+    assert config.orchestrator is orchestrator
+    assert isinstance(config.agents, AgentsConfig)
+    assert resolve_active_profile(config).agent_configs
 
 
 def test_load_runtime_config_model_uses_nearest_repo_config(tmp_path, monkeypatch) -> None:
@@ -55,7 +111,7 @@ def test_load_runtime_config_model_uses_nearest_repo_config(tmp_path, monkeypatc
     context_root = repo_root / ".context"
     config_path = repo_root / "afs.toml"
     config_path.write_text(
-        f"[general]\ncontext_root = \"{context_root}\"\n",
+        f"[general]\ncontext_root = \"{context_root.as_posix()}\"\n",
         encoding="utf-8",
     )
 
@@ -74,7 +130,7 @@ def test_load_config_model_parses_profiles_extensions_hooks(tmp_path) -> None:
     config_path.write_text(
         "[extensions]\n"
         "enabled_extensions = [\"workspace_adapter\"]\n"
-        f"extension_dirs = [\"{tmp_path / 'extensions'}\"]\n\n"
+        f"extension_dirs = [\"{(tmp_path / 'extensions').as_posix()}\"]\n\n"
         "[profiles]\n"
         "active_profile = \"work\"\n"
         "auto_apply = true\n\n"
@@ -136,16 +192,26 @@ def test_load_config_model_parses_verification_profiles(tmp_path) -> None:
     config_path = tmp_path / "verification.toml"
     config_path.write_text(
         "[verification]\n"
-        "default_profile = \"repo\"\n\n"
+        'default_profile = "repo"\n\n'
+        "allow_legacy_shell = false\n\n"
         "[verification.profiles.repo]\n"
-        "description = \"Repo checks\"\n\n"
+        'description = "Repo checks"\n\n'
         "[[verification.profiles.repo.checks]]\n"
-        "name = \"python\"\n"
-        "paths = [\"**/*.py\", \"pyproject.toml\"]\n"
-        "commands = [\"ruff check .\", \"pytest -q\"]\n"
-        "skills = [\"python-quality\"]\n"
-        "workflows = [\"edit_fast\"]\n"
-        "tool_profiles = [\"edit_and_verify\"]\n",
+        'name = "python"\n'
+        'paths = ["**/*.py", "pyproject.toml"]\n'
+        'commands = ["ruff check .", "pytest -q"]\n'
+        'skills = ["python-quality"]\n'
+        'workflows = ["edit_fast"]\n'
+        'tool_profiles = ["edit_and_verify"]\n'
+        "\n"
+        "[[verification.profiles.repo.checks.executions]]\n"
+        'argv = ["python3", "-m", "pytest", "-q"]\n'
+        'cwd = "tests"\n'
+        "timeout_seconds = 600\n"
+        "max_output_bytes = 4096\n"
+        'inherit_env = ["PATH", "HOME"]\n'
+        'env = { AFS_MODE = "test" }\n'
+        "redact_argv_indices = [2]\n",
         encoding="utf-8",
     )
 
@@ -162,6 +228,133 @@ def test_load_config_model_parses_verification_profiles(tmp_path) -> None:
     assert check.skills == ["python-quality"]
     assert check.workflows == ["edit_fast"]
     assert check.tool_profiles == ["edit_and_verify"]
+    assert model.verification.allow_legacy_shell is False
+    assert len(check.executions) == 1
+    execution = check.executions[0]
+    assert execution.argv == ["python3", "-m", "pytest", "-q"]
+    assert execution.cwd == "tests"
+    assert execution.timeout_seconds == 600.0
+    assert execution.max_output_bytes == 4096
+    assert execution.inherit_env == ["PATH", "HOME"]
+    assert execution.env == {"AFS_MODE": "test"}
+    assert execution.redact_argv_indices == [2]
+
+
+@pytest.mark.parametrize(
+    ("execution", "message"),
+    [
+        (
+            {"argv": ["python3"], "timeout_seconds": "30"},
+            "timeout_seconds must be greater than 0",
+        ),
+        (
+            {"argv": ["python3"], "max_output_bytes": 0},
+            "max_output_bytes must be greater than 0",
+        ),
+        (
+            {"argv": ["python3"], "env": {"TOKEN": 7}},
+            "env must map string names to string values",
+        ),
+        (
+            {"argv": ["python3"], "redact_argv_indices": [1, 1]},
+            "redact_argv_indices must contain unique integers",
+        ),
+        (
+            {"argv": ["python3"], "redact_argv_indicies": [0]},
+            "contains unknown fields",
+        ),
+    ],
+)
+def test_verification_execution_safety_fields_fail_closed(
+    execution: dict,
+    message: str,
+) -> None:
+    payload = {
+        "verification": {
+            "default_profile": "repo",
+            "profiles": {
+                "repo": {
+                    "checks": [
+                        {
+                            "name": "required",
+                            "required": True,
+                            "executions": [execution],
+                        }
+                    ]
+                }
+            },
+        }
+    }
+
+    with pytest.raises(VerificationConfigError, match=message):
+        AFSConfig.from_dict(payload)
+
+
+def test_verification_check_rejects_non_table_execution_entries() -> None:
+    payload = {
+        "verification": {
+            "profiles": {
+                "repo": {
+                    "checks": [
+                        {
+                            "name": "required",
+                            "required": True,
+                            "executions": ["python3 -m pytest"],
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    with pytest.raises(VerificationConfigError, match="array of tables"):
+        AFSConfig.from_dict(payload)
+
+
+def test_verification_check_rejects_unknown_execution_field() -> None:
+    payload = {
+        "verification": {
+            "profiles": {
+                "repo": {
+                    "checks": [
+                        {
+                            "name": "required",
+                            "required": True,
+                            "execution": {"argv": ["python3"]},
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    with pytest.raises(VerificationConfigError, match="contains unknown fields"):
+        AFSConfig.from_dict(payload)
+
+
+@pytest.mark.parametrize("name", ["", "   "])
+def test_verification_check_rejects_blank_name(name: str) -> None:
+    payload = {
+        "verification": {
+            "profiles": {
+                "repo": {
+                    "checks": [
+                        {
+                            "name": name,
+                            "executions": [{"argv": ["python3", "-m", "pytest"]}],
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    with pytest.raises(
+        VerificationConfigError,
+        match="verification check name must be a non-empty string",
+    ):
+        AFSConfig.from_dict(payload)
+
 
 
 def test_load_config_model_parses_mcp_allowed_roots(tmp_path) -> None:
@@ -169,7 +362,7 @@ def test_load_config_model_parses_mcp_allowed_roots(tmp_path) -> None:
     allowed = tmp_path / "workspace-root"
     config_path.write_text(
         "[general]\n"
-        f"mcp_allowed_roots = [\"{allowed}\"]\n",
+        f"mcp_allowed_roots = [\"{allowed.as_posix()}\"]\n",
         encoding="utf-8",
     )
 
@@ -200,7 +393,7 @@ def test_load_config_model_merges_env_mcp_allowed_roots(tmp_path, monkeypatch) -
     env_root = tmp_path / "workspace-root"
     config_path.write_text(
         "[general]\n"
-        f"mcp_allowed_roots = [\"{configured}\"]\n",
+        f"mcp_allowed_roots = [\"{configured.as_posix()}\"]\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("AFS_MCP_ALLOWED_ROOTS", str(env_root))
@@ -217,7 +410,7 @@ def test_load_config_model_parses_memory_consolidation_settings(tmp_path) -> Non
         "enabled = true\n"
         "auto_start = true\n"
         "interval_seconds = 900\n"
-        f"report_output = \"{report_output}\"\n"
+        f"report_output = \"{report_output.as_posix()}\"\n"
         "entries_filename = \"durable.jsonl\"\n"
         "summary_dir_name = \"history_notes\"\n"
         "checkpoint_filename = \"cursor.json\"\n"
@@ -249,7 +442,7 @@ def test_load_config_model_parses_service_context_filters(tmp_path) -> None:
         "[services]\n"
         "enabled = true\n\n"
         "[services.services.context-watch]\n"
-        f"context_filters = [\"{tmp_path / 'lab'}\"]\n",
+        f"context_filters = [\"{(tmp_path / 'lab').as_posix()}\"]\n",
         encoding="utf-8",
     )
 

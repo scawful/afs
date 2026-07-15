@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .agent_defaults import DEFAULT_AGENT_TAG
 from .config import load_config_model
 from .extensions import resolve_extensions_config
 from .profiles import resolve_active_profile
@@ -129,7 +130,13 @@ def _bundle_profile_snapshot(profile_name: str, config: AFSConfig) -> ProfileCon
         policies=list(resolved.policies),
         mcp_tools=list(resolved.mcp_tools),
         cli_modules=list(resolved.cli_modules),
-        agent_configs=list(resolved.agent_configs),
+        # Shipped defaults are runtime-provided on every install; exporting
+        # them would freeze one machine's context paths into the bundle.
+        agent_configs=[
+            agent
+            for agent in resolved.agent_configs
+            if DEFAULT_AGENT_TAG not in agent.tags
+        ],
     )
 
 

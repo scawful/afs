@@ -12,7 +12,14 @@ from afs.context_index import ContextSQLiteIndex
 from afs.hivemind import HivemindBus
 from afs.manager import AFSManager
 from afs.models import MountType
-from afs.schema import AFSConfig, DirectoryConfig, GeneralConfig, default_directory_configs
+from afs.schema import (
+    AFSConfig,
+    DirectoryConfig,
+    GeneralConfig,
+    ProfileConfig,
+    ProfilesConfig,
+    default_directory_configs,
+)
 from afs.tasks import TaskQueue
 from afs.work_assistant import WorkAssistantStore
 
@@ -258,3 +265,180 @@ def test_build_session_bootstrap_includes_codebase_summary(
     rendered = render_session_bootstrap(summary)
     assert "## Codebase" in rendered
     assert "source_roots: src" in rendered
+
+
+def test_session_bootstrap_delivers_explicitly_matched_skill_body(
+    tmp_path: Path,
+) -> None:
+    from afs.session_bootstrap import (
+        build_session_bootstrap,
+        render_session_bootstrap,
+        write_session_bootstrap_artifacts,
+    )
+
+    skill_root = tmp_path / "skills"
+    skill = skill_root / "quantum" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\n"
+        "name: quantum-frobnicate\n"
+        "triggers: [quantumfrobnicate]\n"
+        "profiles: [general]\n"
+        "---\n\n"
+        "# Quantum Frobnication\n\n"
+        "Frobnicate only after validating the flux boundary.\n",
+        encoding="utf-8",
+    )
+    context_root = tmp_path / ".context"
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            profiles=ProfilesConfig(
+                active_profile="default",
+                profiles={"default": ProfileConfig(skill_roots=[skill_root])},
+            ),
+        )
+    )
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path, context_root=context_root)
+
+    summary = build_session_bootstrap(
+        manager,
+        context_root,
+        skills_prompt="quantumfrobnicate",
+        record_event=False,
+    )
+    expected_body = (
+        "# Quantum Frobnication\n\n"
+        "Frobnicate only after validating the flux boundary."
+    )
+    assert summary["skills"]["matches"][0]["name"] == "quantum-frobnicate"
+    assert summary["skills"]["matches"][0]["body"] == expected_body
+    rendered = render_session_bootstrap(summary)
+    assert "## Relevant Skills" in rendered
+    assert expected_body in rendered
+
+    artifacts = write_session_bootstrap_artifacts(manager, context_root, summary)
+    persisted = json.loads(Path(artifacts["json"]).read_text(encoding="utf-8"))
+    assert persisted["skills"]["matches"][0]["body"] == expected_body
+    assert expected_body in Path(artifacts["markdown"]).read_text(encoding="utf-8")
+
+    no_match = build_session_bootstrap(
+        manager,
+        context_root,
+        skills_prompt="",
+        record_event=False,
+    )
+    assert no_match["skills"]["matches"] == []
+    assert "## Relevant Skills" not in render_session_bootstrap(no_match)
+
+    TaskQueue(context_root).create(
+        "quantumfrobnicate the next flux boundary",
+        created_by="tester",
+        priority=1,
+    )
+    inferred = build_session_bootstrap(
+        manager,
+        context_root,
+        record_event=False,
+    )
+    assert inferred["skills"]["prompt_source"] == "session_state"
+    assert inferred["skills"]["matches"][0]["name"] == "quantum-frobnicate"
+    assert inferred["skills"]["matches"][0]["body"] == expected_body
+
+
+def test_bootstrap_token_budget_sheds_bodies_before_skill_pointers() -> None:
+    from afs.session_bootstrap import _apply_token_budget, _estimate_tokens
+
+    summary = {
+        "scratchpad": {"state_text": "keep me"},
+        "skills": {
+            "available": True,
+            "matches": [
+                {
+                    "name": "large",
+                    "path": "/skills/large/SKILL.md",
+                    "body": "x" * 4000,
+                    "body_chars": 4000,
+                }
+            ],
+        },
+    }
+    truncated = _apply_token_budget(summary, budget=200)
+    assert truncated["scratchpad"] == {"state_text": "keep me"}
+    assert truncated["skills"]["matches"][0]["name"] == "large"
+    assert truncated["skills"]["matches"][0]["body"] == ""
+    assert truncated["skills"]["matches"][0]["body_chars"] == 0
+    assert truncated["skills"]["matches"][0]["body_omitted"] == "token_budget"
+    assert "skills.bodies" in truncated["_budget_info"]["truncated_sections"]
+    actual_tokens = _estimate_tokens(json.dumps(truncated, default=str))
+    assert truncated["_budget_info"]["estimated_tokens"] == actual_tokens
+    assert actual_tokens <= 200
+
+
+def test_bootstrap_skill_signal_ignores_completed_tasks() -> None:
+    from afs.session_bootstrap import _skill_signal
+
+    signal = _skill_signal(
+        handoff={"available": False},
+        missions={"active": []},
+        tasks={
+            "items": [
+                {"status": "done", "title": "stale completed quantumfrobnicate"},
+                {"status": "pending", "title": "active python review"},
+            ]
+        },
+    )
+    assert "stale completed" not in signal
+    assert "active python review" in signal
+
+
+def test_bootstrap_skill_signal_prioritizes_open_tasks_before_display_limit(
+    tmp_path: Path,
+) -> None:
+    from afs.session_bootstrap import build_session_bootstrap
+
+    skill_root = tmp_path / "skills"
+    skill = skill_root / "queue" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: queue-focus\ntriggers: [pendingneedle]\n---\n\n"
+        "Handle the pending work first.\n",
+        encoding="utf-8",
+    )
+    context_root = tmp_path / ".context"
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            profiles=ProfilesConfig(
+                active_profile="default",
+                profiles={"default": ProfileConfig(skill_roots=[skill_root])},
+            ),
+        )
+    )
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path, context_root=context_root)
+    queue = TaskQueue(context_root)
+    for index in range(10):
+        completed = queue.create(
+            f"completed filler {index}",
+            created_by="tester",
+            priority=0,
+        )
+        queue.update_status(completed.id, "done")
+    queue.create(
+        "pendingneedle remains actionable",
+        created_by="tester",
+        priority=9,
+    )
+
+    summary = build_session_bootstrap(
+        manager,
+        context_root,
+        task_limit=10,
+        record_event=False,
+    )
+    assert summary["tasks"]["items"][0]["status"] == "pending"
+    assert summary["skills"]["matches"][0]["name"] == "queue-focus"

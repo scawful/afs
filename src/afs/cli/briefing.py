@@ -151,12 +151,16 @@ def _read_agent_registry() -> list[dict[str, Any]]:
 # Briefing assembly
 # ---------------------------------------------------------------------------
 
-def _build_briefing(days: int = 7, include_gws: bool = True) -> dict[str, Any]:
+def _build_briefing(
+    days: int = 7,
+    include_gws: bool = True,
+    include_tasks: bool = True,
+) -> dict[str, Any]:
     """Assemble the full briefing data structure."""
     now = datetime.now()
 
     # Tasks
-    tasks = _fetch_tasks()
+    tasks = _fetch_tasks() if include_tasks else []
     agents = _read_agent_registry()
 
     # Google Workspace (optional)

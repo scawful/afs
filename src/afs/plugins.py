@@ -271,10 +271,21 @@ def load_enabled_extensions(
     return _load_extensions(config=config, requested=requested_names, extra_dirs=paths)
 
 
+def extension_load_report(
+    config: AFSConfig | dict | None = None,
+    extra_paths: Iterable[Path] | None = None,
+) -> dict[str, Any]:
+    """Load every discoverable extension manifest, capturing failures."""
+    from .extensions import extension_load_report as _extension_load_report
+
+    return _extension_load_report(config=config, extra_dirs=list(extra_paths or []))
+
+
 __all__ = [
     "call_plugin_hook",
     "discover_plugins",
     "discover_extension_manifests",
+    "extension_load_report",
     "load_plugins",
     "load_enabled_plugins",
     "load_enabled_extensions",

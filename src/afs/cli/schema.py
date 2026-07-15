@@ -52,7 +52,10 @@ def _read_response_text(args: argparse.Namespace) -> str:
     if file_arg and file_arg != "-":
         return Path(file_arg).expanduser().read_text(encoding="utf-8")
     # Default: read the response from stdin (how a post-turn hook pipes it in).
-    return sys.stdin.read()
+    binary_stream = getattr(sys.stdin, "buffer", None)
+    if binary_stream is None:
+        return sys.stdin.read()
+    return binary_stream.read().decode("utf-8")
 
 
 def _resolve_schema_name(args: argparse.Namespace) -> tuple[str, str]:
@@ -88,7 +91,11 @@ def schema_validate_command(args: argparse.Namespace) -> int:
         )
         return 2
 
-    response_text = _read_response_text(args)
+    try:
+        response_text = _read_response_text(args)
+    except UnicodeError as exc:
+        print(f"response input is not valid UTF-8: {exc}", file=sys.stderr)
+        return 2
     result = validate_structured_response(schema_name, response_text)
 
     if getattr(args, "json", False):

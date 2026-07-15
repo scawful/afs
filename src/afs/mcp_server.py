@@ -18,8 +18,9 @@ import shutil
 import sys
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from .agent_scope import allowed_tools, is_tool_allowed
 from .codebase_explorer import build_codebase_summary, render_codebase_summary
@@ -87,6 +88,19 @@ from .session_bootstrap import (
     collect_context_status,
     render_session_bootstrap,
 )
+from .skills import (
+    MAX_SKILL_BODIES_CHARS,
+    MAX_SKILL_BODY_CHARS,
+    MAX_SKILL_BODY_MATCHES,
+    MAX_SKILL_MATCHES,
+    MAX_SKILL_METADATA_ITEM_CHARS,
+    MAX_SKILL_NAME_CHARS,
+    bounded_skill_metadata,
+    build_skill_matches,
+    discover_skills,
+    read_skill_body,
+    resolve_skill_roots,
+)
 
 # Extend core prefixes with schema URI prefix from response_schemas
 _CORE_RESOURCE_PREFIXES = (*_CORE_RESOURCE_PREFIXES_BASE, SCHEMA_URI_PREFIX)
@@ -118,6 +132,10 @@ DEFAULT_MCP_TOOL_CATALOG = frozenset(
         "context.write",
     }
 )
+MAX_SKILL_MATCH_PROMPT_CHARS = 8_000
+MAX_SKILL_KNOWN_PREVIEW_CHARS = 1_024
+SKILL_MATCH_ARGUMENT_NAMES = frozenset({"prompt", "top_k", "include_bodies"})
+SKILL_READ_ARGUMENT_NAMES = frozenset({"name"})
 
 
 def _allowed_roots(manager: AFSManager) -> list[Path]:
@@ -250,6 +268,13 @@ def _coerce_int(
     minimum: int = 1,
     maximum: int | None = None,
 ) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, str):
+        try:
+            value = int(value.strip())
+        except ValueError:
+            return default
     if not isinstance(value, int):
         return default
     if value < minimum:
@@ -2198,18 +2223,202 @@ def _tool_afs_codebase_index(arguments: dict[str, Any], manager: AFSManager) -> 
     }
 
 
+def _profile_skill_roots(manager: AFSManager) -> tuple[str, list[Path]]:
+    profile = resolve_active_profile(manager.config)
+    roots = resolve_skill_roots(
+        list(profile.skill_roots),
+        afs_root=os.getenv("AFS_ROOT", "").strip() or None,
+    )
+    return profile.name, roots
+
+
+def _reject_skill_arguments(
+    arguments: dict[str, Any],
+    message: str,
+) -> NoReturn:
+    # Registry failures are recorded after the handler returns. Drop rejected
+    # payloads so invalid or unknown values cannot be persisted in history.
+    arguments.clear()
+    raise ValueError(message)
+
+
+def _require_known_skill_arguments(
+    arguments: dict[str, Any],
+    *,
+    allowed: frozenset[str],
+    tool_name: str,
+) -> None:
+    if any(key not in allowed for key in arguments):
+        _reject_skill_arguments(
+            arguments,
+            f"{tool_name} received unsupported arguments",
+        )
+
+
+def _has_ascii_or_c1_controls(value: str) -> bool:
+    return any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in value)
+
+
+def _safe_skill_error_label(value: str, *, max_chars: int) -> str:
+    """Render one bounded label without terminal control characters."""
+    escaped = "".join(
+        f"\\u{ord(char):04x}" if _has_ascii_or_c1_controls(char) else char
+        for char in str(value).strip()
+    )
+    if len(escaped) <= max_chars:
+        return escaped
+    if max_chars <= 3:
+        return escaped[:max_chars]
+    return escaped[: max_chars - 3].rstrip() + "..."
+
+
+def _skill_match_top_k(raw: Any) -> int:
+    if raw is None:
+        return 5
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError("top_k must be an integer from 1 to 10")
+    if not 1 <= raw <= MAX_SKILL_MATCHES:
+        raise ValueError("top_k must be an integer from 1 to 10")
+    return raw
+
+
+def _skill_match_include_bodies(raw: Any) -> bool:
+    if raw is None:
+        return False
+    if not isinstance(raw, bool):
+        raise ValueError("include_bodies must be a boolean")
+    return raw
+
+
+def _tool_skill_match(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    _require_known_skill_arguments(
+        arguments,
+        allowed=SKILL_MATCH_ARGUMENT_NAMES,
+        tool_name="skill.match",
+    )
+    raw_prompt = arguments.get("prompt")
+    if not isinstance(raw_prompt, str):
+        _reject_skill_arguments(arguments, "prompt must be a non-empty string")
+    if len(raw_prompt) > MAX_SKILL_MATCH_PROMPT_CHARS:
+        _reject_skill_arguments(
+            arguments,
+            f"prompt must be at most {MAX_SKILL_MATCH_PROMPT_CHARS} characters"
+        )
+    prompt = raw_prompt.strip()
+    if not prompt:
+        _reject_skill_arguments(arguments, "prompt must be a non-empty string")
+
+    try:
+        top_k = _skill_match_top_k(arguments.get("top_k"))
+        include_bodies = _skill_match_include_bodies(arguments.get("include_bodies"))
+    except ValueError as exc:
+        _reject_skill_arguments(arguments, str(exc))
+    profile_name, roots = _profile_skill_roots(manager)
+    matches = build_skill_matches(
+        prompt,
+        roots,
+        profile=profile_name,
+        top_k=top_k,
+        max_body_chars=MAX_SKILL_BODY_CHARS if include_bodies else 0,
+        max_total_body_chars=MAX_SKILL_BODIES_CHARS if include_bodies else 0,
+        max_body_matches=MAX_SKILL_BODY_MATCHES if include_bodies else 0,
+    )
+    if not include_bodies:
+        for match in matches:
+            match["body_omitted"] = "not_requested"
+    return {
+        "profile": profile_name,
+        "prompt": prompt,
+        "include_bodies": include_bodies,
+        "matches": matches,
+    }
+
+
+def _skill_path_within_roots(path: Path, roots: list[Path]) -> tuple[Path, Path]:
+    resolved = path.expanduser().resolve()
+    for root in roots:
+        resolved_root = root.expanduser().resolve()
+        try:
+            resolved.relative_to(resolved_root)
+        except (OSError, ValueError):
+            continue
+        return resolved, resolved_root
+    raise PermissionError(f"Skill path outside configured roots: {resolved}")
+
+
+def _tool_skill_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    _require_known_skill_arguments(
+        arguments,
+        allowed=SKILL_READ_ARGUMENT_NAMES,
+        tool_name="skill.read",
+    )
+    raw_name = arguments.get("name")
+    if not isinstance(raw_name, str):
+        _reject_skill_arguments(arguments, "name must be a non-empty string")
+    if len(raw_name) > MAX_SKILL_NAME_CHARS:
+        _reject_skill_arguments(
+            arguments,
+            f"name must be at most {MAX_SKILL_NAME_CHARS} characters",
+        )
+    if _has_ascii_or_c1_controls(raw_name):
+        _reject_skill_arguments(
+            arguments,
+            "name must not contain ASCII or C1 control characters",
+        )
+    name = raw_name.strip()
+    if not name:
+        _reject_skill_arguments(arguments, "name must be a non-empty string")
+    wanted = name.casefold()
+    profile_name, roots = _profile_skill_roots(manager)
+    skills = discover_skills(roots, profile=profile_name)
+    for skill in skills:
+        if skill.name.casefold() != wanted:
+            continue
+        skill_path, trusted_root = _skill_path_within_roots(skill.path, roots)
+        body, body_truncated = read_skill_body(
+            skill_path,
+            max_chars=MAX_SKILL_BODY_CHARS,
+            trusted_root=trusted_root,
+        )
+        return {
+            "profile": profile_name,
+            **bounded_skill_metadata(replace(skill, path=skill_path)),
+            "body": body,
+            "body_truncated": body_truncated,
+            "body_chars": len(body),
+        }
+
+    known = sorted({skill.name for skill in skills}, key=str.casefold)
+    preview_items = [
+        _safe_skill_error_label(
+            item,
+            max_chars=MAX_SKILL_METADATA_ITEM_CHARS,
+        )
+        for item in known[:MAX_SKILL_MATCHES]
+    ]
+    preview = ", ".join(preview_items) or "none discovered"
+    if len(preview) > MAX_SKILL_KNOWN_PREVIEW_CHARS:
+        preview = preview[: MAX_SKILL_KNOWN_PREVIEW_CHARS - 3].rstrip() + "..."
+    suffix = (
+        f" (and {len(known) - MAX_SKILL_MATCHES} more)"
+        if len(known) > MAX_SKILL_MATCHES
+        else ""
+    )
+    raise ValueError(
+        f"Unknown skill '{name}'. Known skills: {preview}{suffix}"
+    )
+
+
 def _tool_alias_definition(
     tool: MCPToolDefinition,
     *,
     name: str,
     description: str | None = None,
 ) -> MCPToolDefinition:
-    return MCPToolDefinition(
+    return replace(
+        tool,
         name=name,
         description=description or tool.description,
-        input_schema=tool.input_schema,
-        handler=tool.handler,
-        source=tool.source,
     )
 
 
@@ -2288,6 +2497,58 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
     )
 
     return [
+        MCPToolDefinition(
+            name="skill.match",
+            description=(
+                "Rank configured AFS skills against a bounded task description. "
+                "Use when the task shifts mid-session; request bodies only when "
+                "you need inline instructions."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_SKILL_MATCH_PROMPT_CHARS,
+                        "description": "Task or intent text to match against skill triggers.",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_SKILL_MATCHES,
+                        "default": 5,
+                    },
+                    "include_bodies": {"type": "boolean", "default": False},
+                },
+                "required": ["prompt"],
+                "additionalProperties": False,
+            },
+            handler=_tool_skill_match,
+            catalog="slim",
+        ),
+        MCPToolDefinition(
+            name="skill.read",
+            description=(
+                "Read one configured AFS skill by name. Returns metadata and at "
+                f"most {MAX_SKILL_BODY_CHARS} characters of instructions."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "description": "Skill name reported by skill.match.",
+                    },
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+            handler=_tool_skill_read,
+            catalog="slim",
+        ),
         MCPToolDefinition(
             name="briefing",
             description="Morning briefing — calendar, gmail, open tasks, and active agents. Use at the start of a session to understand current state.",
@@ -3594,12 +3855,34 @@ def _invoke_prompt_handler(
     )
 
 
+def _normalize_tool_catalog(
+    value: Any,
+    *,
+    default: str = "full",
+    allow_inherit: bool = True,
+) -> str:
+    if default not in {"full", "slim"}:
+        raise ValueError("default MCP tool catalog must be 'full' or 'slim'")
+    if value is None or value == "":
+        if allow_inherit:
+            return default
+        raise ValueError("MCP tool catalog must be 'full' or 'slim'")
+    if not isinstance(value, str):
+        raise ValueError("MCP tool catalog must be 'full' or 'slim'")
+    normalized = value.strip().lower()
+    if normalized not in {"full", "slim"}:
+        raise ValueError("MCP tool catalog must be 'full' or 'slim'")
+    return normalized
+
+
 def _normalize_extension_tools(
     extension_name: str,
     definitions: Any,
     *,
     source: str,
+    default_catalog: str = "full",
 ) -> list[MCPToolDefinition]:
+    default_catalog = _normalize_tool_catalog(default_catalog, allow_inherit=False)
     if definitions is None:
         return []
     if isinstance(definitions, MCPToolDefinition):
@@ -3626,12 +3909,16 @@ def _normalize_extension_tools(
                 return _invoke_tool_handler(_handler, arguments, manager)
 
             tools.append(
-                MCPToolDefinition(
+                replace(
+                    payload,
                     name=payload.name.strip(),
                     description=payload.description.strip(),
-                    input_schema=payload.input_schema,
                     handler=_wrapped,
                     source=source,
+                    catalog=_normalize_tool_catalog(
+                        payload.catalog,
+                        default=default_catalog,
+                    ),
                 )
             )
             continue
@@ -3644,6 +3931,15 @@ def _normalize_extension_tools(
         description = payload.get("description")
         input_schema = payload.get("inputSchema", payload.get("input_schema"))
         handler = payload.get("handler")
+        catalog = (
+            _normalize_tool_catalog(
+                payload["catalog"],
+                default=default_catalog,
+                allow_inherit=False,
+            )
+            if "catalog" in payload
+            else default_catalog
+        )
 
         if not isinstance(name, str) or not name.strip():
             raise ValueError(f"Extension {extension_name} returned tool without valid name")
@@ -3674,6 +3970,7 @@ def _normalize_extension_tools(
                 input_schema=input_schema,
                 handler=_wrapped,
                 source=source,
+                catalog=catalog,
             )
         )
     return tools
@@ -3903,6 +4200,7 @@ def _normalize_extension_contribution(
     definitions: Any,
     *,
     source: str,
+    default_catalog: str = "full",
 ) -> MCPExtensionContribution:
     if definitions is None:
         return MCPExtensionContribution()
@@ -3913,6 +4211,7 @@ def _normalize_extension_contribution(
                 extension_name,
                 definitions.tools,
                 source=source,
+                default_catalog=default_catalog,
             ),
             resources=_normalize_extension_resources(
                 extension_name,
@@ -3934,6 +4233,7 @@ def _normalize_extension_contribution(
                 extension_name,
                 definitions.get("tools"),
                 source=source,
+                default_catalog=default_catalog,
             ),
             resources=_normalize_extension_resources(
                 extension_name,
@@ -3948,7 +4248,12 @@ def _normalize_extension_contribution(
         )
 
     return MCPExtensionContribution(
-        tools=_normalize_extension_tools(extension_name, definitions, source=source)
+        tools=_normalize_extension_tools(
+            extension_name,
+            definitions,
+            source=source,
+            default_catalog=default_catalog,
+        )
     )
 
 
@@ -3960,6 +4265,7 @@ def _load_extension_surface(
     surface: str,
     module_name: str,
     factory_name: str,
+    default_catalog: str = "full",
 ) -> tuple[MCPExtensionContribution, ExtensionMCPStatus]:
     source = f"extension:{extension_name}"
     search_roots: list[Path] = []
@@ -3995,6 +4301,7 @@ def _load_extension_surface(
                 extension_name,
                 definitions,
                 source=source,
+                default_catalog=default_catalog,
             )
         except Exception as exc:
             status.error = str(exc)
@@ -4019,14 +4326,16 @@ def _load_extension_mcp_definitions(
                 "mcp_tools",
                 manifest.mcp_tools_module.strip(),
                 manifest.mcp_tools_factory.strip() or "register_mcp_tools",
+                manifest.mcp_tools_catalog,
             ),
             (
                 "mcp_server",
                 manifest.mcp_server_module.strip(),
                 manifest.mcp_server_factory.strip() or "register_mcp_server",
+                "full",
             ),
         ]
-        for surface, module_name, factory_name in surfaces:
+        for surface, module_name, factory_name, default_catalog in surfaces:
             if not module_name:
                 continue
             contribution, status = _load_extension_surface(
@@ -4036,6 +4345,7 @@ def _load_extension_mcp_definitions(
                 surface=surface,
                 module_name=module_name,
                 factory_name=factory_name,
+                default_catalog=default_catalog,
             )
             statuses.append(status)
             merged.tools.extend(contribution.tools)
@@ -4133,12 +4443,8 @@ def build_mcp_registry(manager: AFSManager) -> MCPToolRegistry:
     for tool in _builtin_tool_definitions():
         # Apply sensitivity pre-hook to filesystem/context tools
         if tool.name in SENSITIVITY_TOOL_NAMES:
-            tool = MCPToolDefinition(
-                name=tool.name,
-                description=tool.description,
-                input_schema=tool.input_schema,
-                handler=tool.handler,
-                source=tool.source,
+            tool = replace(
+                tool,
                 pre_hook=sensitivity_pre_hook,
             )
         registry.add_tool(tool)
@@ -4194,11 +4500,23 @@ def _tool_specs(registry: MCPToolRegistry | None = None) -> list[dict[str, Any]]
         tools = _builtin_tool_definitions()
         specs = [tool.to_spec() for tool in tools]
         tool_names = [tool.name for tool in tools]
+        core_names = frozenset(tool_names)
+        slim_names = frozenset(tool.name for tool in tools if tool.catalog == "slim")
     else:
         specs = registry.specs()
         tool_names = list(registry.tools)
-    filtered = [spec for spec in specs if _should_list_tool(str(spec["name"]))]
-    return _client_tool_specs(filtered, tool_names)
+        core_names = frozenset(
+            name for name, tool in registry.tools.items() if tool.source == "core"
+        )
+        slim_names = frozenset(
+            name for name, tool in registry.tools.items() if tool.catalog == "slim"
+        )
+    filtered = [
+        spec
+        for spec in specs
+        if _should_list_tool(str(spec["name"]), slim_names=slim_names)
+    ]
+    return _client_tool_specs(filtered, tool_names, core_names=core_names)
 
 
 def _safe_mcp_tool_names_enabled() -> bool:
@@ -4219,13 +4537,23 @@ def _safe_mcp_tool_name(name: str) -> str:
 
 def _tool_name_alias_maps(
     tool_names: Iterable[str],
+    *,
+    core_names: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, str], dict[str, str]]:
     original_to_client: dict[str, str] = {}
     client_to_original: dict[str, str] = {}
     used: set[str] = set()
 
-    # Keep already-valid names stable when they collide with sanitized aliases.
-    ordered = sorted(tool_names, key=lambda name: (not MCP_TOOL_NAME_PATTERN.fullmatch(name), name))
+    # Reserve stable aliases for core tools before an extension can claim the
+    # sanitized spelling. Within each source tier, preserve already-valid names.
+    ordered = sorted(
+        tool_names,
+        key=lambda name: (
+            name not in core_names,
+            not MCP_TOOL_NAME_PATTERN.fullmatch(name),
+            name,
+        ),
+    )
     for original in ordered:
         alias = _safe_mcp_tool_name(original)
         candidate = alias
@@ -4245,11 +4573,16 @@ def _tool_name_alias_maps(
 def _client_tool_specs(
     specs: list[dict[str, Any]],
     tool_names: Iterable[str],
+    *,
+    core_names: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     if not _safe_mcp_tool_names_enabled():
         return specs
 
-    original_to_client, _ = _tool_name_alias_maps(tool_names)
+    original_to_client, _ = _tool_name_alias_maps(
+        tool_names,
+        core_names=core_names,
+    )
     client_specs: list[dict[str, Any]] = []
     for spec in specs:
         original_name = str(spec["name"])
@@ -4263,17 +4596,28 @@ def _client_tool_specs(
 def _server_tool_name(client_name: str, registry: MCPToolRegistry) -> str:
     if not _safe_mcp_tool_names_enabled():
         return client_name
-    _, client_to_original = _tool_name_alias_maps(registry.tools)
+    core_names = frozenset(
+        name for name, tool in registry.tools.items() if tool.source == "core"
+    )
+    _, client_to_original = _tool_name_alias_maps(
+        registry.tools,
+        core_names=core_names,
+    )
     return client_to_original.get(client_name, client_name)
 
 
-def _should_list_tool(tool_name: str) -> bool:
+def _should_list_tool(
+    tool_name: str,
+    *,
+    slim_names: frozenset[str] = frozenset(),
+) -> bool:
     """Return whether *tool_name* belongs in MCP ``tools/list``.
 
     AFS has more operational tools than a model should see by default.  Keep
     call-time permissions separate from discoverability: explicit
     ``AFS_ALLOWED_TOOLS`` / ``AFS_TOOL_PROFILE`` still constrain both listing
-    and calls, while the default catalog only narrows ``tools/list``.
+    and calls, while the default catalog only narrows ``tools/list``. Tool
+    definitions can opt into that default through *slim_names*.
     """
     if not is_tool_allowed(tool_name):
         return False
@@ -4284,7 +4628,7 @@ def _should_list_tool(tool_name: str) -> bool:
     catalog = os.environ.get(MCP_TOOL_CATALOG_ENV, "slim").strip().lower() or "slim"
     if catalog in FULL_MCP_TOOL_CATALOG_VALUES:
         return True
-    return tool_name in DEFAULT_MCP_TOOL_CATALOG
+    return tool_name in DEFAULT_MCP_TOOL_CATALOG or tool_name in slim_names
 
 
 def get_mcp_status(config_path: Path | None = None) -> dict[str, Any]:
@@ -4460,6 +4804,16 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                 {
                     "name": "message_limit",
                     "description": "Maximum hivemind messages to include (default 10)",
+                    "required": False,
+                },
+                {
+                    "name": "skills_prompt",
+                    "description": "Optional task prompt used to match bounded skill bodies.",
+                    "required": False,
+                },
+                {
+                    "name": "skills_top_k",
+                    "description": "Maximum skill matches to retain, capped at 10 (default 5).",
                     "required": False,
                 },
             ],
@@ -4667,6 +5021,13 @@ def _get_prompt(
             context_path,
             task_limit=_coerce_int(arguments.get("task_limit"), default=10, minimum=1, maximum=100),
             message_limit=_coerce_int(arguments.get("message_limit"), default=10, minimum=1, maximum=100),
+            skills_prompt=str(arguments.get("skills_prompt", "") or ""),
+            skills_top_k=_coerce_int(
+                arguments.get("skills_top_k"),
+                default=5,
+                minimum=0,
+                maximum=10,
+            ),
         )
         text = render_session_bootstrap(payload)
         return [{"role": "user", "content": {"type": "text", "text": text}}]

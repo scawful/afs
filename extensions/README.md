@@ -19,6 +19,7 @@ extensions/
 ```toml
 name = "workspace_adapter"
 description = "Private workspace adapter"
+api_version = 1
 
 knowledge_mounts = ["knowledge/work"]
 skill_roots = ["skills"]
@@ -32,6 +33,8 @@ before_context_read = ["scripts/hooks/before_context_read.sh"]
 [mcp_tools]
 module = "workspace_adapter.mcp_tools"
 factory = "register_mcp_tools"
+# Optional extension-wide default for this factory; defaults to "full".
+catalog = "slim"
 ```
 
 ## Config + Env
@@ -63,6 +66,31 @@ Factory contract:
   - `description`
   - `inputSchema` (or `input_schema`)
   - `handler` callable (`handler(arguments)` or `handler(arguments, manager)`)
+  - optional `catalog`: `"slim"` opts into the default `tools/list`; `"full"`
+    keeps the tool full-catalog-only
+
+Catalog behavior is fail-closed:
+
+- `[mcp_tools].catalog` defaults to `"full"` and applies only to tools from the
+  `[mcp_tools]` factory.
+- A per-tool `catalog` overrides that default. This is how one tool opts out of
+  an extension-wide `"slim"` setting.
+- `[mcp_server]` and profile-contributed tools default to `"full"`; they opt in
+  per tool.
+- Only `"full"` and `"slim"` are valid manifest and per-tool values. An invalid
+  value rejects the affected manifest or MCP surface rather than exposing it.
+
+## Validation
+
+Manifests are validated at load time. `api_version` is optional and defaults
+to `1` (the only supported version); declaring an unsupported version is a
+hard error. Existing `schema_version = "0.1"` manifests remain compatible.
+Wrong-typed fields, malformed nested tables, invalid module names, and an
+`[mcp_tools]` section without a module are errors. Unknown keys produce bounded
+warnings with did-you-mean hints. A manifest that fails validation is skipped
+(with a logged warning) while the rest still load. Inspect problems with
+`afs doctor` or `afs plugins --json`
+(`extension_errors` + per-extension `warnings`).
 
 ## Notes
 

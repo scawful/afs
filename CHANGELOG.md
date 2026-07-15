@@ -4,10 +4,46 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 
 ## [Unreleased]
 
+### Added
+
+- Versioned, packaged JSON Schema contracts for optimization evaluation,
+  policy, and decision records.
+- Pure `afs optimize decide` evidence gate with deterministic hashes, stable
+  reason codes, and no execution or promotion authority.
+- Cross-language optimization protocol documentation and runnable fixtures.
+- Versioned execution request, inspection, and record schemas plus a public
+  typed Python policy-checking API.
+- Read-only `afs execution inspect` and a portable process backend with bounded
+  time/output, scrubbed environments, and redacted audit records.
+- Structured verification executions routed through the execution broker.
+- Focused execution-contract CI coverage on Linux, macOS, and Windows.
+- Bounded matched-skill body delivery in session bootstrap and prepared client
+  prompts, with optional CLI and MCP bootstrap focus arguments.
+- Bundled operating skills included in wheel and source distributions.
+- Bounded `skill.match` and root-contained `skill.read` MCP tools in the
+  default slim catalog, including every session tool profile.
+- Twelve bundled workflow skills covering sessions, missions, search, health,
+  events, memory, approvals, schemas, verification, authoring, and CLI routing.
+- Validated per-tool and `[mcp_tools]` catalog controls for extension discovery.
+- A conservative default supervisor set for empty profiles: daily context
+  audit, knowledge/memory index refresh, weekly skill mining, and a daily
+  scratchpad briefing. Defaults are configurable and never augment a custom
+  agent list implicitly.
+- Versioned extension-manifest validation with bounded diagnostics, isolated
+  CLI registration failures, and surfaced doctor/plugin reports.
+
 ### Changed
 
 - Refreshed GitHub Actions dependencies to current Node-runtime-compatible releases.
 - Narrowed CI type checking to the release-critical slice while broader type debt remains tracked in `ROADMAP.md`.
+- Fixed hcode/OpenCode wrappers to request the supported generic session-pack
+  model while retaining their client-specific prompt profile.
+- Deprecated verification string commands; they are blocked by default, require
+  an explicit legacy-shell opt-in during migration, and will be removed in
+  `0.4.0`.
+- Supervisor child processes now inherit an explicit `AFS_CONFIG_PATH`, watch
+  signatures follow symlink-mounted sources, and missing completion records
+  fail closed instead of looking like successful scheduled runs.
 
 ## [0.2.0] - 2026-07-09
 

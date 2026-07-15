@@ -179,6 +179,8 @@ def _write_fake_client(path: Path, log_path: Path) -> Path:
         "    'AFS_SESSION_FOLLOWUP_SCHEMA': os.environ.get('AFS_SESSION_FOLLOWUP_SCHEMA'),\n"
         "    'AFS_SESSION_REPAIR_LOOP_HINT': os.environ.get('AFS_SESSION_REPAIR_LOOP_HINT'),\n"
         "    'AFS_SESSION_EFFECTIVE_TOOL_PROFILE': os.environ.get('AFS_SESSION_EFFECTIVE_TOOL_PROFILE'),\n"
+        "    'AFS_SESSION_SKILLS_MATCH_ENABLED': os.environ.get('AFS_SESSION_SKILLS_MATCH_ENABLED'),\n"
+        "    'AFS_SESSION_SKILLS_PROMPT': os.environ.get('AFS_SESSION_SKILLS_PROMPT'),\n"
         "    'AFS_TOOL_PROFILE': os.environ.get('AFS_TOOL_PROFILE'),\n"
         "    'AFS_SESSION_EVENT_BIN': os.environ.get('AFS_SESSION_EVENT_BIN'),\n"
         "    'AFS_SESSION_DEFAULT_TURN_ID': os.environ.get('AFS_SESSION_DEFAULT_TURN_ID'),\n"
@@ -836,6 +838,59 @@ def test_afs_client_session_avoids_background_noise_by_default(tmp_path: Path) -
     assert any(call.startswith("session hook session_end --client gemini ") for call in payload["_afs_calls"])
 
 
+def test_afs_client_session_uses_supported_model_for_hcode(tmp_path: Path) -> None:
+    payload = _run_client_session(tmp_path, client_label="hcode")
+
+    prepare_call = next(
+        call for call in payload["_afs_calls"] if call.startswith("session prepare-client ")
+    )
+    assert "--client hcode " in prepare_call
+    assert "--model generic " in prepare_call
+    assert "--model hcode " not in prepare_call
+
+
+def test_afs_client_session_prefers_task_for_default_skill_focus(tmp_path: Path) -> None:
+    payload = _run_client_session(
+        tmp_path,
+        wrapper_args=[
+            "--context-query",
+            "retrieval query",
+            "--session-task",
+            "primary task",
+        ],
+    )
+
+    prepare_call = next(
+        call for call in payload["_afs_calls"] if call.startswith("session prepare-client ")
+    )
+    assert "--query retrieval query " in prepare_call
+    assert "--task primary task " in prepare_call
+    assert "--skills-prompt primary task " in prepare_call
+    assert payload["AFS_SESSION_SKILLS_PROMPT"] == "primary task"
+
+
+def test_afs_client_session_prefers_prompt_task_over_query_for_skill_focus(
+    tmp_path: Path,
+) -> None:
+    payload = _run_client_session(
+        tmp_path,
+        wrapper_args=[
+            "--context-query",
+            "retrieval query",
+            "--prompt",
+            "actual task token",
+        ],
+    )
+
+    prepare_call = next(
+        call for call in payload["_afs_calls"] if call.startswith("session prepare-client ")
+    )
+    assert "--query retrieval query " in prepare_call
+    assert "--task actual task token " in prepare_call
+    assert "--skills-prompt actual task token " in prepare_call
+    assert payload["AFS_SESSION_SKILLS_PROMPT"] == "actual task token"
+
+
 def test_afs_client_session_can_enable_agent_drain(tmp_path: Path) -> None:
     payload = _run_client_session(
         tmp_path,
@@ -966,6 +1021,16 @@ def test_afs_client_session_respects_explicit_gemini_system_prompt_env(tmp_path:
     )
 
     assert payload["GEMINI_SYSTEM_MD"] == "/tmp/custom-system.md"
+
+
+def test_afs_client_session_injects_antigravity_system_prompt_env(tmp_path: Path) -> None:
+    payload = _run_client_session(tmp_path, client_label="antigravity")
+
+    assert payload["GEMINI_SYSTEM_MD"] == payload["AFS_SESSION_SYSTEM_PROMPT_TEXT"]
+    prepare_call = next(
+        call for call in payload["_afs_calls"] if call.startswith("session prepare-client ")
+    )
+    assert "--model gemini " in prepare_call
 
 
 def test_afs_session_notify_uses_session_env_defaults(tmp_path: Path) -> None:

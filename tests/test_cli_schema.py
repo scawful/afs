@@ -81,5 +81,15 @@ def test_validate_reads_from_stdin(monkeypatch, capsys) -> None:
     assert "valid" in capsys.readouterr().out
 
 
+def test_validate_rejects_non_utf8_stdin(monkeypatch, capsys) -> None:
+    stdin = io.TextIOWrapper(io.BytesIO(b'{"summary":"caf\xe9"}'), encoding="latin-1")
+    monkeypatch.setattr("sys.stdin", stdin)
+
+    rc = schema_validate_command(_args(schema="edit-intent"))
+
+    assert rc == 2
+    assert "not valid UTF-8" in capsys.readouterr().err
+
+
 def test_validate_unknown_schema_returns_2(capsys) -> None:
     assert schema_validate_command(_args(schema="nope", text="{}")) == 2
