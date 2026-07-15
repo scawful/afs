@@ -14,6 +14,11 @@ MAX_SKILL_BODY_CHARS = 2_000
 MAX_SKILL_BODIES_CHARS = 6_000
 MAX_SKILL_BODY_MATCHES = 3
 MAX_SKILL_MATCHES = 10
+MAX_SKILL_FILE_CHARS = 64_000
+MAX_SKILL_NAME_CHARS = 256
+MAX_SKILL_PATH_CHARS = 4_096
+MAX_SKILL_METADATA_ITEMS = 16
+MAX_SKILL_METADATA_ITEM_CHARS = 256
 
 
 @dataclass
@@ -115,7 +120,12 @@ def _read_open_skill_file(descriptor: int, *, path: Path, max_bytes: int) -> str
             os.close(descriptor)
     if len(payload) > max_bytes:
         raise OSError(f"skill file exceeds the {max_bytes}-byte limit: {path}")
-    return payload.decode("utf-8", errors="replace")
+    content = payload.decode("utf-8", errors="replace")
+    if len(content) > MAX_SKILL_FILE_CHARS:
+        raise ValueError(
+            f"Skill file exceeds {MAX_SKILL_FILE_CHARS} characters: {path}"
+        )
+    return content
 
 
 def _open_skill_beneath(root: Path, relative_path: Path) -> int:
@@ -279,7 +289,7 @@ def _parse_skill_metadata_text(content: str, *, path: Path) -> SkillMetadata:
     if profile_value is None:
         profile_value = frontmatter.get("profile")
 
-    return SkillMetadata(
+    metadata = SkillMetadata(
         name=name,
         path=path.resolve(),
         triggers=_normalize_list(frontmatter.get("triggers")),
@@ -292,6 +302,34 @@ def _parse_skill_metadata_text(content: str, *, path: Path) -> SkillMetadata:
             or frontmatter.get("quality_gates")
         ),
     )
+    validate_skill_metadata(metadata)
+    return metadata
+
+
+def validate_skill_metadata(skill: SkillMetadata) -> None:
+    """Reject metadata that cannot be delivered completely within public limits."""
+    if len(skill.name) > MAX_SKILL_NAME_CHARS:
+        raise ValueError(
+            f"Skill name exceeds {MAX_SKILL_NAME_CHARS} characters: {skill.path}"
+        )
+    for field_name in (
+        "triggers",
+        "requires",
+        "profiles",
+        "enforcement",
+        "verification",
+    ):
+        values = getattr(skill, field_name)
+        if len(values) > MAX_SKILL_METADATA_ITEMS:
+            raise ValueError(
+                f"Skill {field_name} exceeds {MAX_SKILL_METADATA_ITEMS} items: "
+                f"{skill.path}"
+            )
+        if any(len(value) > MAX_SKILL_METADATA_ITEM_CHARS for value in values):
+            raise ValueError(
+                f"Skill {field_name} item exceeds "
+                f"{MAX_SKILL_METADATA_ITEM_CHARS} characters: {skill.path}"
+            )
 
 
 def parse_skill_metadata(path: Path) -> SkillMetadata:
@@ -441,6 +479,55 @@ def score_skill_relevance(prompt: str, skill: SkillMetadata) -> int:
     return score
 
 
+def _bounded_metadata_text(value: str, *, max_chars: int) -> tuple[str, bool]:
+    normalized = str(value).strip()
+    if len(normalized) <= max_chars:
+        return normalized, False
+    if max_chars <= 3:
+        return normalized[:max_chars], True
+    return normalized[: max_chars - 3].rstrip() + "...", True
+
+
+def _bounded_metadata_list(values: list[str]) -> tuple[list[str], bool]:
+    bounded: list[str] = []
+    truncated = len(values) > MAX_SKILL_METADATA_ITEMS
+    for value in values[:MAX_SKILL_METADATA_ITEMS]:
+        item, item_truncated = _bounded_metadata_text(
+            value,
+            max_chars=MAX_SKILL_METADATA_ITEM_CHARS,
+        )
+        if item:
+            bounded.append(item)
+        truncated = truncated or item_truncated
+    return bounded, truncated
+
+
+def bounded_skill_metadata(skill: SkillMetadata) -> dict[str, Any]:
+    """Render bounded metadata suitable for artifacts, prompts, and tool output."""
+    name, name_truncated = _bounded_metadata_text(
+        skill.name,
+        max_chars=MAX_SKILL_NAME_CHARS,
+    )
+    path, path_truncated = _bounded_metadata_text(
+        str(skill.path),
+        max_chars=MAX_SKILL_PATH_CHARS,
+    )
+    payload: dict[str, Any] = {"name": name, "path": path}
+    truncated_fields: list[str] = []
+    if name_truncated:
+        truncated_fields.append("name")
+    if path_truncated:
+        truncated_fields.append("path")
+    for field_name in ("triggers", "requires", "enforcement", "verification"):
+        values, truncated = _bounded_metadata_list(getattr(skill, field_name))
+        payload[field_name] = values
+        if truncated:
+            truncated_fields.append(field_name)
+    if truncated_fields:
+        payload["metadata_truncated"] = truncated_fields
+    return payload
+
+
 def build_skill_matches(
     prompt: str,
     skill_roots: list[Path],
@@ -511,12 +598,7 @@ def build_skill_matches(
         remaining = max(0, remaining - len(body))
         match = {
             "score": score,
-            "name": skill.name,
-            "path": str(skill.path),
-            "triggers": skill.triggers,
-            "requires": skill.requires,
-            "enforcement": skill.enforcement,
-            "verification": skill.verification,
+            **bounded_skill_metadata(skill),
             "body": body,
             "body_truncated": body_truncated,
             "body_chars": len(body),

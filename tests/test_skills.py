@@ -9,6 +9,8 @@ from afs.skills import (
     MAX_SKILL_BODIES_CHARS,
     MAX_SKILL_BODY_CHARS,
     MAX_SKILL_FILE_BYTES,
+    MAX_SKILL_FILE_CHARS,
+    MAX_SKILL_METADATA_ITEM_CHARS,
     build_skill_matches,
     bundled_skill_roots,
     discover_skills,
@@ -97,6 +99,15 @@ def test_read_skill_body_enforces_exact_character_boundary(tmp_path: Path) -> No
     assert first[0].endswith("...")
     assert first[1] is True
     assert read_skill_body(skill, max_chars=0) == ("", True)
+
+
+def test_skill_read_rejects_oversized_files_before_full_read(tmp_path: Path) -> None:
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("x" * (MAX_SKILL_FILE_CHARS + 1), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Skill file exceeds"):
+        read_skill_body(skill)
+    assert discover_skills([tmp_path]) == []
 
 
 def test_truncated_skill_body_closes_markdown_fence() -> None:
@@ -268,6 +279,24 @@ def test_build_skill_matches_is_stable_and_bounds_aggregate_bodies(
     assert first[-1]["body_truncated"] is False
     assert first[-1]["body_omitted"] == "match_limit"
     assert all(match["body_chars"] == len(match["body"]) for match in first)
+
+
+def test_discovery_rejects_metadata_that_cannot_be_delivered(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    skill = root / "large-metadata" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    long_item = "x" * (MAX_SKILL_METADATA_ITEM_CHARS + 100)
+    enforcement = "\n".join(f"  - {long_item}{index}" for index in range(12))
+    skill.write_text(
+        "---\nname: large-metadata\ntriggers: [focus]\nenforcement:\n"
+        f"{enforcement}\n---\n\nBound the metadata.\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="enforcement item exceeds"):
+        parse_skill_metadata(skill)
+    assert discover_skills([root]) == []
+    assert build_skill_matches("focus", [root], top_k=1) == []
 
 
 def test_build_skill_matches_prefers_first_root_for_duplicate_names(

@@ -20,6 +20,11 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 - Bounded matched-skill body delivery in session bootstrap and prepared client
   prompts, with optional CLI and MCP bootstrap focus arguments.
 - Bundled operating skills included in wheel and source distributions.
+- Bounded `skill.match` and root-contained `skill.read` MCP tools in the
+  default slim catalog, including every session tool profile.
+- Twelve bundled workflow skills covering sessions, missions, search, health,
+  events, memory, approvals, schemas, verification, authoring, and CLI routing.
+- Validated per-tool and `[mcp_tools]` catalog controls for extension discovery.
 
 ### Changed
 
