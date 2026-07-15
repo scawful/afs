@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
-from afs.optimization import OptimizationInputError, decide_optimization_step
+from afs.optimization import (
+    OptimizationInputError,
+    canonical_json_text,
+    decide_optimization_step,
+)
 from afs.response_schemas import (
     get_response_schema,
     list_response_schema_names,
@@ -81,6 +85,27 @@ def test_hashes_normalize_equivalent_json_number_spellings() -> None:
     second = decide_optimization_step(baseline, candidate, policy)
 
     assert second == first
+
+
+def test_negative_zero_produces_byte_identical_decision_output() -> None:
+    baseline = _example("baseline.json")
+    candidate = _example("candidate.json")
+    positive_policy = _example("policy.json")
+    negative_policy = deepcopy(positive_policy)
+    positive_guardrail = next(
+        metric for metric in positive_policy["metrics"] if metric["role"] == "guardrail"
+    )
+    negative_guardrail = next(
+        metric for metric in negative_policy["metrics"] if metric["role"] == "guardrail"
+    )
+    positive_guardrail["max_regression"] = 0.0
+    negative_guardrail["max_regression"] = -0.0
+
+    positive = decide_optimization_step(baseline, candidate, positive_policy)
+    negative = decide_optimization_step(baseline, candidate, negative_policy)
+
+    assert negative["decision_sha256"] == positive["decision_sha256"]
+    assert canonical_json_text(negative) == canonical_json_text(positive)
 
 
 def test_decision_does_not_mutate_inputs() -> None:
@@ -225,12 +250,8 @@ def test_decision_schema_enforces_role_specific_minimum_delta() -> None:
         _example("candidate.json"),
         _example("policy.json"),
     )
-    objective = next(
-        metric for metric in decision["metrics"] if metric["role"] == "objective"
-    )
-    guardrail = next(
-        metric for metric in decision["metrics"] if metric["role"] == "guardrail"
-    )
+    objective = next(metric for metric in decision["metrics"] if metric["role"] == "objective")
+    guardrail = next(metric for metric in decision["metrics"] if metric["role"] == "guardrail")
 
     objective.pop("min_delta")
     assert not validate_structured_response("v1/optimization/decision", decision).valid

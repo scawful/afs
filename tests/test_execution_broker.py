@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import sys
 import time
 from pathlib import Path
@@ -74,9 +75,7 @@ def test_inspection_is_pure_and_projection_matches_protocol(tmp_path: Path) -> N
 
     assert inspection.allowed
     assert not sentinel.exists()
-    assert validate_structured_response(
-        "v1/execution/inspection", inspection.to_dict()
-    ).valid
+    assert validate_structured_response("v1/execution/inspection", inspection.to_dict()).valid
 
 
 def test_structured_argv_is_literal_and_audit_redacts_secrets(tmp_path: Path) -> None:
@@ -132,9 +131,7 @@ def test_environment_values_change_request_hash_but_are_not_emitted(tmp_path: Pa
     policy = _policy(tmp_path, allowed_env=frozenset({"AFS_TOKEN"}))
 
     first = inspect_execution(request, policy, environ={"AFS_TOKEN": "first"})
-    second = inspect_execution(
-        request, policy, environ={"AFS_TOKEN": "s3cr3t-value-b"}
-    )
+    second = inspect_execution(request, policy, environ={"AFS_TOKEN": "s3cr3t-value-b"})
 
     assert first.request_sha256 != second.request_sha256
     assert first.environment_sha256 != second.environment_sha256
@@ -157,6 +154,60 @@ def test_non_utf8_source_environment_fails_closed(tmp_path: Path) -> None:
             request,
             policy,
             environ={"AFS_INVALID_TEXT": "\ud800"},
+        )
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("invalid\x00value", "must not contain NUL bytes"),
+        ("x" * (1024 * 1024 + 1), "exceeds 1048576 characters"),
+    ],
+)
+def test_invalid_source_environment_values_fail_closed(
+    tmp_path: Path,
+    value: str,
+    message: str,
+) -> None:
+    request = _request(
+        tmp_path,
+        sys.executable,
+        "-c",
+        "pass",
+        inherit_env=("AFS_INVALID_VALUE",),
+    )
+    policy = _policy(tmp_path, allowed_env=frozenset({"AFS_INVALID_VALUE"}))
+
+    with pytest.raises(ExecutionInputError, match=message):
+        inspect_execution(
+            request,
+            policy,
+            environ={"AFS_INVALID_VALUE": value},
+        )
+
+
+def test_windows_environment_lookup_preserves_system_root_and_rejects_case_aliases(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from afs.execution import broker
+
+    request = _request(tmp_path, sys.executable, "-c", "pass")
+    policy = _policy(tmp_path)
+    monkeypatch.setattr(broker.os, "name", "nt")
+
+    environment, _, _ = broker._effective_environment(
+        request,
+        policy,
+        {"SystemRoot": r"C:\Windows"},
+    )
+    assert environment["SYSTEMROOT"] == r"C:\Windows"
+
+    with pytest.raises(ExecutionInputError, match="must not differ only by case"):
+        broker._effective_environment(
+            request,
+            policy,
+            {"PATH": "first", "Path": "second"},
         )
 
 
@@ -254,13 +305,9 @@ def test_basename_allowlist_cannot_be_redirected_by_request_path(
     )
 
     assert trusted.allowed
-    assert trusted.resolved_executable == str(
-        (trusted_dir / executable_name).resolve()
-    )
+    assert trusted.resolved_executable == str((trusted_dir / executable_name).resolve())
     assert not redirected.allowed
-    assert redirected.resolved_executable == str(
-        (attacker_dir / executable_name).resolve()
-    )
+    assert redirected.resolved_executable == str((attacker_dir / executable_name).resolve())
     assert "executable_not_allowed" in redirected.reason_codes
 
 
@@ -279,9 +326,7 @@ def test_spawn_failure_returns_a_record(tmp_path: Path, monkeypatch) -> None:
     assert record.returncode is None
     assert record.reason_codes == ("spawn_error",)
     assert "simulated executable race" in record.reasons[0]
-    assert validate_structured_response(
-        "v1/execution/record", record.audit_dict()
-    ).valid
+    assert validate_structured_response("v1/execution/record", record.audit_dict()).valid
 
 
 def test_legacy_shell_requires_explicit_policy(tmp_path: Path) -> None:
@@ -309,6 +354,65 @@ def test_legacy_shell_requires_explicit_policy(tmp_path: Path) -> None:
     assert record.stdout == "legacy"
 
 
+def test_legacy_shell_policy_opt_in_requires_a_boolean(tmp_path: Path) -> None:
+    with pytest.raises(ExecutionInputError, match="allow_legacy_shell must be a boolean"):
+        ExecutionPolicy(
+            allowed_cwd_roots=(tmp_path,),
+            allowed_executables=frozenset({sys.executable}),
+            allow_legacy_shell="false",  # type: ignore[arg-type]
+        )
+
+
+def test_executable_index_cannot_be_redacted(tmp_path: Path) -> None:
+    with pytest.raises(ExecutionInputError, match="executable index 0"):
+        _request(
+            tmp_path,
+            sys.executable,
+            "-c",
+            "pass",
+            redact_argv_indices=(0,),
+        )
+
+
+@pytest.mark.parametrize("field", ["caller", "purpose", "cwd"])
+def test_required_request_text_rejects_whitespace_only(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    values = {
+        "command": ArgvCommand((sys.executable,)),
+        "caller": "pytest",
+        "purpose": "exercise required request text",
+        "cwd": tmp_path,
+    }
+    values[field] = "   "
+
+    with pytest.raises(ExecutionInputError, match="non-empty string"):
+        ExecutionRequest(**values)
+
+
+def test_windows_batch_executables_are_blocked_from_structured_mode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from afs.execution import broker
+
+    executable = tmp_path / "check.cmd"
+    executable.write_text("echo must-not-run\n", encoding="utf-8")
+    executable.chmod(0o755)
+    request = _request(tmp_path, str(executable))
+    monkeypatch.setattr(
+        broker,
+        "_is_unsupported_windows_batch_executable",
+        lambda _resolved: True,
+    )
+
+    inspection = inspect_execution(request, _policy(tmp_path, str(executable)))
+
+    assert not inspection.allowed
+    assert "unsupported_batch_executable" in inspection.reason_codes
+
+
 def test_timeout_terminates_descendant_process(tmp_path: Path) -> None:
     marker = tmp_path / "child-survived"
     child_code = f"import time; time.sleep(1); open({str(marker)!r}, 'w').close()"
@@ -331,6 +435,66 @@ def test_timeout_terminates_descendant_process(tmp_path: Path) -> None:
     assert record.outcome == "timed_out"
     assert record.timed_out
     assert not marker.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group regression")
+def test_successful_parent_cannot_leave_same_session_descendant(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from afs.execution import broker
+
+    monkeypatch.setattr(broker, "_TERMINATION_GRACE_SECONDS", 0.1)
+    ready = tmp_path / "child-ready"
+    marker = tmp_path / "child-survived"
+    child_code = (
+        "import time\n"
+        "from pathlib import Path\n"
+        f"Path({str(ready)!r}).touch()\n"
+        "time.sleep(0.8)\n"
+        f"Path({str(marker)!r}).touch()\n"
+    )
+    parent_code = (
+        "import subprocess,sys,time\n"
+        "from pathlib import Path\n"
+        "subprocess.Popen(\n"
+        f"    [sys.executable, '-c', {child_code!r}],\n"
+        "    stdin=subprocess.DEVNULL,\n"
+        "    stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL,\n"
+        ")\n"
+        f"ready = Path({str(ready)!r})\n"
+        "deadline = time.monotonic() + 2\n"
+        "while not ready.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.01)\n"
+    )
+    request = _request(tmp_path, sys.executable, "-c", parent_code)
+
+    record = execute_checked(request, _policy(tmp_path))
+    time.sleep(0.9)
+
+    assert ready.exists()
+    assert record.outcome == "completed"
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or not hasattr(select, "kqueue"),
+    reason="kqueue fallback is unavailable",
+)
+def test_kqueue_fallback_waits_without_reaping(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from afs.execution import broker
+
+    monkeypatch.delattr(broker.os, "waitid", raising=False)
+    request = _request(tmp_path, sys.executable, "-c", "print('kqueue')")
+
+    record = execute_checked(request, _policy(tmp_path))
+
+    assert record.outcome == "completed"
+    assert record.stdout.strip() == "kqueue"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group regression")

@@ -19,6 +19,27 @@ class CanonicalJSONError(ValueError):
     """Raised when a value cannot be represented by the canonical encoder."""
 
 
+def ensure_utf8_text(value: Any, location: str = "(root)") -> None:
+    """Reject lone surrogates and other text that has no strict UTF-8 encoding."""
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise CanonicalJSONError(
+                f"{location}: text must contain only UTF-8-encodable Unicode"
+            ) from exc
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise CanonicalJSONError(f"{location}: JSON object keys must be strings")
+            ensure_utf8_text(key, f"{location}/<key>")
+            ensure_utf8_text(item, f"{location}/{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            ensure_utf8_text(item, f"{location}/{index}")
+
+
 def ensure_finite(value: Any, location: str = "(root)") -> None:
     """Reject non-finite and out-of-range numeric values recursively."""
     if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
@@ -36,6 +57,38 @@ def ensure_finite(value: Any, location: str = "(root)") -> None:
     elif isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
             ensure_finite(item, f"{location}/{index}")
+
+
+def ensure_interoperable_json(value: Any, location: str = "(root)") -> None:
+    """Validate the numeric and Unicode domain shared by AFS v1 protocols."""
+    ensure_finite(value, location)
+    ensure_utf8_text(value, location)
+
+
+def _reject_nonstandard_json_number(token: str) -> None:
+    raise CanonicalJSONError(f"non-standard JSON number {token!r} is not allowed")
+
+
+def _reject_duplicate_json_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise CanonicalJSONError(f"duplicate JSON object member {key!r}")
+        result[key] = value
+    return result
+
+
+def strict_json_loads(data: str | bytes | bytearray) -> Any:
+    """Parse interoperable JSON, rejecting duplicate members and extensions."""
+    if isinstance(data, (bytes, bytearray)):
+        data = bytes(data).decode("utf-8")
+    parsed = json.loads(
+        data,
+        parse_constant=_reject_nonstandard_json_number,
+        object_pairs_hook=_reject_duplicate_json_members,
+    )
+    ensure_interoperable_json(parsed)
+    return parsed
 
 
 def canonical_number_text(value: int | float | Decimal) -> str:
@@ -102,13 +155,13 @@ def encode_canonical_json(value: Any) -> str:
 
 def canonical_json_bytes(value: Any) -> bytes:
     """Return deterministic UTF-8 bytes for a JSON-compatible value."""
-    ensure_finite(value)
+    ensure_interoperable_json(value)
     return encode_canonical_json(value).encode("utf-8")
 
 
 def canonical_json_text(value: Any, *, indent: int | None = None) -> str:
     """Return deterministic text, optionally formatted for human-readable output."""
-    ensure_finite(value)
+    ensure_interoperable_json(value)
     if indent is None:
         return encode_canonical_json(value)
     if indent < 0:

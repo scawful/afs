@@ -66,6 +66,29 @@ def test_coerce_passes_through_objects() -> None:
     assert error == ""
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_coerce_rejects_non_finite_parsed_values(value: float) -> None:
+    parsed, error = coerce_response_payload({"value": value})
+
+    assert parsed is None
+    assert "non-finite" in error
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
+def test_coerce_rejects_nonstandard_json_number_tokens(token: str) -> None:
+    parsed, error = coerce_response_payload(f'{{"value": {token}}}')
+
+    assert parsed is None
+    assert "non-standard JSON number" in error
+
+
+def test_coerce_rejects_duplicate_object_members() -> None:
+    parsed, error = coerce_response_payload('{"outer": {"value": 1, "value": 2}}')
+
+    assert parsed is None
+    assert "duplicate JSON object member 'value'" in error
+
+
 def test_build_schema_correction_lists_violations_and_resource() -> None:
     result = validate_structured_response("handoff-summary", {"accomplished": ["x"]})
     correction = build_schema_correction(result)

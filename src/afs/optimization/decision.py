@@ -61,7 +61,7 @@ def _output_number(value: Decimal, location: str) -> float:
         raise OptimizationInputError(
             f"{location}: derived number is outside the supported finite range"
         )
-    return result
+    return 0.0 if result == 0.0 else result
 
 
 def _normalize_for_canonical_json(value: Any, parent_key: str = "") -> Any:

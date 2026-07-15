@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import select
 import shutil
 import signal
 import subprocess
@@ -17,6 +18,7 @@ from typing import Any, BinaryIO
 from ..protocols.canonical_json import canonical_json_bytes
 from .models import (
     DEFAULT_INHERITED_ENV,
+    MAX_ENV_VALUE_CHARS,
     ArgvCommand,
     ExecutionInputError,
     ExecutionInspection,
@@ -31,9 +33,7 @@ _TERMINATION_GRACE_SECONDS = 2.0
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
-        "+00:00", "Z"
-    )
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _sha256(payload: Any) -> str:
@@ -49,6 +49,29 @@ def _effective_environment(
     policy: ExecutionPolicy,
     source: Mapping[str, str],
 ) -> tuple[dict[str, str], list[str], list[str]]:
+    requested_names = DEFAULT_INHERITED_ENV | set(request.inherit_env) | set(request.set_env)
+    source_names: dict[str, str] = {}
+    if os.name == "nt":
+        requested_by_case: dict[str, str] = {}
+        for name in requested_names:
+            folded = name.casefold()
+            previous = requested_by_case.setdefault(folded, name)
+            if previous != name:
+                raise ExecutionInputError(
+                    "Windows environment names must not differ only by case: "
+                    f"{previous!r}, {name!r}"
+                )
+        for name in source:
+            if not isinstance(name, str):
+                raise ExecutionInputError("source environment names must be strings")
+            folded = name.casefold()
+            previous = source_names.setdefault(folded, name)
+            if previous != name:
+                raise ExecutionInputError(
+                    "source Windows environment names must not differ only by case: "
+                    f"{previous!r}, {name!r}"
+                )
+
     reason_codes: list[str] = []
     reasons: list[str] = []
     denied_inherited = {
@@ -66,15 +89,23 @@ def _effective_environment(
 
     environment: dict[str, str] = {}
     for name in sorted(DEFAULT_INHERITED_ENV | set(request.inherit_env)):
-        if name in source:
-            value = str(source[name])
+        source_name = source_names.get(name.casefold()) if os.name == "nt" else name
+        if source_name is not None and source_name in source:
+            value = str(source[source_name])
             try:
                 value.encode("utf-8")
             except UnicodeEncodeError as exc:
                 raise ExecutionInputError(
-                    f"environment value for {name!r} must contain only "
-                    "UTF-8-encodable Unicode text"
+                    f"environment value for {name!r} must contain only UTF-8-encodable Unicode text"
                 ) from exc
+            if "\x00" in value:
+                raise ExecutionInputError(
+                    f"environment value for {name!r} must not contain NUL bytes"
+                )
+            if len(value) > MAX_ENV_VALUE_CHARS:
+                raise ExecutionInputError(
+                    f"environment value for {name!r} exceeds {MAX_ENV_VALUE_CHARS} characters"
+                )
             environment[name] = value
     environment.update(dict(request.set_env))
     return environment, reason_codes, reasons
@@ -116,6 +147,13 @@ def _resolve_executable(raw: str, cwd: Path, environment: Mapping[str, str]) -> 
         return str(Path(found).resolve(strict=True))
     except (OSError, RuntimeError):
         return ""
+
+
+def _is_unsupported_windows_batch_executable(resolved: str) -> bool:
+    return os.name == "nt" and os.path.splitext(resolved)[1].casefold() in {
+        ".bat",
+        ".cmd",
+    }
 
 
 def _executable_allowed(
@@ -207,9 +245,7 @@ def inspect_execution(
         reason_codes.append("cwd_outside_allowed_roots")
         reasons.append("resolved working directory is outside policy roots")
 
-    environment, env_codes, env_reasons = _effective_environment(
-        request, policy, source_env
-    )
+    environment, env_codes, env_reasons = _effective_environment(request, policy, source_env)
     reason_codes.extend(env_codes)
     reasons.extend(env_reasons)
 
@@ -224,7 +260,12 @@ def inspect_execution(
     resolved_executable = _resolve_executable(raw_executable, cwd, environment)
     if not resolved_executable:
         reason_codes.append("executable_not_found")
-        reasons.append(f"executable could not be resolved: {raw_executable}")
+        reasons.append("requested executable could not be resolved")
+    elif isinstance(request.command, ArgvCommand) and _is_unsupported_windows_batch_executable(
+        resolved_executable
+    ):
+        reason_codes.append("unsupported_batch_executable")
+        reasons.append("structured execution does not support Windows batch-file executables")
     elif not _executable_allowed(
         resolved_executable,
         cwd,
@@ -236,19 +277,13 @@ def inspect_execution(
 
     if request.isolation != "process":
         reason_codes.append("unsupported_isolation")
-        reasons.append(
-            f"portable backend does not support isolation={request.isolation!r}"
-        )
+        reasons.append(f"portable backend does not support isolation={request.isolation!r}")
     if request.network != "inherit":
         reason_codes.append("unsupported_network")
-        reasons.append(
-            f"portable backend does not support network={request.network!r}"
-        )
+        reasons.append(f"portable backend does not support network={request.network!r}")
 
     spawn_argv = _spawn_argv(request, resolved_executable or raw_executable)
-    invalid_indices = [
-        index for index in request.redact_argv_indices if index >= len(spawn_argv)
-    ]
+    invalid_indices = [index for index in request.redact_argv_indices if index >= len(spawn_argv)]
     if invalid_indices:
         reason_codes.append("invalid_redaction_index")
         reasons.append(
@@ -347,7 +382,9 @@ def _drain_stream(
         stream.close()
 
 
-def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+def _terminate_process_tree(
+    process: subprocess.Popen[bytes], *, wait_for_grace: bool = True
+) -> None:
     if os.name == "nt":
         if process.poll() is not None:
             return
@@ -381,31 +418,53 @@ def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
         except OSError:
             pass
 
-    # Waiting only for the group leader is insufficient: it may exit on SIGTERM
-    # while a descendant ignores the signal and keeps the process group alive.
-    # Probe the group for the full grace period, then kill the group regardless
-    # of whether the leader has already been reaped.
-    deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
-    group_alive = True
-    while time.monotonic() < deadline:
-        process.poll()
+    # Keep the group leader unreaped while signaling the group. Its PID anchors
+    # the process-group ID so it cannot be reused for an unrelated process.
+    if wait_for_grace:
+        time.sleep(_TERMINATION_GRACE_SECONDS)
+    try:
+        os.killpg(process_group, signal.SIGKILL)
+    except OSError:
         try:
-            os.killpg(process_group, 0)
-        except ProcessLookupError:
-            group_alive = False
-            break
-        except PermissionError:
-            group_alive = True
-        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
-
-    if group_alive:
-        try:
-            os.killpg(process_group, signal.SIGKILL)
+            process.kill()
         except OSError:
-            try:
-                process.kill()
-            except OSError:
-                pass
+            pass
+
+
+def _wait_for_posix_exit_without_reaping(
+    process: subprocess.Popen[bytes], timeout_seconds: float
+) -> bool:
+    """Wait for the group leader to exit while retaining its PID as a PGID anchor."""
+    if not hasattr(os, "waitid"):
+        if not hasattr(select, "kqueue"):
+            raise RuntimeError(
+                "POSIX execution requires waitid or kqueue lifecycle support"
+            )
+        queue = select.kqueue()
+        try:
+            event = select.kevent(
+                process.pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+            return bool(queue.control([event], 1, timeout_seconds))
+        finally:
+            queue.close()
+
+    deadline = time.monotonic() + timeout_seconds
+    flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
+    while True:
+        try:
+            status = os.waitid(os.P_PID, process.pid, flags)
+        except ChildProcessError:
+            return True
+        if status is not None:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.01, remaining))
 
 
 def execute_checked(
@@ -440,9 +499,7 @@ def execute_checked(
         "shell": False,
     }
     if os.name == "nt":
-        popen_kwargs["creationflags"] = getattr(
-            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
-        )
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     else:
         popen_kwargs["start_new_session"] = True
 
@@ -483,7 +540,15 @@ def execute_checked(
 
     timed_out = False
     try:
-        process.wait(timeout=request.timeout_seconds)
+        if os.name == "nt":
+            process.wait(timeout=request.timeout_seconds)
+        elif _wait_for_posix_exit_without_reaping(process, request.timeout_seconds):
+            # The leader exited, but same-session descendants are still inside
+            # this bounded execution and must not outlive its audit record.
+            _terminate_process_tree(process, wait_for_grace=False)
+        else:
+            timed_out = True
+            _terminate_process_tree(process)
     except subprocess.TimeoutExpired:
         timed_out = True
         _terminate_process_tree(process)

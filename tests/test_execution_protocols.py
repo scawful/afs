@@ -23,6 +23,7 @@ from afs.protocols.canonical_json import (
     CanonicalJSONError,
     canonical_json_bytes,
     sha256_canonical_json,
+    strict_json_loads,
 )
 from afs.response_schemas import (
     get_response_schema,
@@ -107,6 +108,63 @@ def test_execution_request_schema_rejects_lone_unicode_surrogates() -> None:
     assert not result.valid
 
 
+def test_strict_json_bytes_require_utf8() -> None:
+    with pytest.raises(UnicodeDecodeError):
+        strict_json_loads(json.dumps({"value": "ok"}).encode("utf-16"))
+
+
+def test_execution_request_schema_rejects_non_finite_numbers() -> None:
+    request = _request()
+    request["timeout_seconds"] = float("nan")
+
+    parsed_result = validate_structured_response("v1/execution/request", request)
+    text_result = validate_structured_response(
+        "v1/execution/request",
+        json.dumps(request),
+    )
+
+    assert not parsed_result.valid
+    assert "non-finite" in parsed_result.parse_error
+    assert not text_result.valid
+    assert "non-standard JSON number" in text_result.parse_error
+
+
+@pytest.mark.parametrize(
+    ("location", "value"),
+    [
+        (("command", "argv", 0), "   "),
+        (("command", "command"), "\t"),
+        (("caller",), "   "),
+        (("purpose",), "\n"),
+        (("cwd",), "\t"),
+    ],
+)
+def test_execution_request_schema_rejects_whitespace_only_required_text(
+    location: tuple[str | int, ...],
+    value: str,
+) -> None:
+    request = _request()
+    if location[:2] == ("command", "command"):
+        request["command"] = {"kind": "legacy_shell", "command": value}
+        request["redact_argv_indices"] = []
+    else:
+        target = request
+        for part in location[:-1]:
+            target = target[part]
+        target[location[-1]] = value
+
+    assert not validate_structured_response("v1/execution/request", request).valid
+
+
+def test_execution_request_schema_keeps_executable_audit_visible() -> None:
+    request = _request()
+    request["redact_argv_indices"] = [0]
+
+    assert not validate_structured_response("v1/execution/request", request).valid
+    with pytest.raises(CanonicalJSONError):
+        canonical_json_bytes({"bad": "\ud800"})
+
+
 def test_execution_request_allows_known_but_unsupported_isolation_modes() -> None:
     request = _request()
     request["isolation"] = "sandbox"
@@ -144,11 +202,9 @@ def test_execution_protocols_accept_maximum_effective_environment(
     inspection = inspect_execution(request, policy, environ=environment)
     record = execute_checked(request, policy, environ=environment)
 
-    assert len(inspection.environment_keys) == 261
-    assert len(record.environment_keys) == 261
-    assert validate_structured_response(
-        "v1/execution/inspection", inspection.to_dict()
-    ).valid
+    assert len(inspection.environment_keys) == 262
+    assert len(record.environment_keys) == 262
+    assert validate_structured_response("v1/execution/inspection", inspection.to_dict()).valid
     assert validate_structured_response("v1/execution/record", record.audit_dict()).valid
 
 
@@ -179,15 +235,35 @@ def test_execution_protocol_bounds_denial_reasons_and_record_error(
 
     assert not inspection.allowed
     assert len(inspection.reasons[0]) == 2048
-    assert len(inspection.reasons[1]) == 2048
+    assert inspection.reasons[1] == "requested executable could not be resolved"
     assert "...<truncated:" in inspection.reasons[0]
-    assert "...<truncated:" in inspection.reasons[1]
-    assert len(audit["error"]) == 4096
-    assert "...<truncated:" in audit["error"]
-    assert validate_structured_response(
-        "v1/execution/inspection", inspection.to_dict()
-    ).valid
+    assert unresolved_executable not in " ".join(inspection.reasons)
+    assert len(audit["error"]) <= 4096
+    assert validate_structured_response("v1/execution/inspection", inspection.to_dict()).valid
     assert validate_structured_response("v1/execution/record", audit).valid
+
+
+def test_execution_record_schema_enforces_date_time_format(tmp_path: Path) -> None:
+    request = ExecutionRequest(
+        command=ArgvCommand(("missing-executable",)),
+        caller="pytest",
+        purpose="exercise record timestamp validation",
+        cwd=tmp_path,
+    )
+    record = execute_checked(
+        request,
+        ExecutionPolicy(
+            allowed_cwd_roots=(tmp_path,),
+            allowed_executables=frozenset(),
+        ),
+    )
+    payload = record.audit_dict()
+    payload["started_at"] = "not-a-timestamp"
+
+    result = validate_structured_response("v1/execution/record", payload)
+
+    assert not result.valid
+    assert any("started_at" in error for error in result.errors)
 
 
 def test_truncated_protocol_reasons_remain_unique(tmp_path: Path) -> None:

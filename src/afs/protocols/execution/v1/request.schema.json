@@ -29,7 +29,7 @@
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 32768,
-                  "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
+                  "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000\\uD800-\\uDFFF]*$"
                 }
               ],
               "items": {
@@ -52,7 +52,7 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 1048576,
-              "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
+              "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000\\uD800-\\uDFFF]*$"
             }
           },
           "additionalProperties": false
@@ -63,19 +63,19 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 256,
-      "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
+      "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000\\uD800-\\uDFFF]*$"
     },
     "purpose": {
       "type": "string",
       "minLength": 1,
       "maxLength": 2048,
-      "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
+      "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000\\uD800-\\uDFFF]*$"
     },
     "cwd": {
       "type": "string",
       "minLength": 1,
       "maxLength": 32768,
-      "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
+      "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000\\uD800-\\uDFFF]*$"
     },
     "inherit_env": {
       "type": "array",
@@ -126,7 +126,7 @@
     },
     "redact_argv_indices": {
       "type": "array",
-      "items": {"type": "integer", "minimum": 0, "maximum": 255},
+      "items": {"type": "integer", "minimum": 1, "maximum": 255},
       "maxItems": 256,
       "uniqueItems": true,
       "default": []

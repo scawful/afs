@@ -33,15 +33,18 @@
     },
     "policy_id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[^\\uD800-\\uDFFF]*$"
     },
     "baseline_id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[^\\uD800-\\uDFFF]*$"
     },
     "candidate_id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[^\\uD800-\\uDFFF]*$"
     },
     "decision": {
       "type": "string",
@@ -81,7 +84,8 @@
       "maxItems": 1024,
       "items": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "pattern": "^[^\\uD800-\\uDFFF]*$"
       }
     },
     "metrics": {
@@ -105,10 +109,12 @@
         ],
         "properties": {
           "name": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^[^\\uD800-\\uDFFF]*$"
           },
           "unit": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^[^\\uD800-\\uDFFF]*$"
           },
           "role": {
             "type": "string",
@@ -181,14 +187,16 @@
     "failed_constraints": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "pattern": "^[^\\uD800-\\uDFFF]*$"
       },
       "uniqueItems": true
     },
     "missing_constraints": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "pattern": "^[^\\uD800-\\uDFFF]*$"
       },
       "uniqueItems": true
     },

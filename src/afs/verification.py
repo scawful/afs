@@ -15,6 +15,7 @@ from .execution import (
     execute_checked,
 )
 from .operator_digests import digest_operator_output
+from .protocols.canonical_json import sha256_canonical_json
 from .schema import (
     AFSConfig,
     VerificationCheckConfig,
@@ -27,6 +28,19 @@ _TS_SUFFIXES = {".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"}
 _CPP_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
 _REDACTED = "<redacted>"
 _REDACTED_LEGACY_SHELL = "<redacted legacy shell command>"
+
+
+def verification_item_id(check_name: str, kind: str, item_index: int) -> str:
+    """Return a stable, non-secret identity for one planned verification item."""
+    digest = sha256_canonical_json(
+        {
+            "check_name": check_name,
+            "item_index": item_index,
+            "kind": kind,
+            "version": 1,
+        }
+    )
+    return f"verification-item-v1:{digest}"
 
 
 def _normalize_rel_path(value: str) -> str:
@@ -147,6 +161,14 @@ def redact_verification_plan(plan: dict[str, Any]) -> dict[str, Any]:
     return redacted_plan
 
 
+class VerificationDiscoveryError(RuntimeError):
+    """Raised when verification scope cannot be discovered completely."""
+
+
+def _has_git_metadata(start_dir: Path) -> bool:
+    return any(parent.joinpath(".git").exists() for parent in (start_dir, *start_dir.parents))
+
+
 def _run_git(repo_root: Path, *args: str) -> str | None:
     git = shutil.which("git")
     if not git:
@@ -168,7 +190,15 @@ def _run_git(repo_root: Path, *args: str) -> str | None:
         return None
     if record.outcome != "completed":
         return None
-    return record.stdout.strip()
+    if record.stdout_truncated or record.stderr_truncated:
+        raise VerificationDiscoveryError(
+            "git discovery output exceeded the execution broker limit"
+        )
+    if "\ufffd" in record.stdout:
+        raise VerificationDiscoveryError(
+            "git discovery output could not be decoded completely as UTF-8"
+        )
+    return record.stdout
 
 
 def discover_git_repo_root(start_dir: str | Path | None = None) -> Path | None:
@@ -176,8 +206,12 @@ def discover_git_repo_root(start_dir: str | Path | None = None) -> Path | None:
     current = Path(start_dir or Path.cwd()).expanduser().resolve()
     output = _run_git(current, "rev-parse", "--show-toplevel")
     if not output:
+        if _has_git_metadata(current):
+            raise VerificationDiscoveryError(
+                "Git metadata is present but repository-root discovery failed"
+            )
         return None
-    return Path(output).expanduser().resolve()
+    return Path(output.strip()).expanduser().resolve()
 
 
 def discover_changed_paths(start_dir: str | Path | None = None) -> list[str]:
@@ -185,23 +219,43 @@ def discover_changed_paths(start_dir: str | Path | None = None) -> list[str]:
     repo_root = discover_git_repo_root(start_dir)
     if repo_root is None:
         return []
-    output = _run_git(repo_root, "status", "--porcelain", "--untracked-files=all")
+    output = _run_git(
+        repo_root,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    )
+    if output is None:
+        raise VerificationDiscoveryError("git status did not complete successfully")
     if not output:
         return []
     changed_paths: list[str] = []
     seen: set[str] = set()
-    for raw_line in output.splitlines():
-        line = raw_line.rstrip()
-        if len(line) < 4:
+    entries = output.split("\x00")
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        index += 1
+        if not entry:
             continue
-        path_text = line[3:]
-        if " -> " in path_text:
-            path_text = path_text.split(" -> ", 1)[1]
-        normalized = _normalize_rel_path(path_text)
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        changed_paths.append(normalized)
+        if len(entry) < 4 or entry[2] != " ":
+            raise VerificationDiscoveryError("git status returned malformed porcelain data")
+        status = entry[:2]
+        path_texts = [entry[3:]]
+        if "R" in status or "C" in status:
+            if index >= len(entries) or not entries[index]:
+                raise VerificationDiscoveryError(
+                    "git status returned an incomplete rename record"
+                )
+            path_texts.append(entries[index])
+            index += 1
+        for path_text in path_texts:
+            normalized = _normalize_rel_path(path_text)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            changed_paths.append(normalized)
     return changed_paths
 
 
@@ -470,15 +524,29 @@ def build_verification_plan(
     changed_paths: list[str] | None = None,
     verification_profile: str = "",
     policy_summary: dict[str, Any] | None = None,
+    discovery_error: str = "",
 ) -> dict[str, Any]:
     """Build a repo-aware verification plan from config, git state, and skill matches."""
     resolved_cwd = Path(cwd).expanduser().resolve()
-    repo_root = discover_git_repo_root(resolved_cwd) or resolved_cwd
+    try:
+        repo_root = discover_git_repo_root(resolved_cwd) or resolved_cwd
+    except VerificationDiscoveryError as exc:
+        repo_root = resolved_cwd
+        discovery_error = discovery_error or str(exc)
+    discovered_paths: list[str]
+    if changed_paths is not None:
+        discovered_paths = changed_paths
+    elif discovery_error:
+        discovered_paths = []
+    else:
+        try:
+            discovered_paths = discover_changed_paths(resolved_cwd)
+        except VerificationDiscoveryError as exc:
+            discovered_paths = []
+            discovery_error = str(exc)
     normalized_changed_paths = [
         _normalize_rel_path(path)
-        for path in (
-            changed_paths if changed_paths is not None else discover_changed_paths(resolved_cwd)
-        )
+        for path in discovered_paths
         if _normalize_rel_path(path)
     ]
     matched_skill_names = _matched_skill_names(matched_skills)
@@ -496,6 +564,16 @@ def build_verification_plan(
         if configured_checks and not selected_profile:
             selected_profile = "builtin"
 
+    check_names = [check.name for check in configured_checks if check.name]
+    duplicate_check_names = sorted(
+        name for name in set(check_names) if check_names.count(name) > 1
+    )
+    if duplicate_check_names:
+        raise ValueError(
+            "verification check names must be unique after profile expansion: "
+            + ", ".join(duplicate_check_names)
+        )
+
     selected_checks = _collect_selected_checks(
         configured_checks,
         changed_paths=normalized_changed_paths,
@@ -503,6 +581,51 @@ def build_verification_plan(
         tool_profile=tool_profile,
         matched_skills=matched_skill_names,
     )
+    if discovery_error:
+        selected_names = {
+            str(check.get("name", "")).strip() for check in selected_checks
+        }
+        all_checks = _collect_selected_checks(
+            configured_checks,
+            changed_paths=normalized_changed_paths,
+            workflow=workflow,
+            tool_profile=tool_profile,
+            matched_skills=matched_skill_names,
+        )
+        for config_check in configured_checks:
+            if not config_check.name or config_check.name in selected_names:
+                continue
+            all_checks.append(
+                {
+                    "name": config_check.name,
+                    "description": config_check.description,
+                    "required": config_check.required,
+                    "executions": [
+                        execution.to_dict() for execution in config_check.executions
+                    ],
+                    "commands": list(config_check.commands),
+                    "paths": list(config_check.paths),
+                    "matched_by": ["discovery_incomplete"],
+                    "matched_paths": [],
+                    "skills": list(config_check.skills),
+                }
+            )
+        selected_checks = all_checks
+
+    for check in selected_checks:
+        check_name = str(check.get("name", "")).strip()
+        check["execution_item_ids"] = [
+            verification_item_id(check_name, "execution", item_index)
+            for item_index, _execution in enumerate(check.get("executions") or [])
+        ]
+        check["command_item_ids"] = [
+            verification_item_id(check_name, "legacy", item_index)
+            for item_index, _command in enumerate(check.get("commands") or [])
+        ]
+        if not check["execution_item_ids"] and not check["command_item_ids"]:
+            check["review_item_id"] = verification_item_id(
+                check_name, "review", 0
+            )
 
     expected: list[str] = []
     legacy_command_count = 0
@@ -547,6 +670,8 @@ def build_verification_plan(
         "workflow": workflow,
         "tool_profile": tool_profile,
         "changed_paths": normalized_changed_paths,
+        "discovery_complete": not bool(discovery_error),
+        "discovery_error": discovery_error,
         "inferred_languages": _infer_languages(normalized_changed_paths),
         "selected_checks": selected_checks,
         "required": any(bool(check.get("required")) for check in selected_checks),

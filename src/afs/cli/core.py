@@ -1397,13 +1397,15 @@ def session_hook_command(args: argparse.Namespace) -> int:
         args.event == "session_end"
         and verification_mode != "off"
         and bool(verification.get("required"))
-        and str(verification.get("status", "")).strip() in {"missing", "failed", "skipped"}
+        and str(verification.get("status", "")).strip()
+        in {"missing", "failed", "blocked", "skipped"}
     )
     gate_error = (
         args.event == "session_end"
         and verification_mode == "error"
         and bool(verification.get("required"))
-        and str(verification.get("status", "")).strip() in {"missing", "failed"}
+        and str(verification.get("status", "")).strip()
+        in {"missing", "failed", "blocked"}
     )
 
     if gate_warning:

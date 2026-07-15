@@ -15,6 +15,7 @@ from ..optimization import (
     canonical_json_text,
     decide_optimization_step,
 )
+from ..protocols.canonical_json import CanonicalJSONError, strict_json_loads
 
 _MAX_INPUT_BYTES = 2 * 1024 * 1024
 _DECISION_EXIT_CODES = {
@@ -24,10 +25,6 @@ _DECISION_EXIT_CODES = {
 }
 _EXIT_INVALID_INPUT = 2
 _EXIT_INTERNAL_ERROR = 4
-
-
-def _reject_nonstandard_number(value: str) -> None:
-    raise ValueError(f"non-standard JSON number {value!r} is not allowed")
 
 
 def _load_json_object(path_value: str, label: str) -> dict[str, Any]:
@@ -52,11 +49,14 @@ def _load_json_object(path_value: str, label: str) -> dict[str, Any]:
             f"{label} exceeds the {_MAX_INPUT_BYTES}-byte input limit: {path}"
         )
     try:
-        payload = json.loads(
-            raw_payload.decode("utf-8"),
-            parse_constant=_reject_nonstandard_number,
-        )
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        payload = strict_json_loads(raw_payload.decode("utf-8"))
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        CanonicalJSONError,
+        ValueError,
+    ) as exc:
         raise OptimizationInputError(f"invalid {label} JSON {path}: {exc}") from exc
     if not isinstance(payload, dict):
         raise OptimizationInputError(f"invalid {label} JSON {path}: expected an object")

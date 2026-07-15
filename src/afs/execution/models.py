@@ -15,14 +15,14 @@ DEFAULT_TIMEOUT_SECONDS = 300.0
 MAX_TIMEOUT_SECONDS = 3600.0
 DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024
 MAX_OUTPUT_BYTES = 10 * 1024 * 1024
-DEFAULT_INHERITED_ENV = frozenset({"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"})
+DEFAULT_INHERITED_ENV = frozenset({"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SYSTEMROOT"})
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MAX_ARGV_ITEMS = 256
 _MAX_ARGUMENT_CHARS = 32768
 _MAX_SHELL_CHARS = 1024 * 1024
 _MAX_ENV_ITEMS = 128
-_MAX_ENV_VALUE_CHARS = 1024 * 1024
+MAX_ENV_VALUE_CHARS = 1024 * 1024
 _MAX_REASON_CODE_CHARS = 128
 _MAX_REASON_CHARS = 2048
 _MAX_ERROR_CHARS = 4096
@@ -87,9 +87,7 @@ class ArgvCommand:
                 raise ExecutionInputError(f"command.argv[{index}] must be a string")
             _require_utf8(value, f"command.argv[{index}]")
             if "\x00" in value:
-                raise ExecutionInputError(
-                    f"command.argv[{index}] must not contain NUL bytes"
-                )
+                raise ExecutionInputError(f"command.argv[{index}] must not contain NUL bytes")
             if len(value) > _MAX_ARGUMENT_CHARS:
                 raise ExecutionInputError(
                     f"command.argv[{index}] exceeds {_MAX_ARGUMENT_CHARS} characters"
@@ -162,9 +160,7 @@ class ExecutionRequest:
         if not isinstance(self.command, (ArgvCommand, LegacyShellCommand)):
             raise ExecutionInputError("command must be ArgvCommand or LegacyShellCommand")
         if self.schema_version != EXECUTION_SCHEMA_VERSION:
-            raise ExecutionInputError(
-                f"schema_version must be {EXECUTION_SCHEMA_VERSION!r}"
-            )
+            raise ExecutionInputError(f"schema_version must be {EXECUTION_SCHEMA_VERSION!r}")
         object.__setattr__(
             self, "caller", _require_text(self.caller, "caller", max_length=256).strip()
         )
@@ -178,17 +174,11 @@ class ExecutionRequest:
 
         inherited = tuple(self.inherit_env)
         if len(inherited) > _MAX_ENV_ITEMS:
-            raise ExecutionInputError(
-                f"inherit_env must contain at most {_MAX_ENV_ITEMS} entries"
-            )
+            raise ExecutionInputError(f"inherit_env must contain at most {_MAX_ENV_ITEMS} entries")
         if len(set(inherited)) != len(inherited):
             raise ExecutionInputError("inherit_env must not contain duplicate names")
         for name in inherited:
-            if (
-                not isinstance(name, str)
-                or len(name) > 256
-                or _ENV_NAME_RE.fullmatch(name) is None
-            ):
+            if not isinstance(name, str) or len(name) > 256 or _ENV_NAME_RE.fullmatch(name) is None:
                 raise ExecutionInputError(f"invalid inherited environment name: {name!r}")
         object.__setattr__(self, "inherit_env", inherited)
 
@@ -209,9 +199,9 @@ class ExecutionRequest:
             _require_utf8(raw_value, f"set_env[{raw_name!r}]")
             if "\x00" in raw_value:
                 raise ExecutionInputError(f"set_env[{raw_name!r}] must not contain NUL bytes")
-            if len(raw_value) > _MAX_ENV_VALUE_CHARS:
+            if len(raw_value) > MAX_ENV_VALUE_CHARS:
                 raise ExecutionInputError(
-                    f"set_env[{raw_name!r}] exceeds {_MAX_ENV_VALUE_CHARS} characters"
+                    f"set_env[{raw_name!r}] exceeds {MAX_ENV_VALUE_CHARS} characters"
                 )
             normalized_env[raw_name] = raw_value
         object.__setattr__(self, "set_env", MappingProxyType(normalized_env))
@@ -238,9 +228,7 @@ class ExecutionRequest:
             )
 
         if self.isolation not in {"process", "sandbox", "container"}:
-            raise ExecutionInputError(
-                "isolation must be 'process', 'sandbox', or 'container'"
-            )
+            raise ExecutionInputError("isolation must be 'process', 'sandbox', or 'container'")
         if self.network not in {"inherit", "deny"}:
             raise ExecutionInputError("network must be 'inherit' or 'deny'")
 
@@ -249,6 +237,8 @@ class ExecutionRequest:
             raise ExecutionInputError("redact_argv_indices must contain integers")
         if any(index < 0 for index in indices):
             raise ExecutionInputError("redact_argv_indices must not contain negative values")
+        if 0 in indices:
+            raise ExecutionInputError("redact_argv_indices must not redact executable index 0")
         if any(index > 255 for index in indices):
             raise ExecutionInputError("redact_argv_indices must not contain values above 255")
         if len(set(indices)) != len(indices):
@@ -310,9 +300,7 @@ class ExecutionRequest:
             inherit_env=tuple(inherit_env),
             set_env=dict(set_env),
             timeout_seconds=payload.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
-            max_output_bytes=payload.get(
-                "max_output_bytes", DEFAULT_MAX_OUTPUT_BYTES
-            ),
+            max_output_bytes=payload.get("max_output_bytes", DEFAULT_MAX_OUTPUT_BYTES),
             isolation=payload.get("isolation", "process"),
             network=payload.get("network", "inherit"),
             redact_argv_indices=tuple(redact),
@@ -345,6 +333,8 @@ class ExecutionPolicy:
     allow_legacy_shell: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.allow_legacy_shell, bool):
+            raise ExecutionInputError("allow_legacy_shell must be a boolean")
         roots = tuple(Path(root).expanduser().resolve() for root in self.allowed_cwd_roots)
         object.__setattr__(self, "allowed_cwd_roots", roots)
         object.__setattr__(
@@ -377,9 +367,7 @@ class ExecutionInspection:
     reason_codes: tuple[str, ...] = ()
     reasons: tuple[str, ...] = ()
     schema_version: str = EXECUTION_SCHEMA_VERSION
-    _environment: Mapping[str, str] = field(
-        default_factory=dict, repr=False, compare=False
-    )
+    _environment: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "redacted_argv", tuple(self.redacted_argv))
@@ -387,10 +375,7 @@ class ExecutionInspection:
         object.__setattr__(
             self,
             "reason_codes",
-            tuple(
-                _bounded_audit_text(code, _MAX_REASON_CODE_CHARS)
-                for code in self.reason_codes
-            ),
+            tuple(_bounded_audit_text(code, _MAX_REASON_CODE_CHARS) for code in self.reason_codes),
         )
         object.__setattr__(
             self,
@@ -467,10 +452,7 @@ class ExecutionRecord:
         object.__setattr__(
             self,
             "reason_codes",
-            tuple(
-                _bounded_audit_text(code, _MAX_REASON_CODE_CHARS)
-                for code in self.reason_codes
-            ),
+            tuple(_bounded_audit_text(code, _MAX_REASON_CODE_CHARS) for code in self.reason_codes),
         )
         object.__setattr__(
             self,

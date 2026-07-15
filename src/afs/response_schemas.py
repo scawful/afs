@@ -6,14 +6,23 @@ import json
 import re
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from .protocols import load_protocol_schemas
+from .protocols.canonical_json import (
+    CanonicalJSONError,
+    ensure_interoperable_json,
+    strict_json_loads,
+)
 
 SCHEMA_MIME_TYPE = "application/schema+json"
 SCHEMA_URI_PREFIX = "afs://schemas/"
 
 _CODE_FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*(.*?)\s*```\s*$", re.DOTALL)
+_RFC3339_DATETIME_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
+)
 
 _BASE_SCHEMA = "https://json-schema.org/draft/2020-12/schema"
 
@@ -329,6 +338,10 @@ def coerce_response_payload(data: Any) -> tuple[Any, str]:
     ``parse_error`` is empty on success.
     """
     if isinstance(data, (dict, list)):
+        try:
+            ensure_interoperable_json(data)
+        except CanonicalJSONError as exc:
+            return None, f"invalid JSON value: {exc}"
         return data, ""
     if not isinstance(data, str):
         return None, f"expected a JSON object or string, got {type(data).__name__}"
@@ -336,9 +349,11 @@ def coerce_response_payload(data: Any) -> tuple[Any, str]:
     if not text:
         return None, "empty response"
     try:
-        return json.loads(text), ""
+        return strict_json_loads(text), ""
     except json.JSONDecodeError as exc:
         return None, f"invalid JSON: {exc.msg} (line {exc.lineno}, column {exc.colno})"
+    except CanonicalJSONError as exc:
+        return None, f"invalid JSON: {exc}"
 
 
 def validate_structured_response(name: str, data: Any) -> SchemaValidationResult:
@@ -386,16 +401,29 @@ def build_schema_correction(result: SchemaValidationResult) -> str:
 def _collect_schema_errors(schema: dict[str, Any], instance: Any) -> list[str]:
     """Collect human-readable schema violations, preferring jsonschema when present."""
     try:
-        from jsonschema import Draft202012Validator
+        from jsonschema import Draft202012Validator, FormatChecker
     except ImportError:
         return _builtin_schema_errors(schema, instance)
 
-    validator = Draft202012Validator(schema)
+    format_checker = FormatChecker()
+    format_checker.checkers["date-time"] = (_is_rfc3339_datetime, ())
+    validator = Draft202012Validator(schema, format_checker=format_checker)
     errors: list[str] = []
     for error in sorted(validator.iter_errors(instance), key=lambda e: list(e.path)):
         location = "/".join(str(part) for part in error.path) or "(root)"
         errors.append(f"{location}: {error.message}")
     return errors
+
+
+def _is_rfc3339_datetime(value: object) -> bool:
+    if not isinstance(value, str) or _RFC3339_DATETIME_RE.fullmatch(value) is None:
+        return False
+    normalized = value[:-1] + "+00:00" if value[-1:].casefold() == "z" else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
 
 
 def _builtin_schema_errors(schema: dict[str, Any], instance: Any) -> list[str]:

@@ -4,12 +4,21 @@
 
 - Protocol: `v1`
 - Decision algorithm: `pareto-gate-1.0`
+- Stability: **experimental until the planned AFS 0.3 freeze**
 - Execution authority: **none**
 
 AFS v1 defines a small language-neutral contract for comparing one immutable
 candidate with one immutable baseline. It is the evidence and decision layer of
 a future hill-climbing system, not a candidate generator, trial runner, approval
 system, or deployment controller.
+
+The `v1` path is a preview contract during AFS 0.2.x, not yet a compatibility
+promise for long-lived external clients. Before the 0.3 freeze, corrections may
+change the accepted instance set, canonical bytes, or golden hashes. After the
+freeze, the v1 schema files and canonicalization rules are immutable: changes to
+field meaning, required fields, accepted instances, or hash bytes require a new
+protocol path, and decision-behavior changes require a new `algorithm_version`.
+Experimental C++ clients should pin an AFS commit and the schema content hashes.
 
 The command is deliberately pure:
 
@@ -154,16 +163,29 @@ records and bootstrap confidence intervals without changing v1 artifacts.
 
 ## Determinism And Integrity
 
-- JSON is UTF-8 with sorted keys and no NaN/infinity.
+- JSON is strict UTF-8. Every string and object-member name must contain Unicode
+  scalar values only; lone UTF-16 surrogates are invalid even when written as a
+  JSON escape.
+- Object-member names must be unique at every nesting level. A duplicate is
+  invalid input rather than first-wins or last-wins data. This rule is normative
+  because JSON libraries in Python, C++, and JavaScript otherwise disagree.
+- Canonical objects sort member names by Unicode scalar value. Arrays retain
+  semantic order except for the protocol fields explicitly normalized below.
+- NaN, infinity, implementation-specific numeric extensions, and unsupported
+  values are rejected.
 - Threshold arithmetic uses 50-digit base-10 decimal math; derived values must
   remain representable as finite JSON/binary64 numbers.
 - Hash input uses AFS v1 numeric canonicalization: plain decimal notation,
   trailing fractional zero removal, no exponent, and negative-zero collapse to
   `0`. Therefore `500`, `500.0`, and `5e2` hash identically, as do `1.2300` and
   `1.23e0`.
+- Decision presentation also normalizes derived positive and negative zero to
+  `0.0`, so semantically equivalent zero inputs cannot change `--json` bytes.
 - Metric and constraint order is normalized before hashing.
 - Identical semantic inputs produce byte-stable `--json` output.
 - The decision hash covers the decision body but not the hash field itself.
+- The displayed, indented `--json` document is a stable presentation form, not
+  the byte sequence hashed. Hashes use the compact AFS v1 canonical encoding.
 - Content hashes provide integrity, not provenance, authenticity, or approval.
 - Inputs must be regular files and are read through a 2 MiB bounded stream at
   the CLI boundary.
@@ -226,9 +248,10 @@ and one-command rollback. Only this layer may mutate active state.
 
 ## C++ And Other Language Clients
 
-The protocol is the ABI. A Python rewrite or direct SQLite access is not
-required. A C++ evaluator can emit the v1 JSON records, validate them against the
-packaged schemas, and call the CLI today.
+After the 0.3 freeze, the protocol is the ABI. A Python rewrite or direct SQLite
+access is not required. A C++ evaluator can already emit the experimental v1
+JSON records, validate them against the packaged schemas, and call the CLI, but
+it should pin the AFS revision until that freeze.
 
 After the protocol and executor stabilize, a professional C++20 SDK should:
 

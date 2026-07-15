@@ -36,20 +36,43 @@
       "type": "string",
       "enum": ["completed", "failed", "timed_out", "blocked", "spawn_error"]
     },
-    "caller": {"type": "string", "minLength": 1, "maxLength": 256},
-    "purpose": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "caller": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\uD800-\\uDFFF]*$"
+    },
+    "purpose": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^[^\\uD800-\\uDFFF]*$"
+    },
     "request_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "resolved_executable": {"type": "string", "maxLength": 32768},
-    "resolved_cwd": {"type": "string", "minLength": 1, "maxLength": 32768},
+    "resolved_executable": {
+      "type": "string",
+      "maxLength": 32768,
+      "pattern": "^[^\\uD800-\\uDFFF]*$"
+    },
+    "resolved_cwd": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32768,
+      "pattern": "^[^\\uD800-\\uDFFF]*$"
+    },
     "redacted_argv": {
       "type": "array",
-      "items": {"type": "string", "maxLength": 32768},
+      "items": {
+        "type": "string",
+        "maxLength": 32768,
+        "pattern": "^[^\\uD800-\\uDFFF]*$"
+      },
       "maxItems": 256
     },
     "environment_keys": {
       "type": "array",
       "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
-      "maxItems": 261,
+      "maxItems": 262,
       "uniqueItems": true
     },
     "environment_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -57,28 +80,50 @@
     "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 10485760},
     "isolation": {"type": "string", "enum": ["process", "sandbox", "container"]},
     "network": {"type": "string", "enum": ["inherit", "deny"]},
-    "started_at": {"type": "string", "format": "date-time"},
-    "finished_at": {"type": "string", "format": "date-time"},
+    "started_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[^\\uD800-\\uDFFF]*$"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[^\\uD800-\\uDFFF]*$"
+    },
     "duration_seconds": {"type": "number", "minimum": 0},
     "returncode": {"type": ["integer", "null"]},
     "timed_out": {"type": "boolean"},
-    "stdout": {"type": "string"},
-    "stderr": {"type": "string"},
+    "stdout": {"type": "string", "pattern": "^[^\\uD800-\\uDFFF]*$"},
+    "stderr": {"type": "string", "pattern": "^[^\\uD800-\\uDFFF]*$"},
     "stdout_truncated": {"type": "boolean"},
     "stderr_truncated": {"type": "boolean"},
     "reason_codes": {
       "type": "array",
-      "items": {"type": "string", "minLength": 1, "maxLength": 128},
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[^\\uD800-\\uDFFF]*$"
+      },
       "maxItems": 64,
       "uniqueItems": true
     },
     "reasons": {
       "type": "array",
-      "items": {"type": "string", "minLength": 1, "maxLength": 2048},
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048,
+        "pattern": "^[^\\uD800-\\uDFFF]*$"
+      },
       "maxItems": 64,
       "uniqueItems": true
     },
-    "error": {"type": "string", "maxLength": 4096}
+    "error": {
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^[^\\uD800-\\uDFFF]*$"
+    }
   },
   "additionalProperties": false
 }

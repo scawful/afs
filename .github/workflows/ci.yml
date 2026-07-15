@@ -213,6 +213,90 @@ jobs:
         /tmp/afs-wheel-smoke/bin/pip install dist/*.whl
         /tmp/afs-wheel-smoke/bin/python -c "import afs; print(afs.__version__)"
         /tmp/afs-wheel-smoke/bin/afs --help >/tmp/afs-help.txt
+        smoke_dir="$(mktemp -d)"
+        export AFS_WHEEL_SMOKE_DIR="$smoke_dir"
+
+        /tmp/afs-wheel-smoke/bin/python <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        from afs.execution import (
+            ArgvCommand,
+            ExecutionPolicy,
+            ExecutionRequest,
+            execute_checked,
+        )
+
+        output = Path(os.environ["AFS_WHEEL_SMOKE_DIR"])
+        root = Path.cwd().resolve()
+        executable = Path("/bin/echo").resolve()
+        request = ExecutionRequest(
+            command=ArgvCommand((str(executable), "wheel-smoke")),
+            caller="release-smoke",
+            purpose="validate installed execution protocol artifacts",
+            cwd=root,
+        )
+        policy = ExecutionPolicy(
+            allowed_cwd_roots=(root,),
+            allowed_executables=frozenset({str(executable)}),
+        )
+        record = execute_checked(request, policy)
+        if record.outcome != "completed":
+            raise SystemExit(f"installed-wheel execution smoke failed: {record.outcome}")
+        (output / "execution-request.json").write_text(
+            json.dumps(request.to_dict(), indent=2), encoding="utf-8"
+        )
+        (output / "execution-record.json").write_text(
+            json.dumps(record.to_dict(), indent=2), encoding="utf-8"
+        )
+        PY
+
+        /tmp/afs-wheel-smoke/bin/afs execution inspect \
+          --request "$smoke_dir/execution-request.json" \
+          --allowed-root "$PWD" \
+          --allowed-executable /bin/echo \
+          --json >"$smoke_dir/execution-inspection.json"
+
+        schemas=(
+          v1/execution/request
+          v1/execution/inspection
+          v1/execution/record
+          v1/optimization/evaluation
+          v1/optimization/policy
+          v1/optimization/decision
+        )
+        for schema in "${schemas[@]}"; do
+          /tmp/afs-wheel-smoke/bin/afs schema show "$schema" \
+            >"$smoke_dir/${schema//\//_}.schema.json"
+        done
+
+        /tmp/afs-wheel-smoke/bin/afs schema validate \
+          --schema v1/execution/request \
+          --file "$smoke_dir/execution-request.json"
+        /tmp/afs-wheel-smoke/bin/afs schema validate \
+          --schema v1/execution/inspection \
+          --file "$smoke_dir/execution-inspection.json"
+        /tmp/afs-wheel-smoke/bin/afs schema validate \
+          --schema v1/execution/record \
+          --file "$smoke_dir/execution-record.json"
+        /tmp/afs-wheel-smoke/bin/afs schema validate \
+          --schema v1/optimization/evaluation \
+          --file examples/optimization_gate/baseline.json
+        /tmp/afs-wheel-smoke/bin/afs schema validate \
+          --schema v1/optimization/evaluation \
+          --file examples/optimization_gate/candidate.json
+        /tmp/afs-wheel-smoke/bin/afs schema validate \
+          --schema v1/optimization/policy \
+          --file examples/optimization_gate/policy.json
+        /tmp/afs-wheel-smoke/bin/afs optimize decide \
+          --baseline examples/optimization_gate/baseline.json \
+          --candidate examples/optimization_gate/candidate.json \
+          --policy examples/optimization_gate/policy.json \
+          --json >"$smoke_dir/optimization-decision.json"
+        /tmp/afs-wheel-smoke/bin/afs schema validate \
+          --schema v1/optimization/decision \
+          --file "$smoke_dir/optimization-decision.json"
 
     - name: Upload package artifacts
       uses: actions/upload-artifact@v7.0.1

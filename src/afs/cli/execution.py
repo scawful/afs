@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,21 +16,23 @@ from ..execution import (
     ExecutionRequest,
     inspect_execution,
 )
+from ..protocols.canonical_json import CanonicalJSONError, strict_json_loads
 
 _MAX_REQUEST_BYTES = 1024 * 1024
 
 
-def _reject_nonstandard_number(token: str) -> None:
-    raise ValueError(f"non-standard JSON number is not allowed: {token}")
-
-
 def _read_bounded_stream() -> str:
-    text = sys.stdin.read(_MAX_REQUEST_BYTES + 1)
-    if len(text.encode("utf-8")) > _MAX_REQUEST_BYTES:
-        raise ExecutionInputError(
-            f"execution request exceeds {_MAX_REQUEST_BYTES} bytes"
-        )
-    return text
+    binary_stream = getattr(sys.stdin, "buffer", None)
+    if binary_stream is None:
+        payload = sys.stdin.read(_MAX_REQUEST_BYTES + 1).encode("utf-8")
+    else:
+        payload = binary_stream.read(_MAX_REQUEST_BYTES + 1)
+    if len(payload) > _MAX_REQUEST_BYTES:
+        raise ExecutionInputError(f"execution request exceeds {_MAX_REQUEST_BYTES} bytes")
+    try:
+        return payload.decode("utf-8")
+    except UnicodeError as exc:
+        raise ExecutionInputError(f"execution request stdin is not valid UTF-8: {exc}") from exc
 
 
 def _read_request_argument(raw: str) -> str:
@@ -37,40 +40,41 @@ def _read_request_argument(raw: str) -> str:
         return _read_bounded_stream()
     if raw.lstrip().startswith("{"):
         if len(raw.encode("utf-8")) > _MAX_REQUEST_BYTES:
-            raise ExecutionInputError(
-                f"execution request exceeds {_MAX_REQUEST_BYTES} bytes"
-            )
+            raise ExecutionInputError(f"execution request exceeds {_MAX_REQUEST_BYTES} bytes")
         return raw
 
-    path = Path(raw).expanduser()
+    path = Path(raw).expanduser().resolve()
+    descriptor: int | None = None
     try:
-        stat = path.stat()
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(path, flags)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ExecutionInputError("execution request path must be a regular file")
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = None
+            payload = stream.read(_MAX_REQUEST_BYTES + 1)
     except OSError as exc:
         raise ExecutionInputError(f"cannot read execution request {raw!r}: {exc}") from exc
-    if not path.is_file():
-        raise ExecutionInputError("execution request path must be a regular file")
-    if stat.st_size > _MAX_REQUEST_BYTES:
-        raise ExecutionInputError(
-            f"execution request exceeds {_MAX_REQUEST_BYTES} bytes"
-        )
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if len(payload) > _MAX_REQUEST_BYTES:
+        raise ExecutionInputError(f"execution request exceeds {_MAX_REQUEST_BYTES} bytes")
     try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
+        return payload.decode("utf-8")
+    except UnicodeError as exc:
         raise ExecutionInputError(f"cannot read execution request {raw!r}: {exc}") from exc
 
 
 def _load_request(raw: str) -> ExecutionRequest:
     try:
-        payload = json.loads(
-            _read_request_argument(raw),
-            parse_constant=_reject_nonstandard_number,
-        )
+        payload = strict_json_loads(_read_request_argument(raw))
     except json.JSONDecodeError as exc:
         raise ExecutionInputError(
-            f"invalid execution request JSON: {exc.msg} "
-            f"(line {exc.lineno}, column {exc.colno})"
+            f"invalid execution request JSON: {exc.msg} (line {exc.lineno}, column {exc.colno})"
         ) from exc
-    except ValueError as exc:
+    except (CanonicalJSONError, ValueError) as exc:
         if isinstance(exc, ExecutionInputError):
             raise
         raise ExecutionInputError(str(exc)) from exc
@@ -122,9 +126,7 @@ def execution_inspect_command(args: argparse.Namespace) -> int:
         print(f"request_sha256: {inspection.request_sha256}")
         print(f"resolved_executable: {inspection.resolved_executable or '(unresolved)'}")
         print(f"resolved_cwd: {inspection.resolved_cwd}")
-        for code, reason in zip(
-            inspection.reason_codes, inspection.reasons, strict=True
-        ):
+        for code, reason in zip(inspection.reason_codes, inspection.reasons, strict=True):
             print(f"reason: {code}: {reason}")
     return 0 if inspection.allowed else 3
 
@@ -154,10 +156,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--allowed-executable",
         action="append",
         default=[],
-        help=(
-            "Trusted executable name/path. Repeat as needed; omission denies all "
-            "executables."
-        ),
+        help=("Trusted executable name/path. Repeat as needed; omission denies all executables."),
     )
     inspect_parser.add_argument(
         "--allowed-env",

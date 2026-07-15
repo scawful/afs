@@ -927,7 +927,7 @@ class VerificationExecutionConfig:
             or any(
                 not isinstance(value, int)
                 or isinstance(value, bool)
-                or value < 0
+                or value < 1
                 or value > 255
                 for value in raw_redactions
             )
@@ -935,7 +935,7 @@ class VerificationExecutionConfig:
         ):
             raise VerificationConfigError(
                 "verification execution redact_argv_indices must contain unique "
-                "integers from 0 through 255"
+                "integers from 1 through 255"
             )
         return cls(
             argv=list(argv),
@@ -995,6 +995,11 @@ class VerificationCheckConfig:
             raise VerificationConfigError(
                 "verification check name and description must be strings"
             )
+        name = name.strip()
+        if not name:
+            raise VerificationConfigError(
+                "verification check name must be a non-empty string"
+            )
         executions_raw = data.get("executions", [])
         if not isinstance(executions_raw, list) or any(
             not isinstance(item, dict) for item in executions_raw
@@ -1013,7 +1018,7 @@ class VerificationCheckConfig:
             for item in executions_raw
         ]
         return cls(
-            name=name.strip(),
+            name=name,
             description=description.strip(),
             paths=_verification_string_list(
                 data, "paths", label="verification check"

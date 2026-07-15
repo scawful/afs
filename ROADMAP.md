@@ -14,6 +14,13 @@ This roadmap keeps the core repo focused on shareable platform capabilities.
 - Stabilize the v1 optimization evidence/policy/decision protocol and golden fixtures.
 - Stabilize the v1 execution request/inspection/record protocol and portable
   process backend now used by verification.
+- Freeze and publish cross-language canonical JSON conformance vectors covering
+  duplicate members, Unicode scalar ordering/escaping, numeric spellings,
+  negative zero, decimal rounding, and representative decision/request hashes;
+  run the same fixtures against Python and future C++ clients.
+- Before freezing execution v1, bind inspections and records to a trusted policy
+  identifier/hash and encode or semantically validate invariants among
+  `allowed`, reasons, outcome, timeout state, and return code.
 - Add transactional job leases with owner, nonce, expiry, heartbeat, and
   compare-and-swap transitions; then migrate the background worker to
   per-argument templates through the execution broker and keep verification

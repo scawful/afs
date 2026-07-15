@@ -5,6 +5,13 @@ portable, inspectable contract. The boundary is intentionally smaller than a
 general-purpose shell: callers submit a typed request, trusted code supplies
 policy, and the broker inspects the request again immediately before spawning.
 
+The execution `v1` schemas are experimental through AFS 0.2.x and are planned
+to freeze in 0.3. Before that freeze, fixes may change accepted instances or
+request hashes. Afterward, the v1 schemas and canonicalization rules are
+immutable: any change to field meaning, required fields, accepted instances, or
+hash bytes requires a new protocol path. External clients should pin the AFS
+revision and schema content hashes until the freeze.
+
 ## Public Contracts
 
 The language-neutral JSON Schema contracts are packaged with AFS and available
@@ -55,6 +62,14 @@ record = execute_checked(request, policy) if inspection.allowed else None
 The request cannot grant its own permissions; trusted caller code owns the
 policy.
 
+JSON interoperability is strict at the CLI boundary. Input bytes must decode as
+UTF-8, strings and object-member names must contain Unicode scalar values only,
+and every object-member name must be unique at every nesting level. Lone UTF-16
+surrogates and duplicate names are invalid input, never parser-dependent
+first-wins or last-wins data. Request text passed to operating-system process
+APIs also rejects NUL. Request and environment hashes use the same compact AFS
+v1 canonical encoding described in `docs/OPTIMIZATION_PROTOCOL.md`.
+
 To inspect a request without launching it:
 
 ```bash
@@ -81,14 +96,16 @@ The first backend is a portable process boundary, not a security sandbox:
   the parent environment wholesale
 - output is drained concurrently, capped per stream, and marked when truncated
 - timeouts terminate the child process group or Windows process tree
+- on POSIX, normal completion also cleans up descendants that remain in the
+  broker-created process group before returning a record
 - audit records include the request hash, resolved executable, redacted argv,
   environment key names and an environment hash, timing, return code, and
   truncation state
 
 When present, the baseline environment keys are `PATH`, `HOME`, `TMPDIR`,
-`LANG`, and `LC_ALL`. Additional inherited keys require trusted policy, as does
-every explicit override (including overrides of baseline keys). `PYTHONPATH` is
-not inherited by default.
+`LANG`, `LC_ALL`, and Windows `SYSTEMROOT`. Additional inherited keys require
+trusted policy, as does every explicit override (including overrides of
+baseline keys). `PYTHONPATH` is not inherited by default.
 
 The default timeout is 300 seconds and the v1 contract caps it at 3,600 seconds.
 Each output stream defaults to a 1 MiB retained cap with a 10 MiB contract
@@ -101,12 +118,24 @@ or `spawn_error`.
 This backend supports only `isolation=process` and `network=inherit`. Requests
 for a sandbox, container, or network denial fail closed. A worktree or a clean
 environment is useful operational isolation, but neither is a security boundary.
+Process-group cleanup is likewise lifecycle hygiene, not containment: a process
+that escapes its group/session or reaches external resources remains outside
+this backend's control.
+
+Structured execution rejects Windows `.bat` and `.cmd` files as the resolved
+executable because Windows may route them through command-shell parsing even
+when a caller requested `shell=False`. Call a native executable or name an
+explicit, policy-allowed interpreter in argv position zero instead.
 
 Audit fields never serialize raw environment values. Callers can redact
 selected argv positions, and persisted session events contain audit metadata
 rather than raw stdout, stderr, or environment values. Capped process output
 can still contain anything the child prints and must be handled as sensitive
 caller-visible data.
+
+The executable at argv index `0` is always audit-visible and cannot be selected
+for redaction; the resolved executable is also stored separately. Only argument
+positions `1` and above may be replaced with `<redacted>`.
 
 ## Verification Configuration
 

@@ -278,6 +278,30 @@ def test_verification_check_rejects_unknown_execution_field() -> None:
         AFSConfig.from_dict(payload)
 
 
+@pytest.mark.parametrize("name", ["", "   "])
+def test_verification_check_rejects_blank_name(name: str) -> None:
+    payload = {
+        "verification": {
+            "profiles": {
+                "repo": {
+                    "checks": [
+                        {
+                            "name": name,
+                            "executions": [{"argv": ["python3", "-m", "pytest"]}],
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    with pytest.raises(
+        VerificationConfigError,
+        match="verification check name must be a non-empty string",
+    ):
+        AFSConfig.from_dict(payload)
+
+
 
 def test_load_config_model_parses_mcp_allowed_roots(tmp_path) -> None:
     config_path = tmp_path / "mcp.toml"

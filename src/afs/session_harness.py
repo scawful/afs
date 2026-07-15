@@ -27,6 +27,7 @@ from .verification import (
     redact_legacy_verification_command,
     redact_verification_argv,
     redact_verification_plan,
+    verification_item_id,
 )
 
 _RECENT_ACTIVITY_LIMIT = 20
@@ -482,23 +483,39 @@ def _verification_requirements(payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(verification_plan.get("selected_checks"), list)
         else []
     )
-    if selected_checks:
+    preflight_required = bool(verification_plan.get("preflight_required"))
+    if verification_plan.get("available") and (selected_checks or preflight_required):
         expected: list[str] = []
-        required = False
+        required = preflight_required
+        required_checks: dict[str, int] = {}
+        required_items: dict[str, str] = {}
+        plan_items: dict[str, str] = {}
         allow_legacy_shell = bool(verification_plan.get("allow_legacy_shell", False))
+        preflight_item_id = str(
+            verification_plan.get("preflight_item_id", "")
+        ).strip()
+        if preflight_item_id:
+            plan_items[preflight_item_id] = "verification-preflight"
+            if preflight_required:
+                required_items[preflight_item_id] = "verification-preflight"
+                required_checks["verification-preflight"] = 1
         for check in selected_checks:
             if not isinstance(check, dict):
                 continue
             name = str(check.get("name", "")).strip()
-            required = required or bool(check.get("required"))
+            check_required = bool(check.get("required"))
+            required = required or check_required
+            required_item_count = 0
             executions = (
                 check.get("executions")
                 if isinstance(check.get("executions"), list)
                 else []
             )
             commands = check.get("commands") if isinstance(check.get("commands"), list) else []
+            execution_item_ids = list(check.get("execution_item_ids") or [])
+            command_item_ids = list(check.get("command_item_ids") or [])
             rendered = False
-            for execution in executions:
+            for item_index, execution in enumerate(executions):
                 if not isinstance(execution, dict):
                     continue
                 argv = execution.get("argv")
@@ -512,7 +529,16 @@ def _verification_requirements(payload: dict[str, Any]) -> dict[str, Any]:
                 )
                 expected.append(f"{name}: {text}" if name else text)
                 rendered = True
-            for command in commands:
+                required_item_count += 1
+                item_id = (
+                    str(execution_item_ids[item_index])
+                    if item_index < len(execution_item_ids)
+                    else verification_item_id(name, "execution", item_index)
+                )
+                plan_items[item_id] = name
+                if check_required and name:
+                    required_items[item_id] = name
+            for item_index, command in enumerate(commands):
                 text = str(command).strip()
                 if not text:
                     continue
@@ -529,13 +555,44 @@ def _verification_requirements(payload: dict[str, Any]) -> dict[str, Any]:
                     f"{name}: {rendered_command}" if name else rendered_command
                 )
                 rendered = True
+                required_item_count += 1
+                item_id = (
+                    str(command_item_ids[item_index])
+                    if item_index < len(command_item_ids)
+                    else verification_item_id(name, "legacy", item_index)
+                )
+                plan_items[item_id] = name
+                if check_required and name:
+                    required_items[item_id] = name
             if not rendered and name:
                 expected.append(f"{name}: review changed scope")
+                if check_required:
+                    item_id = str(
+                        check.get("review_item_id")
+                        or verification_item_id(name, "review", 0)
+                    )
+                    required_items[item_id] = name
+                else:
+                    item_id = str(
+                        check.get("review_item_id")
+                        or verification_item_id(name, "review", 0)
+                    )
+                plan_items[item_id] = name
+            if check_required and name:
+                required_checks[name] = required_checks.get(name, 0) + max(
+                    1, required_item_count
+                )
         return {
             "required": required,
             "workflow": str(verification_plan.get("workflow", "")).strip(),
             "tool_profile": str(verification_plan.get("tool_profile", "")).strip(),
             "expected": expected,
+            "required_checks": required_checks,
+            "required_items": required_items,
+            "plan_items": plan_items,
+            "verification_run_id": str(
+                verification_plan.get("verification_run_id", "")
+            ).strip(),
         }
 
     pack = payload.get("pack") if isinstance(payload.get("pack"), dict) else {}
@@ -631,6 +688,8 @@ def _verification_record_from_event(
         "turn_id": str(event_payload.get("turn_id", "")).strip(),
         "task_id": str(event_payload.get("task_id", "")).strip(),
         "task_title": str(event_payload.get("task_title", "")).strip(),
+        "check_name": str(event_payload.get("verification_check", "")).strip(),
+        "item_id": str(event_payload.get("verification_item_id", "")).strip(),
     }
     return {key: value for key, value in record.items() if value not in ("", None, [], {})}
 
@@ -649,11 +708,41 @@ def _build_session_verification_state(
     requirements = _verification_requirements(payload)
     required = bool(requirements.get("required"))
     expected = list(requirements.get("expected") or [])
+    required_checks = {
+        str(name): int(count)
+        for name, count in dict(requirements.get("required_checks") or {}).items()
+        if str(name).strip() and isinstance(count, int) and count > 0
+    }
+    required_items = {
+        str(item_id): str(check_name)
+        for item_id, check_name in dict(
+            requirements.get("required_items") or {}
+        ).items()
+        if str(item_id).strip() and str(check_name).strip()
+    }
+    plan_items = {
+        str(item_id): str(check_name)
+        for item_id, check_name in dict(requirements.get("plan_items") or {}).items()
+        if str(item_id).strip() and str(check_name).strip()
+    }
+    verification_run_id = str(requirements.get("verification_run_id", "")).strip()
+
+    retained_indices = set(range(max(0, len(records) - _VERIFICATION_RECORD_LIMIT), len(records)))
+    if plan_items:
+        latest_plan_record: dict[str, int] = {}
+        for index, entry in enumerate(records):
+            if not isinstance(entry, dict):
+                continue
+            item_id = str(entry.get("item_id", "")).strip()
+            if item_id in plan_items:
+                latest_plan_record[item_id] = index
+        retained_indices.update(latest_plan_record.values())
 
     normalized_records: list[dict[str, Any]] = []
     commands: list[str] = []
     command_seen: set[str] = set()
-    for entry in records[-_VERIFICATION_RECORD_LIMIT:]:
+    for index in sorted(retained_indices):
+        entry = records[index]
         if not isinstance(entry, dict):
             continue
         status = _normalize_verification_status(entry.get("status"))
@@ -667,16 +756,61 @@ def _build_session_verification_state(
             command_seen.add(command)
             commands.append(command)
 
-    statuses = [str(entry.get("status", "")).strip() for entry in normalized_records]
-    if not required:
-        status = "not_required"
-        message = "Verification not required for this workflow."
-    elif "blocked" in statuses:
+    relevant_records = normalized_records
+    if plan_items:
+        relevant_records = [
+            entry
+            for entry in normalized_records
+            if str(entry.get("item_id", "")).strip() in plan_items
+            or (
+                not verification_run_id
+                and len(required_items) == 1
+                and not str(entry.get("item_id", "")).strip()
+            )
+        ]
+    statuses = [str(entry.get("status", "")).strip() for entry in relevant_records]
+    passed_item_ids: set[str] = set()
+    generic_passed = 0
+    for entry in relevant_records:
+        if entry.get("status") != "passed":
+            continue
+        item_id = str(entry.get("item_id", "")).strip()
+        if item_id in required_items:
+            passed_item_ids.add(item_id)
+        elif not item_id:
+            generic_passed += 1
+    if not verification_run_id and len(required_items) == 1 and generic_passed:
+        passed_item_ids.add(next(iter(required_items)))
+    completed_required_checks = sorted(
+        name
+        for name in required_checks
+        if {
+            item_id
+            for item_id, check_name in required_items.items()
+            if check_name == name
+        }.issubset(passed_item_ids)
+    )
+    required_coverage_complete = bool(required_items) and set(required_items).issubset(
+        passed_item_ids
+    )
+    if "blocked" in statuses:
         status = "blocked"
-        message = "Required verification was blocked by policy."
+        message = "Verification was blocked by policy."
     elif "failed" in statuses:
         status = "failed"
         message = "Recorded verification failed."
+    elif not required:
+        status = "not_required"
+        message = "Verification not required for this workflow."
+    elif required_checks and required_coverage_complete:
+        status = "passed"
+        message = "Verification recorded."
+    elif required_checks and final:
+        status = "missing"
+        message = "Required verification checks were not all recorded before session end."
+    elif required_checks:
+        status = "pending"
+        message = "Required verification checks are still pending."
     elif "passed" in statuses:
         status = "passed"
         message = "Verification recorded."
@@ -695,6 +829,11 @@ def _build_session_verification_state(
         "required": required,
         "status": status,
         "expected": expected,
+        "required_checks": required_checks,
+        "required_items": sorted(required_items),
+        "completed_required_items": sorted(passed_item_ids),
+        "verification_run_id": verification_run_id,
+        "completed_required_checks": completed_required_checks,
         "records": normalized_records,
         "record_count": len(normalized_records),
         "commands": commands,
@@ -1265,7 +1404,6 @@ def record_client_session_activity(
     )
     if verification_record:
         verification_records.append(verification_record)
-        verification_records = verification_records[-_VERIFICATION_RECORD_LIMIT:]
     verification_state = dict(verification_state)
     verification_state["records"] = verification_records
     verification_state["updated_at"] = now
@@ -1438,6 +1576,9 @@ def build_client_session_payload(
         repo_root=repo_root,
         changed_paths=list((payload.get("verification_plan") or {}).get("changed_paths") or []),
     )
+    discovery_error = str(
+        (payload.get("verification_plan") or {}).get("discovery_error", "")
+    )
     payload["verification_plan"] = build_verification_plan(
         config=manager.config,
         cwd=repo_root,
@@ -1447,6 +1588,7 @@ def build_client_session_payload(
         changed_paths=list((payload.get("verification_plan") or {}).get("changed_paths") or []),
         verification_profile=verification_profile,
         policy_summary=payload["repo_policy"],
+        discovery_error=discovery_error,
     )
     payload["verification_plan"] = redact_verification_plan(
         payload["verification_plan"]

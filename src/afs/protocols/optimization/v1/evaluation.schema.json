@@ -20,11 +20,13 @@
     },
     "candidate_id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[^\\uD800-\\uDFFF]*$"
     },
     "parent_id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[^\\uD800-\\uDFFF]*$"
     },
     "artifact_sha256": {
       "type": "string",
@@ -32,7 +34,8 @@
     },
     "artifact_ref": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[^\\uD800-\\uDFFF]*$"
     },
     "evaluation_suite": {
       "type": "object",
@@ -40,11 +43,13 @@
       "properties": {
         "name": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[^\\uD800-\\uDFFF]*$"
         },
         "version": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[^\\uD800-\\uDFFF]*$"
         },
         "case_set_sha256": {
           "type": "string",
@@ -65,15 +70,18 @@
       "properties": {
         "run_id": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[^\\uD800-\\uDFFF]*$"
         },
         "evaluator": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[^\\uD800-\\uDFFF]*$"
         },
         "evaluator_version": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[^\\uD800-\\uDFFF]*$"
         },
         "seed": {
           "type": "integer"
@@ -84,7 +92,8 @@
         },
         "source_revision": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[^\\uD800-\\uDFFF]*$"
         }
       },
       "additionalProperties": false
@@ -103,7 +112,8 @@
           },
           "unit": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "pattern": "^[^\\uD800-\\uDFFF]*$"
           },
           "value": {
             "type": "number"
@@ -123,6 +133,9 @@
     "constraints": {
       "type": "object",
       "maxProperties": 256,
+      "propertyNames": {
+        "pattern": "^[^\\uD800-\\uDFFF]*$"
+      },
       "additionalProperties": {
         "type": "boolean"
       }
