@@ -113,6 +113,8 @@ def test_canonical_json_rejects_non_finite_and_unsupported_values() -> None:
         canonical_json_bytes({"value": float("nan")})
     with pytest.raises(CanonicalJSONError, match="does not support"):
         canonical_json_bytes({"value": object()})
+    with pytest.raises(CanonicalJSONError, match="keys must be strings"):
+        canonical_json_bytes({1: "not-json"})
 
 
 def test_optimization_decision_hash_is_unchanged_after_canonical_extraction() -> None:

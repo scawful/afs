@@ -42,6 +42,7 @@ nav:
     - Extensions: PLUGINS.md
     - Extension Authoring: EXTENSION_AUTHORING.md
     - Autonomous Optimization: OPTIMIZATION_PROTOCOL.md
+    - Policy-Checked Execution: EXECUTION_BROKER.md
     - MCP Server: MCP_SERVER.md
     - Memory System: MEMORY_SYSTEM.md
     - Workspace Integration: WORKSPACE_INTEGRATION.md

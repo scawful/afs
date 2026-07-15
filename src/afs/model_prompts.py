@@ -9,6 +9,7 @@ session state, workflow hints, and memory manifests.
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -743,13 +744,29 @@ def _verification_context_block(verification_state: dict[str, Any] | None) -> st
             if not isinstance(check, dict):
                 continue
             name = str(check.get("name", "") or "").strip()
+            executions = (
+                check.get("executions")
+                if isinstance(check.get("executions"), list)
+                else []
+            )
             commands = check.get("commands") if isinstance(check.get("commands"), list) else []
-            if commands:
-                for command in commands[:3]:
-                    text = str(command).strip()
-                    if text:
-                        lines.append(f"- {name}: {text}" if name else f"- {text}")
-            elif name:
+            rendered = False
+            for execution in executions[:3]:
+                if not isinstance(execution, dict):
+                    continue
+                argv = execution.get("argv")
+                if not isinstance(argv, list) or not argv:
+                    continue
+                text = shlex.join(str(argument) for argument in argv)
+                lines.append(f"- {name}: {text}" if name else f"- {text}")
+                rendered = True
+            remaining = max(3 - len(executions[:3]), 0)
+            for command in commands[:remaining]:
+                text = str(command).strip()
+                if text:
+                    lines.append(f"- {name}: {text}" if name else f"- {text}")
+                    rendered = True
+            if not rendered and name:
                 lines.append(f"- {name}: review the changed scope explicitly")
     return "\n".join(lines) if len(lines) > 1 else ""
 

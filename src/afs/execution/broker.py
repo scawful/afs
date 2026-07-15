@@ -333,7 +333,7 @@ def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
             process.send_signal(getattr(signal, "CTRL_BREAK_EVENT", signal.SIGTERM))
             process.wait(timeout=_TERMINATION_GRACE_SECONDS)
             return
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, ValueError, subprocess.TimeoutExpired):
             pass
         try:
             subprocess.run(
@@ -344,13 +344,19 @@ def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
                 timeout=_TERMINATION_GRACE_SECONDS,
             )
         except (OSError, subprocess.TimeoutExpired):
-            process.kill()
+            try:
+                process.kill()
+            except OSError:
+                pass
         return
 
     try:
         os.killpg(process.pid, signal.SIGTERM)
-    except (OSError, ProcessLookupError):
-        process.terminate()
+    except OSError:
+        try:
+            process.terminate()
+        except OSError:
+            pass
     try:
         process.wait(timeout=_TERMINATION_GRACE_SECONDS)
         return
@@ -358,8 +364,11 @@ def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
         pass
     try:
         os.killpg(process.pid, signal.SIGKILL)
-    except (OSError, ProcessLookupError):
-        process.kill()
+    except OSError:
+        try:
+            process.kill()
+        except OSError:
+            pass
 
 
 def execute_checked(
@@ -445,7 +454,10 @@ def execute_checked(
         try:
             process.wait(timeout=_TERMINATION_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
-            process.kill()
+            try:
+                process.kill()
+            except OSError:
+                pass
             process.wait()
         stdout_thread.join(timeout=_TERMINATION_GRACE_SECONDS)
         stderr_thread.join(timeout=_TERMINATION_GRACE_SECONDS)

@@ -59,6 +59,7 @@ It provides filesystem-native primitives for:
 - [CLI Reference](CLI_REFERENCE.md)
 - [Training and Feedback RFC](TRAINING_FEEDBACK_RFC.md)
 - [Autonomous Optimization Protocol](OPTIMIZATION_PROTOCOL.md)
+- [Policy-Checked Execution](EXECUTION_BROKER.md)
 - [Emacs Integration](EMACS_INTEGRATION.md)
 
 ## Agent Note

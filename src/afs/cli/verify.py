@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from ..verification import (
     build_structured_guidance,
     build_verification_plan,
     run_verification_command,
+    run_verification_execution,
 )
 from ._utils import load_manager, load_runtime_config_from_args
 
@@ -154,8 +156,11 @@ def verify_plan_command(args: argparse.Namespace) -> int:
             name = str(check.get("name", "")).strip()
             matched_by = ", ".join(check.get("matched_by") or []) or "profile"
             print(f"  - {name} [{matched_by}]")
+            for execution in check.get("executions") or []:
+                argv = execution.get("argv") if isinstance(execution, dict) else []
+                print(f"    argv: {json.dumps(argv or [])}")
             for command in check.get("commands") or []:
-                print(f"    {command}")
+                print(f"    legacy shell (deprecated; opt-in required): {command}")
     else:
         print("checks: (none)")
     if policy.get("matched_risks") or policy.get("anti_pattern_hits"):
@@ -166,6 +171,12 @@ def verify_plan_command(args: argparse.Namespace) -> int:
             print(f"  - anti-pattern {item['name']}: {item['path']}")
     print(f"recommended_schema: {structured['recommended_schema']}")
     print(f"followup_schema: {structured['followup_schema']}")
+    for deprecation in plan.get("deprecations") or []:
+        print(
+            "deprecation: "
+            f"{deprecation.get('message', '')} "
+            f"Removal: {deprecation.get('removal_version', '')}."
+        )
     return 0
 
 
@@ -197,6 +208,10 @@ def _record_result(
     config_raw = str(meta.get("config_path", "")).strip()
     config_path = Path(config_raw).expanduser().resolve() if config_raw else None
     manager = load_manager(config_path)
+    check_name = str(result.get("check_name", ""))
+    status = str(result.get("status", ""))
+    digest_raw = result.get("digest")
+    digest: dict[str, Any] = digest_raw if isinstance(digest_raw, dict) else {}
     _emit_session_event(
         manager=manager,
         context_path=Path(context_path).expanduser().resolve(),
@@ -206,13 +221,26 @@ def _record_result(
         session_id=session_id,
         cwd=Path(str(meta.get("cwd", Path.cwd()))).expanduser().resolve(),
         payload_file=payload_path,
-        summary=str(result.get("summary", "")),
-        verification_status=str(result.get("status", "")),
-        verification_command=str(result.get("command", "")),
+        summary=f"{check_name}: {status}",
+        verification_status=status,
+        verification_command=str(
+            result.get("audit_command") or result.get("command", "")
+        ),
         seed_payload={
-            "verification_check": str(result.get("check_name", "")),
-            "verification_digest": result.get("digest") or {},
+            "verification_check": check_name,
+            "verification_digest": {
+                "kind": str(digest.get("kind", "")),
+                "line_count": digest.get("line_count"),
+                "truncated": bool(digest.get("truncated", False)),
+            },
             "verification_returncode": result.get("returncode"),
+            "verification_request_hash": str(result.get("request_hash", "")),
+            "verification_resolved_executable": str(result.get("resolved_executable", "")),
+            "verification_redacted_argv": list(result.get("redacted_argv") or []),
+            "verification_duration_seconds": result.get("duration_seconds"),
+            "verification_timed_out": bool(result.get("timed_out", False)),
+            "verification_stdout_truncated": bool(result.get("stdout_truncated", False)),
+            "verification_stderr_truncated": bool(result.get("stderr_truncated", False)),
         },
     )
 
@@ -220,10 +248,14 @@ def _record_result(
 def verify_run_command(args: argparse.Namespace) -> int:
     meta, bundle, payload_path = _build_plan_bundle(args)
     checks = _filter_selected_checks(bundle, list(getattr(args, "check", []) or []))
-    runnable: list[tuple[str, str]] = []
+    runnable: list[tuple[str, bool, str, Any]] = []
     for check in checks:
+        check_name = str(check.get("name", "")).strip()
+        required = bool(check.get("required", True))
+        for execution in check.get("executions") or []:
+            runnable.append((check_name, required, "structured", execution))
         for command in check.get("commands") or []:
-            runnable.append((str(check.get("name", "")).strip(), str(command).strip()))
+            runnable.append((check_name, required, "legacy_shell", str(command).strip()))
 
     if not runnable:
         output = {
@@ -241,17 +273,54 @@ def verify_run_command(args: argparse.Namespace) -> int:
 
     results: list[dict[str, Any]] = []
     failed = False
+    blocked = False
     repo_root = Path(bundle["verification_plan"]["repo_root"]).expanduser().resolve()
-    for check_name, command in runnable:
-        result = run_verification_command(
-            repo_root=repo_root,
-            check_name=check_name,
-            command=command,
-            max_digest_items=args.max_digest_items,
-        )
+    allow_legacy_shell = bool(
+        getattr(args, "allow_legacy_shell", False)
+        or bundle["verification_plan"].get("allow_legacy_shell", False)
+    )
+    legacy_warning_emitted = False
+    for check_name, required, execution_kind, execution in runnable:
+        if execution_kind == "legacy_shell":
+            if not legacy_warning_emitted:
+                if allow_legacy_shell:
+                    message = (
+                        "legacy verification shell commands are deprecated and will be "
+                        "removed in AFS 0.4.0."
+                    )
+                else:
+                    message = (
+                        "legacy verification shell commands are deprecated and blocked; "
+                        "migrate to executions.argv or opt in explicitly."
+                    )
+                print(f"warning: {message}", file=sys.stderr)
+                legacy_warning_emitted = True
+            result = run_verification_command(
+                repo_root=repo_root,
+                check_name=check_name,
+                command=str(execution),
+                max_digest_items=args.max_digest_items,
+                allow_legacy_shell=allow_legacy_shell,
+            )
+        else:
+            result = run_verification_execution(
+                repo_root=repo_root,
+                check_name=check_name,
+                execution=execution,
+                max_digest_items=args.max_digest_items,
+            )
+        if result.get("status") == "blocked" and not required:
+            result = dict(result)
+            result["status"] = "skipped"
+            result["summary"] = f"{check_name}: optional blocked check skipped"
+            print(f"warning: {result['summary']}", file=sys.stderr)
         results.append(result)
         _record_result(args=args, meta=meta, payload_path=payload_path, result=result)
-        if result["status"] != "passed":
+        if result["status"] == "blocked":
+            blocked = True
+            if not args.continue_on_fail:
+                break
+        elif result["status"] not in {"passed", "skipped"}:
             failed = True
             if not args.continue_on_fail:
                 break
@@ -260,7 +329,7 @@ def verify_run_command(args: argparse.Namespace) -> int:
         **meta,
         **bundle,
         "results": results,
-        "outcome": "failed" if failed else "passed",
+        "outcome": "blocked" if blocked else ("failed" if failed else "passed"),
     }
     if args.json:
         print(json.dumps(output, indent=2))
@@ -269,6 +338,8 @@ def verify_run_command(args: argparse.Namespace) -> int:
             print(f"[{result['status']}] {result['command']}")
             print(f"  {result['digest']['summary']}")
         print(f"outcome: {output['outcome']}")
+    if blocked:
+        return 2
     return 1 if failed else 0
 
 
@@ -290,7 +361,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         "repo_policy_file": {"help": "Explicit `.afs/policy.toml` override."},
     }
 
-    plan_parser = verify_sub.add_parser("plan", help="Compute a verification plan for the current repo state.")
+    plan_parser = verify_sub.add_parser(
+        "plan", help="Compute a verification plan for the current repo state."
+    )
     for name, kwargs in common_arguments.items():
         plan_parser.add_argument(f"--{name.replace('_', '-')}", dest=name, **kwargs)
     plan_parser.add_argument(
@@ -308,7 +381,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     plan_parser.add_argument("--json", action="store_true", help="Output JSON.")
     plan_parser.set_defaults(func=verify_plan_command)
 
-    run_parser = verify_sub.add_parser("run", help="Execute the runnable commands from the current verification plan.")
+    run_parser = verify_sub.add_parser(
+        "run", help="Execute the runnable commands from the current verification plan."
+    )
     for name, kwargs in common_arguments.items():
         run_parser.add_argument(f"--{name.replace('_', '-')}", dest=name, **kwargs)
     run_parser.add_argument(
@@ -344,6 +419,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--require-checks",
         action="store_true",
         help="Return a non-zero exit code when no runnable checks match.",
+    )
+    run_parser.add_argument(
+        "--allow-legacy-shell",
+        action="store_true",
+        help="Explicitly run deprecated verification command strings through bash -lc.",
     )
     run_parser.add_argument("--json", action="store_true", help="Output JSON.")
     run_parser.set_defaults(func=verify_run_command)

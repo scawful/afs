@@ -25,6 +25,7 @@ This docs set covers the **core AFS platform** in `lab/afs`.
 - [Release Process](../RELEASE.md)
 - [Training and Feedback RFC](TRAINING_FEEDBACK_RFC.md)
 - [Autonomous Optimization Protocol](OPTIMIZATION_PROTOCOL.md)
+- [Policy-Checked Execution](EXECUTION_BROKER.md)
 - [Workspace Integration](WORKSPACE_INTEGRATION.md)
 
 ## API and Dev

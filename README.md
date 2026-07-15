@@ -89,6 +89,11 @@ cross-agent coordination.
 records plus a pure decision gate for bounded hill-climbing experiments. The
 gate can recommend human review but cannot execute or promote a candidate.
 
+**Policy-Checked Execution** — Typed, hash-bound execution requests inspected
+against trusted policy before a portable process backend launches them. The
+current backend scrubs environment state and bounds time/output, but is not a
+security sandbox.
+
 ## Professional/project docs
 
 - [Executive Summary](docs/EXECUTIVE_SUMMARY.md)
@@ -96,6 +101,7 @@ gate can recommend human review but cannot execute or promote a candidate.
 - [Setup Guide](docs/SETUP_GUIDE.md)
 - [Extension Authoring](docs/EXTENSION_AUTHORING.md)
 - [Autonomous Optimization Protocol](docs/OPTIMIZATION_PROTOCOL.md)
+- [Policy-Checked Execution](docs/EXECUTION_BROKER.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
 - [Release Process](RELEASE.md)
@@ -108,6 +114,7 @@ gate can recommend human review but cannot execute or promote a candidate.
 src/afs/
 ├── cli/              # 30+ CLI command groups
 ├── agents/           # optional background agents + supervisor
+├── execution/        # typed policy checks + bounded process backend
 ├── mcp_server.py     # MCP prompts/tools/resources for external clients
 ├── context_index.py  # SQLite-backed context indexing and search
 ├── context_pack.py   # Token-budgeted context packs with caching
@@ -138,6 +145,20 @@ afs sources sync --provider NAME      # Preview provider records into .context/i
 afs context diff                      # Changes since last session
 afs session pack --model gemini       # Token-budgeted context export
 ```
+
+### Execution & Verification
+
+```bash
+afs execution inspect --request request.json --allowed-root "$PWD" \
+  --allowed-executable python3 --json
+afs verify plan --cwd "$PWD" --json   # Inspect selected structured checks
+afs verify run --cwd "$PWD" --json    # Run checks through the broker
+```
+
+Execution inspection never launches the request, and AFS intentionally exposes
+no generic execution CLI. Executable permission is explicit; omitting
+`--allowed-executable` returns a blocked inspection. See [Policy-Checked
+Execution](docs/EXECUTION_BROKER.md) for the typed Python API and backend limits.
 
 ### Agents
 

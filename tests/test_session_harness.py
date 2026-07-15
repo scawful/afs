@@ -19,6 +19,7 @@ from afs.schema import (
     ProfilesConfig,
     VerificationCheckConfig,
     VerificationConfig,
+    VerificationExecutionConfig,
     VerificationProfileConfig,
 )
 
@@ -59,7 +60,17 @@ def _make_manager(tmp_path: Path) -> tuple[AFSManager, Path]:
                             name="harness-artifacts",
                             skills=["agentic-background"],
                             workflows=["edit_fast"],
-                            commands=["pytest -q tests/test_session_harness.py"],
+                            executions=[
+                                VerificationExecutionConfig(
+                                    argv=[
+                                        "python3",
+                                        "-m",
+                                        "pytest",
+                                        "-q",
+                                        "tests/test_session_harness.py",
+                                    ]
+                                )
+                            ],
                         )
                     ],
                 )
@@ -180,8 +191,22 @@ def test_session_prepare_client_command_outputs_artifacts(
     assert isinstance(payload["cli_hints"]["notes"], list)
     assert payload["verification_plan"]["profile"] == "repo"
     assert payload["verification_plan"]["selected_checks"][0]["name"] == "harness-artifacts"
-    assert payload["verification_plan"]["selected_checks"][0]["commands"] == [
-        "pytest -q tests/test_session_harness.py"
+    assert payload["verification_plan"]["selected_checks"][0]["executions"] == [
+        {
+            "argv": [
+                "python3",
+                "-m",
+                "pytest",
+                "-q",
+                "tests/test_session_harness.py",
+            ],
+            "cwd": "",
+            "timeout_seconds": 300.0,
+            "max_output_bytes": 1024 * 1024,
+            "inherit_env": [],
+            "env": {},
+            "redact_argv_indices": [],
+        }
     ]
     assert payload["structured_guidance"]["recommended_schema"] == "design-brief"
     assert payload["structured_guidance"]["followup_schema"] == "verification-summary"
@@ -196,7 +221,10 @@ def test_session_prepare_client_command_outputs_artifacts(
     assert "- agentic-background: Stream background progress instead of hiding state." in prompt_text
     assert "## Skill Verification" in prompt_text
     assert "## Verification Plan" in prompt_text
-    assert "- harness-artifacts: pytest -q tests/test_session_harness.py" in prompt_text
+    assert (
+        "- harness-artifacts: python3 -m pytest -q tests/test_session_harness.py"
+        in prompt_text
+    )
     assert "## Repo Policy" in prompt_text
     assert "- order findings by severity" in prompt_text
     assert "## Structured Workflow" in prompt_text

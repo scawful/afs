@@ -24,6 +24,9 @@
             "kind": {"const": "argv"},
             "argv": {
               "type": "array",
+              "prefixItems": [
+                {"type": "string", "minLength": 1, "maxLength": 32768}
+              ],
               "items": {"type": "string", "maxLength": 32768},
               "minItems": 1,
               "maxItems": 256

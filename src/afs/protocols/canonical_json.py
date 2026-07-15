@@ -85,11 +85,13 @@ def encode_canonical_json(value: Any) -> str:
     if isinstance(value, (list, tuple)):
         return "[" + ",".join(encode_canonical_json(item) for item in value) + "]"
     if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise CanonicalJSONError("canonical JSON object keys must be strings")
         return (
             "{"
             + ",".join(
-                json.dumps(str(key), ensure_ascii=False) + ":" + encode_canonical_json(item)
-                for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+                json.dumps(key, ensure_ascii=False) + ":" + encode_canonical_json(item)
+                for key, item in sorted(value.items())
             )
             + "}"
         )

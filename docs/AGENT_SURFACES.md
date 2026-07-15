@@ -227,7 +227,10 @@ Gemini-friendly prompts/resources are also exposed over MCP:
 
 - prompts: `afs.session.bootstrap`, `afs.session.pack`, `afs.workflow.structured`, `afs.context.overview`, `afs.query.search`, `afs.scratchpad.review`
 - resources: `afs://contexts`, `afs://claude/bootstrap`, `afs://context/<path>/bootstrap`, `.../metadata`, `.../mounts`, `.../index`
-- schema resources: `afs://schemas/plan`, `afs://schemas/file-shortlist`, `afs://schemas/review-findings`, `afs://schemas/edit-intent`, `afs://schemas/verification-summary`, `afs://schemas/handoff-summary`
+- schema resources: compact workflow contracts under `afs://schemas/<name>`
+  plus versioned protocols including `afs://schemas/v1/execution/request`,
+  `afs://schemas/v1/execution/inspection`, and
+  `afs://schemas/v1/execution/record`
 
 `afs.session.bootstrap` is the preferred start-of-session surface. It combines:
 

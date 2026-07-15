@@ -482,14 +482,29 @@ def _verification_requirements(payload: dict[str, Any]) -> dict[str, Any]:
                 continue
             name = str(check.get("name", "")).strip()
             required = required or bool(check.get("required"))
+            executions = (
+                check.get("executions")
+                if isinstance(check.get("executions"), list)
+                else []
+            )
             commands = check.get("commands") if isinstance(check.get("commands"), list) else []
-            if commands:
-                for command in commands:
-                    text = str(command).strip()
-                    if not text:
-                        continue
-                    expected.append(f"{name}: {text}" if name else text)
-            elif name:
+            rendered = False
+            for execution in executions:
+                if not isinstance(execution, dict):
+                    continue
+                argv = execution.get("argv")
+                if not isinstance(argv, list) or not argv:
+                    continue
+                text = shlex.join(str(argument) for argument in argv)
+                expected.append(f"{name}: {text}" if name else text)
+                rendered = True
+            for command in commands:
+                text = str(command).strip()
+                if not text:
+                    continue
+                expected.append(f"{name}: {text}" if name else text)
+                rendered = True
+            if not rendered and name:
                 expected.append(f"{name}: review changed scope")
         return {
             "required": required,

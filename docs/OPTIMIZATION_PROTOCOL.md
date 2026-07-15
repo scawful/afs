@@ -179,12 +179,17 @@ records and bootstrap confidence intervals without changing v1 artifacts.
 
 ### P0 — execution boundary
 
-Before AFS runs generated candidates, add one fail-closed executor shared by
-verification, jobs, hooks, training, and agent tools. Its approval digest must
-bind exact argv, executable, cwd, environment allowlist, readable/writable
-roots, network policy, timeout, resource limits, caller, and risk class. Shell
-text is not an acceptable default. Worktrees are isolation aids, not security
-sandboxes.
+AFS now has a typed, fail-closed execution broker and routes verification
+through its portable process backend. Its request hash binds the resolved
+executable, exact argv or explicitly enabled legacy shell input, cwd, selected
+environment, timeout and output bounds, caller/purpose, and requested backend
+policy. Structured argv is the default, and worktrees remain isolation aids
+rather than security sandboxes.
+
+The current backend supports only process isolation with inherited networking;
+sandbox/container and network-deny requests remain blocked. Background jobs,
+hooks, training, and generic agent tools are not migrated by this milestone.
+See `docs/EXECUTION_BROKER.md`.
 
 ### P1 — immutable trials
 
@@ -241,5 +246,5 @@ and preserve schemas as standalone artifacts rather than inventing a C ABI.
 - `docs/TRAINING_FEEDBACK_RFC.md` — generic run/eval/feedback lifecycle
 - `docs/LINEAGE.md` — filesystem contracts and cross-language consumers
 - `src/afs/skill_mining.py` — future candidate proposer, not a trusted grader
-- `src/afs/verification.py` — future consumer of the centralized executor
+- `src/afs/verification.py` — structured checks routed through the execution broker
 - `src/afs/work_execution.py` — strongest current approval-oriented execution precedent

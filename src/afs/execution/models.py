@@ -159,7 +159,11 @@ class ExecutionRequest:
         if len(set(inherited)) != len(inherited):
             raise ExecutionInputError("inherit_env must not contain duplicate names")
         for name in inherited:
-            if not isinstance(name, str) or _ENV_NAME_RE.fullmatch(name) is None:
+            if (
+                not isinstance(name, str)
+                or len(name) > 256
+                or _ENV_NAME_RE.fullmatch(name) is None
+            ):
                 raise ExecutionInputError(f"invalid inherited environment name: {name!r}")
         object.__setattr__(self, "inherit_env", inherited)
 
@@ -169,7 +173,11 @@ class ExecutionRequest:
             raise ExecutionInputError(f"set_env must contain at most {_MAX_ENV_ITEMS} entries")
         normalized_env: dict[str, str] = {}
         for raw_name, raw_value in self.set_env.items():
-            if not isinstance(raw_name, str) or _ENV_NAME_RE.fullmatch(raw_name) is None:
+            if (
+                not isinstance(raw_name, str)
+                or len(raw_name) > 256
+                or _ENV_NAME_RE.fullmatch(raw_name) is None
+            ):
                 raise ExecutionInputError(f"invalid explicit environment name: {raw_name!r}")
             if not isinstance(raw_value, str):
                 raise ExecutionInputError(f"set_env[{raw_name!r}] must be a string")

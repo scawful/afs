@@ -524,6 +524,44 @@ activates, or promotes a candidate. Exit codes are `0` for
 for `inconclusive`. See `docs/OPTIMIZATION_PROTOCOL.md` for the versioned
 contracts and safety boundary.
 
+## Policy-Checked Execution
+
+```bash
+./scripts/afs execution inspect \
+  --request ./request.json \
+  --allowed-root "$PWD" \
+  --allowed-executable python3 \
+  --json
+
+./scripts/afs schema show v1/execution/request
+./scripts/afs schema show v1/execution/inspection
+./scripts/afs schema show v1/execution/record
+```
+
+`execution inspect` validates and resolves a typed request against trusted
+policy but never executes it. Exit codes are `0` when allowed, `2` for invalid
+input, and `3` when blocked. AFS intentionally exposes no generic execution CLI;
+trusted Python callers use `execute_checked(...)`. The portable backend
+supports only `isolation=process` with `network=inherit` and fails closed for
+unsupported sandbox or network restrictions. Omitted executable permission also
+blocks; pass repeated `--allowed-executable` and `--allowed-env` options to
+construct the trusted read-only inspection policy. See
+`docs/EXECUTION_BROKER.md`.
+
+## Verification
+
+```bash
+./scripts/afs verify plan --cwd "$PWD" --json
+./scripts/afs verify run --cwd "$PWD" --json
+./scripts/afs verify run --cwd "$PWD" --allow-legacy-shell
+```
+
+Structured verification `executions` use argv arrays and run through the
+policy-checked broker. String `commands` are deprecated shell input and blocked
+unless configuration or the explicit CLI flag enables the migration path.
+Warnings go to stderr so `--json` stdout remains machine-readable. Legacy shell
+verification commands are scheduled for removal in AFS `0.4.0`.
+
 ## Training
 
 ```bash

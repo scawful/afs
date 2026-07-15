@@ -136,16 +136,26 @@ def test_load_config_model_parses_verification_profiles(tmp_path) -> None:
     config_path = tmp_path / "verification.toml"
     config_path.write_text(
         "[verification]\n"
-        "default_profile = \"repo\"\n\n"
+        'default_profile = "repo"\n\n'
+        "allow_legacy_shell = false\n\n"
         "[verification.profiles.repo]\n"
-        "description = \"Repo checks\"\n\n"
+        'description = "Repo checks"\n\n'
         "[[verification.profiles.repo.checks]]\n"
-        "name = \"python\"\n"
-        "paths = [\"**/*.py\", \"pyproject.toml\"]\n"
-        "commands = [\"ruff check .\", \"pytest -q\"]\n"
-        "skills = [\"python-quality\"]\n"
-        "workflows = [\"edit_fast\"]\n"
-        "tool_profiles = [\"edit_and_verify\"]\n",
+        'name = "python"\n'
+        'paths = ["**/*.py", "pyproject.toml"]\n'
+        'commands = ["ruff check .", "pytest -q"]\n'
+        'skills = ["python-quality"]\n'
+        'workflows = ["edit_fast"]\n'
+        'tool_profiles = ["edit_and_verify"]\n'
+        "\n"
+        "[[verification.profiles.repo.checks.executions]]\n"
+        'argv = ["python3", "-m", "pytest", "-q"]\n'
+        'cwd = "tests"\n'
+        "timeout_seconds = 600\n"
+        "max_output_bytes = 4096\n"
+        'inherit_env = ["PATH", "HOME"]\n'
+        'env = { AFS_MODE = "test" }\n'
+        "redact_argv_indices = [2]\n",
         encoding="utf-8",
     )
 
@@ -162,6 +172,17 @@ def test_load_config_model_parses_verification_profiles(tmp_path) -> None:
     assert check.skills == ["python-quality"]
     assert check.workflows == ["edit_fast"]
     assert check.tool_profiles == ["edit_and_verify"]
+    assert model.verification.allow_legacy_shell is False
+    assert len(check.executions) == 1
+    execution = check.executions[0]
+    assert execution.argv == ["python3", "-m", "pytest", "-q"]
+    assert execution.cwd == "tests"
+    assert execution.timeout_seconds == 600.0
+    assert execution.max_output_bytes == 4096
+    assert execution.inherit_env == ["PATH", "HOME"]
+    assert execution.env == {"AFS_MODE": "test"}
+    assert execution.redact_argv_indices == [2]
+
 
 
 def test_load_config_model_parses_mcp_allowed_roots(tmp_path) -> None:

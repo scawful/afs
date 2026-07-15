@@ -824,10 +824,68 @@ class SessionPackCacheConfig:
 
 
 @dataclass
+class VerificationExecutionConfig:
+    """Structured process execution used by a verification check."""
+
+    argv: list[str] = field(default_factory=list)
+    cwd: str = ""
+    timeout_seconds: float = 300.0
+    max_output_bytes: int = 1024 * 1024
+    inherit_env: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+    redact_argv_indices: list[int] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> VerificationExecutionConfig:
+        timeout_seconds = data.get("timeout_seconds", cls().timeout_seconds)
+        if not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool):
+            timeout_seconds = cls().timeout_seconds
+        max_output_bytes = data.get("max_output_bytes", cls().max_output_bytes)
+        if not isinstance(max_output_bytes, int) or isinstance(max_output_bytes, bool):
+            max_output_bytes = cls().max_output_bytes
+        raw_env = data.get("env", {})
+        env = (
+            {str(key): str(value) for key, value in raw_env.items()}
+            if isinstance(raw_env, dict)
+            else {}
+        )
+        raw_redactions = data.get("redact_argv_indices", [])
+        redactions = (
+            [
+                value
+                for value in raw_redactions
+                if isinstance(value, int) and not isinstance(value, bool)
+            ]
+            if isinstance(raw_redactions, list)
+            else []
+        )
+        return cls(
+            argv=_as_str_list(data.get("argv")),
+            cwd=str(data.get("cwd", "") or "").strip(),
+            timeout_seconds=float(timeout_seconds),
+            max_output_bytes=max_output_bytes,
+            inherit_env=_as_str_list(data.get("inherit_env")),
+            env=env,
+            redact_argv_indices=redactions,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "argv": list(self.argv),
+            "cwd": self.cwd,
+            "timeout_seconds": self.timeout_seconds,
+            "max_output_bytes": self.max_output_bytes,
+            "inherit_env": list(self.inherit_env),
+            "env": dict(self.env),
+            "redact_argv_indices": list(self.redact_argv_indices),
+        }
+
+@dataclass
 class VerificationCheckConfig:
     name: str
     description: str = ""
     paths: list[str] = field(default_factory=list)
+    executions: list[VerificationExecutionConfig] = field(default_factory=list)
     commands: list[str] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
     workflows: list[str] = field(default_factory=list)
@@ -836,10 +894,17 @@ class VerificationCheckConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> VerificationCheckConfig:
+        executions_raw = data.get("executions", [])
+        executions = [
+            VerificationExecutionConfig.from_dict(item)
+            for item in executions_raw
+            if isinstance(item, dict)
+        ]
         return cls(
             name=str(data.get("name", "")).strip(),
             description=str(data.get("description", "")).strip(),
             paths=_as_str_list(data.get("paths")),
+            executions=executions,
             commands=_as_str_list(data.get("commands")),
             skills=_as_str_list(data.get("skills")),
             workflows=_as_str_list(data.get("workflows")),
@@ -852,6 +917,7 @@ class VerificationCheckConfig:
             "name": self.name,
             "description": self.description,
             "paths": list(self.paths),
+            "executions": [execution.to_dict() for execution in self.executions],
             "commands": list(self.commands),
             "skills": list(self.skills),
             "workflows": list(self.workflows),
@@ -899,6 +965,7 @@ class VerificationConfig:
     enabled: bool = True
     default_profile: str = ""
     fallback_to_builtin: bool = True
+    allow_legacy_shell: bool = False
     profiles: dict[str, VerificationProfileConfig] = field(default_factory=dict)
 
     @classmethod
@@ -914,6 +981,7 @@ class VerificationConfig:
             enabled=bool(data.get("enabled", True)),
             default_profile=str(data.get("default_profile", "")).strip(),
             fallback_to_builtin=bool(data.get("fallback_to_builtin", True)),
+            allow_legacy_shell=bool(data.get("allow_legacy_shell", False)),
             profiles=profiles,
         )
 
@@ -922,9 +990,9 @@ class VerificationConfig:
             "enabled": self.enabled,
             "default_profile": self.default_profile,
             "fallback_to_builtin": self.fallback_to_builtin,
+            "allow_legacy_shell": self.allow_legacy_shell,
             "profiles": {
-                name: profile.to_dict()
-                for name, profile in sorted(self.profiles.items())
+                name: profile.to_dict() for name, profile in sorted(self.profiles.items())
             },
         }
 

@@ -4,12 +4,23 @@ from __future__ import annotations
 
 import shlex
 import shutil
-import subprocess
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .execution import (
+    ArgvCommand,
+    ExecutionPolicy,
+    ExecutionRequest,
+    LegacyShellCommand,
+    execute_checked,
+)
 from .operator_digests import digest_operator_output
-from .schema import AFSConfig, VerificationCheckConfig, VerificationProfileConfig
+from .schema import (
+    AFSConfig,
+    VerificationCheckConfig,
+    VerificationExecutionConfig,
+    VerificationProfileConfig,
+)
 
 _PYTHON_SUFFIXES = {".py", ".pyi"}
 _TS_SUFFIXES = {".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"}
@@ -55,18 +66,27 @@ def _path_matches(path: str, patterns: list[str]) -> bool:
 
 
 def _run_git(repo_root: Path, *args: str) -> str | None:
+    git = shutil.which("git")
+    if not git:
+        return None
     try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_root), *args],
-            capture_output=True,
-            text=True,
-            check=False,
+        request = ExecutionRequest(
+            command=ArgvCommand((git, "-C", str(repo_root), *args)),
+            caller="afs.verify",
+            purpose="discover repository verification scope",
+            cwd=repo_root,
+            timeout_seconds=30,
         )
-    except OSError:
+        policy = ExecutionPolicy(
+            allowed_cwd_roots=(repo_root,),
+            allowed_executables=frozenset({git}),
+        )
+        record = execute_checked(request, policy)
+    except (TypeError, ValueError):
         return None
-    if result.returncode != 0:
+    if record.outcome != "completed":
         return None
-    return result.stdout.strip()
+    return record.stdout.strip()
 
 
 def discover_git_repo_root(start_dir: str | Path | None = None) -> Path | None:
@@ -138,36 +158,40 @@ def _build_builtin_checks(
     cpp_paths = [path for path in changed_paths if Path(path).suffix.lower() in _CPP_SUFFIXES]
 
     if python_paths or _has_any_path(repo_root, ["pyproject.toml", "requirements.txt"]):
-        commands: list[str] = []
+        executions: list[VerificationExecutionConfig] = []
         if shutil.which("ruff"):
-            targets = " ".join(shlex.quote(path) for path in python_paths) if python_paths else "."
-            commands.append(f"ruff check {targets}")
+            targets = python_paths if python_paths else ["."]
+            executions.append(VerificationExecutionConfig(argv=["ruff", "check", *targets]))
         if shutil.which("pytest") and (repo_root / "tests").exists():
-            commands.append("pytest -q")
+            executions.append(VerificationExecutionConfig(argv=["pytest", "-q"]))
         if shutil.which("mypy") and _has_any_path(repo_root, ["mypy.ini", "pyproject.toml"]):
-            commands.append("mypy .")
+            executions.append(VerificationExecutionConfig(argv=["mypy", "."]))
         checks.append(
             VerificationCheckConfig(
                 name="builtin-python",
                 description="Auto-detected Python verification.",
                 paths=["**/*.py", "**/*.pyi", "pyproject.toml", "requirements*.txt"],
-                commands=commands,
+                executions=executions,
                 skills=["python-quality"],
             )
         )
 
-    node_runner = ""
+    node_runner: list[str] = []
     if shutil.which("pnpm"):
-        node_runner = "pnpm exec"
+        node_runner = ["pnpm", "exec"]
     elif shutil.which("npm"):
-        node_runner = "npm exec --"
+        node_runner = ["npm", "exec", "--"]
     elif shutil.which("yarn"):
-        node_runner = "yarn"
-    if ts_paths or _has_any_path(repo_root, ["package.json", "tsconfig.json", "tsconfig.base.json"]):
-        commands = []
+        node_runner = ["yarn"]
+    if ts_paths or _has_any_path(
+        repo_root, ["package.json", "tsconfig.json", "tsconfig.base.json"]
+    ):
+        executions = []
         if node_runner:
             if _has_any_path(repo_root, ["tsconfig.json", "tsconfig.base.json"]):
-                commands.append(f"{node_runner} tsc --noEmit")
+                executions.append(
+                    VerificationExecutionConfig(argv=[*node_runner, "tsc", "--noEmit"])
+                )
             if _has_any_path(
                 repo_root,
                 [
@@ -178,37 +202,59 @@ def _build_builtin_checks(
                     "eslint.config.mjs",
                 ],
             ):
-                target = " ".join(shlex.quote(path) for path in ts_paths) if ts_paths else "."
-                commands.append(f"{node_runner} eslint {target}")
+                targets = ts_paths if ts_paths else ["."]
+                executions.append(
+                    VerificationExecutionConfig(argv=[*node_runner, "eslint", *targets])
+                )
             if _has_any_path(repo_root, ["vitest.config.ts", "vitest.config.js", "jest.config.js"]):
-                commands.append(f"{node_runner} vitest run")
+                executions.append(VerificationExecutionConfig(argv=[*node_runner, "vitest", "run"]))
         checks.append(
             VerificationCheckConfig(
                 name="builtin-typescript",
                 description="Auto-detected TypeScript or JavaScript verification.",
-                paths=["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "package.json", "tsconfig*.json"],
-                commands=commands,
+                paths=[
+                    "**/*.ts",
+                    "**/*.tsx",
+                    "**/*.js",
+                    "**/*.jsx",
+                    "package.json",
+                    "tsconfig*.json",
+                ],
+                executions=executions,
                 skills=["typescript-quality"],
             )
         )
 
     if cpp_paths or _has_any_path(repo_root, ["CMakeLists.txt", "compile_commands.json"]):
-        commands = []
-        if shutil.which("clang-tidy") and (repo_root / "compile_commands.json").exists() and cpp_paths:
-            commands.append(
-                "clang-tidy " + " ".join(shlex.quote(path) for path in cpp_paths)
-            )
+        executions = []
+        if (
+            shutil.which("clang-tidy")
+            and (repo_root / "compile_commands.json").exists()
+            and cpp_paths
+        ):
+            executions.append(VerificationExecutionConfig(argv=["clang-tidy", *cpp_paths]))
         if shutil.which("ctest") and (
             (repo_root / "CTestTestfile.cmake").exists()
             or (repo_root / "build" / "CTestTestfile.cmake").exists()
         ):
-            commands.append("ctest --output-on-failure")
+            executions.append(VerificationExecutionConfig(argv=["ctest", "--output-on-failure"]))
         checks.append(
             VerificationCheckConfig(
                 name="builtin-cpp",
                 description="Auto-detected C or C++ verification.",
-                paths=["**/*.c", "**/*.cc", "**/*.cpp", "**/*.cxx", "**/*.h", "**/*.hh", "**/*.hpp", "**/*.hxx", "CMakeLists.txt", "compile_commands.json"],
-                commands=commands,
+                paths=[
+                    "**/*.c",
+                    "**/*.cc",
+                    "**/*.cpp",
+                    "**/*.cxx",
+                    "**/*.h",
+                    "**/*.hh",
+                    "**/*.hpp",
+                    "**/*.hxx",
+                    "CMakeLists.txt",
+                    "compile_commands.json",
+                ],
+                executions=executions,
                 skills=["cpp-quality"],
             )
         )
@@ -263,6 +309,7 @@ def _collect_selected_checks(
                 "name": check.name,
                 "description": check.description,
                 "required": check.required,
+                "executions": [execution.to_dict() for execution in check.executions],
                 "commands": list(check.commands),
                 "paths": list(check.paths),
                 "matched_by": matched_by,
@@ -340,7 +387,9 @@ def build_verification_plan(
     repo_root = discover_git_repo_root(resolved_cwd) or resolved_cwd
     normalized_changed_paths = [
         _normalize_rel_path(path)
-        for path in (changed_paths if changed_paths is not None else discover_changed_paths(resolved_cwd))
+        for path in (
+            changed_paths if changed_paths is not None else discover_changed_paths(resolved_cwd)
+        )
         if _normalize_rel_path(path)
     ]
     matched_skill_names = _matched_skill_names(matched_skills)
@@ -349,7 +398,11 @@ def build_verification_plan(
     configured_checks: list[VerificationCheckConfig] = []
     if config.verification.enabled and selected_profile:
         configured_checks = _iter_profile_checks(config.verification.profiles, selected_profile)
-    if not configured_checks and config.verification.enabled and config.verification.fallback_to_builtin:
+    if (
+        not configured_checks
+        and config.verification.enabled
+        and config.verification.fallback_to_builtin
+    ):
         configured_checks = _build_builtin_checks(repo_root, normalized_changed_paths)
         if configured_checks and not selected_profile:
             selected_profile = "builtin"
@@ -363,13 +416,35 @@ def build_verification_plan(
     )
 
     expected: list[str] = []
+    legacy_command_count = 0
+    structured_execution_count = 0
     for check in selected_checks:
+        executions = list(check.get("executions") or [])
         commands = list(check.get("commands") or [])
-        if commands:
-            for command in commands:
-                expected.append(f"{check['name']}: {command}")
-        else:
+        structured_execution_count += len(executions)
+        legacy_command_count += len(commands)
+        for execution in executions:
+            argv = execution.get("argv") if isinstance(execution, dict) else []
+            expected.append(f"{check['name']}: {shlex.join([str(arg) for arg in argv or []])}")
+        for command in commands:
+            expected.append(f"{check['name']}: {command} (legacy shell; opt-in required)")
+        if not executions and not commands:
             expected.append(f"{check['name']}: review changed scope")
+
+    deprecations: list[dict[str, Any]] = []
+    if legacy_command_count:
+        deprecations.append(
+            {
+                "kind": "legacy_shell",
+                "count": legacy_command_count,
+                "removal_version": "0.4.0",
+                "opt_in_required": True,
+                "message": (
+                    "Legacy verification commands are deprecated and require "
+                    "allow_legacy_shell or --allow-legacy-shell."
+                ),
+            }
+        )
 
     return {
         "available": True,
@@ -381,11 +456,153 @@ def build_verification_plan(
         "inferred_languages": _infer_languages(normalized_changed_paths),
         "selected_checks": selected_checks,
         "required": any(bool(check.get("required")) for check in selected_checks),
-        "command_count": sum(len(list(check.get("commands") or [])) for check in selected_checks),
+        "allow_legacy_shell": config.verification.allow_legacy_shell,
+        "command_count": structured_execution_count + legacy_command_count,
+        "structured_execution_count": structured_execution_count,
+        "legacy_command_count": legacy_command_count,
+        "deprecations": deprecations,
         "expected": expected,
         "policy_risk_count": len(list((policy_summary or {}).get("matched_risks") or [])),
         "policy_violation_count": len(list((policy_summary or {}).get("anti_pattern_hits") or [])),
     }
+
+
+def _blocked_verification_result(
+    *,
+    check_name: str,
+    command: str,
+    execution_kind: str,
+    reason: str,
+) -> dict[str, Any]:
+    summary = f"{check_name}: {reason}"
+    return {
+        "check_name": check_name,
+        "command": command,
+        "execution_kind": execution_kind,
+        "status": "blocked",
+        "returncode": None,
+        "stdout": "",
+        "stderr": "",
+        "digest": {
+            "kind": "generic",
+            "summary": reason,
+            "highlights": [reason],
+            "truncated": False,
+        },
+        "summary": summary,
+        "blocked_reason": reason,
+        "audit_command": (
+            "<legacy shell blocked>" if execution_kind == "legacy_shell" else command
+        ),
+        "redacted_argv": [],
+    }
+
+
+def _result_from_execution_record(
+    *,
+    check_name: str,
+    command: str,
+    execution_kind: str,
+    record: Any,
+    max_digest_items: int,
+) -> dict[str, Any]:
+    combined_output = (record.stdout or "") + (record.stderr or "")
+    digest = digest_operator_output(combined_output, kind="auto", max_items=max_digest_items)
+    if record.outcome == "completed":
+        status = "passed"
+    elif record.outcome == "blocked":
+        status = "blocked"
+    else:
+        status = "failed"
+    summary = f"{check_name}: {digest.get('summary', status)}"
+    if record.reasons and not combined_output.strip():
+        reason_summary = "; ".join(record.reasons)
+        digest = dict(digest)
+        digest["summary"] = reason_summary
+        digest["highlights"] = list(record.reasons)
+        summary = f"{check_name}: {reason_summary}"
+    return {
+        "check_name": check_name,
+        "command": command,
+        "execution_kind": execution_kind,
+        "status": status,
+        "outcome": record.outcome,
+        "returncode": record.returncode,
+        "stdout": record.stdout,
+        "stderr": record.stderr,
+        "digest": digest,
+        "summary": summary,
+        "request_hash": str(record.request_sha256),
+        "resolved_executable": str(record.resolved_executable or ""),
+        "duration_seconds": record.duration_seconds,
+        "timed_out": record.outcome == "timed_out",
+        "stdout_truncated": record.stdout_truncated,
+        "stderr_truncated": record.stderr_truncated,
+        "reason_codes": list(record.reason_codes),
+        "reasons": list(record.reasons),
+        "audit_command": shlex.join(record.redacted_argv),
+        "redacted_argv": list(record.redacted_argv),
+    }
+
+
+def run_verification_execution(
+    *,
+    repo_root: str | Path,
+    check_name: str,
+    execution: VerificationExecutionConfig | dict[str, Any],
+    max_digest_items: int = 5,
+) -> dict[str, Any]:
+    """Execute a structured verification argv through the checked broker."""
+    resolved_root = Path(repo_root).expanduser().resolve()
+    config = (
+        execution
+        if isinstance(execution, VerificationExecutionConfig)
+        else VerificationExecutionConfig.from_dict(execution)
+    )
+    command = shlex.join(config.argv)
+    if not config.argv:
+        return _blocked_verification_result(
+            check_name=check_name,
+            command=command,
+            execution_kind="structured",
+            reason="structured verification execution requires a non-empty argv",
+        )
+    requested_cwd = Path(config.cwd).expanduser() if config.cwd else resolved_root
+    if not requested_cwd.is_absolute():
+        requested_cwd = resolved_root / requested_cwd
+    allowed_env = frozenset([*config.inherit_env, *config.env.keys()])
+    try:
+        request = ExecutionRequest(
+            command=ArgvCommand(tuple(config.argv)),
+            caller="afs.verify",
+            purpose=f"verification check {check_name}",
+            cwd=requested_cwd,
+            inherit_env=tuple(config.inherit_env),
+            set_env=config.env,
+            timeout_seconds=config.timeout_seconds,
+            max_output_bytes=config.max_output_bytes,
+            redact_argv_indices=tuple(config.redact_argv_indices),
+        )
+        policy = ExecutionPolicy(
+            allowed_cwd_roots=(resolved_root,),
+            allowed_env=allowed_env,
+            allowed_executables=frozenset({config.argv[0]}),
+        )
+        record = execute_checked(request, policy)
+    except (TypeError, ValueError) as exc:
+        return _blocked_verification_result(
+            check_name=check_name,
+            command=command,
+            execution_kind="structured",
+            reason=f"invalid structured verification execution: {exc}",
+        )
+    return _result_from_execution_record(
+        check_name=check_name,
+        command=command,
+        execution_kind="structured",
+        record=record,
+        max_digest_items=max_digest_items,
+    )
 
 
 def run_verification_command(
@@ -394,27 +611,34 @@ def run_verification_command(
     check_name: str,
     command: str,
     max_digest_items: int = 5,
+    allow_legacy_shell: bool = False,
 ) -> dict[str, Any]:
-    """Execute a verification command and return a compact result payload."""
+    """Execute a deprecated shell verification command through the checked broker."""
     resolved_root = Path(repo_root).expanduser().resolve()
-    result = subprocess.run(
-        ["bash", "-lc", command],
-        cwd=resolved_root,
-        capture_output=True,
-        text=True,
-        check=False,
+    try:
+        request = ExecutionRequest(
+            command=LegacyShellCommand(command),
+            caller="afs.verify",
+            purpose=f"legacy verification check {check_name}",
+            cwd=resolved_root,
+        )
+        policy = ExecutionPolicy(
+            allowed_cwd_roots=(resolved_root,),
+            allowed_executables=frozenset({shutil.which("bash") or "bash"}),
+            allow_legacy_shell=allow_legacy_shell,
+        )
+        record = execute_checked(request, policy)
+    except (TypeError, ValueError) as exc:
+        return _blocked_verification_result(
+            check_name=check_name,
+            command=command,
+            execution_kind="legacy_shell",
+            reason=f"invalid legacy verification command: {exc}",
+        )
+    return _result_from_execution_record(
+        check_name=check_name,
+        command=command,
+        execution_kind="legacy_shell",
+        record=record,
+        max_digest_items=max_digest_items,
     )
-    combined_output = (result.stdout or "") + (result.stderr or "")
-    digest = digest_operator_output(combined_output, kind="auto", max_items=max_digest_items)
-    status = "passed" if result.returncode == 0 else "failed"
-    summary = f"{check_name}: {digest.get('summary', status)}"
-    return {
-        "check_name": check_name,
-        "command": command,
-        "status": status,
-        "returncode": result.returncode,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-        "digest": digest,
-        "summary": summary,
-    }
