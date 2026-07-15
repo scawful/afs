@@ -462,18 +462,48 @@ def check_context_index(config_path: Path | None = None) -> DiagnosticResult:
 
 
 def check_extensions(config_path: Path | None = None) -> DiagnosticResult:
-    """Check that enabled extensions load without errors."""
+    """Check that discoverable extension manifests validate and load."""
+
+    def summarize(values: list[str], *, limit: int = 5) -> str:
+        bounded = [
+            value if len(value) <= 512 else f"{value[:512]}..."
+            for value in values[:limit]
+        ]
+        omitted = len(values) - len(bounded)
+        if omitted:
+            bounded.append(f"{omitted} more omitted")
+        return "; ".join(bounded)
+
     try:
         from .config import load_config_model
-        from .plugins import load_enabled_extensions
+        from .extensions import extension_load_report
 
         config = load_config_model(config_path=config_path, merge_user=True)
-        extensions = load_enabled_extensions(config=config)
+        report = extension_load_report(config)
     except Exception as exc:
         return DiagnosticResult(
             name="extensions",
             status="warn",
-            message=f"Extension loading failed: {exc}",
+            message=f"Extension diagnostics failed ({type(exc).__name__})",
+        )
+
+    extensions = report["extensions"]
+    enabled_extensions = [entry for entry in extensions if entry["enabled"]]
+    errors = report["errors"]
+    warnings = [
+        f"{entry['name']}: {warning}" for entry in extensions for warning in entry["warnings"]
+    ]
+
+    if errors:
+        details = summarize([entry["error"] for entry in errors])
+        return DiagnosticResult(
+            name="extensions",
+            status="warn",
+            message=(
+                f"{len(errors)} extension manifest issue(s): {details}. "
+                "Fix or remove the manifest; see `afs plugins --json` for the "
+                "full report."
+            ),
         )
 
     if not extensions:
@@ -483,10 +513,31 @@ def check_extensions(config_path: Path | None = None) -> DiagnosticResult:
             message="No extensions configured",
         )
 
+    names = summarize([entry["name"] for entry in extensions], limit=10)
+    if warnings:
+        return DiagnosticResult(
+            name="extensions",
+            status="warn",
+            message=(
+                f"{len(extensions)} extension manifest(s) validated ({names}) with "
+                f"warnings: {summarize(warnings)}"
+            ),
+        )
+
+    if not enabled_extensions:
+        return DiagnosticResult(
+            name="extensions",
+            status="ok",
+            message=(f"{len(extensions)} extension manifest(s) validated; none enabled"),
+        )
+
+    enabled_names = summarize([entry["name"] for entry in enabled_extensions], limit=10)
     return DiagnosticResult(
         name="extensions",
         status="ok",
-        message=f"{len(extensions)} extension(s) loaded: {', '.join(extensions.keys())}",
+        message=(
+            f"{len(enabled_extensions)} enabled extension manifest(s) validated: {enabled_names}"
+        ),
     )
 
 

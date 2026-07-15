@@ -24,6 +24,7 @@ instead of forking core code.
 ## Manifest
 
 ```toml
+api_version = 1
 name = "workspace_adapter"
 description = "Private workspace adapter"
 
@@ -64,7 +65,8 @@ extension_dirs = ["./extensions"]
 ```
 
 Env overrides: `AFS_EXTENSION_DIRS` (`:`-separated), `AFS_ENABLED_EXTENSIONS`
-(comma/space separated). `afs plugins --details --json` proves manifest
+(comma/space separated). Run `afs doctor` or `afs plugins --json` to surface
+validation errors and bounded warnings. `afs plugins --details --json` proves manifest
 discovery only; it does not import the declared MCP factory. Verify MCP wiring
 with an isolated server initialization plus `tools/list`, and use
 `afs skills list` to confirm extension skill roots. Keep domain content in the

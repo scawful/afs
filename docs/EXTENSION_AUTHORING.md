@@ -4,7 +4,10 @@ Extensions let teams add domain behavior without forking core AFS. Use them for 
 
 ## Contract status
 
-AFS `0.2.x` treats the manifest format as a **versioned pre-1.0 contract**. Add `schema_version = "0.1"` to new manifests so future validators can distinguish old and new layouts.
+AFS treats the manifest format as a **versioned pre-1.0 contract**. Add
+`api_version = 1` to new manifests. Existing `schema_version = "0.1"`
+manifests remain compatible, but new manifests should use the integer API
+version.
 
 Core promises for `0.2.x`:
 
@@ -29,7 +32,7 @@ afs_example/
 `extension.toml`:
 
 ```toml
-schema_version = "0.1"
+api_version = 1
 name = "afs_example"
 description = "Example AFS extension"
 

@@ -19,6 +19,7 @@ extensions/
 ```toml
 name = "workspace_adapter"
 description = "Private workspace adapter"
+api_version = 1
 
 knowledge_mounts = ["knowledge/work"]
 skill_roots = ["skills"]
@@ -78,6 +79,18 @@ Catalog behavior is fail-closed:
   per tool.
 - Only `"full"` and `"slim"` are valid manifest and per-tool values. An invalid
   value rejects the affected manifest or MCP surface rather than exposing it.
+
+## Validation
+
+Manifests are validated at load time. `api_version` is optional and defaults
+to `1` (the only supported version); declaring an unsupported version is a
+hard error. Existing `schema_version = "0.1"` manifests remain compatible.
+Wrong-typed fields, malformed nested tables, invalid module names, and an
+`[mcp_tools]` section without a module are errors. Unknown keys produce bounded
+warnings with did-you-mean hints. A manifest that fails validation is skipped
+(with a logged warning) while the rest still load. Inspect problems with
+`afs doctor` or `afs plugins --json`
+(`extension_errors` + per-extension `warnings`).
 
 ## Notes
 

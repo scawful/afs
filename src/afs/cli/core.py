@@ -156,9 +156,8 @@ def plugins_command(args: argparse.Namespace) -> int:
     """List or load plugins."""
     from ..config import load_config_model
     from ..plugins import (
-        discover_extension_manifests,
         discover_plugins,
-        load_enabled_extensions,
+        extension_load_report,
         load_plugins,
         resolve_extensions_config,
         resolve_plugins_config,
@@ -169,8 +168,12 @@ def plugins_command(args: argparse.Namespace) -> int:
     plugins_config = resolve_plugins_config(config)
     plugin_names = discover_plugins(plugins_config)
     extensions_config = resolve_extensions_config(config)
-    extension_manifests = discover_extension_manifests(extensions_config)
-    loaded_extensions = load_enabled_extensions(config=config)
+    extension_report = extension_load_report(config=config)
+    extension_warnings = {
+        entry["name"]: entry["warnings"]
+        for entry in extension_report["extensions"]
+        if entry["warnings"]
+    }
     loaded = {}
     if args.load:
         loaded = load_plugins(plugin_names, plugins_config.plugin_dirs)
@@ -192,12 +195,14 @@ def plugins_command(args: argparse.Namespace) -> int:
             "enabled_extensions": list(extensions_config.enabled_extensions),
             "extensions": [
                 {
-                    "name": name,
-                    "manifest": str(path),
-                    "status": "ok" if name in loaded_extensions else "discovered",
+                    "name": entry["name"],
+                    "manifest": entry["path"],
+                    "status": "ok" if entry["enabled"] else "discovered",
+                    "warnings": entry["warnings"],
                 }
-                for name, path in extension_manifests.items()
+                for entry in extension_report["extensions"]
             ],
+            "extension_errors": extension_report["errors"],
         }
         print(json.dumps(payload, indent=2))
         return 0
@@ -234,6 +239,11 @@ def plugins_command(args: argparse.Namespace) -> int:
         )
         print(f"extension_dirs: {extension_dirs}")
         print(f"enabled_extensions: {enabled_extensions}")
+        for name, warnings in sorted(extension_warnings.items()):
+            for warning in warnings:
+                print(f"extension {name}: warning: {warning}")
+        for entry in extension_report["errors"]:
+            print(f"extension manifest error: {entry['error']}")
 
     if args.load:
         for name in plugin_names:
