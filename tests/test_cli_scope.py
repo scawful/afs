@@ -113,6 +113,52 @@ def test_profile_cli_modules_can_register_commands(
     assert "profile-demo" in commands
 
 
+def test_plugin_failure_does_not_block_extension_cli_registration(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    import afs.plugins as plugins
+
+    (tmp_path / "profile_cli.py").write_text(
+        "def register_parsers(subparsers):\n"
+        "    parser = subparsers.add_parser('isolated-demo')\n"
+        "    parser.set_defaults(func=lambda _args: 0)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "bad_cli.py").write_text(
+        "def register_parsers(_subparsers):\n"
+        "    raise RuntimeError('extension failed')\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "afs.toml"
+    config_path.write_text(
+        "[extensions]\n"
+        "auto_discover = false\n\n"
+        "[plugins]\n"
+        "auto_discover = false\n\n"
+        "[profiles]\n"
+        'active_profile = "work"\n\n'
+        "[profiles.work]\n"
+        'cli_modules = ["bad_cli", "profile_cli"]\n',
+        encoding="utf-8",
+    )
+
+    def fail_plugins(**_kwargs):
+        raise RuntimeError("plugin failed")
+
+    monkeypatch.setattr(plugins, "load_enabled_plugins", fail_plugins)
+    monkeypatch.setenv("AFS_CONFIG_PATH", str(config_path))
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    parser = build_parser()
+
+    assert "isolated-demo" in _command_choices(parser)
+    assert "Plugin CLI registration failed (RuntimeError)" in caplog.text
+    assert "Extension CLI module 'bad_cli' failed to register (RuntimeError)" in caplog.text
+    assert "Traceback" not in caplog.text
+
+
 def test_build_parser_uses_explicit_config_argument_for_profile_modules(
     monkeypatch,
     tmp_path: Path,

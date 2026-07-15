@@ -1,4 +1,4 @@
-schema_version = "0.1"
+api_version = 1
 name = "afs_hello_extension"
 description = "Minimal extension example for AFS users"
 

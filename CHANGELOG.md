@@ -29,6 +29,8 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
   audit, knowledge/memory index refresh, weekly skill mining, and a daily
   scratchpad briefing. Defaults are configurable and never augment a custom
   agent list implicitly.
+- Versioned extension-manifest validation with bounded diagnostics, isolated
+  CLI registration failures, and surfaced doctor/plugin reports.
 
 ### Changed
 
