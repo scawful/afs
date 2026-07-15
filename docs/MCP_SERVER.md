@@ -296,7 +296,11 @@ Gemini-facing MCP resources:
 `afs.session.bootstrap` is the recommended first call in a new session. It
 packages health, cheap codebase orientation, drift, scratchpad notes, task
 queue state, recent hivemind messages, and the latest durable memory summary
-into one startup packet.
+into one startup packet. Its optional `skills_prompt` and `skills_top_k`
+arguments select bounded skill bodies explicitly. When no prompt is supplied,
+bootstrap uses a bounded continuation signal from handoff next steps, active
+missions, and open tasks; that untrusted state selects only instructions from
+configured skill roots and is not itself treated as policy.
 
 `afs.context.overview` now includes both mount structure and a cheap codebase
 summary. When callers pass `path`/`project_path`, it can also summarize a raw

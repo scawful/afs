@@ -56,6 +56,7 @@ def check_dist() -> int:
     required = {
         "afs/version.py",
         "afs/mcp_server.py",
+        "afs/bundled_skills/context-setup/SKILL.md",
     }
     missing = [name for name in required if not any(item.endswith(name) for item in names)]
     if missing:

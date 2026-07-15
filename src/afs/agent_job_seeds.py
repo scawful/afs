@@ -65,7 +65,7 @@ REPO_MAINTENANCE_SEEDS = (
     AgentJobSeed(
         key="skill-drift-scan",
         title="Scan skill and harness drift",
-        scope="skills/ configs/ scripts/ docs/",
+        scope="src/afs/bundled_skills/ configs/ scripts/ docs/",
         expected_output="Drift report with paths, missing copies, obsolete instructions, and suggested fixes.",
         prompt=(
             "Compare shared skill references, harness exports, and local harness documentation "

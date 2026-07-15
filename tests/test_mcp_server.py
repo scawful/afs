@@ -1995,10 +1995,39 @@ def test_prompts_list_returns_expected_prompts(tmp_path: Path) -> None:
     for prompt in prompts:
         assert "arguments" in prompt
         assert isinstance(prompt["arguments"], list)
+    bootstrap = next(prompt for prompt in prompts if prompt["name"] == "afs.session.bootstrap")
+    argument_names = {argument["name"] for argument in bootstrap["arguments"]}
+    assert {"skills_prompt", "skills_top_k"}.issubset(argument_names)
 
 
-def test_prompts_get_session_bootstrap(tmp_path: Path) -> None:
+def test_prompts_get_session_bootstrap(tmp_path: Path, monkeypatch) -> None:
     manager = _make_manager(tmp_path)
+    afs_root = tmp_path / "afs-root"
+    skill = afs_root / "skills" / "quantum" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\n"
+        "name: quantum-frobnicate\n"
+        "triggers: [quantumfrobnicate]\n"
+        "profiles: [general]\n"
+        "---\n\n"
+        "# Quantum Frobnication\n\n"
+        "Validate the flux boundary before frobnication.\n",
+        encoding="utf-8",
+    )
+    for index in range(6):
+        extra = afs_root / "skills" / f"z-quantum-extra-{index}" / "SKILL.md"
+        extra.parent.mkdir(parents=True)
+        extra.write_text(
+            "---\n"
+            f"name: z-quantum-extra-{index}\n"
+            "triggers: [quantumfrobnicate]\n"
+            "profiles: [general]\n"
+            "---\n\n"
+            f"Extra quantum guidance {index}.\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("AFS_ROOT", str(afs_root))
     context_root = manager.config.general.context_root
     (context_root / "scratchpad" / "state.md").write_text(
         "bootstrap state",
@@ -2015,7 +2044,11 @@ def test_prompts_get_session_bootstrap(tmp_path: Path) -> None:
             "method": "prompts/get",
             "params": {
                 "name": "afs.session.bootstrap",
-                "arguments": {"context_path": str(context_root)},
+                "arguments": {
+                    "context_path": str(context_root),
+                    "skills_prompt": "quantumfrobnicate",
+                    "skills_top_k": "7",
+                },
             },
         },
         manager,
@@ -2026,6 +2059,9 @@ def test_prompts_get_session_bootstrap(tmp_path: Path) -> None:
     assert "AFS Session Bootstrap" in text
     assert "bootstrap state" in text
     assert "## Codebase" in text
+    assert "## Relevant Skills" in text
+    assert "Validate the flux boundary before frobnication." in text
+    assert "### z-quantum-extra-5" in text
 
 
 def test_prompts_get_context_overview_without_existing_context(tmp_path: Path) -> None:

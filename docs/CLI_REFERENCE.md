@@ -377,6 +377,7 @@ See `docs/JOURNAL_AGENT.md` for full argument reference and JSON output shape.
 ```bash
 ./scripts/afs session bootstrap
 ./scripts/afs session bootstrap --json
+./scripts/afs session bootstrap --skills-prompt "review this Python refactor"
 ./scripts/afs session pack
 ./scripts/afs session pack "sqlite indexing" --model gemini
 ./scripts/afs session pack "sqlite indexing" --model gemini --workflow scan_fast --task "Find the three most relevant SQLite files"
@@ -395,6 +396,8 @@ See `docs/JOURNAL_AGENT.md` for full argument reference and JSON output shape.
 - work-assistant people, activity, and pending approval-gated external writes
 - recent `hivemind/` messages
 - latest durable memory summary
+- bounded bodies for skills matched by `--skills-prompt`, or by the current
+  handoff, active missions, and open tasks when no explicit focus is supplied
 
 It also refreshes:
 
@@ -469,7 +472,9 @@ fills in `--client`, `--session-id`, `--payload-file`, `--cwd`, and the current
 also export `AFS_SESSION_SYSTEM_PROMPT_*` and, by default, wire the prompt
 artifact into the native client entrypoint when one exists: Codex via
 `-c model_instructions_file=...`, Claude via `--append-system-prompt-file`,
-and Gemini via `GEMINI_SYSTEM_MD`. Set `AFS_CLIENT_NATIVE_PROMPT=0` or
+and Gemini/Antigravity via `GEMINI_SYSTEM_MD`. Hook-only host integrations
+receive a compact pointer plus a 1,000-character top-skill excerpt. Set
+`AFS_CLIENT_NATIVE_PROMPT=0` or
 `AFS_<CLIENT>_NATIVE_PROMPT=0` to disable that handoff. They also accept
 `--prompt`, `--prompt-file`, and `--turn-id`; when present, they emit
 `user_prompt_submit`, `turn_started`, and `turn_completed` / `turn_failed`
@@ -486,6 +491,12 @@ around the client process.
 - `work_approvals`
 - `work_communication`
 - `notes`
+
+Prepared sessions match skills against `--skills-prompt`, then `--task`, then
+`--query`. Match records and generated system prompts may include bodies for
+the first three skills, bounded to 2,000 characters per body and 6,000 total.
+Compact enforcement and verification rules remain a higher-priority prompt
+section so a small token budget sheds bodies before rules.
 
 `afs-client-session` exports the same follow-up hints as:
 

@@ -1046,6 +1046,8 @@ def session_bootstrap_command(args: argparse.Namespace) -> int:
         task_limit=args.task_limit,
         message_limit=args.message_limit,
         agent_name=getattr(args, "agent_name", "cli") or "cli",
+        skills_prompt=str(getattr(args, "skills_prompt", "") or ""),
+        skills_top_k=int(getattr(args, "skills_top_k", 5) or 0),
     )
     if not args.no_write_artifacts:
         summary["artifact_paths"] = write_session_bootstrap_artifacts(
@@ -1114,7 +1116,7 @@ def session_prepare_client_command(args: argparse.Namespace) -> int:
     changed_paths_arg = vars(args).get("changed_path")
     skills_prompt = args.skills_prompt
     if skills_prompt is None:
-        skills_prompt = args.query or ""
+        skills_prompt = args.task or args.query or ""
 
     payload = build_client_session_payload(
         manager,
@@ -2257,6 +2259,17 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Agent name for registration (default: cli).",
     )
     session_bootstrap.add_argument(
+        "--skills-prompt",
+        default="",
+        help="Optional task prompt used to match and include bounded skill bodies.",
+    )
+    session_bootstrap.add_argument(
+        "--skills-top-k",
+        type=int,
+        default=5,
+        help="Maximum skill matches to retain, capped at 10 (default: 5).",
+    )
+    session_bootstrap.add_argument(
         "--no-write-artifacts",
         action="store_true",
         help="Do not update scratchpad/afs_agents/session_bootstrap.{json,md}.",
@@ -2406,13 +2419,13 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     session_prepare.add_argument(
         "--skills-prompt",
-        help="Prompt to score against discovered skills (defaults to --query).",
+        help="Prompt to score against discovered skills (defaults to --task, then --query).",
     )
     session_prepare.add_argument(
         "--skills-top-k",
         type=int,
         default=10,
-        help="Maximum skill matches to retain.",
+        help="Maximum skill matches to retain, capped at 10.",
     )
     session_prepare.add_argument(
         "--changed-path",

@@ -9,15 +9,25 @@ session state, workflow hints, and memory manifests.
 
 from __future__ import annotations
 
+import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .skills import (
+    MAX_SKILL_BODIES_CHARS,
+    MAX_SKILL_BODY_CHARS,
+    MAX_SKILL_BODY_MATCHES,
+    MAX_SKILL_MATCHES,
+    truncate_skill_body,
+)
 from .verification import (
     redact_legacy_verification_command,
     redact_verification_argv,
 )
+
+_HOOK_SKILL_BODY_CHARS = 1_000
 
 
 @dataclass(frozen=True)
@@ -108,13 +118,26 @@ def build_model_system_prompt(
         ))
 
     # --- Dynamic section: skill matches for the active task/session ---
-    skills_block = _skills_context_block(skills_state)
+    resolved_skills_state = skills_state
+    if resolved_skills_state is None and isinstance(session_state, dict):
+        candidate = session_state.get("skills")
+        if isinstance(candidate, dict):
+            resolved_skills_state = candidate
+    skills_block = _skills_context_block(resolved_skills_state)
     if skills_block:
         sections.append(PromptSection(
             content=skills_block,
             cacheable=False,
             priority=55,
             label="skills_context",
+        ))
+    skill_bodies_block = _skill_bodies_context_block(resolved_skills_state)
+    if skill_bodies_block:
+        sections.append(PromptSection(
+            content=skill_bodies_block,
+            cacheable=False,
+            priority=49,
+            label="skill_instructions",
         ))
 
     verification_block = _verification_context_block(verification_state)
@@ -154,7 +177,11 @@ def build_model_system_prompt(
         ))
 
     # --- Dynamic section: session context (scratchpad, diff, memory) ---
-    context_block = _session_context_block(context_path, session_state)
+    context_block = _session_context_block(
+        context_path,
+        session_state,
+        include_skill_pointers=False,
+    )
     if context_block:
         sections.append(PromptSection(
             content=context_block,
@@ -196,21 +223,58 @@ def build_hook_injection(
     grounding directly as the host's ``additionalContext``.
 
     - ``SessionStart`` (and any unrecognized event): the full session-context
-      block — project intent, scratchpad, stakeholders, pending approvals, the
-      work-communication contract, and last-session next steps — grounding the
-      session once.
+      block — project intent, scratchpad, stakeholders, pending approvals, a
+      bounded top matched-skill excerpt, the work-communication contract, and
+      last-session next steps — grounding the session once.
     - ``UserPromptSubmit``: only the mandatory work-communication contract, and
       only when the turn's prompt looks comms-related. This is a just-in-time
       safety reminder right before the agent might draft or post, without paying
       the token cost of the full block on every turn.
 
-    All content is framed as untrusted retrieved data by the underlying renderers.
+    Session state remains framed as untrusted retrieved data. Skill excerpts are
+    rendered separately as trusted configured-root instructions with explicit
+    system/user/repository precedence.
     Returns ``""`` when there is nothing to inject (the caller should stay silent).
     """
     normalized = str(event or "").strip()
     if normalized == "UserPromptSubmit":
         return _work_communication_contract_block({"prompt": prompt}, session_state)
-    return _session_context_block(context_path, session_state)
+
+    state = session_state
+    if state is None and context_path is not None:
+        try:
+            from .config import load_config_model
+            from .manager import AFSManager
+            from .session_bootstrap import build_session_bootstrap
+
+            state = build_session_bootstrap(
+                AFSManager(config=load_config_model()),
+                context_path,
+                token_budget=0,
+                record_event=False,
+            )
+        except Exception:
+            return ""
+    if not state:
+        return ""
+
+    blocks = [
+        _frame_hook_session_context(_session_context_block(context_path, state)),
+        _hook_skill_body_block(state.get("skills")),
+    ]
+    return "\n\n".join(block for block in blocks if block.strip())
+
+
+def _frame_hook_session_context(block: str) -> str:
+    """Fence retrieved session data so it cannot capture later trusted blocks."""
+    lines = block.splitlines()
+    if len(lines) <= 2:
+        return block
+    prefix = "\n".join(lines[:2])
+    retrieved = "\n".join(lines[2:])
+    longest_run = max((len(run) for run in re.findall(r"`+", retrieved)), default=0)
+    fence = "`" * max(3, longest_run + 1)
+    return f"{prefix}\n\n{fence}\n{retrieved}\n{fence}"
 
 
 def _family_constraints(model_family: str, role: str) -> str:
@@ -396,9 +460,79 @@ def _active_mission_lines(missions: dict[str, Any]) -> list[str]:
     return lines if len(lines) > 1 else []
 
 
+def _matched_skill_lines(skills_state: dict[str, Any] | None) -> list[str]:
+    """Render compact pointers for hook-only sessions with strict size bounds."""
+    if not isinstance(skills_state, dict) or not skills_state.get("available"):
+        return []
+    matches = skills_state.get("matches")
+    if not isinstance(matches, list) or not matches:
+        return []
+
+    lines = [
+        (
+            "Matched skills from configured instruction roots "
+            "(system, user, and repository policy take precedence):"
+        )
+    ]
+    for match in matches[:3]:
+        if not isinstance(match, dict):
+            continue
+        name = " ".join(str(match.get("name", "") or "").split()).strip()[:120]
+        if not name:
+            continue
+        line = f"- {name}"
+        enforcement = _skill_guidance_lines(match.get("enforcement"), limit=1)
+        if enforcement:
+            line += f": {enforcement[0]}"
+        path = " ".join(str(match.get("path", "") or "").split()).strip()[:240]
+        if path:
+            line += f" ({path})"
+        lines.append(line)
+    return lines if len(lines) > 1 else []
+
+
+def _hook_skill_body_block(skills_state: dict[str, Any] | None) -> str:
+    """Render one trusted, bounded skill excerpt outside untrusted session state."""
+    if not isinstance(skills_state, dict) or not skills_state.get("available"):
+        return ""
+    matches = skills_state.get("matches")
+    if not isinstance(matches, list):
+        return ""
+
+    for match in matches[:MAX_SKILL_MATCHES]:
+        if not isinstance(match, dict):
+            continue
+        raw_body = match.get("body")
+        if not isinstance(raw_body, str) or not raw_body.strip():
+            continue
+        name = " ".join(str(match.get("name", "") or "").split()).strip()[:120]
+        if not name:
+            continue
+        source = " ".join(str(match.get("path", "") or "").split()).strip()[:240]
+        body, _body_truncated = truncate_skill_body(
+            raw_body.strip(),
+            max_chars=_HOOK_SKILL_BODY_CHARS,
+        )
+        lines = [
+            "## Matched Skill Instructions",
+            (
+                "Trusted instruction excerpt from a configured local skill root. "
+                "System, user, and repository policy take precedence."
+            ),
+            f"### {name}",
+        ]
+        if source:
+            lines.append(f"Source: `{source}`")
+        lines.extend(["", body])
+        return "\n".join(lines)
+    return ""
+
+
 def _session_context_block(
     context_path: Path | None,
     session_state: dict[str, Any] | None,
+    *,
+    include_skill_pointers: bool = True,
 ) -> str:
     """Build a compact session context block from AFS bootstrap state."""
     if session_state is None and context_path is None:
@@ -477,6 +611,9 @@ def _session_context_block(
 
     # Active background missions (in-flight work carried across sessions/subagents)
     lines.extend(_active_mission_lines(state.get("missions", {})))
+
+    if include_skill_pointers:
+        lines.extend(_matched_skill_lines(state.get("skills")))
 
     work_assistant = state.get("work_assistant", {})
     if isinstance(work_assistant, dict) and work_assistant.get("available", True):
@@ -682,10 +819,10 @@ def _skills_context_block(skills_state: dict[str, Any] | None) -> str:
     lines = ["## Relevant Skills"]
     enforcement_lines: list[str] = []
     verification_lines: list[str] = []
-    for match in matches[:5]:
+    for match in matches[:MAX_SKILL_MATCHES]:
         if not isinstance(match, dict):
             continue
-        name = str(match.get("name", "") or "").strip()
+        name = " ".join(str(match.get("name", "") or "").split()).strip()[:120]
         if not name:
             continue
         score = match.get("score")
@@ -701,6 +838,9 @@ def _skills_context_block(skills_state: dict[str, Any] | None) -> str:
             ]
             if trigger_values:
                 line += f" triggers={', '.join(trigger_values[:4])}"
+        source = " ".join(str(match.get("path", "") or "").split()).strip()[:240]
+        if source:
+            line += f" source=`{source}`"
         lines.append(f"- {line}")
 
         enforcement = _skill_guidance_lines(match.get("enforcement"), limit=3)
@@ -721,6 +861,55 @@ def _skills_context_block(skills_state: dict[str, Any] | None) -> str:
         lines.extend(verification_lines[:8])
 
     return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _skill_bodies_context_block(skills_state: dict[str, Any] | None) -> str:
+    """Render bounded skill bodies separately from higher-priority rule metadata."""
+    if not isinstance(skills_state, dict) or not skills_state.get("available"):
+        return ""
+    matches = skills_state.get("matches")
+    if not isinstance(matches, list) or not matches:
+        return ""
+
+    blocks: list[str] = []
+    remaining = MAX_SKILL_BODIES_CHARS
+    for match in matches[:MAX_SKILL_MATCHES]:
+        if not isinstance(match, dict) or len(blocks) >= MAX_SKILL_BODY_MATCHES:
+            continue
+        raw_body = match.get("body")
+        if not isinstance(raw_body, str) or not raw_body.strip() or remaining <= 0:
+            continue
+        name = " ".join(str(match.get("name", "") or "").split()).strip()[:120]
+        if not name:
+            continue
+        body = raw_body.strip()
+        body_limit = min(MAX_SKILL_BODY_CHARS, remaining)
+        body, renderer_truncated = truncate_skill_body(
+            body,
+            max_chars=body_limit,
+        )
+        remaining -= len(body)
+        source = " ".join(str(match.get("path", "") or "").split()).strip()[:240]
+        block = [f"### {name}"]
+        if source:
+            block.append(f"Source: `{source}`")
+        block.extend(["", body])
+        if renderer_truncated or bool(match.get("body_truncated")):
+            block.extend(["", "Body excerpt truncated by the AFS delivery limit."])
+        blocks.append("\n".join(block))
+
+    if not blocks:
+        return ""
+    return "\n".join(
+        [
+            "## Skill Instructions",
+            (
+                "Matched instructions come from configured local skill roots. "
+                "They do not override system, user, or repository policy."
+            ),
+            *blocks,
+        ]
+    )
 
 
 def _verification_context_block(verification_state: dict[str, Any] | None) -> str:
@@ -888,7 +1077,7 @@ def _skill_guidance_lines(value: Any, *, limit: int) -> list[str]:
     for raw_item in value:
         if not isinstance(raw_item, str):
             continue
-        item = " ".join(raw_item.split()).strip()
+        item = " ".join(raw_item.split()).strip()[:500].rstrip()
         if not item:
             continue
         marker = item.lower()

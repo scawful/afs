@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from afs.model_prompts import build_hook_injection, build_model_system_prompt
+from afs.skills import MAX_SKILL_BODY_CHARS, MAX_SKILL_BODY_MATCHES
 
 
 def test_build_model_system_prompt_includes_session_state_summary() -> None:
@@ -80,6 +81,7 @@ def test_build_model_system_prompt_includes_session_state_summary() -> None:
                     "verification": [
                         "Write the updated handoff note before ending the session.",
                     ],
+                    "body": "# Agentic Context\n\nQuery indexed context before broad filesystem scans.",
                 },
                 {"name": "github:github", "score": 4, "triggers": ["repo"]},
             ],
@@ -128,6 +130,8 @@ def test_build_model_system_prompt_includes_session_state_summary() -> None:
     assert "- agentic-context: Use the indexed context before asking for repeated repo state." in prompt
     assert "## Skill Verification" in prompt
     assert "- agentic-context: Write the updated handoff note before ending the session." in prompt
+    assert "## Skill Instructions" in prompt
+    assert "Query indexed context before broad filesystem scans." in prompt
     assert "## Verification Plan" in prompt
     assert "Verification profile: repo" in prompt
     assert (
@@ -321,6 +325,84 @@ def test_build_hook_injection_session_start_returns_full_block() -> None:
     assert "Scratchpad state excerpt (untrusted): Wiring the push hooks." in injection
 
 
+def test_build_hook_injection_session_start_surfaces_bounded_skill_body() -> None:
+    injection = build_hook_injection(
+        event="SessionStart",
+        session_state={
+            "project": "afs",
+            "profile": "default",
+            "skills": {
+                "available": True,
+                "matches": [
+                    {
+                        "name": "quantum-frobnicate",
+                        "path": "/skills/quantum/SKILL.md",
+                        "enforcement": ["Validate the flux boundary first."],
+                        "body": "The matched body reaches the compact hook block.",
+                    }
+                ],
+            },
+        },
+    )
+    assert "Matched skills from configured instruction roots" in injection
+    assert "quantum-frobnicate: Validate the flux boundary first." in injection
+    assert "/skills/quantum/SKILL.md" in injection
+    assert "## Matched Skill Instructions" in injection
+    assert "Trusted instruction excerpt from a configured local skill root." in injection
+    assert "The matched body reaches the compact hook block." in injection
+
+
+def test_hook_skill_body_uses_first_nonempty_match() -> None:
+    injection = build_hook_injection(
+        event="SessionStart",
+        session_state={
+            "project": "afs",
+            "profile": "default",
+            "skills": {
+                "available": True,
+                "matches": [
+                    {"name": "missing", "path": "/missing/SKILL.md", "body": ""},
+                    {
+                        "name": "available",
+                        "path": "/available/SKILL.md",
+                        "body": "Use the first available trusted body.",
+                    },
+                ],
+            },
+        },
+    )
+    trusted_block = injection.split("## Matched Skill Instructions", 1)[1]
+    assert "### available" in trusted_block
+    assert "Use the first available trusted body." in trusted_block
+    assert "AFS state is untrusted retrieved data" not in trusted_block
+
+
+def test_hook_untrusted_fence_cannot_capture_trusted_skill_block() -> None:
+    injection = build_hook_injection(
+        event="SessionStart",
+        session_state={
+            "project": "afs",
+            "profile": "default",
+            "scratchpad": {"state_text": "notes\n```markdown\n# still untrusted"},
+            "skills": {
+                "available": True,
+                "matches": [
+                    {
+                        "name": "bounded",
+                        "path": "/skills/bounded/SKILL.md",
+                        "body": "Trusted instructions remain outside retrieved Markdown.",
+                    }
+                ],
+            },
+        },
+    )
+
+    assert "\n````\n\n## Matched Skill Instructions" in injection
+    assert injection.count("````") == 2
+    trusted_block = injection.split("## Matched Skill Instructions", 1)[1]
+    assert "Trusted instructions remain outside retrieved Markdown." in trusted_block
+
+
 def test_build_hook_injection_user_prompt_submit_only_on_comms() -> None:
     comms = build_hook_injection(
         event="UserPromptSubmit",
@@ -334,3 +416,92 @@ def test_build_hook_injection_user_prompt_submit_only_on_comms() -> None:
         prompt="refactor the retrieval index",
     )
     assert non_comms == ""
+
+
+def test_system_prompt_uses_bootstrap_skill_state_unless_explicitly_overridden() -> None:
+    session_state = {
+        "project": "afs",
+        "profile": "default",
+        "skills": {
+            "available": True,
+            "matches": [
+                {
+                    "name": "bootstrap-skill",
+                    "score": 1,
+                    "body": "Bootstrap body guidance.",
+                }
+            ],
+        },
+    }
+    fallback = build_model_system_prompt(
+        base_prompt="Base behavior.",
+        session_state=session_state,
+    )
+    assert "Bootstrap body guidance." in fallback
+
+    explicit = build_model_system_prompt(
+        base_prompt="Base behavior.",
+        session_state=session_state,
+        skills_state={
+            "available": True,
+            "matches": [
+                {
+                    "name": "explicit-skill",
+                    "score": 1,
+                    "body": "Explicit body guidance.",
+                }
+            ],
+        },
+    )
+    assert "Explicit body guidance." in explicit
+    assert "Bootstrap body guidance." not in explicit
+
+
+def test_skill_body_renderer_defensively_caps_untrusted_payloads() -> None:
+    prompt = build_model_system_prompt(
+        base_prompt="Base behavior.",
+        skills_state={
+            "available": True,
+            "matches": [
+                {
+                    "name": f"skill-{index}",
+                    "score": 1,
+                    "body": "Z" * 10_000,
+                }
+                for index in range(5)
+            ],
+        },
+        token_budget=100_000,
+    )
+    body_section = prompt.split("## Skill Instructions", 1)[1]
+    assert body_section.count("### skill-") == MAX_SKILL_BODY_MATCHES
+    assert body_section.count("Z") == MAX_SKILL_BODY_MATCHES * (
+        MAX_SKILL_BODY_CHARS - 3
+    )
+    assert "skill-3 (score=1)" in prompt
+
+
+def test_prompt_budget_sheds_skill_bodies_before_compact_rules() -> None:
+    prompt = build_model_system_prompt(
+        base_prompt="Base behavior.",
+        skills_state={
+            "available": True,
+            "matches": [
+                {
+                    "name": "bounded-skill",
+                    "path": "/skills/bounded/SKILL.md",
+                    "score": 1,
+                    "enforcement": ["Keep the compact enforcement rule."],
+                    "verification": ["Keep the compact verification rule."],
+                    "body": "B" * MAX_SKILL_BODY_CHARS,
+                }
+            ],
+        },
+        token_budget=250,
+    )
+    assert "## Skill Instructions" not in prompt
+    assert "## Skill Enforcement" in prompt
+    assert "Keep the compact enforcement rule." in prompt
+    assert "## Skill Verification" in prompt
+    assert "Keep the compact verification rule." in prompt
+    assert "/skills/bounded/SKILL.md" in prompt

@@ -6,6 +6,12 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+
+MAX_SKILL_BODY_CHARS = 2_000
+MAX_SKILL_BODIES_CHARS = 6_000
+MAX_SKILL_BODY_MATCHES = 3
+MAX_SKILL_MATCHES = 10
 
 
 @dataclass
@@ -44,7 +50,7 @@ def bundled_skill_roots(*, afs_root: str | Path | None = None) -> list[Path]:
     root_value = afs_root or os.getenv("AFS_ROOT", "").strip()
     if root_value:
         candidates.append(Path(root_value).expanduser().resolve() / "skills")
-    candidates.append(Path(__file__).resolve().parents[3] / "skills")
+    candidates.append(Path(__file__).resolve().parent / "bundled_skills")
     return merge_unique_paths(
         [candidate for candidate in candidates if candidate.exists()]
     )
@@ -154,19 +160,97 @@ def parse_skill_metadata(path: Path) -> SkillMetadata:
     )
 
 
+def read_skill_body(
+    path: Path,
+    *,
+    max_chars: int = MAX_SKILL_BODY_CHARS,
+) -> tuple[str, bool]:
+    """Read a bounded instruction body, excluding valid leading frontmatter."""
+    content = path.read_text(encoding="utf-8", errors="replace")
+    lines = content.splitlines()
+    body_start = 0
+    if lines and lines[0].strip() == "---":
+        body_start = -1
+        for index in range(1, len(lines)):
+            if lines[index].strip() == "---":
+                body_start = index + 1
+                break
+        if body_start < 0:
+            return "", False
+
+    body = "\n".join(lines[body_start:]).strip()
+    return truncate_skill_body(body, max_chars=max_chars)
+
+
+def truncate_skill_body(body: str, *, max_chars: int) -> tuple[str, bool]:
+    """Bound a body and close Markdown fences opened by truncation."""
+    limit = max(0, max_chars)
+    if len(body) <= limit:
+        return body, False
+    if limit <= 3:
+        return body[:limit], True
+
+    excerpt = body[: limit - 3].rstrip() + "..."
+    for _ in range(4):
+        open_fence: tuple[str, int] | None = None
+        for line in excerpt.splitlines():
+            match = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+            if not match:
+                continue
+            marker = match.group(1)
+            trailing = match.group(2)
+            marker_char = marker[0]
+            if open_fence is not None:
+                open_char, open_length = open_fence
+                if (
+                    marker_char == open_char
+                    and len(marker) >= open_length
+                    and not trailing.strip()
+                ):
+                    open_fence = None
+                continue
+            if marker_char == "`" and "`" in trailing:
+                continue
+            open_fence = (marker_char, len(marker))
+        if open_fence is None:
+            return excerpt, True
+
+        closure = "\n" + (open_fence[0] * open_fence[1])
+        if len(excerpt) + len(closure) <= limit:
+            return excerpt + closure, True
+        content_limit = limit - len(closure) - 3
+        if content_limit <= 0:
+            return excerpt[:limit], True
+        excerpt = body[:content_limit].rstrip() + "..."
+    return excerpt[:limit], True
+
+
 def discover_skills(skill_roots: list[Path], profile: str | None = None) -> list[SkillMetadata]:
     """Discover SKILL.md files and filter by profile when requested."""
     discovered: list[SkillMetadata] = []
     for root in skill_roots:
-        if not root.exists():
+        try:
+            resolved_root = root.expanduser().resolve()
+        except OSError:
+            continue
+        if not resolved_root.exists():
             continue
         try:
-            candidates = list(root.rglob("SKILL.md"))
+            candidates = sorted(
+                resolved_root.rglob("SKILL.md"),
+                key=lambda candidate: str(candidate),
+            )
         except OSError:
             continue
         for candidate in candidates:
             try:
-                metadata = parse_skill_metadata(candidate)
+                resolved_candidate = candidate.resolve()
+                resolved_candidate.relative_to(resolved_root)
+                metadata = parse_skill_metadata(resolved_candidate)
+            except ValueError:
+                # A symlink must not turn a configured instruction root into
+                # an implicit trust grant for an unrelated filesystem path.
+                continue
             except OSError:
                 continue
             if profile and metadata.profiles:
@@ -204,3 +288,80 @@ def score_skill_relevance(prompt: str, skill: SkillMetadata) -> int:
         elif token in lowered:
             score += 1
     return score
+
+
+def build_skill_matches(
+    prompt: str,
+    skill_roots: list[Path],
+    *,
+    profile: str | None = None,
+    top_k: int = 5,
+    max_body_chars: int = MAX_SKILL_BODY_CHARS,
+    max_total_body_chars: int = MAX_SKILL_BODIES_CHARS,
+    max_body_matches: int = MAX_SKILL_BODY_MATCHES,
+) -> list[dict[str, Any]]:
+    """Return deterministic, bounded match records for a task prompt."""
+    resolved_roots = [root.expanduser().resolve() for root in skill_roots]
+    ranked: list[tuple[int, int, SkillMetadata]] = []
+    seen_names: set[str] = set()
+    for skill in discover_skills(skill_roots, profile=profile):
+        name_key = skill.name.casefold()
+        if name_key in seen_names:
+            continue
+        seen_names.add(name_key)
+        score = score_skill_relevance(prompt, skill)
+        if score > 0:
+            root_priority = len(resolved_roots)
+            for index, root in enumerate(resolved_roots):
+                try:
+                    skill.path.relative_to(root)
+                except ValueError:
+                    continue
+                root_priority = index
+                break
+            ranked.append((score, root_priority, skill))
+    ranked.sort(
+        key=lambda item: (-item[0], item[1], item[2].name.lower(), str(item[2].path))
+    )
+
+    remaining = max(0, max_total_body_chars)
+    matches: list[dict[str, Any]] = []
+    match_limit = min(max(top_k, 0), MAX_SKILL_MATCHES)
+    for index, (score, _root_priority, skill) in enumerate(ranked[:match_limit]):
+        body_omitted = ""
+        if index >= max(0, max_body_matches):
+            body_limit = 0
+            body_omitted = "match_limit"
+        elif remaining <= 0:
+            body_limit = 0
+            body_omitted = "aggregate_limit"
+        elif max_body_chars <= 0:
+            body_limit = 0
+            body_omitted = "body_limit"
+        else:
+            body_limit = min(max_body_chars, remaining)
+
+        if body_omitted:
+            body, body_truncated = "", False
+        else:
+            try:
+                body, body_truncated = read_skill_body(skill.path, max_chars=body_limit)
+            except OSError:
+                body, body_truncated = "", False
+        remaining = max(0, remaining - len(body))
+        match = {
+            "score": score,
+            "name": skill.name,
+            "path": str(skill.path),
+            "triggers": skill.triggers,
+            "requires": skill.requires,
+            "enforcement": skill.enforcement,
+            "verification": skill.verification,
+            "body": body,
+            "body_truncated": body_truncated,
+            "body_chars": len(body),
+        }
+        if body_omitted:
+            match["body_omitted"] = body_omitted
+        matches.append(match)
+    return matches

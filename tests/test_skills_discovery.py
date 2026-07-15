@@ -80,10 +80,8 @@ def test_score_skill_relevance_trigger_match() -> None:
 
 
 def test_discover_bundled_skills() -> None:
-    """Verify that the skills/ directory in the AFS repo is discoverable."""
-    skills_dir = Path(__file__).parent.parent / "skills"
-    if not skills_dir.exists():
-        return  # Skip if running from installed package
+    """Verify that packaged AFS skills are discoverable."""
+    skills_dir = Path(__file__).parent.parent / "src" / "afs" / "bundled_skills"
     skills = discover_skills([skills_dir])
     names = {s.name for s in skills}
     assert "context-setup" in names
@@ -99,9 +97,7 @@ def test_discover_bundled_skills() -> None:
 
 
 def test_quality_skills_match_engineering_prompts() -> None:
-    skills_dir = Path(__file__).parent.parent / "skills"
-    if not skills_dir.exists():
-        return
+    skills_dir = Path(__file__).parent.parent / "src" / "afs" / "bundled_skills"
 
     skills = {skill.name: skill for skill in discover_skills([skills_dir])}
     prompt = (
