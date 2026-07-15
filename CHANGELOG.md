@@ -25,6 +25,10 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 - Twelve bundled workflow skills covering sessions, missions, search, health,
   events, memory, approvals, schemas, verification, authoring, and CLI routing.
 - Validated per-tool and `[mcp_tools]` catalog controls for extension discovery.
+- A conservative default supervisor set for empty profiles: daily context
+  audit, knowledge/memory index refresh, weekly skill mining, and a daily
+  scratchpad briefing. Defaults are configurable and never augment a custom
+  agent list implicitly.
 
 ### Changed
 
@@ -35,6 +39,9 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 - Deprecated verification string commands; they are blocked by default, require
   an explicit legacy-shell opt-in during migration, and will be removed in
   `0.4.0`.
+- Supervisor child processes now inherit an explicit `AFS_CONFIG_PATH`, watch
+  signatures follow symlink-mounted sources, and missing completion records
+  fail closed instead of looking like successful scheduled runs.
 
 ## [0.2.0] - 2026-07-09
 

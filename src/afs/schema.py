@@ -405,6 +405,32 @@ class AgentConfig:
 
 
 @dataclass
+class AgentsConfig:
+    """Supervisor-facing agent runtime settings."""
+
+    # When true, an otherwise empty profile gets the shipped default
+    # supervised set (see afs.agent_defaults). Existing custom agent lists
+    # are never augmented implicitly. AFS_DEFAULT_AGENTS overrides this flag.
+    default_set: bool = True
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AgentsConfig:
+        value = data.get("default_set", True)
+        if isinstance(value, bool):
+            return cls(default_set=value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "on", "true", "yes"}:
+                return cls(default_set=True)
+            if normalized in {"0", "off", "false", "no"}:
+                return cls(default_set=False)
+        raise ValueError("agents.default_set must be a boolean")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"default_set": self.default_set}
+
+
+@dataclass
 class OrchestratorConfig:
     enabled: bool = False
     max_agents: int = 5
@@ -1182,6 +1208,7 @@ class AFSConfig:
     hooks: HooksConfig = field(default_factory=HooksConfig)
     directories: list[DirectoryConfig] = field(default_factory=default_directory_configs)
     cognitive: CognitiveConfig = field(default_factory=CognitiveConfig)
+    agents: AgentsConfig = field(default_factory=AgentsConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     services: ServicesConfig = field(default_factory=ServicesConfig)
     history: HistoryConfig = field(default_factory=HistoryConfig)
@@ -1208,6 +1235,7 @@ class AFSConfig:
         hooks = HooksConfig.from_dict(data.get("hooks", {}))
         directories = _parse_directory_config(data)
         cognitive = CognitiveConfig.from_dict(data.get("cognitive", {}))
+        agents = AgentsConfig.from_dict(data.get("agents", {}))
         orchestrator = OrchestratorConfig.from_dict(data.get("orchestrator", {}))
         services = ServicesConfig.from_dict(data.get("services", {}))
         history = HistoryConfig.from_dict(data.get("history", {}))
@@ -1228,6 +1256,7 @@ class AFSConfig:
             hooks=hooks,
             directories=directories,
             cognitive=cognitive,
+            agents=agents,
             orchestrator=orchestrator,
             services=services,
             history=history,

@@ -868,6 +868,14 @@ If you have profile-driven background agents with `auto_start`, `schedule`, or
 ./scripts/afs services start history-memory
 ```
 
+Profiles with an empty `agent_configs` list receive a conservative default set:
+a network-free daily context audit, configured knowledge/memory index refresh,
+weekly skill mining, and a daily scratchpad briefing. Existing custom lists are
+not augmented. Disable the set with `[agents] default_set = false` or
+`AFS_DEFAULT_AGENTS=off`. `daily` is an elapsed interval from the first run,
+not a wall-clock morning schedule, and starting the supervisor remains an
+explicit operator action.
+
 The supervisor stores state under
 `.context/scratchpad/afs_agents/supervisor/` by default, so repo- or
 context-scoped configs do not get shadowed by a single global PID cache.

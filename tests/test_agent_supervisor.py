@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 import signal
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from afs.agent_registry import AgentRegistry
-from afs.agents.supervisor import AgentSupervisor
+from afs.agents.base import now_iso
+from afs.agents.supervisor import AgentSupervisor, RunningAgent, _watch_signature
 from afs.event_log import read_agent_events
 from afs.schema import (
     AFSConfig,
@@ -44,6 +45,35 @@ def _remap_directories(**overrides: str) -> list[DirectoryConfig]:
             )
         )
     return directories
+
+
+def test_agent_timestamps_are_timezone_aware_utc() -> None:
+    timestamp = datetime.fromisoformat(now_iso())
+
+    assert timestamp.tzinfo is not None
+    assert timestamp.utcoffset() == timedelta(0)
+
+
+def test_registry_completion_accepts_builtin_agent_timestamp(tmp_path: Path) -> None:
+    context_root = tmp_path / "context"
+    supervisor = AgentSupervisor(
+        state_dir=tmp_path / "state",
+        config=AFSConfig(general=GeneralConfig(context_root=context_root)),
+    )
+    started_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    agent = RunningAgent(name="timestamped", started_at=started_at)
+    finished_at = now_iso()
+    AgentRegistry().mark_result(
+        name=agent.name,
+        status="ok",
+        started_at=started_at,
+        finished_at=finished_at,
+    )
+
+    completion = supervisor._registry_completion(agent)
+
+    assert completion is not None
+    assert completion["finished_at"] == finished_at
 
 
 def test_supervisor_list_empty(tmp_path: Path) -> None:
@@ -97,6 +127,27 @@ def test_supervisor_spawn_and_status(tmp_path: Path, monkeypatch) -> None:
     assert entries[0]["status"] == "running"
     assert entries[0]["task"].startswith("Sync workspace paths")
     assert entries[0]["metadata"]["session_id"] == "sess-123"
+
+
+def test_supervisor_injects_explicit_config_path_into_child_environment(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AFS_CONFIG_PATH", raising=False)
+    config_path = tmp_path / "explicit-afs.toml"
+    config_path.write_text("[extensions]\nauto_discover = false\n", encoding="utf-8")
+    supervisor = AgentSupervisor(
+        state_dir=tmp_path / "state",
+        config=AFSConfig(general=GeneralConfig(context_root=tmp_path / "context")),
+        config_path=config_path,
+    )
+    mock_proc = type("MockProc", (), {"pid": 99999})()
+
+    with patch("subprocess.Popen", return_value=mock_proc) as popen:
+        supervisor.spawn("configured-agent", "pkg.agent")
+
+    child_env = popen.call_args.kwargs["env"]
+    assert child_env["AFS_CONFIG_PATH"] == str(config_path.resolve())
 
 
 def test_supervisor_logs_lifecycle_events(tmp_path: Path, monkeypatch) -> None:
@@ -171,6 +222,32 @@ def test_supervisor_list_detects_dead_pid(tmp_path: Path) -> None:
     with patch.object(supervisor, "_pid_alive", return_value=False):
         running = supervisor.list_running()
     assert len(running) == 0
+
+
+def test_scheduled_process_without_completion_record_is_failed(tmp_path: Path) -> None:
+    supervisor = AgentSupervisor(
+        state_dir=tmp_path / "state",
+        config=AFSConfig(general=GeneralConfig(context_root=tmp_path / "context")),
+    )
+    scheduled = RunningAgent(
+        name="weekly-agent",
+        pid=12345,
+        state="running",
+        module="pkg.weekly",
+        launch_reason="schedule:weekly",
+    )
+
+    with (
+        patch.object(supervisor, "_pid_alive", return_value=False),
+        patch.object(supervisor, "_registry_completion", return_value=None),
+        patch.object(supervisor, "_attempt_restart", return_value=None),
+        patch.object(supervisor, "_get_agent_config", return_value=None),
+    ):
+        refreshed = supervisor._refresh_state(scheduled)
+
+    assert refreshed.state == "failed"
+    assert refreshed.pid is None
+    assert "completion record" in refreshed.last_error
 
 
 def test_supervisor_uses_registry_completion_for_clean_exit(
@@ -291,6 +368,25 @@ def test_supervisor_watch_path_matching(tmp_path: Path) -> None:
     ]
     matched = supervisor.evaluate_watch_paths([watch_path / "changed.txt"], configs)
     assert [config.name for config in matched] == ["watcher"]
+
+
+def test_watch_signature_detects_edit_through_directory_symlink(tmp_path: Path) -> None:
+    watch_root = tmp_path / "knowledge"
+    target = tmp_path / "mounted-notes"
+    watch_root.mkdir()
+    target.mkdir()
+    note = target / "note.md"
+    note.write_text("before", encoding="utf-8")
+    try:
+        (watch_root / "notes").symlink_to(target, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    before = _watch_signature(watch_root)
+    note.write_text("after with a different size", encoding="utf-8")
+    after = _watch_signature(watch_root)
+
+    assert after != before
 
 
 def test_supervisor_audit_reports_failed_and_manual_stop(tmp_path: Path) -> None:

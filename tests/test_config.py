@@ -49,6 +49,18 @@ def test_load_config_model_uses_explicit_path(tmp_path) -> None:
     assert model.general.context_root == context_root.resolve()
 
 
+def test_write_config_round_trips_default_agents_opt_out(tmp_path: Path) -> None:
+    config_path = tmp_path / "afs.toml"
+    config = AFSConfig.from_dict({"agents": {"default_set": False}})
+
+    write_config(config_path, config)
+
+    text = config_path.read_text(encoding="utf-8")
+    roundtrip = load_config_model(config_path=config_path, merge_user=False)
+    assert "[agents]" in text
+    assert roundtrip.agents.default_set is False
+
+
 def test_load_runtime_config_model_uses_nearest_repo_config(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("AFS_CONFIG_PATH", raising=False)
     repo_root = tmp_path / "repo"

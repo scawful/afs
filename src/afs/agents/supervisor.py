@@ -98,15 +98,38 @@ def _watch_signature(path: Path) -> tuple[bool, int, int, int]:
     newest_mtime = stat.st_mtime_ns
     total_size = 0
     file_count = 0
-    for child in path.rglob("*"):
+    pending = [path]
+    visited_directories: set[tuple[int, int]] = set()
+
+    # AFS mounts are commonly directory symlinks. Path.rglob() does not walk
+    # those targets, so use an inode-guarded traversal that follows them while
+    # avoiding cycles and duplicate targets.
+    while pending:
+        directory = pending.pop()
         try:
-            child_stat = child.stat()
+            directory_stat = directory.stat()
         except OSError:
             continue
-        newest_mtime = max(newest_mtime, child_stat.st_mtime_ns)
-        if child.is_file():
-            total_size += child_stat.st_size
-            file_count += 1
+        identity = (directory_stat.st_dev, directory_stat.st_ino)
+        if identity in visited_directories:
+            continue
+        visited_directories.add(identity)
+        newest_mtime = max(newest_mtime, directory_stat.st_mtime_ns)
+        try:
+            for child in directory.iterdir():
+                try:
+                    child_stat = child.stat()
+                    is_directory = child.is_dir()
+                except OSError:
+                    continue
+                newest_mtime = max(newest_mtime, child_stat.st_mtime_ns)
+                if is_directory:
+                    pending.append(child)
+                else:
+                    total_size += child_stat.st_size
+                    file_count += 1
+        except OSError:
+            continue
     return (True, newest_mtime, total_size, file_count)
 
 
@@ -159,8 +182,12 @@ class AgentSupervisor:
         state_dir: Path | None = None,
         *,
         config: AFSConfig | None = None,
+        config_path: Path | None = None,
     ) -> None:
         self._config = config
+        self._config_path = (
+            config_path.expanduser().resolve() if config_path is not None else None
+        )
         self._state_dir = self._resolve_state_dir(state_dir, config)
         self._state_dir.mkdir(parents=True, exist_ok=True)
         # Per-agent failure tracking for restart-with-backoff
@@ -309,18 +336,6 @@ class AgentSupervisor:
             return True
         except (OSError, ProcessLookupError):
             return False
-
-    def _is_one_shot_agent(self, name: str) -> bool:
-        """Check if an agent is a one-shot scheduled agent (exits after running)."""
-        try:
-            config = self._config or load_config_model(merge_user=True)
-            profile = resolve_active_profile(config)
-            for ac in profile.agent_configs:
-                if ac.name == name:
-                    return not ac.auto_start and bool(ac.schedule)
-        except Exception:
-            pass
-        return False
 
     def _get_agent_config(self, name: str) -> AgentConfig | None:
         """Look up the AgentConfig for *name* from the active profile."""
@@ -516,15 +531,14 @@ class AgentSupervisor:
                         )
                 return agent
 
-            # No completion record found — check if this was a one-shot
-            # scheduled agent (not auto_start).  One-shot agents exit after
-            # doing their work; treat that as "stopped", not "failed".
-            is_one_shot = self._is_one_shot_agent(agent.name)
-            agent.state = "stopped" if is_one_shot else "failed"
+            # A clean one-shot must emit an AgentResult completion record.
+            # Without one, fail closed: the process may have crashed before
+            # reporting and must not be postponed until its next schedule.
+            agent.state = "failed"
             agent.pid = None
             agent.last_seen_at = now_iso()
-            if not is_one_shot and not agent.last_error:
-                agent.last_error = "process exited"
+            if not agent.last_error:
+                agent.last_error = "process exited without a completion record"
             self._write_state(agent)
             self._update_registry(agent)
             if previous_state == "running":
@@ -567,18 +581,6 @@ class AgentSupervisor:
                             "error": agent.last_error,
                         },
                     )
-
-        # Recovery: if a one-shot agent is stuck as "failed" with no pid
-        # (e.g. from a previous run before the one-shot fix), correct it.
-        elif (
-            agent.pid is None
-            and agent.state == "failed"
-            and self._is_one_shot_agent(agent.name)
-        ):
-            agent.state = "stopped"
-            agent.last_error = ""
-            self._write_state(agent)
-            self._update_registry(agent)
 
         return agent
 
@@ -702,6 +704,8 @@ class AgentSupervisor:
         # Always build env so we can inject context snapshot
         env = dict(os.environ)
         env["AFS_AGENT_NAME"] = name
+        if self._config_path is not None:
+            env["AFS_CONFIG_PATH"] = str(self._config_path)
 
         # Inject context snapshot so the agent starts with index/memory/event awareness
         try:
@@ -1265,7 +1269,10 @@ def _run_once(
         merge_user=True,
     )
     profile = resolve_active_profile(config)
-    supervisor = AgentSupervisor(config=config)
+    supervisor = AgentSupervisor(
+        config=config,
+        config_path=Path(args.config) if args.config else None,
+    )
     current_watch_state = _snapshot_watch_paths(profile.agent_configs)
     changed_paths = (
         _diff_watch_paths(previous_watch_state, current_watch_state)

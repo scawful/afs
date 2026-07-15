@@ -21,6 +21,14 @@ enforcement:
 
 Manage background agent processes via the AFS supervisor.
 
+## Default Set
+
+An empty profile agent list gets `context-warm` (network-free daily audit),
+`index-rebuild` (knowledge/memory changes), `skills-mine` (weekly), and
+`morning-briefing` (daily interval). Custom lists are unchanged. Disable with
+`[agents] default_set = false` or `AFS_DEFAULT_AGENTS=off`. Starting the
+supervisor is always an explicit operator action.
+
 ## Commands
 
 | Command | Description |
@@ -41,19 +49,16 @@ at `awaiting_review` until the user approves or rejects it.
 
 | Command | Description |
 |---------|-------------|
-| `afs agent-jobs list/show/status/inbox/review` | Inspect queued and reviewable markdown jobs |
-| `afs agent-jobs create/seed/claim/move/archive` | Change durable job state (user-directed) |
-| `afs agent-jobs work --dry-run` | Preview runnable work before claiming anything |
-| `afs agent-jobs work` | Claim jobs and invoke a local worker (user-directed) |
-| `afs agent-jobs promote` | Promote a review packet to scratchpad/handoffs (user-gated) |
-| `afs agent-runs start/list/show/event/finish` | Record and inspect agent runs |
-| `afs agent-hooks show/status` | Preview hooks or inspect installation state |
-| `afs agent-hooks install-shell/install-worker` | Install persistent hooks only with `--apply`; `--load` loads the LaunchAgent |
-| `afs agent-manifest show/validate/export/sync` | Inspect or export the harness manifest; `sync` applies only with `--apply` |
+| `afs agent-jobs list/show/status/inbox/review` | Inspect durable jobs |
+| `afs agent-jobs create/seed/claim/move/archive` | Change job state (user-directed) |
+| `afs agent-jobs work [--dry-run]` | Preview or invoke a worker |
+| `afs agent-jobs promote` | Promote a review packet (user-gated) |
+| `afs agent-runs start/list/show/event/finish` | Record agent runs |
+| `afs agent-hooks show/status/install-*` | Inspect or explicitly install hooks |
+| `afs agent-manifest show/validate/export/sync` | Manage the harness manifest |
 
 ## Tips
 
-- Agent state dir defaults to `<context_root>/scratchpad/afs_agents/supervisor/`
-- Per-agent sandbox: set `allowed_mounts` and `allowed_tools` in config
-- Treat `--allow-destructive` as an exceptional user-authorized worker mode,
-  never as a way to bypass a blocked job
+- State defaults to `<context_root>/scratchpad/afs_agents/supervisor/`.
+- Set `allowed_mounts` and `allowed_tools` per agent.
+- `--allow-destructive` requires exceptional user authorization.

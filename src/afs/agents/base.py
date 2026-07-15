@@ -8,7 +8,7 @@ import logging
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -273,7 +273,8 @@ def emit_result(
 
 
 def now_iso() -> str:
-    return datetime.now().isoformat()
+    """Return an unambiguous UTC timestamp for cross-process agent state."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 def emit_progress(

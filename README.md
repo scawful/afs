@@ -279,8 +279,18 @@ See [docs/MCP_SERVER.md](docs/MCP_SERVER.md) for configuration and tool referenc
 | `history-memory` | Consolidate event history into durable memory |
 | `context-audit` | Audit contexts for missing directories |
 | `context-inventory` | Inventory contexts and mount counts |
+| `index-rebuild` | Refresh the knowledge/memory SQLite index after source changes |
+| `skills-mine` | Mine repeated successful traces into reviewable skill candidates |
+| `morning-briefing` | Write a network-free daily digest to the configured scratchpad |
 | `scribe-draft` | Draft responses via configured chat model |
 | `researcher` | Research agent with structured output |
+
+When the active profile has no `agent_configs`, the supervisor supplies a
+conservative four-agent default set. It performs a network-free daily context
+audit, watches the configured knowledge/memory roots, mines skills weekly, and
+writes a daily briefing. Existing custom agent lists are never augmented.
+Disable defaults with `[agents] default_set = false` or
+`AFS_DEFAULT_AGENTS=off`. Starting the supervisor remains explicit.
 
 ## Gemini Integration
 
