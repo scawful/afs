@@ -19,14 +19,14 @@ def test_load_config_merges_workspace_registry(tmp_path, monkeypatch) -> None:
     registry_path = context_root / "workspaces.toml"
     registry_path.write_text(
         "[[workspaces]]\n"
-        f"path = \"{workspace_dir}\"\n"
+        f"path = \"{workspace_dir.as_posix()}\"\n"
         "description = \"Example\"\n",
         encoding="utf-8",
     )
 
     config_path = tmp_path / "afs.toml"
     config_path.write_text(
-        f"[general]\ncontext_root = \"{context_root}\"\n",
+        f"[general]\ncontext_root = \"{context_root.as_posix()}\"\n",
         encoding="utf-8",
     )
 
@@ -41,7 +41,7 @@ def test_load_config_model_uses_explicit_path(tmp_path) -> None:
     context_root = tmp_path / "context"
     config_path = tmp_path / "custom.toml"
     config_path.write_text(
-        f"[general]\ncontext_root = \"{context_root}\"\n",
+        f"[general]\ncontext_root = \"{context_root.as_posix()}\"\n",
         encoding="utf-8",
     )
 
@@ -57,7 +57,7 @@ def test_load_runtime_config_model_uses_nearest_repo_config(tmp_path, monkeypatc
     context_root = repo_root / ".context"
     config_path = repo_root / "afs.toml"
     config_path.write_text(
-        f"[general]\ncontext_root = \"{context_root}\"\n",
+        f"[general]\ncontext_root = \"{context_root.as_posix()}\"\n",
         encoding="utf-8",
     )
 
@@ -76,7 +76,7 @@ def test_load_config_model_parses_profiles_extensions_hooks(tmp_path) -> None:
     config_path.write_text(
         "[extensions]\n"
         "enabled_extensions = [\"workspace_adapter\"]\n"
-        f"extension_dirs = [\"{tmp_path / 'extensions'}\"]\n\n"
+        f"extension_dirs = [\"{(tmp_path / 'extensions').as_posix()}\"]\n\n"
         "[profiles]\n"
         "active_profile = \"work\"\n"
         "auto_apply = true\n\n"
@@ -308,7 +308,7 @@ def test_load_config_model_parses_mcp_allowed_roots(tmp_path) -> None:
     allowed = tmp_path / "workspace-root"
     config_path.write_text(
         "[general]\n"
-        f"mcp_allowed_roots = [\"{allowed}\"]\n",
+        f"mcp_allowed_roots = [\"{allowed.as_posix()}\"]\n",
         encoding="utf-8",
     )
 
@@ -339,7 +339,7 @@ def test_load_config_model_merges_env_mcp_allowed_roots(tmp_path, monkeypatch) -
     env_root = tmp_path / "workspace-root"
     config_path.write_text(
         "[general]\n"
-        f"mcp_allowed_roots = [\"{configured}\"]\n",
+        f"mcp_allowed_roots = [\"{configured.as_posix()}\"]\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("AFS_MCP_ALLOWED_ROOTS", str(env_root))
@@ -356,7 +356,7 @@ def test_load_config_model_parses_memory_consolidation_settings(tmp_path) -> Non
         "enabled = true\n"
         "auto_start = true\n"
         "interval_seconds = 900\n"
-        f"report_output = \"{report_output}\"\n"
+        f"report_output = \"{report_output.as_posix()}\"\n"
         "entries_filename = \"durable.jsonl\"\n"
         "summary_dir_name = \"history_notes\"\n"
         "checkpoint_filename = \"cursor.json\"\n"
@@ -388,7 +388,7 @@ def test_load_config_model_parses_service_context_filters(tmp_path) -> None:
         "[services]\n"
         "enabled = true\n\n"
         "[services.services.context-watch]\n"
-        f"context_filters = [\"{tmp_path / 'lab'}\"]\n",
+        f"context_filters = [\"{(tmp_path / 'lab').as_posix()}\"]\n",
         encoding="utf-8",
     )
 

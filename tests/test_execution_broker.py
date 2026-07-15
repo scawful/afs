@@ -163,6 +163,7 @@ def test_non_utf8_source_environment_fails_closed(tmp_path: Path) -> None:
         ("invalid\x00value", "must not contain NUL bytes"),
         ("x" * (1024 * 1024 + 1), "exceeds 1048576 characters"),
     ],
+    ids=("nul", "oversized"),
 )
 def test_invalid_source_environment_values_fail_closed(
     tmp_path: Path,
