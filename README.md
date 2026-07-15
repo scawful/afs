@@ -341,6 +341,9 @@ session_start = ["echo 'session started'"]
 bodies can enter generated system prompts. Configure only roots whose content
 you trust. AFS delivers at most three bodies, capped at 2,000 characters each
 and 6,000 characters in aggregate; additional matches remain metadata-only.
+Skill files over 64,000 characters, names over 256 characters, or metadata
+lists over 16 items of 256 characters each are rejected during discovery so
+enforcement and verification rules are never silently clipped.
 
 ## Extensions
 

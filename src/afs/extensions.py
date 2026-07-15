@@ -34,6 +34,8 @@ class ExtensionManifest:
     mcp_server_module: str = ""
     mcp_server_factory: str = "register_mcp_server"
     context_sources: list[dict[str, Any]] = field(default_factory=list)
+    # Applies only to tools returned from the [mcp_tools] factory.
+    mcp_tools_catalog: str = "full"
 
     @property
     def import_roots(self) -> list[Path]:
@@ -336,6 +338,7 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
 
     mcp_tools_module = ""
     mcp_tools_factory = "register_mcp_tools"
+    mcp_tools_catalog = "full"
     mcp_tools_raw = raw.get("mcp_tools")
     if isinstance(mcp_tools_raw, dict):
         module_value = mcp_tools_raw.get("module")
@@ -344,6 +347,13 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
         factory_value = mcp_tools_raw.get("factory")
         if isinstance(factory_value, str) and factory_value.strip():
             mcp_tools_factory = factory_value.strip()
+        if "catalog" in mcp_tools_raw:
+            catalog_value = mcp_tools_raw.get("catalog")
+            if not isinstance(catalog_value, str):
+                raise ValueError("[mcp_tools].catalog must be 'full' or 'slim'")
+            mcp_tools_catalog = catalog_value.strip().lower()
+            if mcp_tools_catalog not in {"full", "slim"}:
+                raise ValueError("[mcp_tools].catalog must be 'full' or 'slim'")
     else:
         module_value = raw.get("mcp_tools_module")
         if isinstance(module_value, str):
@@ -383,6 +393,7 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
         mcp_server_module=mcp_server_module,
         mcp_server_factory=mcp_server_factory,
         context_sources=_as_context_source_specs(raw.get("context_sources")),
+        mcp_tools_catalog=mcp_tools_catalog,
     )
 
 

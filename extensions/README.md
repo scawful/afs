@@ -32,6 +32,8 @@ before_context_read = ["scripts/hooks/before_context_read.sh"]
 [mcp_tools]
 module = "workspace_adapter.mcp_tools"
 factory = "register_mcp_tools"
+# Optional extension-wide default for this factory; defaults to "full".
+catalog = "slim"
 ```
 
 ## Config + Env
@@ -63,6 +65,19 @@ Factory contract:
   - `description`
   - `inputSchema` (or `input_schema`)
   - `handler` callable (`handler(arguments)` or `handler(arguments, manager)`)
+  - optional `catalog`: `"slim"` opts into the default `tools/list`; `"full"`
+    keeps the tool full-catalog-only
+
+Catalog behavior is fail-closed:
+
+- `[mcp_tools].catalog` defaults to `"full"` and applies only to tools from the
+  `[mcp_tools]` factory.
+- A per-tool `catalog` overrides that default. This is how one tool opts out of
+  an extension-wide `"slim"` setting.
+- `[mcp_server]` and profile-contributed tools default to `"full"`; they opt in
+  per tool.
+- Only `"full"` and `"slim"` are valid manifest and per-tool values. An invalid
+  value rejects the affected manifest or MCP surface rather than exposing it.
 
 ## Notes
 
