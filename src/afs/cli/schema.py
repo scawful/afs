@@ -14,7 +14,6 @@ from pathlib import Path
 
 from ..response_schemas import (
     build_schema_correction,
-    coerce_response_payload,
     get_response_schema,
     list_response_schema_names,
     validate_structured_response,
@@ -108,9 +107,16 @@ def schema_validate_command(args: argparse.Namespace) -> int:
         except OSError as exc:
             print(f"cannot read skeleton: {exc}", file=sys.stderr)
             return 2
-        skeleton, skeleton_error = coerce_response_payload(skeleton_text)
-        if skeleton_error:
-            print(f"invalid skeleton: {skeleton_error}", file=sys.stderr)
+        # The skeleton is a trust anchor: parse it strictly rather than through
+        # the lenient response coercion (fence extraction, repairs) so that
+        # what is verified is exactly what the human wrote.
+        try:
+            skeleton = json.loads(skeleton_text)
+        except json.JSONDecodeError as exc:
+            print(f"invalid skeleton: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(skeleton, dict):
+            print("invalid skeleton: must be a JSON object", file=sys.stderr)
             return 2
         intent_violations = verify_human_intent_preserved(skeleton, result.parsed)
 

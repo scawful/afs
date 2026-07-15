@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from afs.agents.guardrails import ApprovalGate, ApprovalRequest
+from afs.cli import approvals as cli_approvals
 from afs.cli.approvals import (
     approvals_approve_command,
     approvals_clear_command,
@@ -105,9 +106,10 @@ def test_list_excludes_completed(tmp_path: Path, capsys) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_approve_flow(tmp_path: Path, capsys) -> None:
+def test_approve_flow(tmp_path: Path, capsys, monkeypatch) -> None:
     requests = [_sample_request()]
     approvals_file = _make_gate(tmp_path, requests)
+    monkeypatch.setattr(cli_approvals, "_TTY_READER", lambda prompt: "scout:git_push")
 
     exit_code = approvals_approve_command(
         _ns(approvals_file, agent="scout", action="git_push", because="push is release-gated")
@@ -116,12 +118,43 @@ def test_approve_flow(tmp_path: Path, capsys) -> None:
     out = capsys.readouterr().out
     assert "Approved" in out
 
-    # Verify it's now approved in the file, with the rationale stored
+    # Verify it's now approved in the file, with the rationale and provenance
     gate = ApprovalGate(path=approvals_file)
     assert len(gate.pending_requests()) == 0
     assert gate._pending[0].status == "approved"
-    assert gate._pending[0].reviewed_by == "cli"
+    assert gate._pending[0].reviewed_by  # OS user, never a claimable flag
+    assert gate._pending[0].reviewed_via == "tty"
     assert gate._pending[0].rationale == "push is release-gated"
+    assert gate._pending[0].request_id.startswith("gate_")
+
+
+def test_approve_refused_headless(tmp_path: Path, capsys, monkeypatch) -> None:
+    """An agent without a controlling terminal cannot self-approve."""
+    requests = [_sample_request()]
+    approvals_file = _make_gate(tmp_path, requests)
+    monkeypatch.setattr(cli_approvals, "_TTY_READER", lambda prompt: None)
+
+    exit_code = approvals_approve_command(
+        _ns(approvals_file, agent="scout", action="git_push", because="looks fine")
+    )
+    assert exit_code == 2
+    assert "interactive human confirmation" in capsys.readouterr().out
+    gate = ApprovalGate(path=approvals_file)
+    assert len(gate.pending_requests()) == 1
+
+
+def test_approve_refused_on_wrong_token(tmp_path: Path, capsys, monkeypatch) -> None:
+    """Typing anything but the agent:action pair aborts the approval."""
+    requests = [_sample_request()]
+    approvals_file = _make_gate(tmp_path, requests)
+    monkeypatch.setattr(cli_approvals, "_TTY_READER", lambda prompt: "yes")
+
+    exit_code = approvals_approve_command(
+        _ns(approvals_file, agent="scout", action="git_push", because="looks fine")
+    )
+    assert exit_code == 2
+    gate = ApprovalGate(path=approvals_file)
+    assert len(gate.pending_requests()) == 1
 
 
 def test_approve_not_found(tmp_path: Path, capsys) -> None:
@@ -167,11 +200,14 @@ def test_reject_flow(tmp_path: Path, capsys) -> None:
     out = capsys.readouterr().out
     assert "Rejected" in out
 
-    # Verify it's now rejected in the file, with the rationale stored
+    # Verify it's now rejected in the file, with the rationale stored.
+    # Rejection is fail-safe (it denies the agent) so it works headlessly,
+    # but the reviewer identity comes from the OS user.
     gate = ApprovalGate(path=approvals_file)
     assert len(gate.pending_requests()) == 0
     assert gate._pending[0].status == "rejected"
-    assert gate._pending[0].reviewed_by == "cli"
+    assert gate._pending[0].reviewed_by
+    assert gate._pending[0].reviewed_via == "cli"
     assert gate._pending[0].rationale == "branch is frozen"
 
 
@@ -275,9 +311,10 @@ def test_history_shows_all(tmp_path: Path, capsys) -> None:
     assert "1 pending" in out
 
 
-def test_history_shows_rationale(tmp_path: Path, capsys) -> None:
+def test_history_shows_rationale(tmp_path: Path, capsys, monkeypatch) -> None:
     requests = [_sample_request()]
     approvals_file = _make_gate(tmp_path, requests)
+    monkeypatch.setattr(cli_approvals, "_TTY_READER", lambda prompt: "scout:git_push")
     approvals_approve_command(
         _ns(approvals_file, agent="scout", action="git_push", because="verified locally")
     )
@@ -285,7 +322,10 @@ def test_history_shows_rationale(tmp_path: Path, capsys) -> None:
 
     exit_code = approvals_history_command(_ns(approvals_file))
     assert exit_code == 0
-    assert "because: verified locally" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "because: verified locally" in out
+    assert "(tty)" in out  # reviewer provenance is visible
+    assert "ref: gate_" in out  # calibration ref is visible
 
 
 def test_history_empty(tmp_path: Path, capsys) -> None:

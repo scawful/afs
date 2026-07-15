@@ -28,9 +28,11 @@ afs mission update <mission_id> --status done --note "commit abc123"
 ```
 
 `--acceptance` is the human's definition of done — never author it as an
-agent; leave it unset and let the human add it (a tty prompt asks at create).
-Closed missions are resurfaced by `afs calibration review` for outcome
-scoring against that acceptance.
+agent; leave it unset and let the human add it. Setting, changing, or
+clearing it requires a typed confirmation on an interactive terminal, so a
+headless agent passing `--acceptance` is refused (exit 2). Closed missions
+are resurfaced by `afs calibration review` for outcome scoring against that
+acceptance.
 
 ## Lifecycle
 

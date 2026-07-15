@@ -110,6 +110,10 @@ def record_prediction(
     return entry
 
 
+class UnknownDecisionRefError(ValueError):
+    """The ref does not name any known decision in this context."""
+
+
 def record_outcome(
     context_path: Path,
     *,
@@ -117,8 +121,15 @@ def record_outcome(
     outcome: str,
     note: str = "",
     config: Any = None,
+    force: bool = False,
 ) -> dict[str, Any]:
-    """Score a past decision. ``ref`` is an approval/mission/prediction id."""
+    """Score a past decision. ``ref`` is an approval/mission/prediction id.
+
+    The ref must name a real decision — a typo'd or fabricated ref would
+    silently poison the trail. Raises :class:`UnknownDecisionRefError` for
+    refs that no known store contains; ``force=True`` is the explicit
+    escape hatch for scoring a decision whose store is unavailable.
+    """
     if outcome not in VALID_OUTCOMES:
         raise ValueError(
             f"invalid outcome {outcome!r}; valid: " + ", ".join(VALID_OUTCOMES)
@@ -126,6 +137,11 @@ def record_outcome(
     ref = ref.strip()
     if not ref:
         raise ValueError("a decision ref is required")
+    if not force and not ref_is_known(context_path, ref, config=config):
+        raise UnknownDecisionRefError(
+            f"unknown decision ref {ref!r}; run `afs calibration review` to see "
+            "valid refs (approval request ids, mission ids, prediction ids)"
+        )
     entry = {
         "ref": ref,
         "kind": _ref_kind(ref),
@@ -145,6 +161,37 @@ def _ref_kind(ref: str) -> str:
     if ref.startswith("pred_"):
         return "prediction"
     return "approval"
+
+
+def ref_is_known(context_path: Path, ref: str, *, config: Any = None) -> bool:
+    """True when ``ref`` names a decision some known store actually contains."""
+    kind = _ref_kind(ref)
+    if kind == "prediction":
+        return any(
+            entry.get("id") == ref
+            for entry in load_predictions(context_path, config=config)
+        )
+    if kind == "mission":
+        try:
+            from .missions import MissionStore
+
+            return MissionStore(context_path, config=config).get(ref) is not None
+        except Exception:
+            return False
+    try:
+        from .agents.guardrails import ApprovalGate
+
+        if any(request.request_id == ref for request in ApprovalGate()._pending):
+            return True
+    except Exception:
+        pass
+    try:
+        from .work_assistant import WorkAssistantStore
+
+        store = WorkAssistantStore(context_path, config=config)
+        return store.get_approval(ref) is not None
+    except Exception:
+        return False
 
 
 # -- read paths ----------------------------------------------------------------
@@ -175,8 +222,19 @@ def load_predictions(
     return kept
 
 
+# Work approvals that represent a human "yes": applied/failed are approved
+# decisions whose execution already ran (successfully or not) — dropping them
+# would hide exactly the decisions most worth scoring.
+_WORK_DECIDED_STATUSES = ("approved", "rejected", "applied", "failed")
+
+
 def _gate_decisions(since: datetime) -> list[dict[str, Any]]:
-    """Approved/rejected entries from the agent approval gate, in window."""
+    """Approved/rejected entries from the agent approval gate, in window.
+
+    The gate store is global (not per-context), so the store path is included
+    for provenance and refs use the per-request id — never the agent:action
+    pair, which repeats across requests and contexts.
+    """
     try:
         from .agents.guardrails import ApprovalGate
 
@@ -192,13 +250,16 @@ def _gate_decisions(since: datetime) -> list[dict[str, Any]]:
             continue
         decisions.append(
             {
-                "ref": f"{request.agent}:{request.action}",
+                "ref": request.request_id or f"{request.agent}:{request.action}",
                 "source": "gate",
+                "store": str(getattr(gate, "_path", "")),
+                "agent": request.agent,
                 "action": request.action,
                 "detail": request.detail,
                 "status": request.status,
                 "decided_at": request.reviewed_at,
                 "decided_by": request.reviewed_by,
+                "decided_via": request.reviewed_via,
                 "rationale": request.rationale,
             }
         )
@@ -208,17 +269,17 @@ def _gate_decisions(since: datetime) -> list[dict[str, Any]]:
 def _work_decisions(
     context_path: Path, since: datetime, *, config: Any = None
 ) -> list[dict[str, Any]]:
-    """Approved/rejected work approvals in window."""
+    """Decided work approvals in window (approved/rejected/applied/failed)."""
     try:
         from .work_assistant import WorkAssistantStore
 
-        store = WorkAssistantStore(context_path)
+        store = WorkAssistantStore(context_path, config=config)
         approvals = store.list_approvals(status=None, limit=500)
     except Exception:
         return []
     decisions: list[dict[str, Any]] = []
     for approval in approvals:
-        if approval.get("status") not in ("approved", "rejected"):
+        if approval.get("status") not in _WORK_DECIDED_STATUSES:
             continue
         decided_at = _parse_timestamp(approval.get("updated_at"))
         if decided_at is None or decided_at < since:

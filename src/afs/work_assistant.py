@@ -384,14 +384,24 @@ class WorkAssistantStore:
 
     @staticmethod
     def _migrate_schema(connection: sqlite3.Connection) -> None:
-        """Add columns that pre-existing databases are missing."""
+        """Add columns that pre-existing databases are missing.
+
+        Two processes opening the same pre-existing database can both observe
+        the missing column; the loser's ALTER TABLE then fails with
+        "duplicate column name", which is just the race resolving in the
+        winner's favor — swallow exactly that error, re-raise anything else.
+        """
         approval_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(approvals)")
         }
         if "rationale" not in approval_columns:
-            connection.execute(
-                "ALTER TABLE approvals ADD COLUMN rationale TEXT NOT NULL DEFAULT ''"
-            )
+            try:
+                connection.execute(
+                    "ALTER TABLE approvals ADD COLUMN rationale TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
     def upsert_person(self, person: dict[str, Any]) -> str:
         normalized = _normalize_person(person)

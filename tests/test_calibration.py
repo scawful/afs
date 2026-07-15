@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from afs.calibration import (
+    UnknownDecisionRefError,
     collect_decisions,
     load_outcomes,
     load_predictions,
@@ -61,9 +62,50 @@ def test_outcome_validation(tmp_path: Path) -> None:
 
 def test_ref_kind_inference(tmp_path: Path) -> None:
     context = _context(tmp_path)
-    assert record_outcome(context, ref="mission_abc", outcome="hit")["kind"] == "mission"
-    assert record_outcome(context, ref="pred_abc", outcome="miss")["kind"] == "prediction"
-    assert record_outcome(context, ref="apr_abc", outcome="unclear")["kind"] == "approval"
+    # force=True: these synthetic refs exist in no store; only the kind
+    # inference is under test here.
+    assert (
+        record_outcome(context, ref="mission_abc", outcome="hit", force=True)["kind"]
+        == "mission"
+    )
+    assert (
+        record_outcome(context, ref="pred_abc", outcome="miss", force=True)["kind"]
+        == "prediction"
+    )
+    assert (
+        record_outcome(context, ref="apr_abc", outcome="unclear", force=True)["kind"]
+        == "approval"
+    )
+
+
+def test_unknown_ref_is_rejected(tmp_path: Path, monkeypatch) -> None:
+    """A typo'd or fabricated ref must not silently poison the trail."""
+    monkeypatch.setenv("AFS_AGENT_APPROVALS_PATH", str(tmp_path / "gate.json"))
+    context = _context(tmp_path)
+    with pytest.raises(UnknownDecisionRefError):
+        record_outcome(context, ref="mission_nonexistent", outcome="hit")
+    with pytest.raises(UnknownDecisionRefError):
+        record_outcome(context, ref="pred_nonexistent", outcome="hit")
+    with pytest.raises(UnknownDecisionRefError):
+        record_outcome(context, ref="gate_nonexistent", outcome="hit")
+    assert load_outcomes(context) == []
+
+
+def test_known_refs_are_accepted(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AFS_AGENT_APPROVALS_PATH", str(tmp_path / "gate.json"))
+    context = _context(tmp_path)
+    mission = MissionStore(context).create(title="Real mission")
+    prediction = record_prediction(
+        context, kind="bootstrap_top_priority", predicted="a", actual="b", match=False
+    )
+    assert (
+        record_outcome(context, ref=mission.mission_id, outcome="hit")["ref"]
+        == mission.mission_id
+    )
+    assert (
+        record_outcome(context, ref=prediction["id"], outcome="miss")["ref"]
+        == prediction["id"]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +206,76 @@ def test_collect_decisions_includes_gate_decisions(tmp_path: Path, monkeypatch) 
     gate_entries = [e for e in report["approvals"] if e["source"] == "gate"]
     assert len(gate_entries) == 1
     assert gate_entries[0]["rationale"] == "diff reviewed"
+    # Refs are per-request ids, never the agent:action pair (which repeats
+    # across requests and contexts), and the global store path is visible.
+    assert gate_entries[0]["ref"].startswith("gate_")
+    assert gate_entries[0]["store"]
+
+
+def test_gate_refs_are_unique_per_request(tmp_path: Path, monkeypatch) -> None:
+    _isolate_gate(monkeypatch, tmp_path)
+    context = _context(tmp_path)
+
+    from afs.agents.guardrails import ApprovalGate
+
+    gate = ApprovalGate()
+    gate._queue("scout", "git_push", "push to origin")
+    gate._queue("scout", "mass_delete", "clean old artifacts")
+    gate.approve("scout", "git_push", rationale="diff reviewed")
+    gate.reject("scout", "mass_delete", rationale="too broad")
+
+    report = collect_decisions(context, days=7)
+    refs = [e["ref"] for e in report["approvals"] if e["source"] == "gate"]
+    assert len(refs) == 2
+    assert len(set(refs)) == 2
+    assert all(ref.startswith("gate_") for ref in refs)
+
+
+def test_collect_decisions_includes_applied_work_approvals(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Approved-then-executed approvals are decisions worth scoring."""
+    _isolate_gate(monkeypatch, tmp_path)
+    context = _context(tmp_path)
+
+    store = WorkAssistantStore(context)
+    approval_id = store.create_approval(
+        target_system="local",
+        target_id="note",
+        action="internal_note",
+        summary="Record a note",
+    )
+    store.approve(approval_id, approved_by="human", rationale="content verified")
+    store.record_approval_result(
+        approval_id, result={"ok": True}, status="applied"
+    )
+
+    report = collect_decisions(context, days=7)
+    work_entries = {e["ref"]: e for e in report["approvals"] if e["source"] == "work"}
+    assert approval_id in work_entries
+    assert work_entries[approval_id]["status"] == "applied"
+
+
+def test_work_decisions_pass_config_through(tmp_path: Path, monkeypatch) -> None:
+    """Custom mount layouts must reach the work store, not just defaults."""
+    _isolate_gate(monkeypatch, tmp_path)
+    context = _context(tmp_path)
+    captured: dict = {}
+
+    import afs.work_assistant as work_assistant_module
+
+    real_store = work_assistant_module.WorkAssistantStore
+
+    def _capturing_store(context_root, **kwargs):
+        captured.update(kwargs)
+        return real_store(context_root, **kwargs)
+
+    monkeypatch.setattr(work_assistant_module, "WorkAssistantStore", _capturing_store)
+    from afs.schema import AFSConfig
+
+    config = AFSConfig()
+    collect_decisions(context, days=7, config=config)
+    assert captured.get("config") is config
 
 
 # ---------------------------------------------------------------------------

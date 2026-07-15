@@ -48,8 +48,8 @@ afs work approvals reject <approval_id> --path <ws> --by human --because "…"  
 ```
 
 These ID-based requests gate work-assistant external writes; the same
-rationale and interactive-confirmation rules apply. Their pending count, not
-the global supervisor store, surfaces in `afs session bootstrap`.
+rationale and interactive-confirmation rules apply. Their pending count,
+not the global supervisor store, surfaces in `afs session bootstrap`.
 
 ## Optimization Gate
 

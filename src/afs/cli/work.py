@@ -8,6 +8,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from ..human_provenance import os_reviewer
 from ..work_assistant import WorkAssistantStore
 from ..work_execution import (
     HumanApprovalRequiredError,
@@ -526,7 +527,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     approvals_approve = approvals_sub.add_parser("approve", help="Approve one request.")
     _add_context_args(approvals_approve)
     approvals_approve.add_argument("approval_id", help="Approval id.")
-    approvals_approve.add_argument("--by", default="human", help="Approver identity.")
+    # Defaulting to the OS user keeps history honest: "human" is a claim any
+    # process can make, the login name at least identifies the account.
+    approvals_approve.add_argument(
+        "--by", default=os_reviewer(), help="Approver identity (default: OS user)."
+    )
     approvals_approve.add_argument(
         "--because",
         help="Required rationale for the decision; stored in approvals history.",
@@ -536,7 +541,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     approvals_reject = approvals_sub.add_parser("reject", help="Reject one request.")
     _add_context_args(approvals_reject)
     approvals_reject.add_argument("approval_id", help="Approval id.")
-    approvals_reject.add_argument("--by", default="human", help="Reviewer identity.")
+    approvals_reject.add_argument(
+        "--by", default=os_reviewer(), help="Reviewer identity (default: OS user)."
+    )
     approvals_reject.add_argument(
         "--because",
         help="Required rationale for the decision; stored in approvals history.",

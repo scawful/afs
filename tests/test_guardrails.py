@@ -279,6 +279,79 @@ class TestApprovalGate:
         # After rejection, a new check should queue a new request
         assert gate.check("agent1", "deploy") is False
 
+    def test_requests_get_stable_unique_ids(self, tmp_path: Path) -> None:
+        path = tmp_path / "approvals.json"
+        gate = ApprovalGate(path=path)
+        gate.check("agent1", "git_push")
+        gate.check("agent1", "deploy")
+        ids = [r.request_id for r in gate.pending_requests()]
+        assert all(rid.startswith("gate_") for rid in ids)
+        assert len(set(ids)) == 2
+        # Ids survive a reload — they are calibration refs.
+        reloaded = ApprovalGate(path=path)
+        assert [r.request_id for r in reloaded.pending_requests()] == ids
+
+    def test_legacy_records_are_backfilled_with_stable_ids(self, tmp_path: Path) -> None:
+        import json as json_module
+
+        path = tmp_path / "approvals.json"
+        path.write_text(
+            json_module.dumps(
+                [
+                    {
+                        "agent": "old",
+                        "action": "git_push",
+                        "detail": "",
+                        "timestamp": "2026-01-01T00:00:00+00:00",
+                        "status": "pending",
+                        "reviewed_by": "",
+                        "reviewed_at": "",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        first = ApprovalGate(path=path).pending_requests()[0].request_id
+        assert first.startswith("gate_")
+        # The backfilled id was persisted, so a second load sees the same one.
+        second = ApprovalGate(path=path).pending_requests()[0].request_id
+        assert second == first
+
+    def test_decision_does_not_clobber_concurrent_queue(self, tmp_path: Path) -> None:
+        """A decision re-reads the store under the lock, so requests queued by
+        another process between our load and save are preserved."""
+        path = tmp_path / "approvals.json"
+        gate_a = ApprovalGate(path=path)
+        gate_a.check("agent1", "git_push")
+
+        # Another process queues a second request after gate_a loaded.
+        gate_b = ApprovalGate(path=path)
+        gate_b.check("agent2", "deploy")
+
+        assert gate_a.approve("agent1", "git_push", rationale="reviewed") is True
+        final = ApprovalGate(path=path)
+        assert len(final._pending) == 2
+        statuses = {(r.agent, r.status) for r in final._pending}
+        assert ("agent1", "approved") in statuses
+        assert ("agent2", "pending") in statuses
+
+    def test_one_malformed_record_does_not_drop_the_rest(self, tmp_path: Path) -> None:
+        import json as json_module
+
+        path = tmp_path / "approvals.json"
+        good = {
+            "agent": "agent1",
+            "action": "git_push",
+            "detail": "",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "status": "pending",
+        }
+        bad = {"agent": "agent2", "unexpected_field": True}
+        path.write_text(json_module.dumps([bad, good]), encoding="utf-8")
+        gate = ApprovalGate(path=path)
+        assert len(gate.pending_requests()) == 1
+        assert gate.pending_requests()[0].agent == "agent1"
+
     def test_persistence_across_instances(self, tmp_path: Path) -> None:
         path = tmp_path / "approvals.json"
         gate1 = ApprovalGate(path=path)

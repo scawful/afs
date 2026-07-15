@@ -40,8 +40,11 @@ class Mission:
     owner: str = ""
     # Human-authored definition of done ("what does finished look like?").
     # Agents must not fabricate this; it is the calibration anchor the outcome
-    # is later scored against.
+    # is later scored against. Provenance records who set it and when — the
+    # CLI only sets it after an interactive terminal confirmation.
     acceptance: str = ""
+    acceptance_set_by: str = ""
+    acceptance_set_at: str = ""
     next_steps: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     linked_sessions: list[str] = field(default_factory=list)
@@ -61,6 +64,8 @@ class Mission:
             "summary": self.summary,
             "owner": self.owner,
             "acceptance": self.acceptance,
+            "acceptance_set_by": self.acceptance_set_by,
+            "acceptance_set_at": self.acceptance_set_at,
             "next_steps": list(self.next_steps),
             "blockers": list(self.blockers),
             "linked_sessions": list(self.linked_sessions),
@@ -87,6 +92,8 @@ class Mission:
             summary=str(data.get("summary", "")),
             owner=str(data.get("owner", "")),
             acceptance=str(data.get("acceptance", "")),
+            acceptance_set_by=str(data.get("acceptance_set_by", "")),
+            acceptance_set_at=str(data.get("acceptance_set_at", "")),
             next_steps=_str_list(data.get("next_steps")),
             blockers=_str_list(data.get("blockers")),
             linked_sessions=_str_list(data.get("linked_sessions")),
@@ -184,6 +191,7 @@ class MissionStore:
         summary: str = "",
         owner: str = "",
         acceptance: str = "",
+        acceptance_set_by: str = "",
         next_steps: list[str] | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
@@ -191,6 +199,7 @@ class MissionStore:
         if not title.strip():
             raise ValueError("mission title is required")
         now = _now()
+        acceptance = acceptance.strip()
         mission = Mission(
             mission_id=f"mission_{uuid.uuid4().hex[:12]}",
             title=title.strip(),
@@ -199,7 +208,9 @@ class MissionStore:
             updated_at=now,
             summary=summary.strip(),
             owner=owner.strip(),
-            acceptance=acceptance.strip(),
+            acceptance=acceptance,
+            acceptance_set_by=acceptance_set_by.strip() if acceptance else "",
+            acceptance_set_at=now if acceptance else "",
             next_steps=list(next_steps or []),
             tags=list(tags or []),
             metadata=dict(metadata or {}),
@@ -250,6 +261,7 @@ class MissionStore:
         summary: str | None = None,
         owner: str | None = None,
         acceptance: str | None = None,
+        acceptance_set_by: str = "",
         next_steps: list[str] | None = None,
         blockers: list[str] | None = None,
         link_session: str | None = None,
@@ -273,8 +285,17 @@ class MissionStore:
             mission.summary = summary.strip()
         if owner is not None:
             mission.owner = owner.strip()
-        if acceptance is not None:
+        if acceptance is not None and acceptance.strip() != mission.acceptance:
             mission.acceptance = acceptance.strip()
+            mission.acceptance_set_by = acceptance_set_by.strip()
+            mission.acceptance_set_at = _now()
+            mission.log.append(
+                {
+                    "timestamp": mission.acceptance_set_at,
+                    "actor": acceptance_set_by.strip() or actor,
+                    "note": "acceptance updated",
+                }
+            )
         if next_steps is not None:
             mission.next_steps = list(next_steps)
         if blockers is not None:

@@ -90,18 +90,35 @@ def test_cli_show_missing_returns_1(tmp_path, monkeypatch, capsys) -> None:
 
 def test_cli_create_with_acceptance(tmp_path, monkeypatch, capsys) -> None:
     _wire(tmp_path, monkeypatch)
+    # The --acceptance flag requires a typed terminal confirmation.
+    monkeypatch.setattr(missions_cli, "_TTY_READER", lambda prompt: "human")
     rc = mission_create_command(
         _args(title="Ship it", acceptance="all five steps land with tests", json=True)
     )
     assert rc == 0
     created = json.loads(capsys.readouterr().out)
     assert created["acceptance"] == "all five steps land with tests"
+    assert created["acceptance_set_by"]  # OS user recorded as provenance
+    assert created["acceptance_set_at"]
+
+
+def test_cli_create_acceptance_refused_headless(tmp_path, monkeypatch, capsys) -> None:
+    """A headless agent passing --acceptance is refused: the anchor is human-authored."""
+    _wire(tmp_path, monkeypatch)
+    monkeypatch.setattr(missions_cli, "_TTY_READER", lambda prompt: None)
+    rc = mission_create_command(
+        _args(title="Ship it", acceptance="fabricated by an agent", json=True)
+    )
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "human-authored" in captured.err
+    assert captured.out == ""  # refusal never contaminates stdout
 
 
 def test_cli_create_without_tty_skips_prompt_and_nudges(tmp_path, monkeypatch, capsys) -> None:
     _wire(tmp_path, monkeypatch)
     # Simulate a headless caller: no prompt may block, a nudge is printed.
-    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr(missions_cli, "_TTY_READER", lambda prompt: None)
     rc = mission_create_command(_args(title="Background job", acceptance=None))
     assert rc == 0
     out = capsys.readouterr().out
@@ -109,26 +126,77 @@ def test_cli_create_without_tty_skips_prompt_and_nudges(tmp_path, monkeypatch, c
     assert "--acceptance" in out
 
 
+def test_cli_create_json_never_prompts(tmp_path, monkeypatch, capsys) -> None:
+    """--json output must stay machine-readable even with a terminal attached."""
+    _wire(tmp_path, monkeypatch)
+
+    def _fail_reader(prompt):
+        raise AssertionError("prompted during --json output")
+
+    monkeypatch.setattr(missions_cli, "_TTY_READER", _fail_reader)
+    rc = mission_create_command(_args(title="Ship it", acceptance=None, json=True))
+    assert rc == 0
+    created = json.loads(capsys.readouterr().out)
+    assert created["acceptance"] == ""
+
+
+def test_cli_create_interactive_prompt_records_provenance(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    _wire(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        missions_cli, "_TTY_READER", lambda prompt: "demo runs end to end"
+    )
+    rc = mission_create_command(_args(title="Ship it", acceptance=None))
+    assert rc == 0
+    store = MissionStore(tmp_path / ".context")
+    mission = store.list(limit=1)[0]
+    assert mission.acceptance == "demo runs end to end"
+    assert mission.acceptance_set_by
+
+
+def _update_args(mid: str, **overrides):
+    base = dict(
+        mission_id=mid,
+        status=None,
+        summary=None,
+        owner=None,
+        acceptance=None,
+        next_step=None,
+        blocker=None,
+        link_session=None,
+        link_handoff=None,
+        tag=None,
+        note=None,
+        actor=None,
+        json=True,
+    )
+    base.update(overrides)
+    return _args(**base)
+
+
 def test_cli_update_acceptance(tmp_path, monkeypatch, capsys) -> None:
     _wire(tmp_path, monkeypatch)
+    monkeypatch.setattr(missions_cli, "_TTY_READER", lambda prompt: "human")
     mission_create_command(_args(title="Ship it", acceptance="v1", json=True))
     mid = json.loads(capsys.readouterr().out)["mission_id"]
-    rc = mission_update_command(
-        _args(
-            mission_id=mid,
-            status=None,
-            summary=None,
-            owner=None,
-            acceptance="v2 with docs",
-            next_step=None,
-            blocker=None,
-            link_session=None,
-            link_handoff=None,
-            tag=None,
-            note=None,
-            actor=None,
-            json=True,
-        )
-    )
+    rc = mission_update_command(_update_args(mid, acceptance="v2 with docs"))
     assert rc == 0
-    assert json.loads(capsys.readouterr().out)["acceptance"] == "v2 with docs"
+    updated = json.loads(capsys.readouterr().out)
+    assert updated["acceptance"] == "v2 with docs"
+    assert updated["acceptance_set_by"]
+
+
+def test_cli_update_acceptance_refused_headless(tmp_path, monkeypatch, capsys) -> None:
+    """An agent cannot rewrite or clear the human's acceptance after the fact."""
+    _wire(tmp_path, monkeypatch)
+    monkeypatch.setattr(missions_cli, "_TTY_READER", lambda prompt: "human")
+    mission_create_command(_args(title="Ship it", acceptance="v1", json=True))
+    mid = json.loads(capsys.readouterr().out)["mission_id"]
+
+    monkeypatch.setattr(missions_cli, "_TTY_READER", lambda prompt: None)
+    for attempted in ("agent rewrite", ""):
+        rc = mission_update_command(_update_args(mid, acceptance=attempted))
+        assert rc == 2
+    store = MissionStore(tmp_path / ".context")
+    assert store.get(mid).acceptance == "v1"

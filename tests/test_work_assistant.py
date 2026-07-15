@@ -265,3 +265,36 @@ def test_rationale_column_migrated_into_existing_database(tmp_path: Path) -> Non
     migrated = WorkAssistantStore(context_root)
     assert migrated.approve(approval_id, approved_by="human", rationale="restored after migration")
     assert migrated.get_approval(approval_id)["rationale"] == "restored after migration"
+
+
+def test_migration_tolerates_concurrent_first_open(tmp_path: Path) -> None:
+    """Two processes can both see the column missing; the loser's ALTER must
+    resolve quietly instead of crashing the store open."""
+    import sqlite3
+
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+
+    # Force the exact race outcome: the column already exists (the "winner"
+    # added it), but this process's check said it was missing, so its
+    # ALTER TABLE fails with "duplicate column name".
+    with store._connect() as connection:
+        original_execute = connection.execute
+
+        class _RacedConnection:
+            def execute(self, statement, *params):
+                if statement.strip().startswith("PRAGMA table_info"):
+                    return iter(())  # pretend the column is missing
+                return original_execute(statement, *params)
+
+        WorkAssistantStore._migrate_schema(_RacedConnection())
+
+    # A store opened after the race still works end to end.
+    approval_id = store.create_approval(
+        target_system="local",
+        target_id="note",
+        action="internal_note",
+        summary="Post-race approval",
+    )
+    assert store.approve(approval_id, approved_by="human", rationale="fine")

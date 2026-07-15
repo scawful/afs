@@ -7,6 +7,7 @@ import logging
 import os
 import subprocess
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -429,6 +430,10 @@ AUTO_APPROVE = frozenset({
 })
 
 
+def _new_request_id() -> str:
+    return f"gate_{uuid.uuid4().hex[:12]}"
+
+
 @dataclass
 class ApprovalRequest:
     agent: str
@@ -439,6 +444,8 @@ class ApprovalRequest:
     reviewed_by: str = ""
     reviewed_at: str = ""
     rationale: str = ""
+    request_id: str = ""
+    reviewed_via: str = ""  # "tty" when a typed terminal confirmation happened
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -450,6 +457,8 @@ class ApprovalRequest:
             "reviewed_by": self.reviewed_by,
             "reviewed_at": self.reviewed_at,
             "rationale": self.rationale,
+            "request_id": self.request_id,
+            "reviewed_via": self.reviewed_via,
         }
 
 
@@ -472,20 +481,50 @@ class ApprovalGate:
         if not self._path.exists():
             return
         with _file_lock(self._path):
+            self._pending = self._read_unlocked()
+
+    def _read_unlocked(self) -> list[ApprovalRequest]:
+        """Read all requests from disk; caller must hold the file lock.
+
+        One malformed record is skipped rather than dropping the whole file.
+        Records written before request ids existed are backfilled with a
+        stable id and persisted immediately, so calibration refs never change
+        between loads.
+        """
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+        if not isinstance(data, list):
+            return []
+        requests: list[ApprovalRequest] = []
+        backfilled = False
+        for item in data:
+            if not isinstance(item, dict):
+                continue
             try:
-                data = json.loads(self._path.read_text(encoding="utf-8"))
-                for item in data:
-                    self._pending.append(ApprovalRequest(**item))
-            except (json.JSONDecodeError, OSError, TypeError):
-                pass
+                request = ApprovalRequest(**item)
+            except TypeError:
+                continue
+            if not request.request_id:
+                request.request_id = _new_request_id()
+                backfilled = True
+            requests.append(request)
+        if backfilled:
+            self._write_unlocked(requests)
+        return requests
+
+    def _write_unlocked(self, requests: list[ApprovalRequest]) -> None:
+        """Write requests to disk; caller must hold the file lock."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(
+            json.dumps([r.to_dict() for r in requests], indent=2),
+            encoding="utf-8",
+        )
 
     def _save(self) -> None:
         with _file_lock(self._path):
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(
-                json.dumps([r.to_dict() for r in self._pending], indent=2),
-                encoding="utf-8",
-            )
+            self._write_unlocked(self._pending)
 
     def check(self, agent: str, action: str, detail: str = "") -> bool:
         """Check if an action is allowed. Returns True if auto-approved or pre-approved."""
@@ -505,48 +544,94 @@ class ApprovalGate:
         return False
 
     def _queue(self, agent: str, action: str, detail: str) -> None:
-        # Don't duplicate pending requests
-        for req in self._pending:
-            if req.agent == agent and req.action == action and req.status == "pending":
-                return
-        req = ApprovalRequest(
-            agent=agent,
-            action=action,
-            detail=detail,
-            timestamp=datetime.now(timezone.utc).isoformat(),
-        )
-        self._pending.append(req)
-        self._save()
+        with _file_lock(self._path):
+            requests = (
+                self._read_unlocked() if self._path.exists() else list(self._pending)
+            )
+            # Don't duplicate pending requests
+            for req in requests:
+                if req.agent == agent and req.action == action and req.status == "pending":
+                    self._pending = requests
+                    return
+            requests.append(
+                ApprovalRequest(
+                    agent=agent,
+                    action=action,
+                    detail=detail,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    request_id=_new_request_id(),
+                )
+            )
+            self._pending = requests
+            self._write_unlocked(requests)
         logger.info("Queued approval request: agent=%s action=%s", agent, action)
 
     def pending_requests(self) -> list[ApprovalRequest]:
         return [r for r in self._pending if r.status == "pending"]
 
-    def approve(
-        self, agent: str, action: str, reviewer: str = "human", *, rationale: str = ""
-    ) -> bool:
+    def find_pending(self, agent: str, action: str) -> ApprovalRequest | None:
         for req in self._pending:
             if req.agent == agent and req.action == action and req.status == "pending":
-                req.status = "approved"
-                req.reviewed_by = reviewer
-                req.reviewed_at = datetime.now(timezone.utc).isoformat()
-                req.rationale = rationale.strip()
-                self._save()
-                return True
-        return False
+                return req
+        return None
+
+    def approve(
+        self,
+        agent: str,
+        action: str,
+        reviewer: str = "human",
+        *,
+        rationale: str = "",
+        reviewed_via: str = "",
+    ) -> bool:
+        return self._resolve(
+            agent, action, "approved", reviewer, rationale, reviewed_via
+        )
 
     def reject(
-        self, agent: str, action: str, reviewer: str = "human", *, rationale: str = ""
+        self,
+        agent: str,
+        action: str,
+        reviewer: str = "human",
+        *,
+        rationale: str = "",
+        reviewed_via: str = "",
     ) -> bool:
-        for req in self._pending:
-            if req.agent == agent and req.action == action and req.status == "pending":
-                req.status = "rejected"
-                req.reviewed_by = reviewer
-                req.reviewed_at = datetime.now(timezone.utc).isoformat()
-                req.rationale = rationale.strip()
-                self._save()
-                return True
-        return False
+        return self._resolve(
+            agent, action, "rejected", reviewer, rationale, reviewed_via
+        )
+
+    def _resolve(
+        self,
+        agent: str,
+        action: str,
+        status: str,
+        reviewer: str,
+        rationale: str,
+        reviewed_via: str,
+    ) -> bool:
+        """Resolve a pending request under the file lock.
+
+        Re-reads the store while holding the lock so a decision never
+        overwrites requests queued by another process between our load and
+        save.
+        """
+        with _file_lock(self._path):
+            requests = (
+                self._read_unlocked() if self._path.exists() else list(self._pending)
+            )
+            for req in requests:
+                if req.agent == agent and req.action == action and req.status == "pending":
+                    req.status = status
+                    req.reviewed_by = reviewer
+                    req.reviewed_at = datetime.now(timezone.utc).isoformat()
+                    req.rationale = rationale.strip()
+                    req.reviewed_via = reviewed_via
+                    self._pending = requests
+                    self._write_unlocked(requests)
+                    return True
+            self._pending = requests
+            return False
 
 
 # ---------------------------------------------------------------------------

@@ -12,8 +12,12 @@ import json
 import sys
 from pathlib import Path
 
+from ..human_provenance import confirm_typed_token, os_reviewer, read_human_line
 from ..missions import MissionNotFoundError, MissionStore
 from ._utils import load_manager, resolve_context_paths
+
+# Test seam: tests inject a fake terminal reader; production uses /dev/tty.
+_TTY_READER = None
 
 
 def _store(args: argparse.Namespace) -> MissionStore:
@@ -31,32 +35,75 @@ def _print_mission_line(mission) -> None:
     print(f"{mission.mission_id}  ({mission.status}){owner}  {mission.title}{steps}")
 
 
-def _prompt_for_acceptance(args: argparse.Namespace) -> str:
-    """Ask the human to author acceptance when creating a mission interactively.
+def _confirm_flag_acceptance(text: str) -> str | None:
+    """Confirm a ``--acceptance`` flag value on the controlling terminal.
 
     Acceptance is the human-authored definition of done that later outcome
-    scoring calibrates against, so it is prompted for rather than defaulted.
-    Headless callers (agents, scripts) are never blocked: without a tty the
-    prompt is skipped and a follow-up nudge is printed instead.
+    scoring calibrates against, so setting, changing, or clearing it requires
+    typing ``human`` on the tty — piped stdin cannot satisfy it, and headless
+    callers (agents) are refused. Returns the OS reviewer identity, or
+    ``None`` to refuse.
     """
-    if getattr(args, "acceptance", None):
-        return str(args.acceptance)
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        return ""
-    try:
-        return input("Acceptance — what does done look like? (enter to skip): ")
-    except (EOFError, KeyboardInterrupt):
-        return ""
+    shown = text if text else "(clear the existing acceptance)"
+    reviewer = confirm_typed_token(
+        "human",
+        "\n".join(
+            [
+                "",
+                "Acceptance is the human-authored definition of done:",
+                f"  {shown}",
+                "Type 'human' to confirm you (not an agent) authored this change: ",
+            ]
+        ),
+        reader=_TTY_READER,
+    )
+    if reviewer is None:
+        print(
+            "acceptance is human-authored; setting or clearing it requires an "
+            "interactive terminal confirmation. Agents must leave it unset and "
+            "surface the nudge instead.",
+            file=sys.stderr,
+        )
+    return reviewer
+
+
+def _prompt_for_acceptance(args: argparse.Namespace) -> tuple[str, str]:
+    """Ask the human to author acceptance when creating a mission.
+
+    The prompt is written to and read from the controlling terminal, so it
+    never contaminates stdout and piped stdin cannot answer it. Headless
+    callers are never blocked: without a terminal the prompt is skipped and
+    the follow-up nudge is printed instead. Never prompts in ``--json`` mode.
+    Returns ``(acceptance, set_by)``.
+    """
+    if getattr(args, "json", False):
+        return "", ""
+    line = read_human_line(
+        "Acceptance — what does done look like? (enter to skip): ",
+        reader=_TTY_READER,
+    )
+    if line is None:
+        return "", ""
+    acceptance = line.strip()
+    return acceptance, (os_reviewer() if acceptance else "")
 
 
 def mission_create_command(args: argparse.Namespace) -> int:
     store = _store(args)
-    acceptance = _prompt_for_acceptance(args)
+    flag = str(getattr(args, "acceptance", None) or "").strip()
+    if flag:
+        reviewer = _confirm_flag_acceptance(flag)
+        if reviewer is None:
+            return 2
+        acceptance, acceptance_set_by = flag, reviewer
+    else:
+        acceptance, acceptance_set_by = _prompt_for_acceptance(args)
     mission = store.create(
         title=args.title,
         summary=getattr(args, "summary", "") or "",
         owner=getattr(args, "owner", "") or "",
         acceptance=acceptance,
+        acceptance_set_by=acceptance_set_by,
         next_steps=list(getattr(args, "next_step", None) or []),
         tags=list(getattr(args, "tag", None) or []),
     )
@@ -100,13 +147,22 @@ def mission_show_command(args: argparse.Namespace) -> int:
 
 def mission_update_command(args: argparse.Namespace) -> int:
     store = _store(args)
+    acceptance = getattr(args, "acceptance", None)
+    acceptance_set_by = ""
+    if acceptance is not None:
+        acceptance = str(acceptance).strip()
+        reviewer = _confirm_flag_acceptance(acceptance)
+        if reviewer is None:
+            return 2
+        acceptance_set_by = reviewer
     try:
         mission = store.update(
             args.mission_id,
             status=getattr(args, "status", None),
             summary=getattr(args, "summary", None),
             owner=getattr(args, "owner", None),
-            acceptance=getattr(args, "acceptance", None),
+            acceptance=acceptance,
+            acceptance_set_by=acceptance_set_by,
             next_steps=list(args.next_step) if getattr(args, "next_step", None) else None,
             blockers=list(args.blocker) if getattr(args, "blocker", None) else None,
             link_session=getattr(args, "link_session", None),

@@ -197,3 +197,56 @@ def test_human_intent_preserved_checks() -> None:
         "authored" in v for v in verify_human_intent_preserved({}, fabricated)
     )
     assert verify_human_intent_preserved({}, dict(_VALID_PLAN)) == []
+
+
+def test_human_intent_shape_bypasses_are_closed() -> None:
+    """Adversarial probes: Python equality quirks and malformed anchors."""
+    from afs.response_schemas import verify_human_intent_preserved
+
+    # An empty section authored from nowhere is still authoring.
+    assert any(
+        "authored" in v
+        for v in verify_human_intent_preserved({}, {**_VALID_PLAN, "human_intent": {}})
+    )
+
+    # A non-object anchor is rejected, never silently treated as absent.
+    bad_anchor = {"human_intent": "just a string", "summary": "seed"}
+    fabricated = {**_VALID_PLAN, "human_intent": {"goal": "agent-invented"}}
+    assert any(
+        "must be an object" in v
+        for v in verify_human_intent_preserved(bad_anchor, fabricated)
+    )
+
+    # A skeleton violating the human_intent contract is invalid, not absent.
+    invalid_anchor = {"human_intent": {"goal": 42}, "summary": "seed"}
+    assert any(
+        "invalid" in v
+        for v in verify_human_intent_preserved(invalid_anchor, fabricated)
+    )
+
+    # A non-object skeleton document cannot anchor anything.
+    assert any(
+        "JSON object" in v
+        for v in verify_human_intent_preserved(["not", "a", "dict"], fabricated)
+    )
+
+    # An explicitly empty anchor must stay exactly empty.
+    empty_anchor = {"human_intent": {}, "summary": "seed"}
+    filled = {**_VALID_PLAN, "human_intent": {"goal": "agent filled it in"}}
+    assert any(
+        "modified" in v for v in verify_human_intent_preserved(empty_anchor, filled)
+    )
+    kept_empty = {**_VALID_PLAN, "human_intent": {}}
+    assert verify_human_intent_preserved(empty_anchor, kept_empty) == []
+
+
+def test_canonical_json_distinguishes_python_equality_quirks() -> None:
+    """True==1 and 1==1.0 in Python; the preservation check must not conflate
+    them (they are different JSON documents)."""
+    from afs.response_schemas import _canonical_json
+
+    assert _canonical_json({"x": True}) != _canonical_json({"x": 1})
+    assert _canonical_json({"x": 1}) != _canonical_json({"x": 1.0})
+    # Key order is irrelevant — same document either way.
+    assert _canonical_json({"a": "1", "b": "2"}) == _canonical_json({"b": "2", "a": "1"})
+    assert _canonical_json(object()) is None

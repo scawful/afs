@@ -6,13 +6,41 @@ import argparse
 import json
 from pathlib import Path
 
-from ..agents.guardrails import ApprovalGate
+from ..agents.guardrails import ApprovalGate, ApprovalRequest
+from ..human_provenance import confirm_typed_token, os_reviewer
+
+# Test seam: tests inject a fake terminal reader; production uses /dev/tty.
+_TTY_READER = None
 
 
 def _load_gate(args: argparse.Namespace) -> ApprovalGate:
     """Load ApprovalGate, optionally from a custom path."""
     path = Path(args.approvals_file) if getattr(args, "approvals_file", None) else None
     return ApprovalGate(path=path)
+
+
+def _confirm_gate_approval(request: ApprovalRequest) -> str | None:
+    """Interactive human confirmation for granting an agent a guarded action.
+
+    Every request the gate queues is for a dangerous or unknown action, so
+    approval always requires a person at a terminal: the operator must re-type
+    the agent:action pair on the controlling tty, which piped stdin cannot
+    satisfy. Returns the OS-level reviewer identity, or ``None`` to refuse.
+    """
+    token = f"{request.agent}:{request.action}"
+    prompt = "\n".join(
+        [
+            "",
+            "=== HUMAN CONFIRMATION REQUIRED (agent approval) ===",
+            f"  agent:   {request.agent}",
+            f"  action:  {request.action}",
+            f"  detail:  {request.detail}",
+            f"  request: {request.request_id}",
+            "Approving lets this agent perform the guarded action under your authority.",
+            f"Type '{token}' to confirm, anything else aborts: ",
+        ]
+    )
+    return confirm_typed_token(token, prompt, reader=_TTY_READER)
 
 
 def _require_rationale(args: argparse.Namespace, decision: str) -> str | None:
@@ -64,26 +92,55 @@ def approvals_list_command(args: argparse.Namespace) -> int:
 
 
 def approvals_approve_command(args: argparse.Namespace) -> int:
-    """Approve a pending request."""
+    """Approve a pending request. Requires an interactive human confirmation."""
     rationale = _require_rationale(args, "approve")
     if rationale is None:
         return 2
     gate = _load_gate(args)
-    ok = gate.approve(args.agent, args.action, reviewer="cli", rationale=rationale)
+    request = gate.find_pending(args.agent, args.action)
+    if request is None:
+        print(f"No pending request found for agent={args.agent} action={args.action}")
+        return 1
+    reviewer = _confirm_gate_approval(request)
+    if reviewer is None:
+        print(
+            "approve requires an interactive human confirmation on a terminal; "
+            "refusing in a non-interactive context. Re-run `afs approvals approve` "
+            "from an interactive terminal."
+        )
+        return 2
+    ok = gate.approve(
+        args.agent,
+        args.action,
+        reviewer=reviewer,
+        rationale=rationale,
+        reviewed_via="tty",
+    )
     if ok:
-        print(f"Approved: agent={args.agent} action={args.action}")
+        print(f"Approved: agent={args.agent} action={args.action} by {reviewer}")
         return 0
     print(f"No pending request found for agent={args.agent} action={args.action}")
     return 1
 
 
 def approvals_reject_command(args: argparse.Namespace) -> int:
-    """Reject a pending request."""
+    """Reject a pending request.
+
+    Rejection is the fail-safe direction (it denies the agent), so it does
+    not require a terminal — but the reviewer identity is still recorded from
+    the OS user, not a claimable flag.
+    """
     rationale = _require_rationale(args, "reject")
     if rationale is None:
         return 2
     gate = _load_gate(args)
-    ok = gate.reject(args.agent, args.action, reviewer="cli", rationale=rationale)
+    ok = gate.reject(
+        args.agent,
+        args.action,
+        reviewer=os_reviewer(),
+        rationale=rationale,
+        reviewed_via="cli",
+    )
     if ok:
         print(f"Rejected: agent={args.agent} action={args.action}")
         return 0
@@ -144,6 +201,9 @@ def approvals_history_command(args: argparse.Namespace) -> int:
             f"{req.agent:<{agent_w}}  {req.action:<{action_w}}  "
             f"{req.status:<{status_w}}  {req.detail:<{detail_w}}  {ts}"
         )
+        if req.reviewed_by:
+            via = req.reviewed_via or "unconfirmed"
+            print(f"  by: {req.reviewed_by} ({via})  ref: {req.request_id}")
         if req.rationale:
             print(f"  because: {req.rationale}")
 

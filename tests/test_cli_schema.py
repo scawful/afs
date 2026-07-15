@@ -145,3 +145,49 @@ def test_validate_skeleton_passes_when_intent_preserved(tmp_path, capsys) -> Non
     payload = json.loads(capsys.readouterr().out)
     assert payload["valid"] is True
     assert payload["human_intent_violations"] == []
+
+
+def test_validate_skeleton_is_parsed_strictly(tmp_path, capsys) -> None:
+    """The skeleton is a trust anchor: fenced/markdown-wrapped JSON that the
+    lenient response coercion would accept must be rejected here."""
+    skeleton_path = tmp_path / "skeleton.json"
+    skeleton_path.write_text(
+        '```json\n{"human_intent": {"goal": "g"}}\n```', encoding="utf-8"
+    )
+
+    plan = {
+        "summary": "expanded",
+        "steps": ["do it"],
+        "verification": ["pytest"],
+        "risks": ["none"],
+    }
+    rc = schema_validate_command(
+        _args(
+            schema="implementation-plan",
+            text=json.dumps(plan),
+            skeleton=str(skeleton_path),
+        )
+    )
+    assert rc == 2
+    assert "invalid skeleton" in capsys.readouterr().err
+
+
+def test_validate_skeleton_must_be_object(tmp_path, capsys) -> None:
+    skeleton_path = tmp_path / "skeleton.json"
+    skeleton_path.write_text('["not", "an", "object"]', encoding="utf-8")
+
+    plan = {
+        "summary": "expanded",
+        "steps": ["do it"],
+        "verification": ["pytest"],
+        "risks": ["none"],
+    }
+    rc = schema_validate_command(
+        _args(
+            schema="implementation-plan",
+            text=json.dumps(plan),
+            skeleton=str(skeleton_path),
+        )
+    )
+    assert rc == 2
+    assert "must be a JSON object" in capsys.readouterr().err

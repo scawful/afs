@@ -402,28 +402,65 @@ def validate_structured_response(name: str, data: Any) -> SchemaValidationResult
     )
 
 
+def _human_intent_subschema() -> dict[str, Any]:
+    """The human_intent contract from the implementation-plan schema."""
+    plan = _SCHEMA_DEFINITIONS.get("implementation-plan", {})
+    return plan.get("properties", {}).get("human_intent", {"type": "object"})
+
+
+def _canonical_json(value: Any) -> str | None:
+    """Serialize to canonical JSON, or ``None`` for unserializable values.
+
+    Comparison happens on the serialized form, not Python equality: ``True``
+    and ``1`` (or ``1`` and ``1.0``) compare equal as Python objects but are
+    different JSON documents, and a preservation check that conflates them
+    can be gamed.
+    """
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+
+
 def verify_human_intent_preserved(skeleton: Any, expanded: Any) -> list[str]:
     """Check that an agent expansion left the human-authored skeleton untouched.
 
     ``skeleton`` is the human's original plan (or plan fragment) and
     ``expanded`` is the agent-produced plan. The ``human_intent`` section is
     the one part agents must never author: it must survive expansion
-    byte-for-byte, and it must not appear from nowhere. Returns a list of
+    byte-for-byte, and it must not appear from nowhere. The skeleton's own
+    ``human_intent`` must satisfy the schema contract — a malformed anchor is
+    rejected rather than silently treated as absent. Returns a list of
     violations (empty when preserved).
     """
-    skeleton_intent = skeleton.get("human_intent") if isinstance(skeleton, dict) else None
+    if not isinstance(skeleton, dict):
+        return ["skeleton must be a JSON object (the human-authored plan fragment)"]
+    skeleton_intent = skeleton.get("human_intent")
     expanded_intent = expanded.get("human_intent") if isinstance(expanded, dict) else None
 
-    if skeleton_intent:
+    if skeleton_intent is not None:
+        if not isinstance(skeleton_intent, dict):
+            return [
+                "skeleton human_intent must be an object with goal/non_goals/"
+                "done_when; a malformed trust anchor cannot be verified"
+            ]
+        skeleton_errors = _collect_schema_errors(
+            _human_intent_subschema(), skeleton_intent
+        )
+        if skeleton_errors:
+            return [
+                f"skeleton human_intent is invalid: {error}"
+                for error in skeleton_errors[:5]
+            ]
         if expanded_intent is None:
             return ["human_intent was removed by the expansion; restore it verbatim"]
-        if expanded_intent != skeleton_intent:
+        if _canonical_json(expanded_intent) != _canonical_json(skeleton_intent):
             return [
                 "human_intent was modified by the expansion; agents must "
                 "reproduce it exactly as the human wrote it"
             ]
         return []
-    if expanded_intent:
+    if expanded_intent is not None:
         return [
             "human_intent was authored by the expansion; this section is "
             "human-written only — leave it empty and ask instead"
