@@ -823,6 +823,19 @@ class SessionPackCacheConfig:
         )
 
 
+class VerificationConfigError(ValueError):
+    """Raised when executable verification configuration is malformed."""
+
+
+def _verification_string_list(
+    data: dict[str, Any], key: str, *, label: str
+) -> list[str]:
+    raw = data.get(key, [])
+    if not isinstance(raw, list) or any(not isinstance(value, str) for value in raw):
+        raise VerificationConfigError(f"{label} {key} must be an array of strings")
+    return list(raw)
+
+
 @dataclass
 class VerificationExecutionConfig:
     """Structured process execution used by a verification check."""
@@ -837,36 +850,101 @@ class VerificationExecutionConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> VerificationExecutionConfig:
+        if not isinstance(data, dict):
+            raise VerificationConfigError("verification execution must be a table")
+        allowed_fields = {
+            "argv",
+            "cwd",
+            "timeout_seconds",
+            "max_output_bytes",
+            "inherit_env",
+            "env",
+            "redact_argv_indices",
+        }
+        unknown_fields = sorted(set(data) - allowed_fields)
+        if unknown_fields:
+            raise VerificationConfigError(
+                "verification execution contains unknown fields: "
+                + ", ".join(unknown_fields)
+            )
+
+        argv = data.get("argv")
+        if (
+            not isinstance(argv, list)
+            or not argv
+            or any(not isinstance(value, str) for value in argv)
+        ):
+            raise VerificationConfigError(
+                "verification execution argv must be a non-empty array of strings"
+            )
+
+        cwd = data.get("cwd", "")
+        if not isinstance(cwd, str):
+            raise VerificationConfigError("verification execution cwd must be a string")
+
         timeout_seconds = data.get("timeout_seconds", cls().timeout_seconds)
-        if not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool):
-            timeout_seconds = cls().timeout_seconds
+        if (
+            not isinstance(timeout_seconds, (int, float))
+            or isinstance(timeout_seconds, bool)
+            or not 0 < float(timeout_seconds) <= 3600
+        ):
+            raise VerificationConfigError(
+                "verification execution timeout_seconds must be greater than 0 "
+                "and at most 3600"
+            )
+
         max_output_bytes = data.get("max_output_bytes", cls().max_output_bytes)
-        if not isinstance(max_output_bytes, int) or isinstance(max_output_bytes, bool):
-            max_output_bytes = cls().max_output_bytes
+        if (
+            not isinstance(max_output_bytes, int)
+            or isinstance(max_output_bytes, bool)
+            or not 0 < max_output_bytes <= 10 * 1024 * 1024
+        ):
+            raise VerificationConfigError(
+                "verification execution max_output_bytes must be greater than 0 "
+                "and at most 10485760"
+            )
+
+        inherit_env = data.get("inherit_env", [])
+        if not isinstance(inherit_env, list) or any(
+            not isinstance(value, str) for value in inherit_env
+        ):
+            raise VerificationConfigError(
+                "verification execution inherit_env must be an array of strings"
+            )
+
         raw_env = data.get("env", {})
-        env = (
-            {str(key): str(value) for key, value in raw_env.items()}
-            if isinstance(raw_env, dict)
-            else {}
-        )
+        if not isinstance(raw_env, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in raw_env.items()
+        ):
+            raise VerificationConfigError(
+                "verification execution env must map string names to string values"
+            )
+
         raw_redactions = data.get("redact_argv_indices", [])
-        redactions = (
-            [
-                value
+        if (
+            not isinstance(raw_redactions, list)
+            or any(
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+                or value > 255
                 for value in raw_redactions
-                if isinstance(value, int) and not isinstance(value, bool)
-            ]
-            if isinstance(raw_redactions, list)
-            else []
-        )
+            )
+            or len(set(raw_redactions)) != len(raw_redactions)
+        ):
+            raise VerificationConfigError(
+                "verification execution redact_argv_indices must contain unique "
+                "integers from 0 through 255"
+            )
         return cls(
-            argv=_as_str_list(data.get("argv")),
-            cwd=str(data.get("cwd", "") or "").strip(),
+            argv=list(argv),
+            cwd=cwd.strip(),
             timeout_seconds=float(timeout_seconds),
             max_output_bytes=max_output_bytes,
-            inherit_env=_as_str_list(data.get("inherit_env")),
-            env=env,
-            redact_argv_indices=redactions,
+            inherit_env=list(inherit_env),
+            env=dict(raw_env),
+            redact_argv_indices=list(raw_redactions),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -894,22 +972,64 @@ class VerificationCheckConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> VerificationCheckConfig:
+        allowed_fields = {
+            "name",
+            "description",
+            "paths",
+            "executions",
+            "commands",
+            "skills",
+            "workflows",
+            "tool_profiles",
+            "required",
+        }
+        unknown_fields = sorted(set(data) - allowed_fields)
+        if unknown_fields:
+            raise VerificationConfigError(
+                "verification check contains unknown fields: "
+                + ", ".join(unknown_fields)
+            )
+        name = data.get("name", "")
+        description = data.get("description", "")
+        if not isinstance(name, str) or not isinstance(description, str):
+            raise VerificationConfigError(
+                "verification check name and description must be strings"
+            )
         executions_raw = data.get("executions", [])
+        if not isinstance(executions_raw, list) or any(
+            not isinstance(item, dict) for item in executions_raw
+        ):
+            raise VerificationConfigError(
+                "verification check executions must be an array of tables"
+            )
+        commands = _verification_string_list(
+            data, "commands", label="verification check"
+        )
+        required = data.get("required", True)
+        if not isinstance(required, bool):
+            raise VerificationConfigError("verification check required must be a boolean")
         executions = [
             VerificationExecutionConfig.from_dict(item)
             for item in executions_raw
-            if isinstance(item, dict)
         ]
         return cls(
-            name=str(data.get("name", "")).strip(),
-            description=str(data.get("description", "")).strip(),
-            paths=_as_str_list(data.get("paths")),
+            name=name.strip(),
+            description=description.strip(),
+            paths=_verification_string_list(
+                data, "paths", label="verification check"
+            ),
             executions=executions,
-            commands=_as_str_list(data.get("commands")),
-            skills=_as_str_list(data.get("skills")),
-            workflows=_as_str_list(data.get("workflows")),
-            tool_profiles=_as_str_list(data.get("tool_profiles")),
-            required=bool(data.get("required", True)),
+            commands=commands,
+            skills=_verification_string_list(
+                data, "skills", label="verification check"
+            ),
+            workflows=_verification_string_list(
+                data, "workflows", label="verification check"
+            ),
+            tool_profiles=_verification_string_list(
+                data, "tool_profiles", label="verification check"
+            ),
+            required=required,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -939,16 +1059,35 @@ class VerificationProfileConfig:
         name: str,
         data: dict[str, Any],
     ) -> VerificationProfileConfig:
+        allowed_fields = {"description", "include_profiles", "checks"}
+        unknown_fields = sorted(set(data) - allowed_fields)
+        if unknown_fields:
+            raise VerificationConfigError(
+                "verification profile contains unknown fields: "
+                + ", ".join(unknown_fields)
+            )
         checks_raw = data.get("checks", [])
+        if not isinstance(checks_raw, list) or any(
+            not isinstance(item, dict) for item in checks_raw
+        ):
+            raise VerificationConfigError(
+                "verification profile checks must be an array of tables"
+            )
+        description = data.get("description", "")
+        if not isinstance(description, str):
+            raise VerificationConfigError(
+                "verification profile description must be a string"
+            )
         checks = [
             VerificationCheckConfig.from_dict(item)
             for item in checks_raw
-            if isinstance(item, dict)
         ]
         return cls(
             name=str(name).strip(),
-            description=str(data.get("description", "")).strip(),
-            include_profiles=_as_str_list(data.get("include_profiles")),
+            description=description.strip(),
+            include_profiles=_verification_string_list(
+                data, "include_profiles", label="verification profile"
+            ),
             checks=checks,
         )
 
@@ -970,18 +1109,50 @@ class VerificationConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> VerificationConfig:
+        if not isinstance(data, dict):
+            raise VerificationConfigError("verification configuration must be a table")
+        allowed_fields = {
+            "enabled",
+            "default_profile",
+            "fallback_to_builtin",
+            "allow_legacy_shell",
+            "profiles",
+        }
+        unknown_fields = sorted(set(data) - allowed_fields)
+        if unknown_fields:
+            raise VerificationConfigError(
+                "verification configuration contains unknown fields: "
+                + ", ".join(unknown_fields)
+            )
+        allow_legacy_shell = data.get("allow_legacy_shell", False)
+        if not isinstance(allow_legacy_shell, bool):
+            raise VerificationConfigError(
+                "verification allow_legacy_shell must be a boolean"
+            )
         raw_profiles = data.get("profiles", {})
         profiles: dict[str, VerificationProfileConfig] = {}
-        if isinstance(raw_profiles, dict):
-            for name, payload in raw_profiles.items():
-                if not isinstance(payload, dict):
-                    continue
-                profiles[str(name)] = VerificationProfileConfig.from_dict(str(name), payload)
+        if not isinstance(raw_profiles, dict) or any(
+            not isinstance(payload, dict) for payload in raw_profiles.values()
+        ):
+            raise VerificationConfigError("verification profiles must be a table")
+        for name, payload in raw_profiles.items():
+            profiles[str(name)] = VerificationProfileConfig.from_dict(str(name), payload)
+        enabled = data.get("enabled", True)
+        fallback_to_builtin = data.get("fallback_to_builtin", True)
+        if not isinstance(enabled, bool) or not isinstance(fallback_to_builtin, bool):
+            raise VerificationConfigError(
+                "verification enabled and fallback_to_builtin must be booleans"
+            )
+        default_profile = data.get("default_profile", "")
+        if not isinstance(default_profile, str):
+            raise VerificationConfigError(
+                "verification default_profile must be a string"
+            )
         return cls(
-            enabled=bool(data.get("enabled", True)),
-            default_profile=str(data.get("default_profile", "")).strip(),
-            fallback_to_builtin=bool(data.get("fallback_to_builtin", True)),
-            allow_legacy_shell=bool(data.get("allow_legacy_shell", False)),
+            enabled=enabled,
+            default_profile=default_profile.strip(),
+            fallback_to_builtin=fallback_to_builtin,
+            allow_legacy_shell=allow_legacy_shell,
             profiles=profiles,
         )
 

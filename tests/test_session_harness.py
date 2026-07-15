@@ -22,6 +22,12 @@ from afs.schema import (
     VerificationExecutionConfig,
     VerificationProfileConfig,
 )
+from afs.session_harness import (
+    _build_session_feedback_state,
+    _build_session_verification_state,
+    _verification_record_from_event,
+    build_client_session_payload,
+)
 
 
 def _make_manager(tmp_path: Path) -> tuple[AFSManager, Path]:
@@ -238,6 +244,88 @@ def test_session_prepare_client_command_outputs_artifacts(
     supported_names = {entry["name"] for entry in payload["integration"]["supported_events"]}
     assert "user_prompt_submit" in supported_names
     assert "task_completed" in supported_names
+
+
+def test_prepared_session_redacts_verification_secrets_from_all_artifacts(
+    tmp_path: Path,
+) -> None:
+    manager, context_root = _make_manager(tmp_path)
+    check = manager.config.verification.profiles["repo"].checks[0]
+    execution = check.executions[0]
+    execution.argv.append("argv-secret")
+    execution.redact_argv_indices = [len(execution.argv) - 1]
+    execution.env = {"AFS_SECRET": "env-secret"}
+    check.commands = ["printf legacy-secret"]
+
+    payload = build_client_session_payload(
+        manager,
+        context_root,
+        client="codex",
+        session_id="session-redaction",
+        cwd=tmp_path,
+        model="codex",
+        workflow="edit_fast",
+        tool_profile="edit_and_verify",
+        skills_prompt="background agents harness",
+        write_artifacts=True,
+    )
+
+    check_payload = payload["verification_plan"]["selected_checks"][0]
+    execution_payload = check_payload["executions"][0]
+    assert execution_payload["argv"][-1] == "<redacted>"
+    assert execution_payload["env"] == {"AFS_SECRET": "<redacted>"}
+    assert check_payload["commands"] == ["<redacted legacy shell command>"]
+    assert all(
+        secret not in json.dumps(payload)
+        for secret in ("argv-secret", "env-secret", "legacy-secret")
+    )
+    prompt_text = Path(payload["prompt"]["artifact_paths"]["text"]).read_text(
+        encoding="utf-8"
+    )
+    persisted_payload = Path(payload["artifact_paths"]["json"]).read_text(
+        encoding="utf-8"
+    )
+    for secret in ("argv-secret", "env-secret", "legacy-secret"):
+        assert secret not in prompt_text
+        assert secret not in persisted_payload
+    assert "deprecated; blocked; explicit opt-in required" in prompt_text
+
+
+def test_blocked_verification_event_remains_blocked_in_session_state() -> None:
+    record = _verification_record_from_event(
+        event_name="verification_recorded",
+        event_payload={
+            "verification_status": "blocked",
+            "verification_command": "python3 -c '<redacted>'",
+            "summary": "required: blocked",
+        },
+        timestamp="2026-07-15T00:00:00Z",
+    )
+    payload = {
+        "verification_plan": {
+            "available": True,
+            "selected_checks": [
+                {
+                    "name": "required",
+                    "required": True,
+                    "executions": [{"argv": ["python3"], "redact_argv_indices": []}],
+                    "commands": [],
+                }
+            ],
+        },
+        "activity": {"verification": {"records": [record]}},
+        "repo_policy": {},
+    }
+
+    state = _build_session_verification_state(payload, final=False)
+    payload["activity"]["verification"] = state
+    feedback = _build_session_feedback_state(payload)
+
+    assert record["status"] == "blocked"
+    assert state["status"] == "blocked"
+    assert state["record_count"] == 1
+    assert feedback["signals"] == ["verification_blocked"]
+    assert feedback["counts"] == {"verification_blocked": 1}
 
 
 def test_session_hook_command_uses_payload_file(

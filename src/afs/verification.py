@@ -25,6 +25,8 @@ from .schema import (
 _PYTHON_SUFFIXES = {".py", ".pyi"}
 _TS_SUFFIXES = {".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"}
 _CPP_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
+_REDACTED = "<redacted>"
+_REDACTED_LEGACY_SHELL = "<redacted legacy shell command>"
 
 
 def _normalize_rel_path(value: str) -> str:
@@ -63,6 +65,86 @@ def _path_matches(path: str, patterns: list[str]) -> bool:
             if posix_path.match(pattern) or posix_path.match(f"**/{pattern}"):
                 return True
     return False
+
+
+def redact_verification_argv(argv: Any, indices: Any) -> list[str]:
+    """Return a best-effort redacted argv suitable for output and persistence."""
+    if not isinstance(argv, (list, tuple)):
+        return []
+    redacted = [str(argument) for argument in argv]
+    if indices is None or indices == [] or indices == ():
+        return redacted
+    if (
+        not isinstance(indices, (list, tuple))
+        or any(
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or index < 0
+            or index >= len(redacted)
+            for index in indices
+        )
+        or len(set(indices)) != len(indices)
+    ):
+        return [_REDACTED for _argument in redacted]
+    for index in indices:
+        redacted[index] = _REDACTED
+    return redacted
+
+
+def redact_legacy_verification_command(command: Any) -> str:
+    """Hide opaque shell text while preserving that a legacy command exists."""
+    return _REDACTED_LEGACY_SHELL if str(command or "").strip() else ""
+
+
+def redact_verification_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    """Return the verification plan projection safe for prompts and artifacts."""
+    redacted_plan = dict(plan)
+    selected_checks: list[dict[str, Any]] = []
+    expected: list[str] = []
+    allow_legacy_shell = bool(plan.get("allow_legacy_shell", False))
+    for raw_check in plan.get("selected_checks") or []:
+        if not isinstance(raw_check, dict):
+            continue
+        check = dict(raw_check)
+        executions: list[dict[str, Any]] = []
+        for raw_execution in check.get("executions") or []:
+            if not isinstance(raw_execution, dict):
+                continue
+            execution = dict(raw_execution)
+            execution["argv"] = redact_verification_argv(
+                execution.get("argv"), execution.get("redact_argv_indices")
+            )
+            raw_env = execution.get("env")
+            execution["env"] = (
+                {str(key): _REDACTED for key in raw_env}
+                if isinstance(raw_env, dict)
+                else {}
+            )
+            executions.append(execution)
+        check["executions"] = executions
+        check["commands"] = [
+            redact_legacy_verification_command(command)
+            for command in check.get("commands") or []
+            if str(command or "").strip()
+        ]
+        selected_checks.append(check)
+        name = str(check.get("name", "")).strip()
+        for execution in executions:
+            expected.append(
+                f"{name}: {shlex.join(execution.get('argv') or [])}"
+            )
+        legacy_status = (
+            "deprecated; explicit opt-in enabled"
+            if allow_legacy_shell
+            else "deprecated; blocked; explicit opt-in required"
+        )
+        for command in check["commands"]:
+            expected.append(f"{name}: {command} (legacy shell; {legacy_status})")
+        if not executions and not check["commands"] and name:
+            expected.append(f"{name}: review changed scope")
+    redacted_plan["selected_checks"] = selected_checks
+    redacted_plan["expected"] = expected
+    return redacted_plan
 
 
 def _run_git(repo_root: Path, *args: str) -> str | None:
@@ -233,11 +315,18 @@ def _build_builtin_checks(
             and cpp_paths
         ):
             executions.append(VerificationExecutionConfig(argv=["clang-tidy", *cpp_paths]))
-        if shutil.which("ctest") and (
-            (repo_root / "CTestTestfile.cmake").exists()
-            or (repo_root / "build" / "CTestTestfile.cmake").exists()
-        ):
-            executions.append(VerificationExecutionConfig(argv=["ctest", "--output-on-failure"]))
+        if shutil.which("ctest"):
+            if (repo_root / "CTestTestfile.cmake").exists():
+                executions.append(
+                    VerificationExecutionConfig(argv=["ctest", "--output-on-failure"])
+                )
+            elif (repo_root / "build" / "CTestTestfile.cmake").exists():
+                executions.append(
+                    VerificationExecutionConfig(
+                        argv=["ctest", "--output-on-failure"],
+                        cwd="build",
+                    )
+                )
         checks.append(
             VerificationCheckConfig(
                 name="builtin-cpp",
@@ -426,8 +515,13 @@ def build_verification_plan(
         for execution in executions:
             argv = execution.get("argv") if isinstance(execution, dict) else []
             expected.append(f"{check['name']}: {shlex.join([str(arg) for arg in argv or []])}")
+        legacy_status = (
+            "deprecated; explicit opt-in enabled"
+            if config.verification.allow_legacy_shell
+            else "deprecated; blocked; explicit opt-in required"
+        )
         for command in commands:
-            expected.append(f"{check['name']}: {command} (legacy shell; opt-in required)")
+            expected.append(f"{check['name']}: {command} (legacy shell; {legacy_status})")
         if not executions and not commands:
             expected.append(f"{check['name']}: review changed scope")
 
@@ -491,9 +585,7 @@ def _blocked_verification_result(
         },
         "summary": summary,
         "blocked_reason": reason,
-        "audit_command": (
-            "<legacy shell blocked>" if execution_kind == "legacy_shell" else command
-        ),
+        "audit_command": command,
         "redacted_argv": [],
     }
 
@@ -521,6 +613,7 @@ def _result_from_execution_record(
         digest["summary"] = reason_summary
         digest["highlights"] = list(record.reasons)
         summary = f"{check_name}: {reason_summary}"
+    audit_command = shlex.join(record.redacted_argv)
     return {
         "check_name": check_name,
         "command": command,
@@ -540,7 +633,7 @@ def _result_from_execution_record(
         "stderr_truncated": record.stderr_truncated,
         "reason_codes": list(record.reason_codes),
         "reasons": list(record.reasons),
-        "audit_command": shlex.join(record.redacted_argv),
+        "audit_command": audit_command,
         "redacted_argv": list(record.redacted_argv),
     }
 
@@ -554,12 +647,28 @@ def run_verification_execution(
 ) -> dict[str, Any]:
     """Execute a structured verification argv through the checked broker."""
     resolved_root = Path(repo_root).expanduser().resolve()
-    config = (
-        execution
-        if isinstance(execution, VerificationExecutionConfig)
-        else VerificationExecutionConfig.from_dict(execution)
-    )
-    command = shlex.join(config.argv)
+    try:
+        config = (
+            execution
+            if isinstance(execution, VerificationExecutionConfig)
+            else VerificationExecutionConfig.from_dict(execution)
+        )
+    except (TypeError, ValueError) as exc:
+        raw_execution = execution if isinstance(execution, dict) else {}
+        command = shlex.join(
+            redact_verification_argv(
+                raw_execution.get("argv"),
+                raw_execution.get("redact_argv_indices"),
+            )
+        )
+        return _blocked_verification_result(
+            check_name=check_name,
+            command=command,
+            execution_kind="structured",
+            reason=f"invalid structured verification execution: {exc}",
+        )
+    display_argv = redact_verification_argv(config.argv, config.redact_argv_indices)
+    command = shlex.join(display_argv)
     if not config.argv:
         return _blocked_verification_result(
             check_name=check_name,
@@ -621,6 +730,7 @@ def run_verification_command(
             caller="afs.verify",
             purpose=f"legacy verification check {check_name}",
             cwd=resolved_root,
+            redact_argv_indices=(2,),
         )
         policy = ExecutionPolicy(
             allowed_cwd_roots=(resolved_root,),
@@ -631,13 +741,13 @@ def run_verification_command(
     except (TypeError, ValueError) as exc:
         return _blocked_verification_result(
             check_name=check_name,
-            command=command,
+            command="bash -lc '<redacted>'",
             execution_kind="legacy_shell",
             reason=f"invalid legacy verification command: {exc}",
         )
     return _result_from_execution_record(
         check_name=check_name,
-        command=command,
+        command=shlex.join(record.redacted_argv),
         execution_kind="legacy_shell",
         record=record,
         max_digest_items=max_digest_items,

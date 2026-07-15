@@ -11,7 +11,10 @@ import pytest
 
 import afs.cli.core as cli_core_module
 import afs.cli.verify as cli_verify_module
+import afs.verification as verification_module
 from afs.cli.verify import verify_plan_command, verify_run_command
+from afs.schema import AFSConfig, VerificationExecutionConfig
+from afs.verification import build_verification_plan, run_verification_execution
 
 
 def _base_args(tmp_path: Path, **overrides) -> Namespace:
@@ -105,6 +108,43 @@ def test_verify_plan_command_includes_policy_and_structured_guidance(
             ),
         }
     ]
+
+
+def test_verify_plan_redacts_duplicate_execution_and_legacy_surfaces(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _prepare_changed_python_file(tmp_path)
+    (tmp_path / "afs.toml").write_text(
+        "[verification]\n"
+        'default_profile = "repo"\n\n'
+        "[verification.profiles.repo]\n\n"
+        "[[verification.profiles.repo.checks]]\n"
+        'name = "python"\n'
+        'paths = ["src/**/*.py"]\n'
+        'commands = ["printf legacy-secret"]\n\n'
+        "[[verification.profiles.repo.checks.executions]]\n"
+        f"argv = {json.dumps([sys.executable, '-c', 'pass', 'argv-secret'])}\n"
+        "redact_argv_indices = [3]\n"
+        'env = { AFS_SECRET = "env-secret" }\n',
+        encoding="utf-8",
+    )
+
+    rc = verify_plan_command(_base_args(tmp_path))
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    plan = payload["verification_plan"]
+    check = plan["selected_checks"][0]
+    execution = check["executions"][0]
+    assert rc == 0
+    assert execution["argv"][3] == "<redacted>"
+    assert execution["env"] == {"AFS_SECRET": "<redacted>"}
+    assert check["commands"] == ["<redacted legacy shell command>"]
+    assert any("<redacted>" in item for item in plan["expected"])
+    assert any("<redacted legacy shell command>" in item for item in plan["expected"])
+    for secret in ("argv-secret", "env-secret", "legacy-secret"):
+        assert secret not in captured.out
 
 
 def test_verify_run_command_executes_selected_checks(
@@ -251,6 +291,8 @@ def test_verify_run_blocks_required_legacy_command_by_default(
     assert rc == 2
     assert payload["outcome"] == "blocked"
     assert payload["results"][0]["status"] == "blocked"
+    assert str(sentinel) not in payload["results"][0]["command"]
+    assert "<redacted>" in payload["results"][0]["command"]
     assert "deprecated and blocked" in captured.err
     assert not sentinel.exists()
 
@@ -317,6 +359,8 @@ def test_verify_run_records_execution_audit_metadata_without_output_or_env(
         execution_argv=[sys.executable, "-c", "print('not persisted')"],
         redact_argv_indices=[2],
     )
+    with (tmp_path / "afs.toml").open("a", encoding="utf-8") as config_file:
+        config_file.write('env = { AFS_SECRET = "session-secret" }\n')
     context_path = tmp_path / ".context"
     payload_path = tmp_path / "session-payload.json"
     payload_path.write_text(
@@ -341,7 +385,13 @@ def test_verify_run_records_execution_audit_metadata_without_output_or_env(
     rc = verify_run_command(_base_args(tmp_path, payload_file=str(payload_path)))
 
     assert rc == 0
-    json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    execution = output["verification_plan"]["selected_checks"][0]["executions"][0]
+    assert execution["argv"][2] == "<redacted>"
+    assert execution["env"] == {"AFS_SECRET": "<redacted>"}
+    assert output["results"][0]["command"].endswith("-c '<redacted>'")
+    assert "session-secret" not in captured.out
     seed = captured_events[0]["seed_payload"]
     assert seed["verification_request_hash"]
     assert seed["verification_resolved_executable"] == str(Path(sys.executable).resolve())
@@ -357,3 +407,104 @@ def test_verify_run_records_execution_audit_metadata_without_output_or_env(
     assert "stdout" not in seed
     assert "stderr" not in seed
     assert "env" not in seed
+
+
+def test_verify_run_rejects_string_legacy_opt_in_without_execution(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _prepare_changed_python_file(tmp_path)
+    sentinel = tmp_path / "must-not-exist"
+    (tmp_path / "afs.toml").write_text(
+        "[verification]\n"
+        'default_profile = "repo"\n'
+        'allow_legacy_shell = "false"\n\n'
+        "[verification.profiles.repo]\n\n"
+        "[[verification.profiles.repo.checks]]\n"
+        'name = "python"\n'
+        'paths = ["src/**/*.py"]\n'
+        f"commands = [{json.dumps(f'touch {sentinel}')} ]\n",
+        encoding="utf-8",
+    )
+
+    rc = verify_run_command(_base_args(tmp_path))
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert rc == 2
+    assert payload["outcome"] == "blocked"
+    assert "allow_legacy_shell must be a boolean" in payload["message"]
+    assert captured.err == ""
+    assert not sentinel.exists()
+
+
+def test_invalid_structured_execution_error_redacts_designated_argv(
+    tmp_path: Path,
+) -> None:
+    result = run_verification_execution(
+        repo_root=tmp_path,
+        check_name="invalid",
+        execution=VerificationExecutionConfig(
+            argv=[sys.executable, "-c", "pass", "session-secret"],
+            timeout_seconds=-1,
+            redact_argv_indices=[3],
+        ),
+    )
+
+    assert result["status"] == "blocked"
+    assert "session-secret" not in result["command"]
+    assert "session-secret" not in result["audit_command"]
+    assert "<redacted>" in result["command"]
+
+
+def test_malformed_redaction_metadata_hides_entire_argv(tmp_path: Path) -> None:
+    result = run_verification_execution(
+        repo_root=tmp_path,
+        check_name="invalid-redaction",
+        execution={
+            "argv": [sys.executable, "-c", "pass", "session-secret"],
+            "redact_argv_indices": ["3"],
+        },
+    )
+
+    assert result["status"] == "blocked"
+    assert "session-secret" not in result["command"]
+    assert sys.executable not in result["command"]
+    assert result["command"].count("<redacted>") == 4
+
+
+def test_builtin_ctest_uses_detected_build_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.20)\n")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "CTestTestfile.cmake").write_text("# generated\n")
+    monkeypatch.setattr(
+        verification_module.shutil,
+        "which",
+        lambda executable: "/usr/bin/ctest" if executable == "ctest" else None,
+    )
+
+    plan = build_verification_plan(
+        config=AFSConfig(),
+        cwd=tmp_path,
+        workflow="general",
+        tool_profile="default",
+        changed_paths=["src/main.cpp"],
+    )
+
+    check = next(
+        item for item in plan["selected_checks"] if item["name"] == "builtin-cpp"
+    )
+    assert check["executions"] == [
+        {
+            "argv": ["ctest", "--output-on-failure"],
+            "cwd": "build",
+            "timeout_seconds": 300.0,
+            "max_output_bytes": 1024 * 1024,
+            "inherit_env": [],
+            "env": {},
+            "redact_argv_indices": [],
+        }
+    ]

@@ -21,7 +21,13 @@ from .repo_policy import evaluate_repo_policy, load_repo_policy
 from .session_bootstrap import build_session_bootstrap, write_session_bootstrap_artifacts
 from .session_workflows import build_session_execution_profile
 from .skills import discover_skills, resolve_skill_roots, score_skill_relevance
-from .verification import build_structured_guidance, build_verification_plan
+from .verification import (
+    build_structured_guidance,
+    build_verification_plan,
+    redact_legacy_verification_command,
+    redact_verification_argv,
+    redact_verification_plan,
+)
 
 _RECENT_ACTIVITY_LIMIT = 20
 _PROMPT_PREVIEW_CHARS = 180
@@ -456,6 +462,8 @@ def _normalize_verification_status(value: Any) -> str:
         return "failed"
     if text in {"skipped", "skip"}:
         return "skipped"
+    if text in {"blocked", "policy_blocked"}:
+        return "blocked"
     if text in {"missing", "pending", "not_required"}:
         return text
     if text.startswith("verification_"):
@@ -477,6 +485,7 @@ def _verification_requirements(payload: dict[str, Any]) -> dict[str, Any]:
     if selected_checks:
         expected: list[str] = []
         required = False
+        allow_legacy_shell = bool(verification_plan.get("allow_legacy_shell", False))
         for check in selected_checks:
             if not isinstance(check, dict):
                 continue
@@ -495,14 +504,30 @@ def _verification_requirements(payload: dict[str, Any]) -> dict[str, Any]:
                 argv = execution.get("argv")
                 if not isinstance(argv, list) or not argv:
                     continue
-                text = shlex.join(str(argument) for argument in argv)
+                text = shlex.join(
+                    redact_verification_argv(
+                        argv,
+                        execution.get("redact_argv_indices"),
+                    )
+                )
                 expected.append(f"{name}: {text}" if name else text)
                 rendered = True
             for command in commands:
                 text = str(command).strip()
                 if not text:
                     continue
-                expected.append(f"{name}: {text}" if name else text)
+                legacy_status = (
+                    "deprecated; explicit opt-in enabled"
+                    if allow_legacy_shell
+                    else "deprecated; blocked; explicit opt-in required"
+                )
+                rendered_command = (
+                    f"legacy shell ({legacy_status}): "
+                    f"{redact_legacy_verification_command(text)}"
+                )
+                expected.append(
+                    f"{name}: {rendered_command}" if name else rendered_command
+                )
                 rendered = True
             if not rendered and name:
                 expected.append(f"{name}: review changed scope")
@@ -646,6 +671,9 @@ def _build_session_verification_state(
     if not required:
         status = "not_required"
         message = "Verification not required for this workflow."
+    elif "blocked" in statuses:
+        status = "blocked"
+        message = "Required verification was blocked by policy."
     elif "failed" in statuses:
         status = "failed"
         message = "Recorded verification failed."
@@ -709,7 +737,7 @@ def _build_session_feedback_state(
         signals.append("policy_violation")
 
     verification_status = str(verification.get("status", "")).strip()
-    if verification_status in {"failed", "missing", "skipped"}:
+    if verification_status in {"blocked", "failed", "missing", "skipped"}:
         counts[f"verification_{verification_status}"] = 1
         signals.append(f"verification_{verification_status}")
 
@@ -718,7 +746,7 @@ def _build_session_feedback_state(
         message_parts.append(f"{counts['review_risk']} repo risk alerts")
     if counts.get("policy_violation"):
         message_parts.append(f"{counts['policy_violation']} policy violations")
-    if verification_status in {"failed", "missing", "skipped"}:
+    if verification_status in {"blocked", "failed", "missing", "skipped"}:
         message_parts.append(f"verification {verification_status}")
 
     return {
@@ -1419,6 +1447,9 @@ def build_client_session_payload(
         changed_paths=list((payload.get("verification_plan") or {}).get("changed_paths") or []),
         verification_profile=verification_profile,
         policy_summary=payload["repo_policy"],
+    )
+    payload["verification_plan"] = redact_verification_plan(
+        payload["verification_plan"]
     )
     payload["structured_guidance"] = build_structured_guidance(
         model=model,

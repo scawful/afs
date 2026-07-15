@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from afs.cli._utils import write_config
 from afs.config import load_config, load_config_model, load_runtime_config_model
-from afs.schema import AFSConfig
+from afs.schema import AFSConfig, VerificationConfigError
 
 
 def test_load_config_merges_workspace_registry(tmp_path, monkeypatch) -> None:
@@ -182,6 +184,98 @@ def test_load_config_model_parses_verification_profiles(tmp_path) -> None:
     assert execution.inherit_env == ["PATH", "HOME"]
     assert execution.env == {"AFS_MODE": "test"}
     assert execution.redact_argv_indices == [2]
+
+
+@pytest.mark.parametrize(
+    ("execution", "message"),
+    [
+        (
+            {"argv": ["python3"], "timeout_seconds": "30"},
+            "timeout_seconds must be greater than 0",
+        ),
+        (
+            {"argv": ["python3"], "max_output_bytes": 0},
+            "max_output_bytes must be greater than 0",
+        ),
+        (
+            {"argv": ["python3"], "env": {"TOKEN": 7}},
+            "env must map string names to string values",
+        ),
+        (
+            {"argv": ["python3"], "redact_argv_indices": [1, 1]},
+            "redact_argv_indices must contain unique integers",
+        ),
+        (
+            {"argv": ["python3"], "redact_argv_indicies": [0]},
+            "contains unknown fields",
+        ),
+    ],
+)
+def test_verification_execution_safety_fields_fail_closed(
+    execution: dict,
+    message: str,
+) -> None:
+    payload = {
+        "verification": {
+            "default_profile": "repo",
+            "profiles": {
+                "repo": {
+                    "checks": [
+                        {
+                            "name": "required",
+                            "required": True,
+                            "executions": [execution],
+                        }
+                    ]
+                }
+            },
+        }
+    }
+
+    with pytest.raises(VerificationConfigError, match=message):
+        AFSConfig.from_dict(payload)
+
+
+def test_verification_check_rejects_non_table_execution_entries() -> None:
+    payload = {
+        "verification": {
+            "profiles": {
+                "repo": {
+                    "checks": [
+                        {
+                            "name": "required",
+                            "required": True,
+                            "executions": ["python3 -m pytest"],
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    with pytest.raises(VerificationConfigError, match="array of tables"):
+        AFSConfig.from_dict(payload)
+
+
+def test_verification_check_rejects_unknown_execution_field() -> None:
+    payload = {
+        "verification": {
+            "profiles": {
+                "repo": {
+                    "checks": [
+                        {
+                            "name": "required",
+                            "required": True,
+                            "execution": {"argv": ["python3"]},
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    with pytest.raises(VerificationConfigError, match="contains unknown fields"):
+        AFSConfig.from_dict(payload)
 
 
 

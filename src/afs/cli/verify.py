@@ -12,6 +12,7 @@ from ..repo_policy import evaluate_repo_policy, load_repo_policy
 from ..verification import (
     build_structured_guidance,
     build_verification_plan,
+    redact_verification_plan,
     run_verification_command,
     run_verification_execution,
 )
@@ -132,17 +133,45 @@ def _build_plan_bundle(args: argparse.Namespace) -> tuple[dict[str, Any], dict[s
     }, payload_path
 
 
+def _public_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
+    """Return a CLI-safe bundle without raw env values or designated argv data."""
+    public = dict(bundle)
+    plan = bundle.get("verification_plan")
+    if isinstance(plan, dict):
+        public["verification_plan"] = redact_verification_plan(plan)
+    return public
+
+
+def _invalid_verification_input(args: argparse.Namespace, exc: ValueError) -> int:
+    message = f"Invalid verification input: {exc}"
+    output = {
+        "verification_plan": {"available": False},
+        "results": [],
+        "outcome": "blocked",
+        "message": message,
+    }
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(output, indent=2))
+    else:
+        print(message, file=sys.stderr)
+    return 2
+
+
 def verify_plan_command(args: argparse.Namespace) -> int:
-    meta, bundle, _payload_path = _build_plan_bundle(args)
-    output = dict(bundle)
+    try:
+        meta, bundle, _payload_path = _build_plan_bundle(args)
+    except ValueError as exc:
+        return _invalid_verification_input(args, exc)
+    public_bundle = _public_bundle(bundle)
+    output = dict(public_bundle)
     output.update(meta)
     if args.json:
         print(json.dumps(output, indent=2))
         return 0
 
-    plan = bundle["verification_plan"]
-    policy = bundle["repo_policy"]
-    structured = bundle["structured_guidance"]
+    plan = public_bundle["verification_plan"]
+    policy = public_bundle["repo_policy"]
+    structured = public_bundle["structured_guidance"]
     print(f"repo_root: {plan['repo_root']}")
     print(f"profile: {plan.get('profile') or '(none)'}")
     changed_paths = list(plan.get("changed_paths") or [])
@@ -160,7 +189,12 @@ def verify_plan_command(args: argparse.Namespace) -> int:
                 argv = execution.get("argv") if isinstance(execution, dict) else []
                 print(f"    argv: {json.dumps(argv or [])}")
             for command in check.get("commands") or []:
-                print(f"    legacy shell (deprecated; opt-in required): {command}")
+                legacy_status = (
+                    "explicit opt-in enabled"
+                    if plan.get("allow_legacy_shell")
+                    else "blocked; explicit opt-in required"
+                )
+                print(f"    legacy shell (deprecated; {legacy_status}): {command}")
     else:
         print("checks: (none)")
     if policy.get("matched_risks") or policy.get("anti_pattern_hits"):
@@ -246,7 +280,10 @@ def _record_result(
 
 
 def verify_run_command(args: argparse.Namespace) -> int:
-    meta, bundle, payload_path = _build_plan_bundle(args)
+    try:
+        meta, bundle, payload_path = _build_plan_bundle(args)
+    except ValueError as exc:
+        return _invalid_verification_input(args, exc)
     checks = _filter_selected_checks(bundle, list(getattr(args, "check", []) or []))
     runnable: list[tuple[str, bool, str, Any]] = []
     for check in checks:
@@ -260,7 +297,7 @@ def verify_run_command(args: argparse.Namespace) -> int:
     if not runnable:
         output = {
             **meta,
-            **bundle,
+            **_public_bundle(bundle),
             "results": [],
             "outcome": "blocked" if args.require_checks else "passed",
             "message": "No runnable verification commands matched the current scope.",
@@ -327,7 +364,7 @@ def verify_run_command(args: argparse.Namespace) -> int:
 
     output = {
         **meta,
-        **bundle,
+        **_public_bundle(bundle),
         "results": results,
         "outcome": "blocked" if blocked else ("failed" if failed else "passed"),
     }
