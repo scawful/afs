@@ -3805,6 +3805,45 @@ def test_skill_read_rechecks_configured_root_containment(
     assert "outside configured roots" in response["error"]["message"]
 
 
+def test_skill_read_rejects_symlink_swap_after_containment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    afs_root = tmp_path / "afs-root"
+    skill_path = afs_root / "skills" / "safe" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        "---\nname: safe\ntriggers: [safe]\n---\n\nTrusted body.\n",
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside-secret.md"
+    outside.write_text("SECRET_OUTSIDE_ROOT\n", encoding="utf-8")
+    monkeypatch.setenv("AFS_ROOT", str(afs_root))
+
+    import afs.mcp_server as mcp_server_module
+
+    original = mcp_server_module._skill_path_within_roots
+
+    def swap_after_check(path: Path, roots: list[Path]) -> tuple[Path, Path]:
+        checked = original(path, roots)
+        skill_path.unlink()
+        try:
+            skill_path.symlink_to(outside)
+        except OSError as exc:
+            pytest.skip(f"symlinks are unavailable on this platform: {exc}")
+        return checked
+
+    monkeypatch.setattr(
+        mcp_server_module,
+        "_skill_path_within_roots",
+        swap_after_check,
+    )
+    response = _call_tool(_make_manager(tmp_path), "skill.read", {"name": "safe"})
+
+    assert "error" in response
+    assert "SECRET_OUTSIDE_ROOT" not in json.dumps(response)
+
+
 def test_skill_read_unknown_name_preview_is_bounded(tmp_path: Path, monkeypatch) -> None:
     afs_root = tmp_path / "afs-root"
     for index in range(14):

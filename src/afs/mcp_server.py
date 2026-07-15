@@ -2334,14 +2334,15 @@ def _tool_skill_match(arguments: dict[str, Any], manager: AFSManager) -> dict[st
     }
 
 
-def _skill_path_within_roots(path: Path, roots: list[Path]) -> Path:
+def _skill_path_within_roots(path: Path, roots: list[Path]) -> tuple[Path, Path]:
     resolved = path.expanduser().resolve()
     for root in roots:
+        resolved_root = root.expanduser().resolve()
         try:
-            resolved.relative_to(root.expanduser().resolve())
+            resolved.relative_to(resolved_root)
         except (OSError, ValueError):
             continue
-        return resolved
+        return resolved, resolved_root
     raise PermissionError(f"Skill path outside configured roots: {resolved}")
 
 
@@ -2373,10 +2374,11 @@ def _tool_skill_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str
     for skill in skills:
         if skill.name.casefold() != wanted:
             continue
-        skill_path = _skill_path_within_roots(skill.path, roots)
+        skill_path, trusted_root = _skill_path_within_roots(skill.path, roots)
         body, body_truncated = read_skill_body(
             skill_path,
             max_chars=MAX_SKILL_BODY_CHARS,
+            trusted_root=trusted_root,
         )
         return {
             "profile": profile_name,
