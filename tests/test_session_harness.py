@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from argparse import Namespace
 from pathlib import Path
 
@@ -197,18 +198,19 @@ def test_session_prepare_client_command_outputs_artifacts(
     assert payload["prompt"]["artifact_paths"]["json"].endswith("session_system_prompt_codex.json")
     assert Path(payload["prompt"]["artifact_paths"]["json"]).exists()
     assert payload["cli_hints"]["workspace_path"] == str(tmp_path.resolve())
-    assert payload["cli_hints"]["query_shortcut"] == f"afs query <text> --path {tmp_path.resolve()}"
+    quoted_workspace = shlex.quote(str(tmp_path.resolve()))
+    assert payload["cli_hints"]["query_shortcut"] == f"afs query <text> --path {quoted_workspace}"
     assert (
         payload["cli_hints"]["query_canonical"]
-        == f"afs context query <text> --path {tmp_path.resolve()}"
+        == f"afs context query <text> --path {quoted_workspace}"
     )
-    assert payload["cli_hints"]["index_rebuild"] == f"afs index rebuild --path {tmp_path.resolve()}"
-    assert payload["cli_hints"]["agent_jobs_inbox"] == f"afs agent-jobs inbox --path {tmp_path.resolve()}"
-    assert payload["cli_hints"]["work_summary"] == f"afs work --path {tmp_path.resolve()}"
-    assert payload["cli_hints"]["work_approvals"] == f"afs work approvals list --path {tmp_path.resolve()}"
+    assert payload["cli_hints"]["index_rebuild"] == f"afs index rebuild --path {quoted_workspace}"
+    assert payload["cli_hints"]["agent_jobs_inbox"] == f"afs agent-jobs inbox --path {quoted_workspace}"
+    assert payload["cli_hints"]["work_summary"] == f"afs work --path {quoted_workspace}"
+    assert payload["cli_hints"]["work_approvals"] == f"afs work approvals list --path {quoted_workspace}"
     assert (
         payload["cli_hints"]["work_communication"]
-        == f"afs work communication preflight --path {tmp_path.resolve()}"
+        == f"afs work communication preflight --path {quoted_workspace}"
     )
     assert payload["cli_hints"]["verify_plan"].startswith("afs verify plan --payload-file ")
     assert payload["cli_hints"]["verify_run"].startswith("afs verify run --payload-file ")
