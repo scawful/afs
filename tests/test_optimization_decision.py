@@ -183,13 +183,29 @@ def test_objective_requires_positive_minimum_delta() -> None:
     objective = next(metric for metric in policy["metrics"] if metric["role"] == "objective")
     objective["min_delta"] = 0.0
 
-    with pytest.raises(OptimizationInputError, match="min_delta > 0"):
+    with pytest.raises(OptimizationInputError, match="invalid policy"):
         decide_optimization_step(baseline, candidate, policy)
 
     del objective["min_delta"]
 
-    with pytest.raises(OptimizationInputError, match="min_delta > 0"):
+    with pytest.raises(OptimizationInputError, match="invalid policy"):
         decide_optimization_step(baseline, candidate, policy)
+
+
+def test_policy_schema_enforces_role_specific_minimum_delta() -> None:
+    policy = _example("policy.json")
+    objective = next(metric for metric in policy["metrics"] if metric["role"] == "objective")
+    guardrail = next(metric for metric in policy["metrics"] if metric["role"] == "guardrail")
+
+    objective.pop("min_delta")
+    assert not validate_structured_response("v1/optimization/policy", policy).valid
+
+    objective["min_delta"] = 0.0
+    assert not validate_structured_response("v1/optimization/policy", policy).valid
+
+    objective["min_delta"] = 0.01
+    guardrail["min_delta"] = 0.01
+    assert not validate_structured_response("v1/optimization/policy", policy).valid
 
 
 def test_guardrail_must_not_declare_minimum_delta() -> None:
@@ -199,8 +215,29 @@ def test_guardrail_must_not_declare_minimum_delta() -> None:
     guardrail = next(metric for metric in policy["metrics"] if metric["role"] == "guardrail")
     guardrail["min_delta"] = 0.0
 
-    with pytest.raises(OptimizationInputError, match="must not declare min_delta"):
+    with pytest.raises(OptimizationInputError, match="invalid policy"):
         decide_optimization_step(baseline, candidate, policy)
+
+
+def test_decision_schema_enforces_role_specific_minimum_delta() -> None:
+    decision = decide_optimization_step(
+        _example("baseline.json"),
+        _example("candidate.json"),
+        _example("policy.json"),
+    )
+    objective = next(
+        metric for metric in decision["metrics"] if metric["role"] == "objective"
+    )
+    guardrail = next(
+        metric for metric in decision["metrics"] if metric["role"] == "guardrail"
+    )
+
+    objective.pop("min_delta")
+    assert not validate_structured_response("v1/optimization/decision", decision).valid
+
+    objective["min_delta"] = 0.01
+    guardrail["min_delta"] = 0.01
+    assert not validate_structured_response("v1/optimization/decision", decision).valid
 
 
 def test_exact_decimal_threshold_is_not_lost_to_binary_float_rounding() -> None:

@@ -117,7 +117,7 @@ def test_canonical_json_rejects_non_finite_and_unsupported_values() -> None:
         canonical_json_bytes({1: "not-json"})
 
 
-def test_optimization_decision_hash_is_unchanged_after_canonical_extraction() -> None:
+def test_optimization_decision_hash_remains_golden_after_canonical_extraction() -> None:
     inputs = [
         json.loads((EXAMPLE_ROOT / filename).read_text(encoding="utf-8"))
         for filename in ("baseline.json", "candidate.json", "policy.json")
@@ -127,5 +127,5 @@ def test_optimization_decision_hash_is_unchanged_after_canonical_extraction() ->
 
     assert (
         decision["decision_sha256"]
-        == "d3a168ef536bc3a3c370779596c7e3d466ad56facaca1108e595fbcc9b4dbd6e"
+        == "fb0663a2cdc7125d2aa5f0c9297616c8c546978ce89ce0354d08bcc7ba33fdb9"
     )

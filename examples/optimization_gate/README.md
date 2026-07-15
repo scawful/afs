@@ -17,6 +17,7 @@ Exit codes are stable for automation:
 - `1`: `rejected`
 - `2`: invalid input
 - `3`: `inconclusive`
+- `4`: internal gate error (not an evidence verdict)
 
 The baseline uses `parent_id: "root"` as the v1 lineage sentinel. Every candidate
 compared to it must name the baseline's `candidate_id` as its own `parent_id`.

@@ -57,8 +57,7 @@
             "enum": ["objective", "guardrail"]
           },
           "min_delta": {
-            "type": "number",
-            "minimum": 0
+            "type": "number"
           },
           "max_regression": {
             "type": "number",
@@ -69,6 +68,31 @@
             "minimum": 1
           }
         },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "role": {
+                  "const": "objective"
+                }
+              },
+              "required": ["role"]
+            },
+            "then": {
+              "required": ["min_delta"],
+              "properties": {
+                "min_delta": {
+                  "exclusiveMinimum": 0
+                }
+              }
+            },
+            "else": {
+              "not": {
+                "required": ["min_delta"]
+              }
+            }
+          }
+        ],
         "additionalProperties": false
       }
     },
