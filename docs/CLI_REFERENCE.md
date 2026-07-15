@@ -520,9 +520,10 @@ output has an obvious review path.
 
 `optimize decide` is a pure evidence comparator. It never executes, writes,
 activates, or promotes a candidate. Exit codes are `0` for
-`eligible_for_human_review`, `1` for `rejected`, `2` for invalid input, and `3`
-for `inconclusive`. See `docs/OPTIMIZATION_PROTOCOL.md` for the versioned
-contracts and safety boundary.
+`eligible_for_human_review`, `1` for `rejected`, `2` for invalid input, `3`
+for `inconclusive`, and `4` for an internal gate error (not an evidence
+verdict). See `docs/OPTIMIZATION_PROTOCOL.md` for the versioned contracts and
+safety boundary.
 
 ## Policy-Checked Execution
 

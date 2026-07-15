@@ -22,6 +22,8 @@ _DECISION_EXIT_CODES = {
     "rejected": 1,
     "inconclusive": 3,
 }
+_EXIT_INVALID_INPUT = 2
+_EXIT_INTERNAL_ERROR = 4
 
 
 def _reject_nonstandard_number(value: str) -> None:
@@ -68,12 +70,20 @@ def optimize_decide_command(args: argparse.Namespace) -> int:
         candidate = _load_json_object(args.candidate, "candidate")
         policy = _load_json_object(args.policy, "policy")
         decision = decide_optimization_step(baseline, candidate, policy)
+        rendered = canonical_json_text(decision) if args.json else None
     except OptimizationInputError as exc:
         print(f"afs optimize decide: {exc}", file=sys.stderr)
-        return 2
+        return _EXIT_INVALID_INPUT
+    except Exception as exc:
+        # A gate crash must never share an exit code with an evidence verdict.
+        print(
+            f"afs optimize decide: internal error: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return _EXIT_INTERNAL_ERROR
 
-    if args.json:
-        sys.stdout.write(canonical_json_text(decision))
+    if rendered is not None:
+        sys.stdout.write(rendered)
     else:
         print(f"decision: {decision['decision']}")
         print(f"baseline: {decision['baseline_id']}")

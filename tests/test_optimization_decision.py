@@ -52,6 +52,9 @@ def test_example_records_validate_and_candidate_is_eligible_for_review() -> None
     assert len(decision["decision_sha256"]) == 64
     assert validate_structured_response("v1/optimization/decision", decision).valid
 
+    for metric in decision["metrics"]:
+        assert ("min_delta" in metric) == (metric["role"] == "objective")
+
 
 def test_decision_is_stable_across_semantically_irrelevant_input_order() -> None:
     baseline = _example("baseline.json")
@@ -183,6 +186,22 @@ def test_objective_requires_positive_minimum_delta() -> None:
     with pytest.raises(OptimizationInputError, match="min_delta > 0"):
         decide_optimization_step(baseline, candidate, policy)
 
+    del objective["min_delta"]
+
+    with pytest.raises(OptimizationInputError, match="min_delta > 0"):
+        decide_optimization_step(baseline, candidate, policy)
+
+
+def test_guardrail_must_not_declare_minimum_delta() -> None:
+    baseline = _example("baseline.json")
+    candidate = _example("candidate.json")
+    policy = _example("policy.json")
+    guardrail = next(metric for metric in policy["metrics"] if metric["role"] == "guardrail")
+    guardrail["min_delta"] = 0.0
+
+    with pytest.raises(OptimizationInputError, match="must not declare min_delta"):
+        decide_optimization_step(baseline, candidate, policy)
+
 
 def test_exact_decimal_threshold_is_not_lost_to_binary_float_rounding() -> None:
     baseline = _example("baseline.json")
@@ -222,9 +241,9 @@ def test_maximum_policy_size_still_produces_a_schema_valid_decision() -> None:
             "unit": "ratio",
             "direction": "maximize",
             "role": "objective" if index == 0 else "guardrail",
-            "min_delta": 0.01 if index == 0 else 0.0,
             "max_regression": 0.0,
             "min_samples": 1,
+            **({"min_delta": 0.01} if index == 0 else {}),
         }
         for index in range(256)
     ]

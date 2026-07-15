@@ -36,7 +36,6 @@
           "unit",
           "direction",
           "role",
-          "min_delta",
           "max_regression",
           "min_samples"
         ],

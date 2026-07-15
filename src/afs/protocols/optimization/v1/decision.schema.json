@@ -100,7 +100,6 @@
           "candidate_samples",
           "adjusted_delta",
           "conservative_delta",
-          "min_delta",
           "max_regression",
           "status"
         ],

@@ -91,6 +91,8 @@ A policy declares:
 
 - objective metrics that must improve by a positive `min_delta`
 - guardrail metrics and their maximum allowed regression
+- `min_delta` is objective-only: an objective must declare `min_delta > 0`, and
+  a policy that declares `min_delta` on a guardrail is rejected as invalid
 - explicit units and maximize/minimize direction
 - minimum samples per metric
 - required hard constraints
@@ -174,6 +176,11 @@ records and bootstrap confidence intervals without changing v1 artifacts.
 | `1` | `rejected` |
 | `2` | invalid input or schema |
 | `3` | `inconclusive` |
+| `4` | internal gate error — not an evidence verdict |
+
+Codes `0`, `1`, and `3` are evidence verdicts. Code `4` means the gate itself
+failed after inputs were accepted; treat it like `2` (do not promote, fix and
+re-run), never like `rejected`.
 
 ## Path To Safe Hill Climbing
 

@@ -112,6 +112,37 @@ def test_optimize_decide_rejects_non_regular_file_without_blocking(tmp_path: Pat
     assert "not a regular file" in capsys.readouterr().err
 
 
+def test_optimize_decide_internal_error_does_not_reuse_verdict_exit_codes(
+    monkeypatch, capsys
+) -> None:
+    def _explode(*_args, **_kwargs):
+        raise RuntimeError("simulated gate defect")
+
+    monkeypatch.setattr("afs.cli.optimize.decide_optimization_step", _explode)
+    parser = build_parser()
+
+    exit_code = _run(
+        parser,
+        [
+            "optimize",
+            "decide",
+            "--baseline",
+            str(EXAMPLE_ROOT / "baseline.json"),
+            "--candidate",
+            str(EXAMPLE_ROOT / "candidate.json"),
+            "--policy",
+            str(EXAMPLE_ROOT / "policy.json"),
+            "--json",
+        ],
+    )
+
+    assert exit_code == 4
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "internal error" in captured.err
+    assert "simulated gate defect" in captured.err
+
+
 def test_optimize_decide_reports_large_integer_as_invalid_input(tmp_path: Path, capsys) -> None:
     candidate_payload = json.loads((EXAMPLE_ROOT / "candidate.json").read_text(encoding="utf-8"))
     candidate_payload["metrics"][0]["value"] = 10**400

@@ -242,10 +242,15 @@ def decide_optimization_step(
     ]
     if not objective_policies:
         raise OptimizationInputError("invalid policy: at least one objective metric is required")
-    for metric in objective_policies:
-        if metric["min_delta"] <= 0:
+    for metric in policy_metrics.values():
+        if metric["role"] == "objective":
+            if metric.get("min_delta", 0) <= 0:
+                raise OptimizationInputError(
+                    f"invalid policy: objective metric {metric['name']!r} must use min_delta > 0"
+                )
+        elif "min_delta" in metric:
             raise OptimizationInputError(
-                f"invalid policy: objective metric {metric['name']!r} must use min_delta > 0"
+                f"invalid policy: guardrail metric {metric['name']!r} must not declare min_delta"
             )
 
     reason_codes: set[str] = set()
@@ -341,7 +346,11 @@ def decide_optimization_step(
             else:
                 conservative_delta = adjusted_delta
 
-        min_delta = _decimal_number(metric_policy["min_delta"], f"policy/metrics/{name}/min_delta")
+        min_delta = (
+            _decimal_number(metric_policy["min_delta"], f"policy/metrics/{name}/min_delta")
+            if metric_policy["role"] == "objective"
+            else None
+        )
         max_regression = _decimal_number(
             metric_policy["max_regression"], f"policy/metrics/{name}/max_regression"
         )
@@ -373,31 +382,29 @@ def decide_optimization_step(
                 "metric_regression",
                 f"metric {name!r} exceeds its allowed regression",
             )
-        elif metric_policy["role"] == "objective" and conservative_delta >= min_delta:
+        elif min_delta is not None and conservative_delta >= min_delta:
             status = "improved"
             objective_improved = True
 
-        metric_results.append(
-            {
-                "name": name,
-                "unit": expected_unit,
-                "role": metric_policy["role"],
-                "direction": metric_policy["direction"],
-                "baseline_value": _output_number(baseline_value, f"metrics/{name}/baseline_value"),
-                "candidate_value": _output_number(
-                    candidate_value, f"metrics/{name}/candidate_value"
-                ),
-                "baseline_samples": baseline_samples,
-                "candidate_samples": candidate_samples,
-                "adjusted_delta": _output_number(adjusted_delta, f"metrics/{name}/adjusted_delta"),
-                "conservative_delta": _output_number(
-                    conservative_delta, f"metrics/{name}/conservative_delta"
-                ),
-                "min_delta": _output_number(min_delta, f"metrics/{name}/min_delta"),
-                "max_regression": _output_number(max_regression, f"metrics/{name}/max_regression"),
-                "status": status,
-            }
-        )
+        metric_result = {
+            "name": name,
+            "unit": expected_unit,
+            "role": metric_policy["role"],
+            "direction": metric_policy["direction"],
+            "baseline_value": _output_number(baseline_value, f"metrics/{name}/baseline_value"),
+            "candidate_value": _output_number(candidate_value, f"metrics/{name}/candidate_value"),
+            "baseline_samples": baseline_samples,
+            "candidate_samples": candidate_samples,
+            "adjusted_delta": _output_number(adjusted_delta, f"metrics/{name}/adjusted_delta"),
+            "conservative_delta": _output_number(
+                conservative_delta, f"metrics/{name}/conservative_delta"
+            ),
+            "max_regression": _output_number(max_regression, f"metrics/{name}/max_regression"),
+            "status": status,
+        }
+        if min_delta is not None:
+            metric_result["min_delta"] = _output_number(min_delta, f"metrics/{name}/min_delta")
+        metric_results.append(metric_result)
 
     if failed_constraints or metric_regressed:
         decision = "rejected"

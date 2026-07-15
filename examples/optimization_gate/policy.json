@@ -17,7 +17,6 @@
       "unit": "ms",
       "direction": "minimize",
       "role": "guardrail",
-      "min_delta": 0.0,
       "max_regression": 20.0,
       "min_samples": 100
     },
@@ -26,7 +25,6 @@
       "unit": "usd",
       "direction": "minimize",
       "role": "guardrail",
-      "min_delta": 0.0,
       "max_regression": 0.005,
       "min_samples": 100
     }
