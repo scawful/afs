@@ -156,21 +156,21 @@ def test_cli_create_interactive_prompt_records_provenance(
 
 
 def _update_args(mid: str, **overrides):
-    base = dict(
-        mission_id=mid,
-        status=None,
-        summary=None,
-        owner=None,
-        acceptance=None,
-        next_step=None,
-        blocker=None,
-        link_session=None,
-        link_handoff=None,
-        tag=None,
-        note=None,
-        actor=None,
-        json=True,
-    )
+    base = {
+        "mission_id": mid,
+        "status": None,
+        "summary": None,
+        "owner": None,
+        "acceptance": None,
+        "next_step": None,
+        "blocker": None,
+        "link_session": None,
+        "link_handoff": None,
+        "tag": None,
+        "note": None,
+        "actor": None,
+        "json": True,
+    }
     base.update(overrides)
     return _args(**base)
 

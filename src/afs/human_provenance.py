@@ -12,7 +12,7 @@ no confirmation, never a silent pass.
 from __future__ import annotations
 
 import getpass
-from typing import Callable
+from collections.abc import Callable
 
 TTY_PATH = "/dev/tty"
 

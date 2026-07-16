@@ -270,8 +270,6 @@ def test_rationale_column_migrated_into_existing_database(tmp_path: Path) -> Non
 def test_migration_tolerates_concurrent_first_open(tmp_path: Path) -> None:
     """Two processes can both see the column missing; the loser's ALTER must
     resolve quietly instead of crashing the store open."""
-    import sqlite3
-
     context_root = tmp_path / ".context"
     context_root.mkdir()
     store = WorkAssistantStore(context_root)
