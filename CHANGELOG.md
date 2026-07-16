@@ -73,8 +73,11 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
   Unknown `on_event_action` values fail closed; the `job` action passes the
   same supervisor gates as spawns and embeds only sanitized event labels in
   prompts; debounce (`event_debounce`, default 5m) is persisted at ack so it
-  also covers job actions; malformed records are skipped and counted; the
-  hivemind bus is canonical (history mirrors of sends are excluded); and
+  also covers job actions; future-stamped records are deferred without
+  blocking later ripe work; hivemind sends publish atomically and exact file
+  identities preserve newly copied/backdated messages; stable malformed
+  records are skipped and counted; the hivemind bus is canonical (history
+  mirrors of sends are excluded); and
   `AgentConfig` round-trips now preserve custom mapping keys.
 
 ### Changed

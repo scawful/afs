@@ -1,7 +1,7 @@
 """React to new event-log entries and hivemind messages.
 
 The supervisor's reconcile loop opens an :func:`open_event_batch` each cycle:
-events are read oldest-first from both sources under an exclusive lock, the
+events are read in bounded source order under an exclusive lock, the
 supervisor dispatches matches against ``AgentConfig.on_event`` patterns, and
 only then acks the batch. Cursors never advance before dispatch, so a crash
 mid-cycle redelivers instead of losing events (at-least-once delivery).
@@ -23,6 +23,7 @@ message never yields two events.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -52,7 +53,7 @@ STATE_DIR_NAME = "event_reactor"
 CURSOR_FILE_NAME = "cursor.json"
 INITIALIZED_FILE_NAME = "initialized"
 LEGACY_CURSOR_FILE_NAME = "event_reactor_cursor.json"
-STATE_VERSION = 3
+STATE_VERSION = 4
 DEFAULT_EVENT_DEBOUNCE_SECONDS = 300.0
 HIVEMIND_KIND = "hivemind"
 # Per-source per-cycle record bound. Positional checkpoints resume larger
@@ -96,6 +97,26 @@ class ReactorEvent:
 
     def label(self) -> str:
         return f"{self.kind}:{self.detail}" if self.detail else self.kind
+
+
+@dataclass(frozen=True)
+class _DeferredHistoryRecord:
+    """Reference to a visible history record whose timestamp is not ripe yet."""
+
+    filename: str
+    offset: int
+    length: int
+    digest: str
+    timestamp: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "filename": self.filename,
+            "offset": self.offset,
+            "length": self.length,
+            "digest": self.digest,
+            "timestamp": self.timestamp,
+        }
 
 
 def sanitize_label(label: str) -> str:
@@ -245,9 +266,7 @@ def _save_state(state_dir: Path, state: dict[str, Any]) -> None:
             tmp_path.unlink(missing_ok=True)
         except OSError:
             pass
-        raise ReactorStateError(
-            f"could not persist event reactor state to {path}: {exc}"
-        ) from exc
+        raise ReactorStateError(f"could not persist event reactor state to {path}: {exc}") from exc
     try:
         (state_dir / LEGACY_CURSOR_FILE_NAME).unlink(missing_ok=True)
     except OSError:
@@ -347,6 +366,95 @@ def _offset_map(value: Any, *, key: str) -> dict[str, int]:
     return result
 
 
+def _history_deferred_records(value: Any) -> list[_DeferredHistoryRecord]:
+    if not isinstance(value, list):
+        raise ReactorStateError("event reactor state field 'history_deferred' must be a list")
+    records: list[_DeferredHistoryRecord] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ReactorStateError("event reactor history_deferred contains a non-object")
+        filename = item.get("filename")
+        offset = item.get("offset")
+        length = item.get("length")
+        digest = item.get("digest")
+        timestamp = item.get("timestamp")
+        if (
+            not isinstance(filename, str)
+            or not filename
+            or Path(filename).name != filename
+            or isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or offset < 0
+            or isinstance(length, bool)
+            or not isinstance(length, int)
+            or length <= 0
+            or length > MAX_HISTORY_RECORD_BYTES
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or not isinstance(timestamp, str)
+            or _parse_timestamp(timestamp) is None
+        ):
+            raise ReactorStateError(
+                "event reactor history_deferred contains an invalid record reference"
+            )
+        records.append(
+            _DeferredHistoryRecord(
+                filename=filename,
+                offset=offset,
+                length=length,
+                digest=digest,
+                timestamp=timestamp,
+            )
+        )
+    return records
+
+
+def _history_record_event(raw: bytes) -> ReactorEvent | None:
+    """Parse one complete history line, excluding the hivemind mirror."""
+    record = json.loads(raw.strip())
+    if not isinstance(record, dict):
+        raise ValueError("history record is not an object")
+    kind = str(record.get("type", ""))
+    if kind == HIVEMIND_KIND:
+        return None
+    stamp = _parse_timestamp(str(record.get("timestamp", "")))
+    if stamp is None:
+        raise ValueError("history record timestamp is invalid")
+    metadata = record.get("metadata")
+    return ReactorEvent(
+        kind=kind,
+        detail=str(record.get("op", "") or ""),
+        source=str(record.get("source", "")),
+        timestamp=str(record.get("timestamp", "")),
+        metadata=metadata if isinstance(metadata, dict) else {},
+    )
+
+
+def _read_deferred_history_event(
+    history_root: Path,
+    reference: _DeferredHistoryRecord,
+) -> ReactorEvent | None:
+    path = history_root / reference.filename
+    try:
+        with path.open("rb") as handle:
+            handle.seek(reference.offset)
+            raw = handle.read(reference.length)
+    except OSError as exc:
+        raise ReactorStateError(
+            f"could not reread deferred history record {path} at offset {reference.offset}: {exc}"
+        ) from exc
+    if len(raw) != reference.length or hashlib.sha256(raw).hexdigest() != reference.digest:
+        raise ReactorStateError(
+            f"deferred history record changed before delivery: {path} at offset {reference.offset}"
+        )
+    try:
+        return _history_record_event(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ReactorStateError(
+            f"deferred history record became malformed: {path} at offset {reference.offset}: {exc}"
+        ) from exc
+
+
 def _history_events_since(
     context_path: Path,
     cursor: datetime,
@@ -355,20 +463,31 @@ def _history_events_since(
     config: Any = None,
     offsets: dict[str, int] | None = None,
     migration_cutoffs: dict[str, int] | None = None,
+    deferred: list[_DeferredHistoryRecord] | None = None,
     limit: int = MAX_EVENTS_PER_CYCLE,
     max_scan_bytes: int = MAX_HISTORY_SCAN_BYTES,
-) -> tuple[list[ReactorEvent], bool, int, dict[str, int], dict[str, int]]:
-    """Stream one bounded, resumable slice of append-only history files.
+) -> tuple[
+    list[ReactorEvent],
+    bool,
+    int,
+    dict[str, int],
+    dict[str, int],
+    list[_DeferredHistoryRecord],
+]:
+    """Stream one payload-bounded, resumable slice of append-only history files.
 
-    File offsets, not timestamps, are the delivery checkpoint. That keeps the
-    scan bounded without assuming callers append timestamp-monotonic records.
+    File offsets, not timestamps, are the delivery checkpoint. The byte budget
+    bounds record payload reads after file discovery, without assuming callers
+    append timestamp-monotonic records.
     ``migration_cutoffs`` marks bytes that predate an older timestamp-only
     cursor; those records are filtered once while offsets catch up. Offsets are
     returned separately and persist only when the enclosing batch is acked.
     """
     paths = _history_files(context_path, config=config)
+    path_by_name = {path.name: path for path in paths}
     pending_offsets = dict(offsets or {})
     pending_cutoffs = dict(migration_cutoffs or {})
+    pending_deferred = list(deferred or [])
     existing_names = {path.name for path in paths}
     for name in [name for name in pending_offsets if name not in existing_names]:
         pending_offsets.pop(name, None)
@@ -381,16 +500,50 @@ def _history_events_since(
     record_limit = limit if limit > 0 else MAX_EVENTS_PER_CYCLE
     byte_limit = max(max_scan_bytes, 1)
     truncated = False
+    deferred_pending = False
+
+    # A future-stamped record must not pin the append offset forever. Once its
+    # containing batch is acked, the durable reference below lets the byte
+    # checkpoint advance past it; it is reread and delivered when ripe.
+    retained_deferred: list[_DeferredHistoryRecord] = []
+    for reference in sorted(
+        pending_deferred,
+        key=lambda item: _parse_timestamp(item.timestamp)
+        or datetime.min.replace(tzinfo=timezone.utc),
+    ):
+        stamp = _parse_timestamp(reference.timestamp)
+        if stamp is None:
+            raise ReactorStateError("deferred history record has an invalid timestamp")
+        if stamp > until:
+            retained_deferred.append(reference)
+            deferred_pending = True
+            continue
+        if scanned_records >= record_limit:
+            retained_deferred.append(reference)
+            truncated = True
+            continue
+        path = path_by_name.get(reference.filename)
+        if path is None:
+            raise ReactorStateError(
+                f"history file containing a deferred event is missing: {reference.filename}"
+            )
+        event = _read_deferred_history_event(path.parent, reference)
+        scanned_records += 1
+        if event is not None:
+            events.append(event)
+    pending_deferred = retained_deferred
 
     for path_index, path in enumerate(paths):
+        if scanned_records >= record_limit:
+            truncated = True
+            break
         name = path.name
         offset = pending_offsets.get(name, 0)
         try:
             size = path.stat().st_size
             if size < offset:
                 raise ReactorStateError(
-                    f"history file shrank below its reactor checkpoint: {path} "
-                    f"({size} < {offset})"
+                    f"history file shrank below its reactor checkpoint: {path} ({size} < {offset})"
                 )
             handle = path.open("rb")
         except ReactorStateError:
@@ -403,23 +556,25 @@ def _history_events_since(
                 if len(events) >= record_limit or scanned_records >= record_limit:
                     truncated = True
                     break
-                remaining = byte_limit - scanned_bytes
-                if remaining <= 0:
+                if scanned_bytes >= byte_limit:
                     truncated = True
                     break
                 line_start = handle.tell()
-                read_cap = min(MAX_HISTORY_RECORD_BYTES + 1, remaining + 1)
-                raw = handle.readline(read_cap)
+                # The cycle budget controls whether another record starts; a
+                # started record may finish up to the per-record cap. Splitting
+                # it at the cycle boundary would retry the same line forever
+                # whenever its valid size exceeds ``max_scan_bytes``.
+                raw = handle.readline(MAX_HISTORY_RECORD_BYTES + 1)
                 if not raw:
                     break
+                if len(raw) > MAX_HISTORY_RECORD_BYTES:
+                    raise ReactorStateError(
+                        f"history record exceeds {MAX_HISTORY_RECORD_BYTES} bytes: "
+                        f"{path} at offset {line_start}"
+                    )
                 if not raw.endswith(b"\n"):
-                    if len(raw) > MAX_HISTORY_RECORD_BYTES:
-                        raise ReactorStateError(
-                            f"history record exceeds {MAX_HISTORY_RECORD_BYTES} bytes: "
-                            f"{path} at offset {line_start}"
-                        )
-                    # The cycle byte budget ended inside a valid line. Leave
-                    # the offset at its start so the next cycle reads it whole.
+                    # A writer has not published a complete JSONL record yet.
+                    # Leave the offset at its start so completion is retried.
                     handle.seek(line_start)
                     truncated = True
                     break
@@ -427,50 +582,34 @@ def _history_events_since(
                 pending_offsets[name] = handle.tell()
                 scanned_records += 1
                 scanned_bytes += len(raw)
-                line = raw.strip()
-                if not line:
+                if not raw.strip():
                     continue
                 try:
-                    record = json.loads(line)
-                except (UnicodeDecodeError, json.JSONDecodeError):
+                    event = _history_record_event(raw)
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                     skipped += 1
                     continue
-                if not isinstance(record, dict):
+                if event is None:
+                    continue
+                stamp = _parse_timestamp(event.timestamp)
+                if stamp is None:
                     skipped += 1
                     continue
-                try:
-                    kind = str(record.get("type", ""))
-                    if kind == HIVEMIND_KIND:
-                        # The bus is the canonical hivemind source; its history
-                        # mirror would double-deliver each message.
-                        continue
-                    stamp = _parse_timestamp(str(record.get("timestamp", "")))
-                    if stamp is None:
-                        continue
-                    if stamp > until:
-                        # Do not checkpoint past a grace-window event. Writers
-                        # stamp before append; advancing the file offset here
-                        # would make the event disappear permanently.
-                        pending_offsets[name] = line_start
-                        handle.seek(line_start)
-                        truncated = True
-                        break
-                    cutoff = pending_cutoffs.get(name, 0)
-                    if line_start < cutoff and stamp <= cursor:
-                        continue
-                    metadata = record.get("metadata")
-                    events.append(
-                        ReactorEvent(
-                            kind=kind,
-                            detail=str(record.get("op", "") or ""),
-                            source=str(record.get("source", "")),
-                            timestamp=str(record.get("timestamp", "")),
-                            metadata=metadata if isinstance(metadata, dict) else {},
+                cutoff = pending_cutoffs.get(name, 0)
+                if line_start < cutoff and stamp <= cursor:
+                    continue
+                if stamp > until:
+                    pending_deferred.append(
+                        _DeferredHistoryRecord(
+                            filename=name,
+                            offset=line_start,
+                            length=len(raw),
+                            digest=hashlib.sha256(raw).hexdigest(),
+                            timestamp=event.timestamp,
                         )
                     )
-                except Exception:  # noqa: BLE001 - one bad record never stops ingestion
-                    skipped += 1
                     continue
+                events.append(event)
             if pending_offsets.get(name, offset) < size:
                 truncated = True
             cutoff = pending_cutoffs.get(name)
@@ -487,7 +626,15 @@ def _history_events_since(
             break
 
     events.sort(key=_event_sort_key)
-    return events, truncated, skipped, pending_offsets, pending_cutoffs
+    truncated = truncated or deferred_pending or bool(pending_deferred)
+    return (
+        events,
+        truncated,
+        skipped,
+        pending_offsets,
+        pending_cutoffs,
+        pending_deferred,
+    )
 
 
 def _string_checkpoint_map(value: Any, *, key: str) -> dict[str, str]:
@@ -495,11 +642,7 @@ def _string_checkpoint_map(value: Any, *, key: str) -> dict[str, str]:
         raise ReactorStateError(f"event reactor state field {key!r} must be an object")
     result: dict[str, str] = {}
     for raw_name, raw_checkpoint in value.items():
-        if (
-            not isinstance(raw_name, str)
-            or not raw_name
-            or not isinstance(raw_checkpoint, str)
-        ):
+        if not isinstance(raw_name, str) or not raw_name or not isinstance(raw_checkpoint, str):
             raise ReactorStateError(
                 f"event reactor state field {key!r} contains an invalid checkpoint"
             )
@@ -516,41 +659,80 @@ def _hivemind_root(context_path: Path, *, config: Any = None) -> Path | None:
     return root if root.exists() else None
 
 
-def _hivemind_checkpoint_snapshot(
-    context_path: Path,
-    *,
-    config: Any = None,
-) -> dict[str, str]:
-    root = _hivemind_root(context_path, config=config)
-    if root is None:
-        return {}
-    snapshot: dict[str, str] = {}
+@dataclass(frozen=True)
+class _HivemindFile:
+    directory: str
+    filename: str
+    path: Path
+    signature: str
+    mtime_ns: int
+
+
+def _hivemind_file_signature(stat: os.stat_result) -> str:
+    """Identity for one immutable final file in the current filesystem model."""
+    return ":".join(
+        str(value)
+        for value in (
+            stat.st_dev,
+            stat.st_ino,
+            stat.st_size,
+            stat.st_mtime_ns,
+            stat.st_ctime_ns,
+        )
+    )
+
+
+def _valid_hivemind_signature(value: str) -> bool:
+    return bool(re.fullmatch(r"-?\d+(?::-?\d+){4}", value))
+
+
+def _hivemind_inventory(root: Path) -> dict[str, dict[str, _HivemindFile]]:
+    """Return a metadata inventory, failing closed on an incomplete scan.
+
+    Discovery necessarily visits every extant final ``*.json`` file so a file
+    copied in later with an old name or mtime cannot hide behind a high-water
+    mark. Message *contents* remain bounded and are read only for candidates.
+    """
+    inventory: dict[str, dict[str, _HivemindFile]] = {}
     try:
         directories = sorted(
             path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")
         )
-    except OSError:
-        return {}
-    for directory in directories:
-        try:
+        for directory in directories:
+            files: dict[str, _HivemindFile] = {}
             with os.scandir(directory) as entries:
-                latest = max(
-                    (
-                        (entry.stat().st_mtime_ns, entry.name)
-                        for entry in entries
-                        if entry.is_file() and entry.name.endswith(".json")
-                    ),
-                    default=None,
-                )
-        except OSError:
-            continue
-        if latest is not None:
-            snapshot[directory.name] = _encode_hivemind_checkpoint(*latest)
-    return snapshot
+                for entry in entries:
+                    if not entry.name.endswith(".json") or not entry.is_file(follow_symlinks=False):
+                        continue
+                    stat = entry.stat(follow_symlinks=False)
+                    files[entry.name] = _HivemindFile(
+                        directory=directory.name,
+                        filename=entry.name,
+                        path=Path(entry.path),
+                        signature=_hivemind_file_signature(stat),
+                        mtime_ns=stat.st_mtime_ns,
+                    )
+            inventory[directory.name] = files
+    except OSError as exc:
+        raise ReactorStateError(
+            f"could not inventory hivemind message files under {root}: {exc}"
+        ) from exc
+    return inventory
 
 
-def _encode_hivemind_checkpoint(mtime_ns: int, filename: str) -> str:
-    return f"{mtime_ns}:{filename}"
+def _hivemind_signature_snapshot(
+    context_path: Path,
+    *,
+    config: Any = None,
+) -> dict[str, dict[str, str]]:
+    root = _hivemind_root(context_path, config=config)
+    if root is None:
+        return {}
+    return {
+        directory: {name: item.signature for name, item in files.items()}
+        for directory, files in _hivemind_inventory(root).items()
+        if files
+    }
 
 
 def _decode_hivemind_checkpoint(value: str) -> tuple[int, str]:
@@ -562,31 +744,150 @@ def _decode_hivemind_checkpoint(value: str) -> tuple[int, str]:
     return int(raw_mtime), filename
 
 
-def _hivemind_candidates(
-    root: Path,
+def _nested_string_map(value: Any, *, key: str) -> dict[str, dict[str, str]]:
+    if not isinstance(value, dict):
+        raise ReactorStateError(f"event reactor state field {key!r} must be an object")
+    result: dict[str, dict[str, str]] = {}
+    for raw_directory, raw_files in value.items():
+        if (
+            not isinstance(raw_directory, str)
+            or not raw_directory
+            or not isinstance(raw_files, dict)
+        ):
+            raise ReactorStateError(
+                f"event reactor state field {key!r} contains an invalid directory map"
+            )
+        files: dict[str, str] = {}
+        for raw_filename, raw_signature in raw_files.items():
+            if (
+                not isinstance(raw_filename, str)
+                or not raw_filename
+                or Path(raw_filename).name != raw_filename
+                or not isinstance(raw_signature, str)
+                or not _valid_hivemind_signature(raw_signature)
+            ):
+                raise ReactorStateError(
+                    f"event reactor state field {key!r} contains an invalid file identity"
+                )
+            files[raw_filename] = raw_signature
+        if files:
+            result[raw_directory] = files
+    return result
+
+
+def _hivemind_deferred_map(
+    value: Any,
+) -> dict[str, dict[str, dict[str, str]]]:
+    if not isinstance(value, dict):
+        raise ReactorStateError("event reactor state field 'hivemind_deferred' must be an object")
+    result: dict[str, dict[str, dict[str, str]]] = {}
+    for raw_directory, raw_files in value.items():
+        if (
+            not isinstance(raw_directory, str)
+            or not raw_directory
+            or not isinstance(raw_files, dict)
+        ):
+            raise ReactorStateError("event reactor hivemind_deferred is malformed")
+        files: dict[str, dict[str, str]] = {}
+        for raw_filename, raw_entry in raw_files.items():
+            if (
+                not isinstance(raw_filename, str)
+                or not raw_filename
+                or Path(raw_filename).name != raw_filename
+                or not isinstance(raw_entry, dict)
+            ):
+                raise ReactorStateError("event reactor hivemind_deferred is malformed")
+            signature = raw_entry.get("signature")
+            timestamp = raw_entry.get("timestamp")
+            if (
+                not isinstance(signature, str)
+                or not _valid_hivemind_signature(signature)
+                or not isinstance(timestamp, str)
+                or _parse_timestamp(timestamp) is None
+            ):
+                raise ReactorStateError("event reactor hivemind_deferred is malformed")
+            files[raw_filename] = {
+                "signature": signature,
+                "timestamp": timestamp,
+            }
+        if files:
+            result[raw_directory] = files
+    return result
+
+
+def _exact_inventory_subset(
+    values: dict[str, dict[str, str]],
+    inventory: dict[str, dict[str, _HivemindFile]],
+) -> dict[str, dict[str, str]]:
+    """Keep only identities still present exactly as previously observed."""
+    result: dict[str, dict[str, str]] = {}
+    for directory, files in values.items():
+        current = inventory.get(directory, {})
+        kept = {
+            filename: signature
+            for filename, signature in files.items()
+            if filename in current and current[filename].signature == signature
+        }
+        if kept:
+            result[directory] = kept
+    return result
+
+
+def _exact_deferred_subset(
+    values: dict[str, dict[str, dict[str, str]]],
+    inventory: dict[str, dict[str, _HivemindFile]],
+) -> dict[str, dict[str, dict[str, str]]]:
+    result: dict[str, dict[str, dict[str, str]]] = {}
+    for directory, files in values.items():
+        current = inventory.get(directory, {})
+        kept = {
+            filename: dict(entry)
+            for filename, entry in files.items()
+            if filename in current and current[filename].signature == entry.get("signature")
+        }
+        if kept:
+            result[directory] = kept
+    return result
+
+
+def _seen_from_legacy_checkpoints(
+    inventory: dict[str, dict[str, _HivemindFile]],
     checkpoints: dict[str, str],
-) -> Iterator[tuple[int, str, str, Path]]:
-    """Yield uncheckpointed message paths without retaining directory contents."""
-    try:
-        directories = sorted(
-            path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")
-        )
-    except OSError:
-        return
-    for directory in directories:
-        checkpoint = _decode_hivemind_checkpoint(
-            checkpoints.get(directory.name, "")
-        )
-        try:
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    if not entry.is_file() or not entry.name.endswith(".json"):
-                        continue
-                    candidate = (entry.stat().st_mtime_ns, entry.name)
-                    if candidate > checkpoint:
-                        yield candidate[0], candidate[1], directory.name, Path(entry.path)
-        except OSError:
-            continue
+) -> dict[str, dict[str, str]]:
+    """Translate version-3 mtime checkpoints into exact extant identities."""
+    seen: dict[str, dict[str, str]] = {}
+    for directory, files in inventory.items():
+        checkpoint = _decode_hivemind_checkpoint(checkpoints.get(directory, ""))
+        migrated = {
+            filename: item.signature
+            for filename, item in files.items()
+            if (item.mtime_ns, filename) <= checkpoint
+        }
+        if migrated:
+            seen[directory] = migrated
+    return seen
+
+
+def _hivemind_candidates(
+    inventory: dict[str, dict[str, _HivemindFile]],
+    seen: dict[str, dict[str, str]],
+    deferred: dict[str, dict[str, dict[str, str]]],
+    until: datetime,
+) -> tuple[Iterator[_HivemindFile], bool]:
+    waiting = False
+    candidates: list[_HivemindFile] = []
+    for directory, files in inventory.items():
+        for filename, item in files.items():
+            if seen.get(directory, {}).get(filename) == item.signature:
+                continue
+            deferred_entry = deferred.get(directory, {}).get(filename)
+            if deferred_entry and deferred_entry.get("signature") == item.signature:
+                stamp = _parse_timestamp(deferred_entry.get("timestamp", ""))
+                if stamp is not None and stamp > until:
+                    waiting = True
+                    continue
+            candidates.append(item)
+    return iter(candidates), waiting
 
 
 def _hivemind_events_since(
@@ -595,90 +896,176 @@ def _hivemind_events_since(
     until: datetime,
     *,
     config: Any = None,
-    checkpoints: dict[str, str] | None = None,
-    migration_cutoffs: dict[str, str] | None = None,
+    seen: dict[str, dict[str, str]] | None = None,
+    malformed: dict[str, dict[str, str]] | None = None,
+    deferred: dict[str, dict[str, dict[str, str]]] | None = None,
+    migration_existing: dict[str, dict[str, str]] | None = None,
+    legacy_migration_cutoffs: dict[str, str] | None = None,
     limit: int = MAX_EVENTS_PER_CYCLE,
-) -> tuple[list[ReactorEvent], bool, int, dict[str, str], dict[str, str]]:
-    """Read a bounded oldest-first slice of immutable hivemind message files."""
+) -> tuple[
+    list[ReactorEvent],
+    bool,
+    int,
+    dict[str, dict[str, str]],
+    dict[str, dict[str, str]],
+    dict[str, dict[str, dict[str, str]]],
+    dict[str, dict[str, str]],
+    dict[str, str],
+]:
+    """Read bounded candidate payloads from a complete filesystem inventory."""
     from ..hivemind import HivemindMessage
 
     root = _hivemind_root(context_path, config=config)
-    pending_checkpoints = dict(checkpoints or {})
-    pending_cutoffs = dict(migration_cutoffs or {})
     if root is None:
-        return [], False, 0, pending_checkpoints, pending_cutoffs
+        return (
+            [],
+            False,
+            0,
+            dict(seen or {}),
+            dict(malformed or {}),
+            dict(deferred or {}),
+            dict(migration_existing or {}),
+            dict(legacy_migration_cutoffs or {}),
+        )
 
-    try:
-        active_directories = {
-            path.name
-            for path in root.iterdir()
-            if path.is_dir() and not path.name.startswith(".")
-        }
-    except OSError:
-        active_directories = set()
-    for name in [name for name in pending_checkpoints if name not in active_directories]:
-        pending_checkpoints.pop(name, None)
-        pending_cutoffs.pop(name, None)
+    inventory = _hivemind_inventory(root)
+    pending_seen = _exact_inventory_subset(seen or {}, inventory)
+    pending_malformed = _exact_inventory_subset(malformed or {}, inventory)
+    pending_deferred = _exact_deferred_subset(deferred or {}, inventory)
+    pending_migration = _exact_inventory_subset(migration_existing or {}, inventory)
+    pending_legacy_cutoffs = dict(legacy_migration_cutoffs or {})
 
     record_limit = limit if limit > 0 else MAX_EVENTS_PER_CYCLE
+    candidates, waiting = _hivemind_candidates(inventory, pending_seen, pending_deferred, until)
     selected = nsmallest(
         record_limit + 1,
-        _hivemind_candidates(root, pending_checkpoints),
-        key=lambda item: (item[0], item[1], item[2]),
+        candidates,
+        key=lambda item: (item.mtime_ns, item.filename, item.directory),
     )
-    truncated = len(selected) > record_limit
+    truncated = waiting or len(selected) > record_limit
     events: list[ReactorEvent] = []
     skipped = 0
     expiry_now = datetime.now(timezone.utc)
-    for mtime_ns, filename, directory_name, path in selected[:record_limit]:
-        checkpoint = _encode_hivemind_checkpoint(mtime_ns, filename)
+
+    def mark_seen(item: _HivemindFile) -> None:
+        pending_seen.setdefault(item.directory, {})[item.filename] = item.signature
+        pending_malformed.get(item.directory, {}).pop(item.filename, None)
+        pending_deferred.get(item.directory, {}).pop(item.filename, None)
+        pending_migration.get(item.directory, {}).pop(item.filename, None)
+
+    def observe_malformed(item: _HivemindFile, reason: str) -> None:
+        nonlocal skipped, truncated
+        previous = pending_malformed.get(item.directory, {}).get(item.filename)
+        if previous == item.signature:
+            skipped += 1
+            _log.warning(
+                "Event reactor permanently skipped stable malformed hivemind record %s: %s",
+                item.path,
+                reason,
+            )
+            mark_seen(item)
+            return
+        pending_malformed.setdefault(item.directory, {})[item.filename] = item.signature
+        truncated = True
+
+    for item in selected[:record_limit]:
         try:
-            with path.open("rb") as handle:
+            with item.path.open("rb") as handle:
                 raw = handle.read(MAX_HIVEMIND_RECORD_BYTES + 1)
-            if len(raw) > MAX_HIVEMIND_RECORD_BYTES:
-                skipped += 1
-                pending_checkpoints[directory_name] = checkpoint
-                continue
+            current_stat = os.stat(item.path, follow_symlinks=False)
+        except OSError as exc:
+            # The directory inventory raced a copy/rename/permission change.
+            # Nothing about this file is acknowledged; retry a later cycle.
+            truncated = True
+            _log.debug("Transient hivemind read failure for %s: %s", item.path, exc)
+            continue
+        if _hivemind_file_signature(current_stat) != item.signature:
+            truncated = True
+            continue
+        if len(raw) > MAX_HIVEMIND_RECORD_BYTES:
+            observe_malformed(item, f"record exceeds {MAX_HIVEMIND_RECORD_BYTES} bytes")
+            continue
+        try:
             data = json.loads(raw)
             if not isinstance(data, dict):
                 raise ValueError("message is not an object")
             message = HivemindMessage.from_dict(data)
             stamp = _parse_timestamp(message.timestamp)
             if stamp is None:
-                skipped += 1
-                pending_checkpoints[directory_name] = checkpoint
-                continue
-            if stamp > until:
-                # Filename ordering follows the send timestamp. Leave this and
-                # later files uncheckpointed until the grace window elapses.
-                truncated = True
-                break
-            expires = _parse_timestamp(message.expires_at or "")
-            pending_checkpoints[directory_name] = checkpoint
-            if expires is not None and expires <= expiry_now:
-                continue
-            cutoff = pending_cutoffs.get(directory_name, "")
-            if cutoff and (mtime_ns, filename) <= _decode_hivemind_checkpoint(cutoff) and stamp <= cursor:
-                continue
-            events.append(
-                ReactorEvent(
-                    kind=HIVEMIND_KIND,
-                    detail=str(message.topic or message.msg_type or ""),
-                    source=message.from_agent,
-                    timestamp=message.timestamp,
-                    metadata={"msg_type": message.msg_type, "id": message.id},
-                )
-            )
-        except Exception:  # noqa: BLE001 - one bad message never stops ingestion
-            skipped += 1
-            pending_checkpoints[directory_name] = checkpoint
+                raise ValueError("message timestamp is invalid")
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            # A non-atomic external writer may have exposed a partial final
+            # file. Require the exact malformed identity to survive one acked
+            # cycle before treating it as durable and advancing past it.
+            observe_malformed(item, str(exc))
             continue
-    for directory_name, cutoff in list(pending_cutoffs.items()):
-        checkpoint = pending_checkpoints.get(directory_name, "")
-        if checkpoint and _decode_hivemind_checkpoint(checkpoint) >= _decode_hivemind_checkpoint(cutoff):
-            pending_cutoffs.pop(directory_name, None)
+
+        pending_malformed.get(item.directory, {}).pop(item.filename, None)
+        if stamp > until:
+            pending_deferred.setdefault(item.directory, {})[item.filename] = {
+                "signature": item.signature,
+                "timestamp": message.timestamp,
+            }
+            truncated = True
+            continue
+
+        expires = _parse_timestamp(message.expires_at or "")
+        legacy_cutoff = pending_legacy_cutoffs.get(item.directory, "")
+        predates_legacy_cursor = bool(
+            legacy_cutoff
+            and (item.mtime_ns, item.filename) <= _decode_hivemind_checkpoint(legacy_cutoff)
+            and stamp <= cursor
+        )
+        existed_at_migration = (
+            pending_migration.get(item.directory, {}).get(item.filename) == item.signature
+            and stamp <= cursor
+        )
+        mark_seen(item)
+        if expires is not None and expires <= expiry_now:
+            continue
+        if predates_legacy_cursor or existed_at_migration:
+            continue
+        events.append(
+            ReactorEvent(
+                kind=HIVEMIND_KIND,
+                detail=str(message.topic or message.msg_type or ""),
+                source=message.from_agent,
+                timestamp=message.timestamp,
+                metadata={"msg_type": message.msg_type, "id": message.id},
+            )
+        )
+
+    # A v3 migration cutoff is done only after every extant identity at or
+    # below it has reached a terminal state. This legacy path cannot recover a
+    # backdated file that v3 had already skipped before upgrading; v4 exact
+    # identities prevent that loss for all subsequent discoveries.
+    for directory, cutoff in list(pending_legacy_cutoffs.items()):
+        boundary = _decode_hivemind_checkpoint(cutoff)
+        remaining = any(
+            (item.mtime_ns, item.filename) <= boundary
+            and pending_seen.get(directory, {}).get(item.filename) != item.signature
+            for item in inventory.get(directory, {}).values()
+        )
+        if not remaining:
+            pending_legacy_cutoffs.pop(directory, None)
+
+    for mapping in (pending_seen, pending_malformed, pending_migration):
+        for directory in [name for name, files in mapping.items() if not files]:
+            mapping.pop(directory, None)
+    for directory in [name for name, files in pending_deferred.items() if not files]:
+        pending_deferred.pop(directory, None)
+
     events.sort(key=_event_sort_key)
-    return events, truncated, skipped, pending_checkpoints, pending_cutoffs
+    return (
+        events,
+        truncated,
+        skipped,
+        pending_seen,
+        pending_malformed,
+        pending_deferred,
+        pending_migration,
+        pending_legacy_cutoffs,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -708,8 +1095,12 @@ class ReactorBatch:
     _now: datetime
     _pending_history_offsets: dict[str, int] = field(default_factory=dict)
     _pending_history_migration_cutoffs: dict[str, int] = field(default_factory=dict)
-    _pending_hivemind_files: dict[str, str] = field(default_factory=dict)
-    _pending_hivemind_migration_cutoffs: dict[str, str] = field(default_factory=dict)
+    _pending_history_deferred: list[_DeferredHistoryRecord] = field(default_factory=list)
+    _pending_hivemind_seen: dict[str, dict[str, str]] = field(default_factory=dict)
+    _pending_hivemind_malformed: dict[str, dict[str, str]] = field(default_factory=dict)
+    _pending_hivemind_deferred: dict[str, dict[str, dict[str, str]]] = field(default_factory=dict)
+    _pending_hivemind_migration_existing: dict[str, dict[str, str]] = field(default_factory=dict)
+    _pending_hivemind_legacy_cutoffs: dict[str, str] = field(default_factory=dict)
     acked: bool = False
     dispatch_failures: int = 0
     dispatch_outcomes: dict[str, ReactorDispatchOutcome] = field(default_factory=dict)
@@ -803,18 +1194,33 @@ class ReactorBatch:
         self._state["hivemind_cursor"] = self._pending_hivemind_cursor
         self._state["history_offsets"] = self._pending_history_offsets
         if self._pending_history_migration_cutoffs:
-            self._state["history_migration_cutoffs"] = (
-                self._pending_history_migration_cutoffs
-            )
+            self._state["history_migration_cutoffs"] = self._pending_history_migration_cutoffs
         else:
             self._state.pop("history_migration_cutoffs", None)
-        self._state["hivemind_files"] = self._pending_hivemind_files
-        if self._pending_hivemind_migration_cutoffs:
-            self._state["hivemind_migration_cutoffs"] = (
-                self._pending_hivemind_migration_cutoffs
-            )
+        if self._pending_history_deferred:
+            self._state["history_deferred"] = [
+                reference.to_dict() for reference in self._pending_history_deferred
+            ]
+        else:
+            self._state.pop("history_deferred", None)
+        self._state["hivemind_seen"] = self._pending_hivemind_seen
+        if self._pending_hivemind_malformed:
+            self._state["hivemind_malformed"] = self._pending_hivemind_malformed
+        else:
+            self._state.pop("hivemind_malformed", None)
+        if self._pending_hivemind_deferred:
+            self._state["hivemind_deferred"] = self._pending_hivemind_deferred
+        else:
+            self._state.pop("hivemind_deferred", None)
+        if self._pending_hivemind_migration_existing:
+            self._state["hivemind_migration_existing"] = self._pending_hivemind_migration_existing
+        else:
+            self._state.pop("hivemind_migration_existing", None)
+        if self._pending_hivemind_legacy_cutoffs:
+            self._state["hivemind_migration_cutoffs"] = self._pending_hivemind_legacy_cutoffs
         else:
             self._state.pop("hivemind_migration_cutoffs", None)
+        self._state.pop("hivemind_files", None)
         _save_state(self._state_dir, self._state)
         self.acked = True
 
@@ -889,12 +1295,8 @@ def open_event_batch(
             state["history_cursor"] = current.isoformat()
             hivemind_stored = current
             state["hivemind_cursor"] = current.isoformat()
-            state["history_offsets"] = _history_offset_snapshot(
-                context_path, config=config
-            )
-            state["hivemind_files"] = _hivemind_checkpoint_snapshot(
-                context_path, config=config
-            )
+            state["history_offsets"] = _history_offset_snapshot(context_path, config=config)
+            state["hivemind_seen"] = _hivemind_signature_snapshot(context_path, config=config)
             _save_state(state_dir, state)
             yield ReactorBatch(
                 events=[],
@@ -906,7 +1308,7 @@ def open_event_batch(
                 _pending_hivemind_cursor=state["hivemind_cursor"],
                 _now=current,
                 _pending_history_offsets=dict(state["history_offsets"]),
-                _pending_hivemind_files=dict(state["hivemind_files"]),
+                _pending_hivemind_seen=dict(state["hivemind_seen"]),
                 acked=True,
             )
             return
@@ -923,9 +1325,7 @@ def open_event_batch(
             )
 
         if "history_offsets" in state:
-            history_offsets = _offset_map(
-                state["history_offsets"], key="history_offsets"
-            )
+            history_offsets = _offset_map(state["history_offsets"], key="history_offsets")
             history_migration_cutoffs = _offset_map(
                 state.get("history_migration_cutoffs", {}),
                 key="history_migration_cutoffs",
@@ -936,23 +1336,39 @@ def open_event_batch(
             # the old timestamp cursor; bytes appended after this snapshot are
             # always delivered, even if their caller supplied an older stamp.
             history_offsets = {}
-            history_migration_cutoffs = _history_offset_snapshot(
-                context_path, config=config
-            )
+            history_migration_cutoffs = _history_offset_snapshot(context_path, config=config)
+        history_deferred = _history_deferred_records(state.get("history_deferred", []))
 
+        legacy_hivemind_files: dict[str, str] | None = None
         if "hivemind_files" in state:
-            hivemind_files = _string_checkpoint_map(
+            legacy_hivemind_files = _string_checkpoint_map(
                 state["hivemind_files"], key="hivemind_files"
             )
-            hivemind_migration_cutoffs = _string_checkpoint_map(
-                state.get("hivemind_migration_cutoffs", {}),
-                key="hivemind_migration_cutoffs",
+        legacy_hivemind_cutoffs = _string_checkpoint_map(
+            state.get("hivemind_migration_cutoffs", {}),
+            key="hivemind_migration_cutoffs",
+        )
+        if "hivemind_seen" in state:
+            hivemind_seen = _nested_string_map(state["hivemind_seen"], key="hivemind_seen")
+            hivemind_migration_existing = _nested_string_map(
+                state.get("hivemind_migration_existing", {}),
+                key="hivemind_migration_existing",
             )
+        elif legacy_hivemind_files is not None:
+            root = _hivemind_root(context_path, config=config)
+            inventory = _hivemind_inventory(root) if root is not None else {}
+            hivemind_seen = _seen_from_legacy_checkpoints(inventory, legacy_hivemind_files)
+            hivemind_migration_existing = {}
         else:
-            hivemind_files = {}
-            hivemind_migration_cutoffs = _hivemind_checkpoint_snapshot(
-                context_path, config=config
-            )
+            # Timestamp-only state: remember exact identities that existed at
+            # migration. A later copy is new even when its name and mtime are
+            # older than the timestamp cursor.
+            hivemind_seen = {}
+            hivemind_migration_existing = _hivemind_signature_snapshot(context_path, config=config)
+        hivemind_malformed = _nested_string_map(
+            state.get("hivemind_malformed", {}), key="hivemind_malformed"
+        )
+        hivemind_deferred = _hivemind_deferred_map(state.get("hivemind_deferred", {}))
 
         (
             history_events,
@@ -960,6 +1376,7 @@ def open_event_batch(
             history_skipped,
             pending_history_offsets,
             pending_history_migration_cutoffs,
+            pending_history_deferred,
         ) = _history_events_since(
             context_path,
             history_stored,
@@ -967,6 +1384,7 @@ def open_event_batch(
             config=config,
             offsets=history_offsets,
             migration_cutoffs=history_migration_cutoffs,
+            deferred=history_deferred,
             limit=max_events,
             max_scan_bytes=max_history_scan_bytes,
         )
@@ -974,15 +1392,21 @@ def open_event_batch(
             hivemind_events,
             hivemind_truncated,
             hivemind_skipped,
-            pending_hivemind_files,
-            pending_hivemind_migration_cutoffs,
+            pending_hivemind_seen,
+            pending_hivemind_malformed,
+            pending_hivemind_deferred,
+            pending_hivemind_migration_existing,
+            pending_hivemind_legacy_cutoffs,
         ) = _hivemind_events_since(
             context_path,
             hivemind_stored,
             ripe_until,
             config=config,
-            checkpoints=hivemind_files,
-            migration_cutoffs=hivemind_migration_cutoffs,
+            seen=hivemind_seen,
+            malformed=hivemind_malformed,
+            deferred=hivemind_deferred,
+            migration_existing=hivemind_migration_existing,
+            legacy_migration_cutoffs=legacy_hivemind_cutoffs,
             limit=max_events,
         )
         events = sorted(history_events + hivemind_events, key=_event_sort_key)
@@ -1000,12 +1424,12 @@ def open_event_batch(
             _pending_hivemind_cursor=_source_watermark(hivemind_events, hivemind_stored),
             _now=current,
             _pending_history_offsets=pending_history_offsets,
-            _pending_history_migration_cutoffs=(
-                pending_history_migration_cutoffs
-            ),
-            _pending_hivemind_files=pending_hivemind_files,
-            _pending_hivemind_migration_cutoffs=(
-                pending_hivemind_migration_cutoffs
-            ),
+            _pending_history_migration_cutoffs=(pending_history_migration_cutoffs),
+            _pending_history_deferred=pending_history_deferred,
+            _pending_hivemind_seen=pending_hivemind_seen,
+            _pending_hivemind_malformed=pending_hivemind_malformed,
+            _pending_hivemind_deferred=pending_hivemind_deferred,
+            _pending_hivemind_migration_existing=(pending_hivemind_migration_existing),
+            _pending_hivemind_legacy_cutoffs=pending_hivemind_legacy_cutoffs,
             acked=False,
         )
