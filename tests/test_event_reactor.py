@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -9,8 +10,11 @@ from pathlib import Path
 
 import pytest
 
+import afs.agents.event_reactor as event_reactor_module
 from afs.agent_defaults import default_agent_configs
 from afs.agents.event_reactor import (
+    MAX_HISTORY_DEFERRED_RECORDS,
+    MAX_HISTORY_RECORD_BYTES,
     ReactorBatch,
     ReactorBusyError,
     ReactorEvent,
@@ -23,6 +27,7 @@ from afs.agents.event_reactor import (
     sanitize_label,
 )
 from afs.agents.supervisor import AgentSupervisor, RunningAgent
+from afs.models import MountType
 from afs.schema import AFSConfig, AgentConfig, GeneralConfig
 
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
@@ -337,7 +342,7 @@ def test_history_record_larger_than_cycle_budget_is_delivered(tmp_path: Path) ->
         batch.ack()
 
 
-def test_future_history_record_does_not_block_later_ripe_record(
+def test_future_history_record_is_delivered_on_arrival_without_blocking_later_record(
     tmp_path: Path,
 ) -> None:
     context = tmp_path / "context"
@@ -357,16 +362,13 @@ def test_future_history_record_does_not_block_later_ripe_record(
     )
 
     with open_event_batch(context, state, now=NOW, max_events=1) as first:
-        assert first.events == []
+        assert [event.detail for event in first.events] == ["future"]
         first.ack()
-    assert _load_state(state)["history_deferred"]
+    assert "history_deferred" not in _load_state(state)
 
     with open_event_batch(context, state, now=NOW + timedelta(seconds=30), max_events=1) as second:
         assert [event.detail for event in second.events] == ["ripe"]
         second.ack()
-    third = _collect(context, state, now=NOW + timedelta(minutes=6))
-    assert [event.detail for event in third] == ["future"]
-    assert "history_deferred" not in _load_state(state)
 
 
 def test_history_scan_does_not_materialize_daily_file(tmp_path: Path, monkeypatch) -> None:
@@ -926,7 +928,7 @@ def test_v3_migration_cutoff_replays_post_snapshot_same_mtime_file(
     assert "b-new-after-snapshot.json" in migrated["hivemind_seen"]["afs-watch"]
 
 
-def test_future_hivemind_file_does_not_block_ripe_candidate(tmp_path: Path) -> None:
+def test_future_hivemind_file_is_delivered_on_arrival(tmp_path: Path) -> None:
     context = tmp_path / "context"
     state = tmp_path / "state"
     _collect(context, state, now=NOW - timedelta(minutes=1))
@@ -944,16 +946,13 @@ def test_future_hivemind_file_does_not_block_ripe_candidate(tmp_path: Path) -> N
     )
 
     with open_event_batch(context, state, now=NOW, max_events=1) as first:
-        assert first.events == []
+        assert [event.detail for event in first.events] == ["context:future"]
         first.ack()
-    assert _load_state(state)["hivemind_deferred"]
+    assert "hivemind_deferred" not in _load_state(state)
 
     with open_event_batch(context, state, now=NOW + timedelta(seconds=30), max_events=1) as second:
         assert [event.detail for event in second.events] == ["context:ripe"]
         second.ack()
-    third = _collect(context, state, now=NOW + timedelta(minutes=6))
-    assert [event.detail for event in third] == ["context:future"]
-    assert "hivemind_deferred" not in _load_state(state)
 
 
 def test_v2_state_written_before_backdated_hivemind_file_does_not_lose_it(
@@ -1132,10 +1131,8 @@ def test_state_lives_outside_agent_state_namespace(tmp_path: Path) -> None:
     assert (state / "event_reactor" / "cursor.json").exists()
 
 
-def test_recently_stamped_events_are_deferred_one_cycle(tmp_path: Path) -> None:
-    """Writers stamp before their write lands; events younger than the grace
-    window must not be consumed, or the watermark could pass an in-flight
-    write forever."""
+def test_recently_stamped_events_are_delivered_by_position(tmp_path: Path) -> None:
+    """A complete v4 positional record is ready regardless of source clock."""
     context = tmp_path / "context"
     state = tmp_path / "state"
     _collect(context, state, now=NOW - timedelta(seconds=60))
@@ -1143,16 +1140,14 @@ def test_recently_stamped_events_are_deferred_one_cycle(tmp_path: Path) -> None:
         context, event_type="error", op="young", timestamp=NOW - timedelta(seconds=2)
     )
 
-    assert _collect(context, state, now=NOW) == []
-    # Once the stamp is older than the grace window it is delivered.
-    events = _collect(context, state, now=NOW + timedelta(seconds=10))
+    events = _collect(context, state, now=NOW)
     assert [event.label() for event in events] == ["error:young"]
 
 
 def test_cursor_never_advances_past_undelivered_stamps(tmp_path: Path) -> None:
     """A write stamped before a batch's *now* but landing after it must still
-    be delivered later: the watermark tracks delivered events, bounded by the
-    ripeness cutoff, never *now* itself."""
+    be delivered later: byte positions, not the diagnostic watermark, own
+    version-4 delivery."""
     context = tmp_path / "context"
     state = tmp_path / "state"
     _collect(context, state, now=NOW - timedelta(seconds=60))
@@ -1477,6 +1472,389 @@ def test_prune_dispatch_drops_unconfigured_agents(tmp_path: Path) -> None:
     assert batch.last_dispatch("removed") is None
 
 
+def test_strict_state_json_failures_are_normalized_and_non_mutating(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW)
+    cursor_path = state / "event_reactor" / "cursor.json"
+    valid = cursor_path.read_text(encoding="utf-8").strip()
+    corruptions = {
+        "duplicate": valid[:-1] + ',"version":4}',
+        "nonfinite": valid[:-1] + ',"bad":NaN}',
+        "overlong": valid[:-1] + ',"bad":' + ("9" * 5_000) + "}",
+        "deep": valid[:-1] + ',"bad":' + ("[" * 1_200) + "0" + ("]" * 1_200) + "}",
+    }
+
+    for label, raw in corruptions.items():
+        cursor_path.write_text(raw + "\n", encoding="utf-8")
+        before = cursor_path.read_bytes()
+        with pytest.raises(ReactorStateError, match="invalid JSON"):
+            with open_event_batch(context, state, now=NOW + timedelta(minutes=1)):
+                pass
+        assert cursor_path.read_bytes() == before, label
+
+
+@pytest.mark.parametrize("raw_marker", ["²\n", ("9" * 5_000) + "\n"])
+def test_malformed_initialized_marker_is_bounded_and_non_mutating(
+    tmp_path: Path,
+    raw_marker: str,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW)
+    marker = state / "event_reactor" / "initialized"
+    marker.write_text(raw_marker, encoding="utf-8")
+    before = marker.read_bytes()
+    with pytest.raises(ReactorStateError, match="marker is malformed"):
+        _load_state(state)
+    assert marker.read_bytes() == before
+
+
+@pytest.mark.parametrize("raw_mtime", ["²", "9" * 5_000])
+def test_malformed_legacy_hivemind_checkpoint_is_bounded_and_non_mutating(
+    tmp_path: Path,
+    raw_mtime: str,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    reactor_state = state / "event_reactor"
+    reactor_state.mkdir(parents=True)
+    cursor_path = reactor_state / "cursor.json"
+    cursor_path.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "history_cursor": NOW.isoformat(),
+                "hivemind_cursor": NOW.isoformat(),
+                "last_dispatch": {},
+                "history_offsets": {},
+                "hivemind_files": {"afs-watch": f"{raw_mtime}:message.json"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (reactor_state / "initialized").write_text("3\n", encoding="utf-8")
+    before = cursor_path.read_bytes()
+    with pytest.raises(ReactorStateError, match="checkpoint is malformed"):
+        with open_event_batch(context, state, now=NOW + timedelta(minutes=1)):
+            pass
+    assert cursor_path.read_bytes() == before
+
+
+def test_initialized_v4_rejects_current_v1_shape_without_mutation(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW)
+    cursor_path = state / "event_reactor" / "cursor.json"
+    cursor_path.write_text(json.dumps({"cursor": NOW.isoformat()}) + "\n", encoding="utf-8")
+    before = cursor_path.read_bytes()
+
+    with pytest.raises(ReactorStateError, match="matching initialized marker"):
+        _load_state(state)
+    assert cursor_path.read_bytes() == before
+
+
+def test_initialized_state_never_falls_back_to_stale_legacy_cursor(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW)
+    current = state / "event_reactor" / "cursor.json"
+    legacy = state / "event_reactor_cursor.json"
+    legacy.write_text(json.dumps({"cursor": NOW.isoformat()}) + "\n", encoding="utf-8")
+    legacy_before = legacy.read_bytes()
+    current.unlink()
+
+    with pytest.raises(ReactorStateError, match="cursor is missing after initialization"):
+        _load_state(state)
+    assert legacy.read_bytes() == legacy_before
+
+
+@pytest.mark.parametrize("malformed", ["duplicate", "deep"])
+def test_malformed_complete_history_records_are_skipped_without_blocking(
+    tmp_path: Path,
+    malformed: str,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    history = context / "history"
+    history.mkdir(parents=True, exist_ok=True)
+    log = history / f"events_{NOW:%Y%m%d}.jsonl"
+    if malformed == "duplicate":
+        raw = (
+            '{"timestamp":"'
+            + NOW.isoformat()
+            + '","type":"error","op":"first","op":"second","metadata":{}}\n'
+        )
+    else:
+        raw = (
+            '{"timestamp":"'
+            + NOW.isoformat()
+            + '","type":"error","op":"deep","metadata":'
+            + ("[" * 1_200)
+            + "0"
+            + ("]" * 1_200)
+            + "}\n"
+        )
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(raw)
+    _write_history_event(
+        context,
+        event_type="error",
+        op="after-malformed",
+        timestamp=NOW,
+    )
+
+    with open_event_batch(context, state, now=NOW + timedelta(minutes=1)) as batch:
+        assert [event.detail for event in batch.events] == ["after-malformed"]
+        assert batch.skipped_malformed == 1
+        batch.ack()
+
+
+@pytest.mark.parametrize("malformed", ["duplicate", "deep"])
+def test_stable_malformed_hivemind_json_is_quarantined(
+    tmp_path: Path,
+    malformed: str,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    directory = context / "hivemind" / "afs-watch"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{malformed}.json"
+    if malformed == "duplicate":
+        raw = (
+            '{"id":"bad","from":"afs-watch","to":null,"type":"status",'
+            '"payload":{},"timestamp":"'
+            + NOW.isoformat()
+            + '","topic":"one","topic":"two"}'
+        )
+    else:
+        raw = (
+            '{"id":"bad","from":"afs-watch","to":null,"type":"status",'
+            '"payload":'
+            + ("[" * 1_200)
+            + "0"
+            + ("]" * 1_200)
+            + ',"timestamp":"'
+            + NOW.isoformat()
+            + '","topic":"deep"}'
+        )
+    path.write_text(raw, encoding="utf-8")
+
+    with open_event_batch(context, state, now=NOW + timedelta(minutes=1)) as first:
+        assert first.events == []
+        first.ack()
+    with open_event_batch(context, state, now=NOW + timedelta(minutes=2)) as second:
+        assert second.events == []
+        assert second.skipped_malformed == 1
+        second.ack()
+    assert path.name in _load_state(state)["hivemind_seen"]["afs-watch"]
+
+
+def test_unreadable_oldest_hivemind_file_cannot_starve_valid_candidate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    blocked = _write_hivemind_message(
+        context,
+        filename="a-blocked.json",
+        timestamp=NOW,
+        topic="context:blocked",
+        mtime_ns=1_700_000_000_000_000_000,
+    )
+    _write_hivemind_message(
+        context,
+        filename="b-valid.json",
+        timestamp=NOW,
+        topic="context:valid",
+        mtime_ns=1_700_000_000_000_000_001,
+    )
+    original_open = Path.open
+
+    def guarded_open(path: Path, *args, **kwargs):
+        if path == blocked and args and args[0] == "rb":
+            raise PermissionError("test unreadable message")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    with open_event_batch(context, state, now=NOW + timedelta(minutes=1), max_events=1) as first:
+        assert first.events == []
+        first.ack()
+    with open_event_batch(context, state, now=NOW + timedelta(minutes=2), max_events=1) as second:
+        assert [event.detail for event in second.events] == ["context:valid"]
+        second.ack()
+    seen = _load_state(state)["hivemind_seen"]["afs-watch"]
+    assert "b-valid.json" in seen
+    assert "a-blocked.json" not in seen
+
+
+def test_transient_history_mount_absence_preserves_offsets(tmp_path: Path, monkeypatch) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _write_history_event(
+        context,
+        event_type="error",
+        op="before-prime",
+        timestamp=NOW - timedelta(minutes=2),
+    )
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    _write_history_event(context, event_type="error", op="new", timestamp=NOW)
+    cursor_path = state / "event_reactor" / "cursor.json"
+    before = cursor_path.read_bytes()
+    original_resolve = event_reactor_module.resolve_mount_root
+
+    def unavailable(context_path, mount_type, *, config=None):
+        if mount_type is MountType.HISTORY:
+            raise OSError("history mount temporarily unavailable")
+        return original_resolve(context_path, mount_type, config=config)
+
+    monkeypatch.setattr(event_reactor_module, "resolve_mount_root", unavailable)
+    with pytest.raises(ReactorStateError, match="history source is unavailable"):
+        with open_event_batch(context, state, now=NOW + timedelta(minutes=1)):
+            pass
+    assert cursor_path.read_bytes() == before
+
+    monkeypatch.setattr(event_reactor_module, "resolve_mount_root", original_resolve)
+    events = _collect(context, state, now=NOW + timedelta(minutes=2))
+    assert [event.detail for event in events] == ["new"]
+
+
+def test_legacy_deferred_history_orphan_fails_immediately(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    _write_history_event(
+        context,
+        event_type="error",
+        op="orphan",
+        timestamp=NOW + timedelta(days=1),
+    )
+    log = next((context / "history").glob("events_*.jsonl"))
+    raw = log.read_bytes()
+    cursor_path = state / "event_reactor" / "cursor.json"
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+    payload["history_offsets"][log.name] = len(raw)
+    payload["history_deferred"] = [
+        {
+            "filename": log.name,
+            "offset": 0,
+            "length": len(raw),
+            "digest": hashlib.sha256(raw).hexdigest(),
+            "timestamp": (NOW + timedelta(days=1)).isoformat(),
+        }
+    ]
+    cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    before = cursor_path.read_bytes()
+    log.unlink()
+
+    with pytest.raises(ReactorStateError, match="deferred event is missing"):
+        with open_event_batch(context, state, now=NOW):
+            pass
+    assert cursor_path.read_bytes() == before
+
+
+def test_future_history_prefix_over_old_cap_cannot_hide_ripe_tail(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    history = context / "history"
+    history.mkdir(parents=True, exist_ok=True)
+    log = history / f"events_{NOW:%Y%m%d}.jsonl"
+    records: list[str] = []
+    for index in range(MAX_HISTORY_DEFERRED_RECORDS + 1):
+        records.append(
+            json.dumps(
+                {
+                    "timestamp": (NOW + timedelta(days=1)).isoformat(),
+                    "type": "error",
+                    "op": f"future-{index}",
+                    "source": "test",
+                    "metadata": {},
+                }
+            )
+        )
+    records.append(
+        json.dumps(
+            {
+                "timestamp": NOW.isoformat(),
+                "type": "error",
+                "op": "ripe-tail",
+                "source": "test",
+                "metadata": {},
+            }
+        )
+    )
+    log.write_text("\n".join(records) + "\n", encoding="utf-8")
+
+    with open_event_batch(context, state, now=NOW, max_events=500) as first:
+        assert len(first.events) == 500
+        details = [event.detail for event in first.events]
+        first.ack()
+    with open_event_batch(context, state, now=NOW, max_events=500) as second:
+        details.extend(event.detail for event in second.events)
+        second.ack()
+    assert "ripe-tail" in details
+    assert "history_deferred" not in _load_state(state)
+
+
+def test_expired_future_hivemind_message_is_terminally_seen(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    path = _write_hivemind_message(
+        context,
+        filename="expired-future.json",
+        timestamp=NOW + timedelta(days=30),
+        topic="context:expired",
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["expires_at"] = (NOW - timedelta(days=1)).isoformat()
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with open_event_batch(context, state, now=NOW) as batch:
+        assert batch.events == []
+        batch.ack()
+    saved = _load_state(state)
+    assert path.name in saved["hivemind_seen"]["afs-watch"]
+    assert "hivemind_deferred" not in saved
+
+
+def test_oversized_history_record_is_quarantined_without_blocking_sources(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    _write_history_event(
+        context,
+        event_type="error",
+        op="oversized-" + ("x" * MAX_HISTORY_RECORD_BYTES),
+        timestamp=NOW,
+    )
+    _write_history_event(context, event_type="error", op="after-large", timestamp=NOW)
+    _write_hivemind_message(
+        context,
+        filename="valid.json",
+        timestamp=NOW,
+        topic="context:valid",
+    )
+
+    with open_event_batch(context, state, now=NOW) as first:
+        assert [event.detail for event in first.events] == ["context:valid"]
+        assert first.truncated is True
+        first.ack()
+    with open_event_batch(context, state, now=NOW + timedelta(minutes=1)) as second:
+        assert [event.detail for event in second.events] == ["after-large"]
+        assert second.skipped_malformed == 1
+        second.ack()
+    assert "history_oversized" not in _load_state(state)
+
+
 # ---------------------------------------------------------------------------
 # Supervisor integration
 # ---------------------------------------------------------------------------
@@ -1559,6 +1937,40 @@ def test_debounce_is_explicitly_coalesced(tmp_path: Path) -> None:
     assert batch.dispatch_failures == 0
     assert batch.dispatch_outcomes["jobber"].state == "coalesced"
     assert batch.dispatch_outcomes["jobber"].reason == "debounce"
+
+
+def test_future_dispatch_timestamp_does_not_coalesce_delivery(tmp_path: Path) -> None:
+    supervisor = _supervisor(tmp_path)
+    config = AgentConfig(name="jobber", module="x.y", on_event=["error"])
+    batch = _make_batch(tmp_path / "state", [_event("error", "boom")])
+    batch._state["last_dispatch"]["jobber"] = (NOW + timedelta(hours=1)).isoformat()
+
+    matched = supervisor.evaluate_event_records(
+        batch.events,
+        [config],
+        now=NOW,
+        batch=batch,
+    )
+    assert [item[0].name for item in matched] == ["jobber"]
+
+
+def test_future_stopped_agent_start_does_not_coalesce_delivery(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    supervisor = _supervisor(tmp_path)
+    config = AgentConfig(name="reactor", module="x.y", on_event=["error"])
+    monkeypatch.setattr(
+        supervisor,
+        "status",
+        lambda name: RunningAgent(
+            name=name,
+            state="stopped",
+            started_at=(NOW + timedelta(hours=1)).isoformat(),
+        ),
+    )
+    matched = supervisor.evaluate_event_records([_event("error")], [config], now=NOW)
+    assert [item[0].name for item in matched] == ["reactor"]
 
 
 def test_invalid_event_action_fails_closed(tmp_path: Path, monkeypatch) -> None:
@@ -1709,7 +2121,7 @@ def test_event_jobs_respect_supervisor_gates(tmp_path: Path, monkeypatch) -> Non
         ("missing_module", "missing_module"),
     ],
 )
-def test_retryable_event_gates_defer_batch_ack(
+def test_retryable_event_gates_park_pending_route(
     tmp_path: Path,
     monkeypatch,
     action: str,
@@ -1739,6 +2151,7 @@ def test_retryable_event_gates_defer_batch_ack(
     assert batch.dispatch_outcomes[config.name].state == "deferred"
     assert batch.dispatch_outcomes[config.name].reason == expected_reason
     assert batch.last_dispatch(config.name) is None
+    assert [route.agent_name for route in batch.pending_routes()] == [config.name]
 
 
 @pytest.mark.parametrize("action", ["spawn", "job"])
@@ -1769,7 +2182,7 @@ def test_running_agent_explicitly_coalesces_event(
 
 @pytest.mark.parametrize("action", ["spawn", "job"])
 @pytest.mark.parametrize("gate", ["manual_stop", "dependency"])
-def test_retryable_gate_redelivers_then_dispatches_after_clear(
+def test_retryable_gate_retries_parked_route_after_source_ack(
     tmp_path: Path,
     monkeypatch,
     action: str,
@@ -1812,7 +2225,8 @@ def test_retryable_gate_redelivers_then_dispatches_after_clear(
         assert [event.label() for event in first.events] == ["error:boom"]
         assert _dispatch_event(supervisor, first, config, action=action) == []
         assert first.dispatch_failures == 1
-        assert first.acked is False
+        first.ack()
+        assert first.acked is True
 
     gate_closed = False
     with open_event_batch(
@@ -1820,7 +2234,7 @@ def test_retryable_gate_redelivers_then_dispatches_after_clear(
         supervisor._state_dir,
         now=NOW + timedelta(seconds=30),
     ) as redelivered:
-        assert [event.label() for event in redelivered.events] == ["error:boom"]
+        assert redelivered.events == []
         dispatched = _dispatch_event(
             supervisor,
             redelivered,
@@ -1839,6 +2253,132 @@ def test_retryable_gate_redelivers_then_dispatches_after_clear(
         now=NOW + timedelta(seconds=60),
     ) as drained:
         assert drained.events == []
+
+
+def test_persistently_blocked_route_does_not_pin_unrelated_source_backlog(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context = tmp_path / "context"
+    supervisor = _supervisor(tmp_path)
+    blocked = AgentConfig(name="blocked", module="x.y", on_event=["error"])
+    valid = AgentConfig(name="valid", module="x.y", on_event=["mcp_tool"])
+    configs = [blocked, valid]
+    _collect(context, supervisor._state_dir, now=NOW - timedelta(minutes=1))
+    _write_history_event(
+        context,
+        event_type="error",
+        op="first",
+        timestamp=NOW,
+    )
+    _write_history_event(
+        context,
+        event_type="mcp_tool",
+        op="second",
+        timestamp=NOW,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "status",
+        lambda name: RunningAgent(name=name, manually_stopped=True)
+        if name == "blocked"
+        else None,
+    )
+    spawned: list[str] = []
+    monkeypatch.setattr(
+        supervisor,
+        "spawn",
+        lambda name, module, args=None, *, reason="", agent_config=None: spawned.append(name),
+    )
+
+    with open_event_batch(
+        context,
+        supervisor._state_dir,
+        now=NOW + timedelta(minutes=1),
+        max_events=1,
+    ) as first:
+        assert [event.detail for event in first.events] == ["first"]
+        supervisor.reconcile(configs, event_batch=first, now=NOW)
+        assert first.dispatch_outcomes["blocked"].state == "deferred"
+        first.ack()
+
+    with open_event_batch(
+        context,
+        supervisor._state_dir,
+        now=NOW + timedelta(minutes=2),
+        max_events=1,
+    ) as second:
+        assert [event.detail for event in second.events] == ["second"]
+        supervisor.reconcile(configs, event_batch=second, now=NOW + timedelta(minutes=2))
+        assert spawned == ["valid"]
+        assert second.dispatch_outcomes["blocked"].state == "deferred"
+        second.ack()
+
+    saved = _load_state(supervisor._state_dir)
+    assert list(saved["pending_routes"]) == ["blocked"]
+
+
+def test_missing_module_route_survives_config_fix_and_dispatches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context = tmp_path / "context"
+    supervisor = _supervisor(tmp_path)
+    broken = AgentConfig(name="reactor", module="", on_event=["error"])
+    _collect(context, supervisor._state_dir, now=NOW - timedelta(minutes=1))
+    _write_history_event(context, event_type="error", op="boom", timestamp=NOW)
+
+    with open_event_batch(context, supervisor._state_dir, now=NOW + timedelta(minutes=1)) as first:
+        assert [event.detail for event in first.events] == ["boom"]
+        assert supervisor.reconcile([broken], event_batch=first, now=NOW) == []
+        assert first.dispatch_outcomes["reactor"].reason == "missing_module"
+        first.ack()
+
+    fixed = AgentConfig(name="reactor", module="x.y", on_event=["error"])
+    spawned: list[str] = []
+    monkeypatch.setattr(
+        supervisor,
+        "spawn",
+        lambda name, module, args=None, *, reason="", agent_config=None: spawned.append(name),
+    )
+    with open_event_batch(context, supervisor._state_dir, now=NOW + timedelta(minutes=2)) as second:
+        assert second.events == []
+        started = supervisor.reconcile([fixed], event_batch=second, now=NOW + timedelta(minutes=2))
+        assert len(started) == 1
+        assert spawned == ["reactor"]
+        second.ack()
+    assert "pending_routes" not in _load_state(supervisor._state_dir)
+
+
+def test_failed_spawn_route_retries_without_failed_start_debounce(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    config_model = AFSConfig(
+        general=GeneralConfig(
+            context_root=context,
+            python_executable=tmp_path / "does-not-exist" / "python",
+        )
+    )
+    supervisor = AgentSupervisor(
+        state_dir=tmp_path / "supervisor-state",
+        config=config_model,
+    )
+    config = AgentConfig(name="reactor", module="x.y", on_event=["error"])
+    _collect(context, supervisor._state_dir, now=NOW - timedelta(minutes=1))
+    _write_history_event(context, event_type="error", op="boom", timestamp=NOW)
+
+    with open_event_batch(context, supervisor._state_dir, now=NOW + timedelta(minutes=1)) as first:
+        supervisor.reconcile([config], event_batch=first, now=NOW)
+        assert first.dispatch_outcomes["reactor"].reason == "spawn_failed"
+        first.ack()
+    assert supervisor.status("reactor").launch_count == 1  # type: ignore[union-attr]
+
+    with open_event_batch(context, supervisor._state_dir, now=NOW + timedelta(minutes=2)) as second:
+        assert "error:boom" not in [event.label() for event in second.events]
+        supervisor.reconcile([config], event_batch=second, now=NOW + timedelta(minutes=2))
+        assert second.dispatch_outcomes["reactor"].state == "deferred"
+        assert second.dispatch_outcomes["reactor"].reason == "spawn_failed"
+        second.ack()
+    assert supervisor.status("reactor").launch_count == 2  # type: ignore[union-attr]
 
 
 def test_event_job_prompt_sanitizes_event_label(tmp_path: Path) -> None:

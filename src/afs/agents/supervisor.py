@@ -38,6 +38,7 @@ from .event_reactor import (
     ReactorBusyError,
     ReactorEvent,
     ReactorStateError,
+    event_config_digest,
     match_event_rules,
     open_event_batch,
 )
@@ -1256,8 +1257,32 @@ class AgentSupervisor:
         action: str | None = None,
         batch: ReactorBatch | None = None,
     ) -> list[tuple[AgentConfig, str]]:
-        """Return valid event matches, optionally owned by one action path."""
+        """Return source and parked matches, optionally for one action path."""
         results: list[tuple[AgentConfig, str]] = []
+        result_names: set[str] = set()
+        config_by_name = {config.name: config for config in agent_configs}
+        digests: dict[str, str] = {}
+        if batch is not None:
+            valid_routes: dict[str, tuple[str, str]] = {}
+            for config in agent_configs:
+                if not config.on_event or config.on_event_action not in VALID_EVENT_ACTIONS:
+                    continue
+                digest = event_config_digest(config)
+                digests[config.name] = digest
+                valid_routes[config.name] = (config.on_event_action, digest)
+            batch.prune_pending_routes(valid_routes)
+            for route in batch.pending_routes(action=action):
+                config = config_by_name.get(route.agent_name)
+                if config is None:
+                    continue
+                batch.register_route(
+                    config.name,
+                    action=route.action,
+                    reason=route.reason,
+                    config_digest=route.config_digest,
+                )
+                results.append((config, route.reason))
+                result_names.add(config.name)
         for config, reason in match_event_rules(events, agent_configs):
             if config.on_event_action not in VALID_EVENT_ACTIONS:
                 should_log = batch is None or batch.mark_rejected(
@@ -1275,7 +1300,18 @@ class AgentSupervisor:
                 continue
             if action is not None and config.on_event_action != action:
                 continue
+            if batch is not None:
+                route = batch.register_route(
+                    config.name,
+                    action=config.on_event_action,
+                    reason=reason,
+                    config_digest=digests[config.name],
+                )
+                reason = route.reason
+            if config.name in result_names:
+                continue
             results.append((config, reason))
+            result_names.add(config.name)
         return results
 
     def _event_is_debounced(
@@ -1288,12 +1324,16 @@ class AgentSupervisor:
     ) -> bool:
         debounce = self._event_debounce_seconds(config)
         dispatched = batch.last_dispatch(config.name) if batch else None
-        if dispatched and (current - dispatched).total_seconds() < debounce:
-            return True
-        if existing:
-            last_start = _parse_timestamp(existing.started_at)
-            if last_start and (current - last_start).total_seconds() < debounce:
+        if dispatched:
+            elapsed = (current - dispatched).total_seconds()
+            if 0 <= elapsed < debounce:
                 return True
+        if existing and getattr(existing, "state", "stopped") == "stopped":
+            last_start = _parse_timestamp(existing.started_at)
+            if last_start:
+                elapsed = (current - last_start).total_seconds()
+                if 0 <= elapsed < debounce:
+                    return True
         return False
 
     @staticmethod
@@ -1429,7 +1469,7 @@ class AgentSupervisor:
                 for job in queue.list(status=status)
                 if job.dedupe_key
             }
-        except Exception:  # noqa: BLE001 - an unusable queue must defer ack
+        except Exception:  # noqa: BLE001 - an unusable queue must park the route
             _log.exception("Event job queue is unavailable")
             for config, _reason in ready_matches:
                 batch.mark_dispatch_failed(config.name, reason="queue_unavailable")
@@ -1455,7 +1495,7 @@ class AgentSupervisor:
                     created_by=AGENT_NAME,
                     dedupe_key=dedupe_key,
                 )
-            except Exception:  # noqa: BLE001 - a failed enqueue must defer ack
+            except Exception:  # noqa: BLE001 - a failed enqueue must park the route
                 _log.exception("Could not enqueue event job for '%s'", config.name)
                 batch.mark_dispatch_failed(config.name, reason="enqueue_failed")
                 continue
@@ -1484,7 +1524,7 @@ class AgentSupervisor:
         if changed_paths:
             for config in self.evaluate_watch_paths(changed_paths, agent_configs):
                 candidates.setdefault(config.name, (config, "file_watch"))
-        if event_batch and event_batch.events:
+        if event_batch:
             for config, reason in self._matched_event_records(
                 event_batch.events,
                 agent_configs,
@@ -1558,11 +1598,9 @@ class AgentSupervisor:
                 )
             except RuntimeError:
                 if is_event_candidate and event_batch:
-                    # Acking over a failed event spawn would consume the
-                    # event with zero deliveries; deferring ack redelivers
-                    # it. The failed attempt's started_at debounces the
-                    # retry. A persistent failure may open the circuit, but
-                    # that retryable gate also leaves the batch unacked.
+                    # Keep one durable route while source offsets advance.
+                    # Failed agent state never supplies fallback debounce, so
+                    # recovery can retry; a later open circuit parks it too.
                     event_batch.mark_dispatch_failed(
                         config.name,
                         reason="spawn_failed",
@@ -1698,11 +1736,11 @@ def _run_once(
         if previous_watch_state
         else []
     )
-    # Event handling is transactional: dispatch happens inside the batch and
-    # the cursor only advances on ack afterwards, so a crash mid-dispatch
-    # redelivers next cycle instead of losing events. A contended lock means
-    # another supervisor owns this cycle's events — skip them, never double
-    # deliver.
+    # Event handling is transactional: source checkpoints and the coalesced
+    # pending-route outbox commit together after routing. A crash before that
+    # ack reconstructs routes from source; a retryable gate is safely parked
+    # without pinning unrelated backlog. A contended lock means another
+    # supervisor owns this cycle's events — skip them, never double deliver.
     reactor_event_count = 0
     reactor_skipped = 0
     reactor_truncated = False
@@ -1732,17 +1770,15 @@ def _run_once(
                 now=_now_utc(),
             )
             reactor_dispatch_failures = batch.dispatch_failures
-            if not batch.dispatch_failures:
-                batch.prune_dispatch(c.name for c in profile.agent_configs)
-                try:
-                    batch.ack()
-                except ReactorStateError:
-                    # Cursors did not commit: the batch redelivers next
-                    # cycle instead of being lost. Dispatches that did
-                    # happen stay debounced by job dedupe keys and the
-                    # started agents' own state.
-                    _log.exception("Event reactor ack failed")
-                    reactor_state_error = True
+            batch.prune_dispatch(c.name for c in profile.agent_configs)
+            try:
+                batch.ack()
+            except ReactorStateError:
+                # Neither source cursors nor the pending-route outbox
+                # committed. Source matches therefore reconstruct the route
+                # on the next cycle instead of being lost.
+                _log.exception("Event reactor ack failed")
+                reactor_state_error = True
     except ReactorBusyError:
         reactor_busy = True
         started_agents = supervisor.reconcile(
@@ -1780,7 +1816,7 @@ def _run_once(
     if reactor_dispatch_failures:
         notes.append(
             f"{reactor_dispatch_failures} event dispatch(es) failed or deferred; "
-            "batch unacked for redelivery"
+            "routes parked for retry"
         )
     if reactor_state_error:
         notes.append("reactor state not persisted; cursors unchanged")

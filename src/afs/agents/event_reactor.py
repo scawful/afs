@@ -1,10 +1,11 @@
 """React to new event-log entries and hivemind messages.
 
 The supervisor's reconcile loop opens an :func:`open_event_batch` each cycle:
-events are read in bounded source order under an exclusive lock, the
-supervisor dispatches matches against ``AgentConfig.on_event`` patterns, and
-only then acks the batch. Cursors never advance before dispatch, so a crash
-mid-cycle redelivers instead of losing events (at-least-once delivery).
+events are read in bounded source order under an exclusive lock and matched
+against ``AgentConfig.on_event`` patterns. Successful/coalesced routes leave
+the outbox; retryable routes remain in one durable slot per agent. Source
+checkpoints and that outbox commit in the same ack, so one blocked route never
+pins unrelated input and a failed commit loses neither source nor route.
 Redelivery is kept safe by three overlapping guards — dispatch times
 persisted at ack, job dedupe keys that live as long as the job is queued or
 running, and the started agent's own state — and the lock closes the
@@ -31,7 +32,7 @@ import re
 from collections.abc import Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from heapq import nsmallest
 from pathlib import Path
@@ -40,6 +41,11 @@ from typing import Any
 from ..context_paths import resolve_mount_root
 from ..history import EVENT_FILE_PREFIX
 from ..models import MountType
+from ..protocols.canonical_json import (
+    CanonicalJSONError,
+    sha256_canonical_json,
+    strict_json_loads,
+)
 from ..schema import AgentConfig
 from .guardrails import _file_lock
 
@@ -62,10 +68,14 @@ MAX_EVENTS_PER_CYCLE = 500
 MAX_HISTORY_SCAN_BYTES = 1024 * 1024
 MAX_HISTORY_RECORD_BYTES = 256 * 1024
 MAX_HIVEMIND_RECORD_BYTES = 256 * 1024
+# Compatibility bound for future-record references written by earlier v4
+# builds. Current v4 readers deliver complete positional records on arrival
+# regardless of untrusted payload timestamps and create no new references.
+MAX_HISTORY_DEFERRED_RECORDS = MAX_EVENTS_PER_CYCLE
 LOCK_TIMEOUT_SECONDS = 5.0
-# Writers stamp events before the write lands (history hashes and may write a
-# payload file first). Events younger than this are deferred one cycle so the
-# watermark can never advance past a stamped-but-not-yet-visible write.
+# Retained for API compatibility. Version-4 positional/exact-identity
+# checkpoints deliver complete records on durable arrival, so caller clocks
+# no longer decide whether a visible record is consumed.
 WATERMARK_GRACE_SECONDS = 5.0
 
 VALID_EVENT_ACTIONS = ("spawn", "job")
@@ -101,7 +111,7 @@ class ReactorEvent:
 
 @dataclass(frozen=True)
 class _DeferredHistoryRecord:
-    """Reference to a visible history record whose timestamp is not ripe yet."""
+    """Compatibility reference written by an earlier version-4 reader."""
 
     filename: str
     offset: int
@@ -117,6 +127,17 @@ class _DeferredHistoryRecord:
             "digest": self.digest,
             "timestamp": self.timestamp,
         }
+
+
+@dataclass(frozen=True)
+class _OversizedHistoryScan:
+    """Bounded-memory progress through one newline-complete oversized record."""
+
+    start: int
+    scan_offset: int
+
+    def to_dict(self) -> dict[str, int]:
+        return {"start": self.start, "scan_offset": self.scan_offset}
 
 
 def sanitize_label(label: str) -> str:
@@ -195,19 +216,14 @@ def _read_initialized_version(state_dir: Path) -> int | None:
         raw = path.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
         return None
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise ReactorStateError(
             f"could not read event reactor initialized marker from {path}: {exc}"
         ) from exc
-    if not raw.isdigit():
+    supported = {"2": 2, "3": 3, str(STATE_VERSION): STATE_VERSION}
+    if raw not in supported:
         raise ReactorStateError(f"event reactor initialized marker is malformed: {path}")
-    version = int(raw)
-    if version not in (2, 3, STATE_VERSION):
-        raise ReactorStateError(
-            f"event reactor initialized marker version {version} is unsupported; "
-            f"expected 2, 3, or {STATE_VERSION}: {path}"
-        )
-    return version
+    return supported[raw]
 
 
 def _read_state_file(path: Path) -> dict[str, Any] | None:
@@ -215,11 +231,17 @@ def _read_state_file(path: Path) -> dict[str, Any] | None:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise ReactorStateError(f"could not read event reactor state from {path}: {exc}") from exc
     try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
+        payload = strict_json_loads(raw)
+    except (
+        CanonicalJSONError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        RecursionError,
+        ValueError,
+    ) as exc:
         raise ReactorStateError(f"event reactor state is invalid JSON: {path}: {exc}") from exc
     if not isinstance(payload, dict):
         raise ReactorStateError(
@@ -326,6 +348,12 @@ def _load_state(state_dir: Path) -> dict[str, Any]:
     payload = _read_state_file(state_path)
     loaded_path = state_path
     if payload is None:
+        if initialized_version is not None:
+            raise ReactorStateError(
+                f"event reactor cursor is missing after initialization: {state_path}; "
+                "restore the cursor or remove the initialized marker only when an "
+                "explicit re-prime is intended"
+            )
         # Migrate state written by earlier versions directly into the state
         # dir. The legacy file is removed on the next successful save, never
         # before, so a crash mid-migration cannot lose the cursors.
@@ -333,20 +361,13 @@ def _load_state(state_dir: Path) -> dict[str, Any]:
         payload = _read_state_file(legacy_path)
         loaded_path = legacy_path
     if payload is None:
-        if initialized_version is not None:
-            raise ReactorStateError(
-                f"event reactor cursor is missing after initialization: {state_path}; "
-                "restore the cursor or remove the initialized marker only when an "
-                "explicit re-prime is intended"
-            )
         return {}
     state = _normalize_state(payload, path=loaded_path)
-    if loaded_path == state_path and state["version"] in (2, 3, STATE_VERSION):
-        if initialized_version != state["version"]:
-            raise ReactorStateError(
-                f"event reactor version-{state['version']} state is missing its matching "
-                f"initialized marker: {state_path}"
-            )
+    if loaded_path == state_path and initialized_version != state["version"]:
+        raise ReactorStateError(
+            f"event reactor version-{state['version']} state is missing its matching "
+            f"initialized marker: {state_path}"
+        )
     return state
 
 
@@ -442,14 +463,20 @@ def _history_files(
     context_path: Path,
     *,
     config: Any = None,
-) -> list[Path]:
+) -> tuple[list[Path], bool]:
+    """Return history logs and whether the configured source is available.
+
+    An unavailable mount is distinct from an available empty directory. Once
+    positional checkpoints exist, treating a transient mount failure as an
+    empty inventory would prune them and replay restored files from byte zero.
+    """
     try:
         history_root = resolve_mount_root(context_path, MountType.HISTORY, config=config)
-    except Exception:  # noqa: BLE001 - missing mounts must not break reconcile
-        return []
-    if not history_root.exists():
-        return []
-    return sorted(history_root.glob(f"{EVENT_FILE_PREFIX}_*.jsonl"))
+        if not history_root.is_dir():
+            return [], False
+        return sorted(history_root.glob(f"{EVENT_FILE_PREFIX}_*.jsonl")), True
+    except Exception:  # noqa: BLE001 - provider resolution may fail
+        return [], False
 
 
 def _history_offset_snapshot(
@@ -466,7 +493,8 @@ def _history_offset_snapshot(
     newline instead.
     """
     snapshot: dict[str, int] = {}
-    for path in _history_files(context_path, config=config):
+    paths, _available = _history_files(context_path, config=config)
+    for path in paths:
         try:
             with path.open("rb") as handle:
                 size = os.fstat(handle.fileno()).st_size
@@ -515,6 +543,10 @@ def _offset_map(value: Any, *, key: str) -> dict[str, int]:
 def _history_deferred_records(value: Any) -> list[_DeferredHistoryRecord]:
     if not isinstance(value, list):
         raise ReactorStateError("event reactor state field 'history_deferred' must be a list")
+    if len(value) > MAX_HISTORY_DEFERRED_RECORDS:
+        raise ReactorStateError(
+            "event reactor state field 'history_deferred' exceeds the bounded record limit"
+        )
     records: list[_DeferredHistoryRecord] = []
     for item in value:
         if not isinstance(item, dict):
@@ -555,9 +587,36 @@ def _history_deferred_records(value: Any) -> list[_DeferredHistoryRecord]:
     return records
 
 
+def _history_oversized_map(value: Any) -> dict[str, _OversizedHistoryScan]:
+    if not isinstance(value, dict):
+        raise ReactorStateError("event reactor state field 'history_oversized' must be an object")
+    scans: dict[str, _OversizedHistoryScan] = {}
+    for filename, raw in value.items():
+        if (
+            not isinstance(filename, str)
+            or not filename
+            or Path(filename).name != filename
+            or not isinstance(raw, dict)
+        ):
+            raise ReactorStateError("event reactor state field 'history_oversized' is malformed")
+        start = raw.get("start")
+        scan_offset = raw.get("scan_offset")
+        if (
+            isinstance(start, bool)
+            or not isinstance(start, int)
+            or start < 0
+            or isinstance(scan_offset, bool)
+            or not isinstance(scan_offset, int)
+            or scan_offset <= start
+        ):
+            raise ReactorStateError("event reactor state field 'history_oversized' is malformed")
+        scans[filename] = _OversizedHistoryScan(start=start, scan_offset=scan_offset)
+    return scans
+
+
 def _history_record_event(raw: bytes) -> ReactorEvent | None:
     """Parse one complete history line, excluding the hivemind mirror."""
-    record = json.loads(raw.strip())
+    record = strict_json_loads(raw.strip())
     if not isinstance(record, dict):
         raise ValueError("history record is not an object")
     kind = str(record.get("type", ""))
@@ -595,7 +654,7 @@ def _read_deferred_history_event(
         )
     try:
         return _history_record_event(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
         raise ReactorStateError(
             f"deferred history record became malformed: {path} at offset {reference.offset}: {exc}"
         ) from exc
@@ -610,6 +669,7 @@ def _history_events_since(
     offsets: dict[str, int] | None = None,
     migration_cutoffs: dict[str, int] | None = None,
     deferred: list[_DeferredHistoryRecord] | None = None,
+    oversized: dict[str, _OversizedHistoryScan] | None = None,
     limit: int = MAX_EVENTS_PER_CYCLE,
     max_scan_bytes: int = MAX_HISTORY_SCAN_BYTES,
 ) -> tuple[
@@ -619,6 +679,7 @@ def _history_events_since(
     dict[str, int],
     dict[str, int],
     list[_DeferredHistoryRecord],
+    dict[str, _OversizedHistoryScan],
 ]:
     """Stream one payload-bounded, resumable slice of append-only history files.
 
@@ -632,15 +693,32 @@ def _history_events_since(
     original cursor. Offsets are returned separately and persist only when the
     enclosing batch is acked.
     """
-    paths = _history_files(context_path, config=config)
+    paths, history_available = _history_files(context_path, config=config)
     path_by_name = {path.name: path for path in paths}
     pending_offsets = dict(offsets or {})
     pending_cutoffs = dict(migration_cutoffs or {})
     pending_deferred = list(deferred or [])
+    pending_oversized = dict(oversized or {})
+    if not history_available:
+        if pending_offsets or pending_cutoffs or pending_deferred or pending_oversized:
+            raise ReactorStateError(
+                "history source is unavailable while reactor checkpoints exist; "
+                "preserving state for retry"
+            )
+        return (
+            [],
+            False,
+            0,
+            pending_offsets,
+            pending_cutoffs,
+            pending_deferred,
+            pending_oversized,
+        )
     existing_names = {path.name for path in paths}
     for name in [name for name in pending_offsets if name not in existing_names]:
         pending_offsets.pop(name, None)
         pending_cutoffs.pop(name, None)
+        pending_oversized.pop(name, None)
 
     events: list[ReactorEvent] = []
     skipped = 0
@@ -649,33 +727,27 @@ def _history_events_since(
     record_limit = limit if limit > 0 else MAX_EVENTS_PER_CYCLE
     byte_limit = max(max_scan_bytes, 1)
     truncated = False
-    deferred_pending = False
 
-    # A future-stamped record must not pin the append offset forever. Once its
-    # containing batch is acked, the durable reference below lets the byte
-    # checkpoint advance past it; it is reread and delivered when ripe.
+    # Drain compatibility references from earlier v4 builds immediately.
+    # Positional visibility, not the untrusted timestamp, now defines arrival.
     retained_deferred: list[_DeferredHistoryRecord] = []
     for reference in sorted(
         pending_deferred,
         key=lambda item: _parse_timestamp(item.timestamp)
         or datetime.min.replace(tzinfo=timezone.utc),
     ):
-        stamp = _parse_timestamp(reference.timestamp)
-        if stamp is None:
-            raise ReactorStateError("deferred history record has an invalid timestamp")
-        if stamp > until:
-            retained_deferred.append(reference)
-            deferred_pending = True
-            continue
-        if scanned_records >= record_limit:
-            retained_deferred.append(reference)
-            truncated = True
-            continue
         path = path_by_name.get(reference.filename)
         if path is None:
             raise ReactorStateError(
                 f"history file containing a deferred event is missing: {reference.filename}"
             )
+        stamp = _parse_timestamp(reference.timestamp)
+        if stamp is None:
+            raise ReactorStateError("deferred history record has an invalid timestamp")
+        if scanned_records >= record_limit:
+            retained_deferred.append(reference)
+            truncated = True
+            continue
         event = _read_deferred_history_event(path.parent, reference)
         scanned_records += 1
         if event is not None:
@@ -714,7 +786,41 @@ def _history_events_since(
         assert handle is not None
         with handle:
             handle.seek(offset)
-            while handle.tell() < size:
+            oversized_scan = pending_oversized.get(name)
+            if oversized_scan is not None:
+                if oversized_scan.start != offset or oversized_scan.scan_offset > size:
+                    raise ReactorStateError(
+                        f"history oversized-record checkpoint is inconsistent: {path}"
+                    )
+                handle.seek(oversized_scan.scan_offset)
+                while handle.tell() < size and scanned_bytes < byte_limit:
+                    chunk_start = handle.tell()
+                    chunk = handle.read(min(64 * 1024, byte_limit - scanned_bytes))
+                    if not chunk:
+                        break
+                    newline = chunk.find(b"\n")
+                    consumed = len(chunk) if newline < 0 else newline + 1
+                    scanned_bytes += consumed
+                    if newline >= 0:
+                        record_end = chunk_start + consumed
+                        pending_offsets[name] = record_end
+                        pending_oversized.pop(name, None)
+                        handle.seek(record_end)
+                        scanned_records += 1
+                        skipped += 1
+                        _log.warning(
+                            "Event reactor skipped oversized history record %s at offset %d",
+                            path,
+                            oversized_scan.start,
+                        )
+                        break
+                    pending_oversized[name] = _OversizedHistoryScan(
+                        start=oversized_scan.start,
+                        scan_offset=handle.tell(),
+                    )
+                if name in pending_oversized:
+                    truncated = True
+            while name not in pending_oversized and handle.tell() < size:
                 if len(events) >= record_limit or scanned_records >= record_limit:
                     truncated = True
                     break
@@ -730,10 +836,24 @@ def _history_events_since(
                 if not raw:
                     break
                 if len(raw) > MAX_HISTORY_RECORD_BYTES:
-                    raise ReactorStateError(
-                        f"history record exceeds {MAX_HISTORY_RECORD_BYTES} bytes: "
-                        f"{path} at offset {line_start}"
+                    scanned_bytes += len(raw)
+                    if raw.endswith(b"\n"):
+                        pending_offsets[name] = handle.tell()
+                        scanned_records += 1
+                        skipped += 1
+                        _log.warning(
+                            "Event reactor skipped oversized history record %s at offset %d",
+                            path,
+                            line_start,
+                        )
+                        continue
+                    pending_offsets[name] = line_start
+                    pending_oversized[name] = _OversizedHistoryScan(
+                        start=line_start,
+                        scan_offset=handle.tell(),
                     )
+                    truncated = True
+                    break
                 if not raw.endswith(b"\n"):
                     # A writer has not published a complete JSONL record yet.
                     # Leave the offset at its start so completion is retried.
@@ -748,7 +868,12 @@ def _history_events_since(
                     continue
                 try:
                     event = _history_record_event(raw)
-                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                except (
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                    RecursionError,
+                    ValueError,
+                ):
                     skipped += 1
                     continue
                 if event is None:
@@ -763,17 +888,6 @@ def _history_events_since(
                     and migration_watermark is not None
                     and stamp <= migration_watermark
                 ):
-                    continue
-                if stamp > until:
-                    pending_deferred.append(
-                        _DeferredHistoryRecord(
-                            filename=name,
-                            offset=line_start,
-                            length=len(raw),
-                            digest=hashlib.sha256(raw).hexdigest(),
-                            timestamp=event.timestamp,
-                        )
-                    )
                     continue
                 events.append(event)
             if pending_offsets.get(name, offset) < size:
@@ -792,7 +906,7 @@ def _history_events_since(
             break
 
     events.sort(key=_event_sort_key)
-    truncated = truncated or deferred_pending or bool(pending_deferred)
+    truncated = truncated or bool(pending_deferred)
     return (
         events,
         truncated,
@@ -800,6 +914,7 @@ def _history_events_since(
         pending_offsets,
         pending_cutoffs,
         pending_deferred,
+        pending_oversized,
     )
 
 
@@ -905,9 +1020,49 @@ def _decode_hivemind_checkpoint(value: str) -> tuple[int, str]:
     if not value:
         return -1, ""
     raw_mtime, separator, filename = value.partition(":")
-    if not separator or not raw_mtime.isdigit() or not filename:
+    if (
+        not separator
+        or not re.fullmatch(r"[0-9]{1,20}", raw_mtime)
+        or not filename
+    ):
         raise ReactorStateError("event reactor hivemind checkpoint is malformed")
-    return int(raw_mtime), filename
+    try:
+        return int(raw_mtime), filename
+    except ValueError as exc:
+        raise ReactorStateError("event reactor hivemind checkpoint is malformed") from exc
+
+
+def _hivemind_scan_cursor(value: Any) -> tuple[int, str, str] | None:
+    """Validate the bounded fairness cursor used for candidate rotation."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ReactorStateError("event reactor state field 'hivemind_scan_cursor' is malformed")
+    mtime_ns = value.get("mtime_ns")
+    filename = value.get("filename")
+    directory = value.get("directory")
+    if (
+        isinstance(mtime_ns, bool)
+        or not isinstance(mtime_ns, int)
+        or not -(2**63) <= mtime_ns < 2**63
+        or not isinstance(filename, str)
+        or not filename
+        or Path(filename).name != filename
+        or not isinstance(directory, str)
+        or not directory
+        or Path(directory).name != directory
+    ):
+        raise ReactorStateError("event reactor state field 'hivemind_scan_cursor' is malformed")
+    return mtime_ns, filename, directory
+
+
+def _hivemind_scan_cursor_dict(
+    value: tuple[int, str, str] | None,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    mtime_ns, filename, directory = value
+    return {"mtime_ns": mtime_ns, "filename": filename, "directory": directory}
 
 
 def _nested_string_map(value: Any, *, key: str) -> dict[str, dict[str, str]]:
@@ -1021,21 +1176,15 @@ def _hivemind_candidates(
     seen: dict[str, dict[str, str]],
     deferred: dict[str, dict[str, dict[str, str]]],
     until: datetime,
-) -> tuple[Iterator[_HivemindFile], bool]:
-    waiting = False
+) -> tuple[list[_HivemindFile], bool]:
+    del until  # v4 exact identities deliver complete files on durable arrival.
     candidates: list[_HivemindFile] = []
     for directory, files in inventory.items():
         for filename, item in files.items():
             if seen.get(directory, {}).get(filename) == item.signature:
                 continue
-            deferred_entry = deferred.get(directory, {}).get(filename)
-            if deferred_entry and deferred_entry.get("signature") == item.signature:
-                stamp = _parse_timestamp(deferred_entry.get("timestamp", ""))
-                if stamp is not None and stamp > until:
-                    waiting = True
-                    continue
             candidates.append(item)
-    return iter(candidates), waiting
+    return candidates, False
 
 
 def _hivemind_events_since(
@@ -1049,6 +1198,7 @@ def _hivemind_events_since(
     deferred: dict[str, dict[str, dict[str, str]]] | None = None,
     migration_existing: dict[str, dict[str, str]] | None = None,
     legacy_migration_cutoffs: dict[str, str] | None = None,
+    scan_cursor: tuple[int, str, str] | None = None,
     limit: int = MAX_EVENTS_PER_CYCLE,
 ) -> tuple[
     list[ReactorEvent],
@@ -1059,6 +1209,7 @@ def _hivemind_events_since(
     dict[str, dict[str, dict[str, str]]],
     dict[str, dict[str, str]],
     dict[str, str],
+    tuple[int, str, str] | None,
 ]:
     """Read bounded candidate payloads from a complete filesystem inventory."""
     from ..hivemind import HivemindMessage
@@ -1074,6 +1225,7 @@ def _hivemind_events_since(
             dict(deferred or {}),
             dict(migration_existing or {}),
             dict(legacy_migration_cutoffs or {}),
+            scan_cursor,
         )
 
     inventory = _hivemind_inventory(root)
@@ -1085,12 +1237,25 @@ def _hivemind_events_since(
 
     record_limit = limit if limit > 0 else MAX_EVENTS_PER_CYCLE
     candidates, waiting = _hivemind_candidates(inventory, pending_seen, pending_deferred, until)
-    selected = nsmallest(
-        record_limit + 1,
-        candidates,
-        key=lambda item: (item.mtime_ns, item.filename, item.directory),
-    )
-    truncated = waiting or len(selected) > record_limit
+
+    def candidate_key(item: _HivemindFile) -> tuple[int, str, str]:
+        return item.mtime_ns, item.filename, item.directory
+
+    # Rotate the bounded read window after the last attempted identity. An
+    # unreadable oldest file remains unacknowledged, but cannot permanently
+    # head-of-line block a later valid file when ``limit`` is small.
+    after = (item for item in candidates if scan_cursor is None or candidate_key(item) > scan_cursor)
+    selected = nsmallest(record_limit, after, key=candidate_key)
+    if len(selected) < record_limit and scan_cursor is not None:
+        selected.extend(
+            nsmallest(
+                record_limit - len(selected),
+                (item for item in candidates if candidate_key(item) <= scan_cursor),
+                key=candidate_key,
+            )
+        )
+    truncated = waiting or len(candidates) > record_limit
+    pending_scan_cursor = scan_cursor
     events: list[ReactorEvent] = []
     skipped = 0
     expiry_now = datetime.now(timezone.utc)
@@ -1116,7 +1281,8 @@ def _hivemind_events_since(
         pending_malformed.setdefault(item.directory, {})[item.filename] = item.signature
         truncated = True
 
-    for item in selected[:record_limit]:
+    for item in selected:
+        pending_scan_cursor = candidate_key(item)
         try:
             with item.path.open("rb") as handle:
                 raw = handle.read(MAX_HIVEMIND_RECORD_BYTES + 1)
@@ -1134,7 +1300,7 @@ def _hivemind_events_since(
             observe_malformed(item, f"record exceeds {MAX_HIVEMIND_RECORD_BYTES} bytes")
             continue
         try:
-            data = json.loads(raw)
+            data = strict_json_loads(raw)
             if not isinstance(data, dict):
                 raise ValueError("message is not an object")
             message = HivemindMessage.from_dict(data)
@@ -1150,7 +1316,14 @@ def _hivemind_events_since(
                 expires = _parse_timestamp(raw_expires)
                 if expires is None:
                     raise ValueError("message expires_at is invalid")
-        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        except (
+            CanonicalJSONError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            RecursionError,
+            TypeError,
+            ValueError,
+        ) as exc:
             # A non-atomic external writer may have exposed a partial final
             # file. Require the exact malformed identity to survive one acked
             # cycle before treating it as durable and advancing past it.
@@ -1158,14 +1331,9 @@ def _hivemind_events_since(
             continue
 
         pending_malformed.get(item.directory, {}).pop(item.filename, None)
-        if stamp > until:
-            pending_deferred.setdefault(item.directory, {})[item.filename] = {
-                "signature": item.signature,
-                "timestamp": message.timestamp,
-            }
-            truncated = True
+        if expires is not None and expires <= expiry_now:
+            mark_seen(item)
             continue
-
         legacy_cutoff = pending_legacy_cutoffs.get(item.directory, "")
         predates_legacy_cursor = bool(
             legacy_cutoff
@@ -1179,8 +1347,6 @@ def _hivemind_events_since(
             and stamp <= migration_watermark
         )
         mark_seen(item)
-        if expires is not None and expires <= expiry_now:
-            continue
         if predates_legacy_cursor or existed_at_migration:
             continue
         events.append(
@@ -1223,6 +1389,7 @@ def _hivemind_events_since(
         pending_deferred,
         pending_migration,
         pending_legacy_cutoffs,
+        pending_scan_cursor,
     )
 
 
@@ -1237,6 +1404,80 @@ class ReactorDispatchOutcome:
 
     state: str
     reason: str
+
+
+@dataclass(frozen=True)
+class ReactorPendingRoute:
+    """Durable coalesced delivery intent for one configured agent."""
+
+    agent_name: str
+    action: str
+    reason: str
+    config_digest: str
+    queued_at: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "action": self.action,
+            "reason": self.reason,
+            "config_digest": self.config_digest,
+            "queued_at": self.queued_at,
+        }
+
+
+def _pending_route_map(value: Any) -> dict[str, ReactorPendingRoute]:
+    if not isinstance(value, dict):
+        raise ReactorStateError("event reactor state field 'pending_routes' must be an object")
+    routes: dict[str, ReactorPendingRoute] = {}
+    for agent_name, raw in value.items():
+        if not isinstance(agent_name, str) or not agent_name or not isinstance(raw, dict):
+            raise ReactorStateError("event reactor state field 'pending_routes' is malformed")
+        action = raw.get("action")
+        reason = raw.get("reason")
+        config_digest = raw.get("config_digest")
+        queued_at = raw.get("queued_at")
+        label = reason.removeprefix("event:") if isinstance(reason, str) else ""
+        if (
+            action not in VALID_EVENT_ACTIONS
+            or not isinstance(reason, str)
+            or not reason.startswith("event:")
+            or not label
+            or sanitize_label(label) != label
+            or not isinstance(config_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", config_digest)
+            or not isinstance(queued_at, str)
+            or _parse_timestamp(queued_at) is None
+        ):
+            raise ReactorStateError("event reactor state field 'pending_routes' is malformed")
+        routes[agent_name] = ReactorPendingRoute(
+            agent_name=agent_name,
+            action=action,
+            reason=reason,
+            config_digest=config_digest,
+            queued_at=queued_at,
+        )
+    return routes
+
+
+def event_config_digest(config: AgentConfig) -> str:
+    """Hash stable trigger authorization, not retry-recovery mechanics.
+
+    Module/dependency/debounce edits commonly *fix* a parked route and must
+    not erase it. Rule/action changes alter what was authorized and therefore
+    terminally invalidate the old route.
+    """
+    try:
+        return sha256_canonical_json(
+            {
+                "name": config.name,
+                "on_event": list(config.on_event),
+                "on_event_action": config.on_event_action,
+            }
+        )
+    except (CanonicalJSONError, TypeError, ValueError) as exc:
+        raise ReactorStateError(
+            f"agent config {config.name!r} cannot be hashed for event delivery: {exc}"
+        ) from exc
 
 
 @dataclass
@@ -1254,14 +1495,69 @@ class ReactorBatch:
     _pending_history_offsets: dict[str, int] = field(default_factory=dict)
     _pending_history_migration_cutoffs: dict[str, int] = field(default_factory=dict)
     _pending_history_deferred: list[_DeferredHistoryRecord] = field(default_factory=list)
+    _pending_history_oversized: dict[str, _OversizedHistoryScan] = field(default_factory=dict)
     _pending_hivemind_seen: dict[str, dict[str, str]] = field(default_factory=dict)
     _pending_hivemind_malformed: dict[str, dict[str, str]] = field(default_factory=dict)
     _pending_hivemind_deferred: dict[str, dict[str, dict[str, str]]] = field(default_factory=dict)
     _pending_hivemind_migration_existing: dict[str, dict[str, str]] = field(default_factory=dict)
     _pending_hivemind_legacy_cutoffs: dict[str, str] = field(default_factory=dict)
+    _pending_hivemind_scan_cursor: tuple[int, str, str] | None = None
+    _pending_routes: dict[str, ReactorPendingRoute] = field(default_factory=dict)
+    _active_routes: set[str] = field(default_factory=set)
     acked: bool = False
     dispatch_failures: int = 0
     dispatch_outcomes: dict[str, ReactorDispatchOutcome] = field(default_factory=dict)
+
+    def pending_routes(self, *, action: str | None = None) -> list[ReactorPendingRoute]:
+        """Return durable routes, oldest first, optionally for one action."""
+        routes = (
+            route
+            for route in self._pending_routes.values()
+            if action is None or route.action == action
+        )
+        return sorted(routes, key=lambda route: (route.queued_at, route.agent_name))
+
+    def prune_pending_routes(
+        self,
+        valid_routes: dict[str, tuple[str, str]],
+    ) -> None:
+        """Terminally reject routes whose config disappeared or changed."""
+        for name, route in list(self._pending_routes.items()):
+            valid = valid_routes.get(name)
+            if valid == (route.action, route.config_digest):
+                continue
+            self._pending_routes.pop(name, None)
+            self._active_routes.discard(name)
+            reason = "config_removed" if valid is None else "config_changed"
+            self._record_dispatch_outcome(name, "rejected", reason)
+
+    def register_route(
+        self,
+        agent_name: str,
+        *,
+        action: str,
+        reason: str,
+        config_digest: str,
+    ) -> ReactorPendingRoute:
+        """Coalesce one source match into the agent's durable pending slot."""
+        existing = self._pending_routes.get(agent_name)
+        if existing is not None and (
+            existing.action != action or existing.config_digest != config_digest
+        ):
+            self._pending_routes.pop(agent_name, None)
+            self._record_dispatch_outcome(agent_name, "rejected", "config_changed")
+            existing = None
+        if existing is None:
+            existing = ReactorPendingRoute(
+                agent_name=agent_name,
+                action=action,
+                reason=reason,
+                config_digest=config_digest,
+                queued_at=self._now.isoformat(),
+            )
+            self._pending_routes[agent_name] = existing
+        self._active_routes.add(agent_name)
+        return existing
 
     def last_dispatch(self, agent_name: str) -> datetime | None:
         """Persisted time of the last event-triggered dispatch for an agent."""
@@ -1300,24 +1596,34 @@ class ReactorBatch:
         duplicates, not this table.
         """
         self._state.setdefault("last_dispatch", {})[agent_name] = self._now.isoformat()
+        self._pending_routes.pop(agent_name, None)
+        self._active_routes.discard(agent_name)
         self._record_dispatch_outcome(agent_name, "dispatched", reason)
 
     def mark_dispatch_deferred(self, agent_name: str, *, reason: str) -> None:
-        """Record a retryable gate and require batch redelivery."""
+        """Record a retryable gate while retaining its durable pending route."""
+        if agent_name not in self._pending_routes:
+            raise ReactorStateError(
+                f"cannot defer event route for {agent_name!r} before it is registered"
+            )
         if not self._record_dispatch_outcome(agent_name, "deferred", reason):
             return
         _log.warning(
-            "Event delivery for agent '%s' deferred (%s); batch will redeliver",
+            "Event delivery for agent '%s' deferred (%s); route parked for retry",
             agent_name,
             reason,
         )
 
     def mark_coalesced(self, agent_name: str, *, reason: str) -> None:
         """Record an intentional delivery coalescing decision."""
+        self._pending_routes.pop(agent_name, None)
+        self._active_routes.discard(agent_name)
         self._record_dispatch_outcome(agent_name, "coalesced", reason)
 
     def mark_rejected(self, agent_name: str, *, reason: str) -> bool:
         """Record a terminal fail-closed rejection and permit cursor advance."""
+        self._pending_routes.pop(agent_name, None)
+        self._active_routes.discard(agent_name)
         return self._record_dispatch_outcome(agent_name, "rejected", reason)
 
     def mark_dispatch_failed(
@@ -1328,8 +1634,8 @@ class ReactorBatch:
     ) -> None:
         """Record that an event-triggered dispatch failed.
 
-        The caller must then skip ack() so the batch is redelivered: acking
-        over a failed dispatch would consume the event with zero deliveries.
+        The registered route remains in the durable outbox while source
+        offsets can advance independently.
         """
         self.mark_dispatch_deferred(agent_name, reason=reason)
 
@@ -1341,12 +1647,11 @@ class ReactorBatch:
             table.pop(name, None)
 
     def ack(self) -> None:
-        """Commit the cursor advance. Call only after every dispatch succeeded.
+        """Atomically commit source cursors and the durable route outbox.
 
-        Skipping ack (or crashing before it) leaves the cursors unchanged, so
-        the same events are redelivered next cycle instead of being lost.
-        Raises :class:`ReactorStateError` when the commit itself cannot be
-        persisted — the batch then counts as unacked and redelivers.
+        A retryable dispatch does not pin unrelated source backlog: its
+        coalesced route is parked in ``pending_routes`` in the same atomic
+        state write as source offsets. A failed state save commits neither.
         """
         self._state["history_cursor"] = self._pending_history_cursor
         self._state["hivemind_cursor"] = self._pending_hivemind_cursor
@@ -1362,6 +1667,13 @@ class ReactorBatch:
             ]
         else:
             self._state.pop("history_deferred", None)
+        if self._pending_history_oversized:
+            self._state["history_oversized"] = {
+                name: scan.to_dict()
+                for name, scan in self._pending_history_oversized.items()
+            }
+        else:
+            self._state.pop("history_oversized", None)
         self._state["hivemind_seen"] = self._pending_hivemind_seen
         if self._pending_hivemind_malformed:
             self._state["hivemind_malformed"] = self._pending_hivemind_malformed
@@ -1384,25 +1696,39 @@ class ReactorBatch:
             and not self._pending_hivemind_legacy_cutoffs
         ):
             self._state.pop("hivemind_migration_watermark", None)
+        scan_cursor = _hivemind_scan_cursor_dict(self._pending_hivemind_scan_cursor)
+        if scan_cursor is not None:
+            self._state["hivemind_scan_cursor"] = scan_cursor
+        else:
+            self._state.pop("hivemind_scan_cursor", None)
         self._state.pop("hivemind_files", None)
+        if self._pending_routes:
+            self._state["pending_routes"] = {
+                name: route.to_dict() for name, route in self._pending_routes.items()
+            }
+        else:
+            self._state.pop("pending_routes", None)
         _save_state(self._state_dir, self._state)
         self.acked = True
 
 
-def _source_watermark(events: list[ReactorEvent], stored: datetime) -> str:
+def _source_watermark(
+    events: list[ReactorEvent],
+    stored: datetime,
+    *,
+    ceiling: datetime | None = None,
+) -> str:
     """Cursor value a source may advance to after this batch is dispatched.
 
-    The cursor only ever advances to the newest event actually delivered —
-    never to ``now`` — so a truncated backlog arrives next cycle. Because
-    delivered events are bounded by the ripeness cutoff (``now`` minus
-    :data:`WATERMARK_GRACE_SECONDS`), a writer that stamped an event before
-    the read but landed it after is still ahead of the cursor as long as its
-    stamp-to-land delay is under the grace window; without the cutoff such a
-    write would be skipped forever.
+    Version-4 delivery uses positional/exact-identity checkpoints, not this
+    diagnostic timestamp. Clamp caller-future stamps so a bad source clock
+    does not make legacy metadata jump arbitrarily far ahead.
     """
     newest = stored
     for event in events:
         stamp = _parse_timestamp(event.timestamp)
+        if stamp is not None and ceiling is not None and stamp > ceiling:
+            stamp = ceiling
         if stamp is not None and stamp > newest:
             newest = stamp
     return newest.astimezone(timezone.utc).isoformat()
@@ -1513,9 +1839,9 @@ def open_event_batch(
     the lock is contended — the caller skips event handling for that cycle
     and retries on the next.
 
-    Events stamped within ``grace_seconds`` of *now* are deferred one cycle:
-    writers stamp before their write lands, so consuming right up to *now*
-    could advance the watermark past a stamped-but-in-flight event.
+    ``grace_seconds`` is retained for call compatibility. Version-4
+    positional and exact-identity checkpoints deliver complete records when
+    they are durably visible; untrusted payload timestamps do not gate them.
 
     A genuinely absent state is primed to *now* once, so first enabling the
     reactor never replays weeks of history as a spawn storm. Once initialized,
@@ -1523,7 +1849,7 @@ def open_event_batch(
     :class:`ReactorStateError` instead of silently skipping backlog.
     """
     current = now or datetime.now(timezone.utc)
-    ripe_until = current - timedelta(seconds=max(grace_seconds, 0.0))
+    del grace_seconds
     with ExitStack() as stack:
         try:
             stack.enter_context(_file_lock(_state_path(state_dir), timeout=lock_timeout))
@@ -1591,6 +1917,7 @@ def open_event_batch(
         )
         history_migration_watermark = _migration_watermark(state, source="history")
         history_deferred = _history_deferred_records(state.get("history_deferred", []))
+        history_oversized = _history_oversized_map(state.get("history_oversized", {}))
 
         hivemind_seen = _nested_string_map(state["hivemind_seen"], key="hivemind_seen")
         hivemind_migration_existing = _nested_string_map(
@@ -1606,6 +1933,8 @@ def open_event_batch(
             state.get("hivemind_malformed", {}), key="hivemind_malformed"
         )
         hivemind_deferred = _hivemind_deferred_map(state.get("hivemind_deferred", {}))
+        hivemind_scan_cursor = _hivemind_scan_cursor(state.get("hivemind_scan_cursor"))
+        pending_routes = _pending_route_map(state.get("pending_routes", {}))
 
         (
             history_events,
@@ -1614,14 +1943,16 @@ def open_event_batch(
             pending_history_offsets,
             pending_history_migration_cutoffs,
             pending_history_deferred,
+            pending_history_oversized,
         ) = _history_events_since(
             context_path,
             history_migration_watermark,
-            ripe_until,
+            current,
             config=config,
             offsets=history_offsets,
             migration_cutoffs=history_migration_cutoffs,
             deferred=history_deferred,
+            oversized=history_oversized,
             limit=max_events,
             max_scan_bytes=max_history_scan_bytes,
         )
@@ -1634,16 +1965,18 @@ def open_event_batch(
             pending_hivemind_deferred,
             pending_hivemind_migration_existing,
             pending_hivemind_legacy_cutoffs,
+            pending_hivemind_scan_cursor,
         ) = _hivemind_events_since(
             context_path,
             hivemind_migration_watermark,
-            ripe_until,
+            current,
             config=config,
             seen=hivemind_seen,
             malformed=hivemind_malformed,
             deferred=hivemind_deferred,
             migration_existing=hivemind_migration_existing,
             legacy_migration_cutoffs=legacy_hivemind_cutoffs,
+            scan_cursor=hivemind_scan_cursor,
             limit=max_events,
         )
         events = sorted(history_events + hivemind_events, key=_event_sort_key)
@@ -1657,16 +1990,23 @@ def open_event_batch(
             skipped_malformed=skipped,
             _state_dir=state_dir,
             _state=state,
-            _pending_history_cursor=_source_watermark(history_events, history_stored),
-            _pending_hivemind_cursor=_source_watermark(hivemind_events, hivemind_stored),
+            _pending_history_cursor=_source_watermark(
+                history_events, history_stored, ceiling=current
+            ),
+            _pending_hivemind_cursor=_source_watermark(
+                hivemind_events, hivemind_stored, ceiling=current
+            ),
             _now=current,
             _pending_history_offsets=pending_history_offsets,
             _pending_history_migration_cutoffs=(pending_history_migration_cutoffs),
             _pending_history_deferred=pending_history_deferred,
+            _pending_history_oversized=pending_history_oversized,
             _pending_hivemind_seen=pending_hivemind_seen,
             _pending_hivemind_malformed=pending_hivemind_malformed,
             _pending_hivemind_deferred=pending_hivemind_deferred,
             _pending_hivemind_migration_existing=(pending_hivemind_migration_existing),
             _pending_hivemind_legacy_cutoffs=pending_hivemind_legacy_cutoffs,
+            _pending_hivemind_scan_cursor=pending_hivemind_scan_cursor,
+            _pending_routes=pending_routes,
             acked=False,
         )

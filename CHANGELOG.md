@@ -63,24 +63,27 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
   CLI registration failures, and surfaced doctor/plugin reports.
 - Event reactor: `on_event` agent start conditions match history events and
   hivemind messages with `"<kind>[:<detail>]"` fnmatch patterns. Delivery is
-  transactional — events are read oldest-first under an exclusive lock with
-  bounded per-cycle batches, dispatched, and only then acked via an atomic
-  state commit, so a crash redelivers instead of losing events and
-  supervisors sharing a state directory never double-deliver. A failed
-  dispatch defers the ack (redelivery, not silent consumption); events
-  stamped within a short grace window are deferred one cycle so the
-  watermark cannot pass an in-flight write; cursors prime per source.
+  transactional — bounded source checkpoints and a coalesced per-agent
+  pending-route outbox commit together under an exclusive lock, so blocked
+  routes retry without pinning unrelated backlog and a failed state save loses
+  neither side. Complete positional/exact-identity records are delivered on
+  durable arrival regardless of untrusted future or skewed timestamps.
   Unknown `on_event_action` values fail closed; the `job` action passes the
   same supervisor gates as spawns and embeds only sanitized event labels in
   prompts; debounce (`event_debounce`, default 5m) is persisted at ack so it
-  also covers job actions; future-stamped records are deferred without
-  blocking later ripe work; hivemind sends publish atomically and exact file
-  identities preserve newly copied/backdated messages; timestamp-only v1/v2
+  also covers job actions, while failed/future start clocks cannot suppress a
+  retry; recovery config edits preserve parked routes; hivemind sends publish
+  atomically and exact file identities preserve newly copied/backdated
+  messages; a persisted scan cursor prevents unreadable oldest-file starvation;
+  timestamp-only v1/v2
   state conservatively replays extant source content once when upgrading to
   positional/exact checkpoints, while tuple-based v3 state does the same for
   its unprovable hivemind inventory; stable malformed records, including
-  invalid provided expiries, are skipped and counted; the hivemind bus is
-  canonical (history mirrors of sends are excluded); and
+  strict-JSON violations, invalid provided expiries, and oversized complete
+  history records are skipped and counted; transient history mount loss fails
+  closed without pruning offsets; initialized markers/checkpoints use bounded
+  ASCII parsing; the hivemind bus is canonical (history mirrors of sends are
+  excluded); and
   `AgentConfig` round-trips now preserve custom mapping keys.
 
 ### Changed
