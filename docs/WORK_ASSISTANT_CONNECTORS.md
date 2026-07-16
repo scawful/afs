@@ -53,7 +53,7 @@ approval_id="$(
     --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["approval_id"])'
 )"
 
-./scripts/afs work approvals approve "$approval_id" --path . --by human
+./scripts/afs work approvals approve "$approval_id" --path . --because "email content verified"
 ./scripts/afs work approvals execute "$approval_id" --path . \
   --executor "python3 scripts/afs-work-gws-executor.py"
 ```
@@ -73,7 +73,7 @@ approval_id="$(
     --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["approval_id"])'
 )"
 
-./scripts/afs work approvals approve "$approval_id" --path . --by human
+./scripts/afs work approvals approve "$approval_id" --path . --because "sheet rows verified"
 ./scripts/afs work approvals execute "$approval_id" --path . \
   --executor "python3 scripts/afs-work-gws-executor.py"
 ```
@@ -93,7 +93,7 @@ approval_id="$(
     --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["approval_id"])'
 )"
 
-./scripts/afs work approvals approve "$approval_id" --path . --by human
+./scripts/afs work approvals approve "$approval_id" --path . --because "event details verified"
 ./scripts/afs work approvals execute "$approval_id" --path . \
   --executor "python3 scripts/afs-work-gws-executor.py"
 ```

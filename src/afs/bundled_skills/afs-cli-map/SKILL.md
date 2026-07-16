@@ -30,7 +30,7 @@ When unsure, start with
 | Files | `fs read/write/list/move/delete`, `context mount/unmount/list` |
 | Health | `health check/status/trend`, `doctor`, `context repair --dry-run`, `context validate` |
 | Sessions | `session bootstrap/pack/prepare-client/handoff/replay`, `cache` |
-| Coordination | `tasks`, `hivemind`, `mission`, `approvals`, `work` |
+| Coordination | `tasks`, `hivemind`, `mission`, `approvals`, `work`, `calibration` |
 | Agents | `agents list/ps/run/watch`, `agent-jobs`, `agent-runs`, `agent-hooks`, `agent-manifest` |
 | Quality | `verify plan/run`, `schema list/show/validate`, `review`, `optimize decide`, `execution inspect` |
 | Knowledge | `memory consolidate/status/search`, `skills list/match/mine/promote`, `events`, `graph`, `sources` |

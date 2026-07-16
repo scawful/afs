@@ -456,6 +456,9 @@ def _active_mission_lines(missions: dict[str, Any]) -> list[str]:
             first_blocker = str(blockers[0]).strip()
             if first_blocker:
                 line += f" — blocked: {first_blocker}"
+        acceptance = str(mission.get("acceptance") or "").strip()
+        if acceptance and mission.get("acceptance_human_confirmed") is True:
+            line += f" — done when: {acceptance[:300]}"
         lines.append(line)
     return lines if len(lines) > 1 else []
 

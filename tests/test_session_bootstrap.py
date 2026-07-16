@@ -442,3 +442,63 @@ def test_bootstrap_skill_signal_prioritizes_open_tasks_before_display_limit(
     )
     assert summary["tasks"]["items"][0]["status"] == "pending"
     assert summary["skills"]["matches"][0]["name"] == "queue-focus"
+
+
+def test_bootstrap_renders_bounded_human_confirmed_mission_acceptance(
+    tmp_path: Path,
+) -> None:
+    from afs.human_provenance import _broker_for_reader
+    from afs.missions import MissionStore
+    from afs.session_bootstrap import build_session_bootstrap, render_session_bootstrap
+
+    context_root = tmp_path / ".context"
+    manager = AFSManager(config=AFSConfig(general=GeneralConfig(context_root=context_root)))
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path, context_root=context_root)
+    store = MissionStore(context_root, config=manager.config)
+    title = "Ship bounded mission delivery"
+    acceptance = "human-visible done criteria"
+    authorization = _broker_for_reader(lambda _prompt: "human").confirm_token(
+        "human",
+        "prompt",
+        scope=store.human_acceptance_scope("create", title, acceptance),
+    )
+    assert authorization is not None
+    store.create(
+        title=title,
+        summary="s" * 3000,
+        acceptance=acceptance,
+        acceptance_authorization=authorization,
+        next_steps=[f"step {index} " + "x" * 600 for index in range(8)],
+        metadata={"unbounded": "secret" * 1000},
+    )
+
+    summary = build_session_bootstrap(manager, context_root, record_event=False)
+    mission = summary["missions"]["active"][0]
+    assert len(mission["summary"]) <= 1500
+    assert len(mission["next_steps"]) == 5
+    assert all(len(step) <= 400 for step in mission["next_steps"])
+    assert "metadata" not in mission
+    assert "log" not in mission
+    assert mission["acceptance_human_confirmed"] is True
+
+    rendered = render_session_bootstrap(summary)
+    assert "## Active Missions" in rendered
+    assert title in rendered
+    assert f"done_when: {acceptance}" in rendered
+
+
+def test_bootstrap_token_budget_can_shed_missions() -> None:
+    from afs.session_bootstrap import _apply_token_budget
+
+    summary = {
+        "missions": {
+            "available": True,
+            "active_count": 1,
+            "active": [{"title": "mission", "summary": "x" * 5000}],
+        }
+    }
+    truncated = _apply_token_budget(summary, budget=80)
+    assert truncated["missions"] == {"truncated": True, "reason": "token_budget"}
+    assert "missions" in truncated["_budget_info"]["truncated_sections"]

@@ -9,10 +9,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
+from ..human_provenance import (
+    HumanAuthorization,
+    _broker_for_reader,
+)
 from ..missions import MissionNotFoundError, MissionStore
 from ._utils import load_manager, resolve_context_paths
+
+# Test seam: production uses the platform controlling-terminal backend.
+_TTY_READER = None
 
 
 def _store(args: argparse.Namespace) -> MissionStore:
@@ -30,12 +38,87 @@ def _print_mission_line(mission) -> None:
     print(f"{mission.mission_id}  ({mission.status}){owner}  {mission.title}{steps}")
 
 
+def _confirm_flag_acceptance(
+    text: str, *, scope: str
+) -> HumanAuthorization | None:
+    """Confirm a ``--acceptance`` flag value on the controlling terminal.
+
+    Acceptance is the human-authored definition of done that later outcome
+    scoring calibrates against, so setting, changing, or clearing it requires
+    typing ``human`` on the tty — piped stdin cannot satisfy it, and headless
+    callers (agents) are refused. Returns a decision-scoped broker
+    authorization, or ``None`` to refuse.
+    """
+    shown = text if text else "(clear the existing acceptance)"
+    authorization = _broker_for_reader(_TTY_READER).confirm_token(
+        "human",
+        "\n".join(
+            [
+                "",
+                "Acceptance is the human-authored definition of done:",
+                f"  {shown}",
+                "Type 'human' to confirm you (not an agent) authored this change: ",
+            ]
+        ),
+        scope=scope,
+    )
+    if authorization is None:
+        print(
+            "acceptance is human-authored; setting or clearing it requires an "
+            "interactive terminal confirmation. Agents must leave it unset and "
+            "surface the nudge instead.",
+            file=sys.stderr,
+        )
+    return authorization
+
+
+def _prompt_for_acceptance(
+    args: argparse.Namespace, *, title: str, store: MissionStore
+) -> tuple[str, HumanAuthorization | None]:
+    """Ask the human to author acceptance when creating a mission.
+
+    The prompt is written to and read from the controlling terminal, so it
+    never contaminates stdout and piped stdin cannot answer it. Headless
+    callers are never blocked: without a terminal the prompt is skipped and
+    the follow-up nudge is printed instead. Never prompts in ``--json`` mode.
+    Returns ``(acceptance, authorization)``.
+    """
+    if getattr(args, "json", False):
+        return "", None
+    result = _broker_for_reader(_TTY_READER).read_line(
+        "Acceptance — what does done look like? (enter to skip): ",
+        scope=lambda response: store.human_acceptance_scope(
+            "create", title.strip(), response.strip()
+        ),
+    )
+    if result is None:
+        return "", None
+    line, authorization = result
+    acceptance = line.strip()
+    return acceptance, (authorization if acceptance else None)
+
+
 def mission_create_command(args: argparse.Namespace) -> int:
     store = _store(args)
+    flag = str(getattr(args, "acceptance", None) or "").strip()
+    if flag:
+        scope = store.human_acceptance_scope(
+            "create", args.title.strip(), flag
+        )
+        authorization = _confirm_flag_acceptance(flag, scope=scope)
+        if authorization is None:
+            return 2
+        acceptance = flag
+    else:
+        acceptance, authorization = _prompt_for_acceptance(
+            args, title=args.title, store=store
+        )
     mission = store.create(
         title=args.title,
         summary=getattr(args, "summary", "") or "",
         owner=getattr(args, "owner", "") or "",
+        acceptance=acceptance,
+        acceptance_authorization=authorization,
         next_steps=list(getattr(args, "next_step", None) or []),
         tags=list(getattr(args, "tag", None) or []),
     )
@@ -44,6 +127,11 @@ def mission_create_command(args: argparse.Namespace) -> int:
     else:
         print(f"created: {mission.mission_id}")
         _print_mission_line(mission)
+        if not mission.acceptance:
+            print(
+                "acceptance not set; add one with: "
+                f"afs mission update {mission.mission_id} --acceptance '<what done looks like>'"
+            )
     return 0
 
 
@@ -74,12 +162,26 @@ def mission_show_command(args: argparse.Namespace) -> int:
 
 def mission_update_command(args: argparse.Namespace) -> int:
     store = _store(args)
+    acceptance = getattr(args, "acceptance", None)
+    acceptance_authorization = None
+    if acceptance is not None:
+        acceptance = str(acceptance).strip()
+        scope = store.human_acceptance_scope(
+            "update", args.mission_id, acceptance
+        )
+        acceptance_authorization = _confirm_flag_acceptance(
+            acceptance, scope=scope
+        )
+        if acceptance_authorization is None:
+            return 2
     try:
         mission = store.update(
             args.mission_id,
             status=getattr(args, "status", None),
             summary=getattr(args, "summary", None),
             owner=getattr(args, "owner", None),
+            acceptance=acceptance,
+            acceptance_authorization=acceptance_authorization,
             next_steps=list(args.next_step) if getattr(args, "next_step", None) else None,
             blockers=list(args.blocker) if getattr(args, "blocker", None) else None,
             link_session=getattr(args, "link_session", None),
@@ -121,6 +223,10 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     create_parser.add_argument("--summary", help="One-line mission summary.")
     create_parser.add_argument("--owner", help="Owning agent or session.")
     create_parser.add_argument(
+        "--acceptance",
+        help="Human-authored definition of done; prompted for on a tty when omitted.",
+    )
+    create_parser.add_argument(
         "--next-step", action="append", help="A next step (repeatable)."
     )
     create_parser.add_argument("--tag", action="append", help="A tag (repeatable).")
@@ -149,6 +255,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     update_parser.add_argument("--summary", help="Replace the summary.")
     update_parser.add_argument("--owner", help="Replace the owner.")
+    update_parser.add_argument(
+        "--acceptance", help="Replace the human-authored definition of done."
+    )
     update_parser.add_argument(
         "--next-step", action="append", help="Replace next steps (repeatable)."
     )

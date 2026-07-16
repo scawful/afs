@@ -2,8 +2,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from afs.personal_context import load_personal_context
 from afs.work_assistant import WorkAssistantStore, enrich_logged_event
+
+
+def _human_authorization(
+    store: WorkAssistantStore, approval_id: str, decision: str = "approve"
+):
+    from afs.human_provenance import _broker_for_reader
+
+    authorization = _broker_for_reader(lambda _prompt: "confirm").confirm_token(
+        "confirm",
+        "prompt",
+        scope=store.human_authorization_scope(decision, approval_id, "reviewed"),
+    )
+    assert authorization is not None
+    return authorization
 
 
 def test_store_tracks_people_relationships_reviewers_and_approvals(tmp_path: Path) -> None:
@@ -52,9 +68,13 @@ def test_store_tracks_people_relationships_reviewers_and_approvals(tmp_path: Pat
     assert approvals[0]["approval_id"] == approval_id
     assert approvals[0]["preview"]["replace"] == "old"
 
-    assert store.approve(approval_id, approved_by="human")
+    assert store.approve(approval_id, approved_by="human", rationale="intro edit matches style guide")
     assert store.list_approvals(status="pending") == []
-    assert store.list_approvals(status="approved")[0]["approved_by"] == "human"
+    approved = store.list_approvals(status="approved")[0]
+    assert approved["approved_by"] == "unauthenticated"
+    assert approved["rationale"] == "intro edit matches style guide"
+    assert approved["decision_via"] == "programmatic"
+    assert approved["human_confirmed"] is False
 
     sample_id = store.record_communication_sample(
         person_id=person_id,
@@ -77,6 +97,60 @@ def test_store_tracks_people_relationships_reviewers_and_approvals(tmp_path: Pat
     assert style_summary["style_notes"] == ["direct", "specific"]
     assert any("explicit approval" in line for line in style_summary["guidance"])
     assert store.summary()["communication_samples"] == 1
+
+
+def test_store_requires_broker_capability_for_human_authorization(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    approval_id = store.create_approval(
+        target_system="local",
+        target_id="note",
+        action="internal_note",
+        summary="Review note",
+    )
+
+    assert store.approve(approval_id, approved_by="human", rationale="claimed")
+    untrusted = store.get_approval(approval_id)
+    assert untrusted is not None
+    assert untrusted["human_confirmed"] is False
+    assert untrusted["approved_by"] == "unauthenticated"
+
+    second_id = store.create_approval(
+        target_system="local",
+        target_id="note-2",
+        action="internal_note",
+        summary="Review second note",
+    )
+    authorization = _human_authorization(store, second_id)
+    with pytest.raises(ValueError, match="authorization"):
+        store.approve_human(
+            second_id,
+            rationale="caller changed the rationale",
+            authorization=authorization,
+        )
+    assert store.approve_human(
+        second_id,
+        rationale="reviewed",
+        authorization=authorization,
+    )
+    trusted = store.get_approval(second_id)
+    assert trusted is not None
+    assert trusted["human_confirmed"] is True
+    assert trusted["decision_via"] == "controlling_terminal"
+
+    third_id = store.create_approval(
+        target_system="local",
+        target_id="note-3",
+        action="internal_note",
+        summary="Replay target",
+    )
+    with pytest.raises(ValueError, match="authorization"):
+        store.approve_human(
+            third_id,
+            rationale="replayed",
+            authorization=authorization,
+        )
 
 
 def test_enrich_logged_event_extracts_people_routes_approvals_and_activity(tmp_path: Path) -> None:
@@ -236,3 +310,97 @@ def test_communication_preflight_flags_missing_style_evidence(tmp_path: Path) ->
     assert preflight["checklist"][0]["status"] == "not_loaded"
     assert preflight["checklist"][1]["status"] == "missing"
     assert any("Style evidence is missing" in line for line in preflight["guidance"])
+
+
+def test_rationale_column_migrated_into_existing_database(tmp_path: Path) -> None:
+    import sqlite3
+
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    approval_id = store.create_approval(
+        target_system="local",
+        target_id="note",
+        action="internal_note",
+        summary="Pre-migration approval",
+    )
+
+    # Simulate a database created before the rationale column existed.
+    db_path = store._db_path if hasattr(store, "_db_path") else None
+    if db_path is None:
+        candidates = list(context_root.rglob("*.db")) + list(context_root.rglob("*.sqlite*"))
+        assert candidates, "work assistant database not found"
+        db_path = candidates[0]
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("ALTER TABLE approvals DROP COLUMN rationale")
+
+    migrated = WorkAssistantStore(context_root)
+    assert migrated.approve(approval_id, approved_by="human", rationale="restored after migration")
+    assert migrated.get_approval(approval_id)["rationale"] == "restored after migration"
+
+
+def test_legacy_approved_row_is_reopened_for_human_confirmation(tmp_path: Path) -> None:
+    import sqlite3
+
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    approval_id = store.create_approval(
+        target_system="local",
+        target_id="legacy-note",
+        action="internal_note",
+        summary="Legacy approved row",
+    )
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            "UPDATE approvals SET status = 'approved', approved_by = 'legacy-human' "
+            "WHERE approval_id = ?",
+            (approval_id,),
+        )
+        connection.execute("ALTER TABLE approvals DROP COLUMN human_confirmed")
+
+    migrated = WorkAssistantStore(context_root)
+    reopened = migrated.get_approval(approval_id)
+    assert reopened is not None
+    assert reopened["status"] == "pending"
+    assert reopened["human_confirmed"] is False
+
+    authorization = _human_authorization(migrated, approval_id)
+    assert migrated.approve_human(
+        approval_id, rationale="reviewed", authorization=authorization
+    )
+    confirmed = migrated.get_approval(approval_id)
+    assert confirmed is not None
+    assert confirmed["status"] == "approved"
+    assert confirmed["human_confirmed"] is True
+
+
+def test_migration_tolerates_concurrent_first_open(tmp_path: Path) -> None:
+    """Two processes can both see the column missing; the loser's ALTER must
+    resolve quietly instead of crashing the store open."""
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+
+    # Force the exact race outcome: the column already exists (the "winner"
+    # added it), but this process's check said it was missing, so its
+    # ALTER TABLE fails with "duplicate column name".
+    with store._connect() as connection:
+        original_execute = connection.execute
+
+        class _RacedConnection:
+            def execute(self, statement, *params):
+                if statement.strip().startswith("PRAGMA table_info"):
+                    return iter(())  # pretend the column is missing
+                return original_execute(statement, *params)
+
+        WorkAssistantStore._migrate_schema(_RacedConnection())
+
+    # A store opened after the race still works end to end.
+    approval_id = store.create_approval(
+        target_system="local",
+        target_id="note",
+        action="internal_note",
+        summary="Post-race approval",
+    )
+    assert store.approve(approval_id, approved_by="human", rationale="fine")

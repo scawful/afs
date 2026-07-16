@@ -151,3 +151,143 @@ def test_result_to_dict_shape() -> None:
     result = SchemaValidationResult(valid=False, schema="plan", errors=["e"], parse_error="")
     payload = result.to_dict()
     assert payload == {"valid": False, "schema": "plan", "errors": ["e"], "parse_error": ""}
+
+
+# ---------------------------------------------------------------------------
+# human_intent (skeleton-first planning)
+# ---------------------------------------------------------------------------
+
+
+def test_plan_accepts_human_intent_section() -> None:
+    payload = {
+        **_VALID_PLAN,
+        "human_intent": {
+            "goal": "friction on decisions, not mechanics",
+            "non_goals": ["blocking headless agents"],
+            "done_when": ["all five steps land with tests"],
+        },
+    }
+    result = validate_structured_response("implementation-plan", payload)
+    assert result.valid is True
+
+
+def test_plan_human_intent_rejects_unknown_keys() -> None:
+    payload = {**_VALID_PLAN, "human_intent": {"agent_notes": "sneaky"}}
+    result = validate_structured_response("implementation-plan", payload)
+    assert result.valid is False
+
+
+def test_plan_rejects_empty_human_intent_object() -> None:
+    result = validate_structured_response(
+        "implementation-plan", {**_VALID_PLAN, "human_intent": {}}
+    )
+    assert result.valid is False
+    assert any("non-empty" in error or "property" in error for error in result.errors)
+
+
+def test_human_intent_preserved_checks() -> None:
+    from afs.response_schemas import verify_human_intent_preserved
+
+    intent = {"goal": "the human goal", "done_when": ["tests pass"]}
+    skeleton = {"human_intent": intent, "summary": "seed"}
+    faithful = {**_VALID_PLAN, "human_intent": dict(intent)}
+    assert verify_human_intent_preserved(skeleton, faithful) == []
+
+    edited = {**_VALID_PLAN, "human_intent": {**intent, "goal": "reworded"}}
+    assert any("modified" in v for v in verify_human_intent_preserved(skeleton, edited))
+
+    dropped = dict(_VALID_PLAN)
+    assert any("removed" in v for v in verify_human_intent_preserved(skeleton, dropped))
+
+    # No skeleton intent: the agent must not author one.
+    fabricated = {**_VALID_PLAN, "human_intent": {"goal": "agent-invented"}}
+    assert any(
+        "authored" in v for v in verify_human_intent_preserved({}, fabricated)
+    )
+    assert verify_human_intent_preserved({}, dict(_VALID_PLAN)) == []
+
+
+def test_human_intent_shape_bypasses_are_closed() -> None:
+    """Adversarial probes: Python equality quirks and malformed anchors."""
+    from afs.response_schemas import verify_human_intent_preserved
+
+    # An empty section authored from nowhere is still authoring.
+    assert any(
+        "authored" in v
+        for v in verify_human_intent_preserved({}, {**_VALID_PLAN, "human_intent": {}})
+    )
+
+    # A non-object anchor is rejected, never silently treated as absent.
+    bad_anchor = {"human_intent": "just a string", "summary": "seed"}
+    fabricated = {**_VALID_PLAN, "human_intent": {"goal": "agent-invented"}}
+    assert any(
+        "must be an object" in v
+        for v in verify_human_intent_preserved(bad_anchor, fabricated)
+    )
+
+    # Explicit null is a malformed anchor, not the same as an omitted key.
+    null_anchor = {"human_intent": None, "summary": "seed"}
+    assert any(
+        "must be an object" in v
+        for v in verify_human_intent_preserved(null_anchor, dict(_VALID_PLAN))
+    )
+
+    # A skeleton violating the human_intent contract is invalid, not absent.
+    invalid_anchor = {"human_intent": {"goal": 42}, "summary": "seed"}
+    assert any(
+        "invalid" in v
+        for v in verify_human_intent_preserved(invalid_anchor, fabricated)
+    )
+
+    # A non-object skeleton document cannot anchor anything.
+    assert any(
+        "JSON object" in v
+        for v in verify_human_intent_preserved(["not", "a", "dict"], fabricated)
+    )
+
+    # An explicitly empty anchor is malformed, not a valid trust anchor.
+    empty_anchor = {"human_intent": {}, "summary": "seed"}
+    filled = {**_VALID_PLAN, "human_intent": {"goal": "agent filled it in"}}
+    assert any(
+        "invalid" in v for v in verify_human_intent_preserved(empty_anchor, filled)
+    )
+    kept_empty = {**_VALID_PLAN, "human_intent": {}}
+    assert any(
+        "invalid" in v for v in verify_human_intent_preserved(empty_anchor, kept_empty)
+    )
+
+
+def test_canonical_json_distinguishes_python_equality_quirks() -> None:
+    """True==1 and 1==1.0 in Python; the preservation check must not conflate
+    them (they are different JSON documents)."""
+    from afs.response_schemas import _canonical_json
+
+    assert _canonical_json({"x": True}) != _canonical_json({"x": 1})
+    assert _canonical_json({"x": 1}) != _canonical_json({"x": 1.0})
+    # Key order is irrelevant — same document either way.
+    assert _canonical_json({"a": "1", "b": "2"}) == _canonical_json({"b": "2", "a": "1"})
+    assert _canonical_json(object()) is None
+    # Non-finite floats have no canonical JSON form.
+    assert _canonical_json({"x": float("nan")}) is None
+
+
+def test_unserializable_intent_is_never_preserved() -> None:
+    """An intent carrying NaN must never verify as preserved.
+
+    With jsonschema installed the subschema (additionalProperties: false,
+    string-typed items) rejects it; without jsonschema the laxer builtin
+    fallback may let it through to the canonical comparison, where two
+    ``None`` canonical forms must read as modified, not equal.
+    """
+    from afs.response_schemas import verify_human_intent_preserved
+
+    intent = {
+        "goal": "g",
+        "non_goals": [],
+        "done_when": [],
+        "weight": float("nan"),
+    }
+    skeleton = {"human_intent": dict(intent)}
+    expanded = {"human_intent": dict(intent)}
+    violations = verify_human_intent_preserved(skeleton, expanded)
+    assert violations  # never silently preserved

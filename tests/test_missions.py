@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -142,3 +145,163 @@ def test_mission_dataclass_round_trip() -> None:
         next_steps=["s"],
     )
     assert Mission.from_dict(mission.to_dict()) == mission
+
+
+def test_programmatic_acceptance_is_only_a_suggestion(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    mission = store.create(
+        title="Ship the reactor",
+        acceptance="reactor starts agents from history events with tests",
+        acceptance_set_by="human",
+    )
+    loaded = store.get(mission.mission_id)
+    assert loaded is not None
+    assert loaded.acceptance == ""
+    assert (
+        loaded.acceptance_suggestion
+        == "reactor starts agents from history events with tests"
+    )
+    assert loaded.acceptance_human_confirmed is False
+
+    store.update(mission.mission_id, acceptance="also covers hivemind topics")
+    updated = store.get(mission.mission_id)
+    assert updated is not None
+    assert updated.acceptance == ""
+    assert updated.acceptance_suggestion == "also covers hivemind topics"
+
+    # Records written before the field existed load with an empty acceptance.
+    assert Mission.from_dict({"mission_id": "mission_old", "title": "Old"}).acceptance == ""
+
+
+def test_string_acceptance_confirmation_fails_closed() -> None:
+    loaded = Mission.from_dict(
+        {
+            "mission_id": "mission_untrusted",
+            "title": "Untrusted",
+            "acceptance": "fabricated done criteria",
+            "acceptance_human_confirmed": "false",
+            "acceptance_identity_authenticated": "true",
+        }
+    )
+    assert loaded.acceptance == ""
+    assert loaded.acceptance_suggestion == "fabricated done criteria"
+    assert loaded.acceptance_human_confirmed is False
+    assert loaded.acceptance_identity_authenticated is False
+
+
+def test_broker_authorized_acceptance_round_trips(tmp_path: Path) -> None:
+    from afs.human_provenance import _broker_for_reader
+
+    acceptance = "reactor starts agents with tests"
+    store = _store(tmp_path)
+    authorization = _broker_for_reader(lambda _prompt: "human").confirm_token(
+        "human",
+        "prompt",
+        scope=store.human_acceptance_scope(
+            "create", "Ship the reactor", acceptance
+        ),
+    )
+    assert authorization is not None
+    mission = store.create(
+        title="Ship the reactor",
+        acceptance=acceptance,
+        acceptance_authorization=authorization,
+    )
+    loaded = store.get(mission.mission_id)
+    assert loaded is not None
+    assert loaded.acceptance == "reactor starts agents with tests"
+    assert loaded.acceptance_human_confirmed is True
+    with pytest.raises(ValueError, match="fresh HumanDecisionBroker"):
+        store.create(
+            title="Ship the reactor",
+            acceptance=acceptance,
+            acceptance_authorization=authorization,
+        )
+
+
+def test_concurrent_updates_preserve_human_acceptance_and_agent_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from afs.human_provenance import _broker_for_reader
+
+    store = _store(tmp_path)
+    mission = store.create(title="Ship the reactor", summary="v1")
+    acceptance = "v2 passes the reactor integration suite"
+    authorization = _broker_for_reader(lambda _prompt: "human").confirm_token(
+        "human",
+        "prompt",
+        scope=store.human_acceptance_scope("update", mission.mission_id, acceptance),
+    )
+    assert authorization is not None
+
+    original_get = MissionStore.get
+
+    def slow_get(self: MissionStore, mission_id: str):
+        loaded = original_get(self, mission_id)
+        if threading.current_thread() is not threading.main_thread():
+            time.sleep(0.15)
+        return loaded
+
+    monkeypatch.setattr(MissionStore, "get", slow_get)
+    start = threading.Barrier(2)
+    acceptance_store = MissionStore(store._context_path)  # type: ignore[attr-defined]
+    summary_store = MissionStore(store._context_path)  # type: ignore[attr-defined]
+
+    def update_acceptance() -> None:
+        start.wait(timeout=5)
+        acceptance_store.update(
+            mission.mission_id,
+            acceptance=acceptance,
+            acceptance_authorization=authorization,
+        )
+
+    def update_summary() -> None:
+        start.wait(timeout=5)
+        summary_store.update(mission.mission_id, summary="agent summary v2")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(update_acceptance), pool.submit(update_summary)]
+        for future in futures:
+            future.result(timeout=10)
+
+    final = original_get(store, mission.mission_id)
+    assert final is not None
+    assert final.summary == "agent summary v2"
+    assert final.acceptance == acceptance
+    assert final.acceptance_human_confirmed is True
+    assert any(
+        entry.get("note") == "human-confirmed acceptance updated"
+        for entry in final.log
+    )
+
+
+def test_agent_acceptance_suggestion_is_not_attributed_to_prior_human(
+    tmp_path: Path,
+) -> None:
+    from afs.human_provenance import _broker_for_reader
+
+    store = _store(tmp_path)
+    title = "Ship the reactor"
+    acceptance = "human definition of done"
+    authorization = _broker_for_reader(lambda _prompt: "human").confirm_token(
+        "human",
+        "prompt",
+        scope=store.human_acceptance_scope("create", title, acceptance),
+    )
+    assert authorization is not None
+    mission = store.create(
+        title=title,
+        acceptance=acceptance,
+        acceptance_authorization=authorization,
+    )
+
+    updated = store.update(
+        mission.mission_id,
+        acceptance="agent suggestion",
+        actor="planner-agent",
+    )
+
+    assert updated.acceptance == acceptance
+    assert updated.acceptance_suggestion == "agent suggestion"
+    assert updated.log[-1]["actor"] == "planner-agent"
+    assert updated.log[-1]["note"] == "unauthenticated acceptance suggestion updated"

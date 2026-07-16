@@ -332,6 +332,11 @@ class WorkAssistantStore:
                     permission_required TEXT NOT NULL,
                     requested_by TEXT NOT NULL,
                     approved_by TEXT NOT NULL DEFAULT '',
+                    rationale TEXT NOT NULL DEFAULT '',
+                    decision_via TEXT NOT NULL DEFAULT '',
+                    reviewer_subject TEXT NOT NULL DEFAULT '',
+                    identity_authenticated INTEGER NOT NULL DEFAULT 0,
+                    human_confirmed INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     expires_at TEXT,
@@ -379,6 +384,52 @@ class WorkAssistantStore:
                     ON communication_samples(person_id, updated_at);
                 """
             )
+            self._migrate_schema(connection)
+
+    @staticmethod
+    def _migrate_schema(connection: sqlite3.Connection) -> None:
+        """Add columns that pre-existing databases are missing.
+
+        Two processes opening the same pre-existing database can both observe
+        the missing column; the loser's ALTER TABLE then fails with
+        "duplicate column name", which is just the race resolving in the
+        winner's favor — swallow exactly that error, re-raise anything else.
+        """
+        approval_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(approvals)")
+        }
+        missing_columns = {
+            "rationale": "rationale TEXT NOT NULL DEFAULT ''",
+            "decision_via": "decision_via TEXT NOT NULL DEFAULT ''",
+            "reviewer_subject": "reviewer_subject TEXT NOT NULL DEFAULT ''",
+            "identity_authenticated": (
+                "identity_authenticated INTEGER NOT NULL DEFAULT 0"
+            ),
+            "human_confirmed": "human_confirmed INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, definition in missing_columns.items():
+            if name in approval_columns:
+                continue
+            try:
+                connection.execute(f"ALTER TABLE approvals ADD COLUMN {definition}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
+
+        # Rows approved before capability-derived provenance existed cannot
+        # safely execute, but leaving them in ``approved`` makes them
+        # impossible to re-confirm because the human decision API only
+        # resolves pending rows.  Reopen them fail-closed.  This also repairs
+        # databases that were opened once by an intermediate release which
+        # added the column but did not normalize the legacy rows.
+        connection.execute(
+            """
+            UPDATE approvals
+            SET status = 'pending', updated_at = ?
+            WHERE status = 'approved' AND human_confirmed = 0
+            """,
+            (_now(),),
+        )
 
     def upsert_person(self, person: dict[str, Any]) -> str:
         normalized = _normalize_person(person)
@@ -707,11 +758,113 @@ class WorkAssistantStore:
             ).fetchone()
         return self._approval_row_to_dict(row) if row else None
 
-    def approve(self, approval_id: str, *, approved_by: str = "human") -> bool:
-        return self._set_approval_status(approval_id, "approved", approved_by=approved_by)
+    def human_authorization_scope(
+        self, decision: str, approval_id: str, rationale: str
+    ) -> str:
+        """Return the broker scope for one decision in this exact database."""
+        from .human_provenance import decision_scope_parts
 
-    def reject(self, approval_id: str, *, rejected_by: str = "human") -> bool:
-        return self._set_approval_status(approval_id, "rejected", approved_by=rejected_by)
+        return decision_scope_parts(
+            "work-approval",
+            decision,
+            str(self.db_path),
+            approval_id,
+            rationale.strip(),
+        )
+
+    def approve(
+        self, approval_id: str, *, approved_by: str = "human", rationale: str = ""
+    ) -> bool:
+        """Record a non-authoritative programmatic approval.
+
+        The compatibility API retains the ``approved`` status for reporting,
+        but ignores claimable provenance and sets ``human_confirmed = false``.
+        Execution and calibration never accept it as human authorization. Use
+        :meth:`approve_human` with a broker capability for that.
+        """
+        return self._set_approval_status(
+            approval_id,
+            "approved",
+            approved_by="unauthenticated",
+            rationale=rationale,
+            decision_via="programmatic",
+            reviewer_subject="",
+            identity_authenticated=False,
+            human_confirmed=False,
+        )
+
+    def approve_human(
+        self,
+        approval_id: str,
+        *,
+        rationale: str,
+        authorization: Any,
+    ) -> bool:
+        """Authorize an approval using a broker-minted capability."""
+        from .human_provenance import consume_human_authorization
+
+        if not rationale.strip():
+            raise ValueError("a rationale is required for a human approval")
+        scope = self.human_authorization_scope(
+            "approve", approval_id, rationale
+        )
+        if not consume_human_authorization(authorization, scope=scope):
+            raise ValueError("a HumanDecisionBroker authorization is required")
+        identity = authorization.identity
+        return self._set_approval_status(
+            approval_id,
+            "approved",
+            approved_by=identity.reviewer,
+            rationale=rationale,
+            decision_via=authorization.confirmed_via,
+            reviewer_subject=identity.subject,
+            identity_authenticated=identity.authenticated,
+            human_confirmed=True,
+        )
+
+    def reject(
+        self, approval_id: str, *, rejected_by: str = "human", rationale: str = ""
+    ) -> bool:
+        """Record a fail-safe, non-authoritative programmatic rejection."""
+        return self._set_approval_status(
+            approval_id,
+            "rejected",
+            approved_by="unauthenticated",
+            rationale=rationale,
+            decision_via="programmatic",
+            reviewer_subject="",
+            identity_authenticated=False,
+            human_confirmed=False,
+        )
+
+    def reject_human(
+        self,
+        approval_id: str,
+        *,
+        rationale: str,
+        authorization: Any,
+    ) -> bool:
+        """Record a human-confirmed rejection using a broker capability."""
+        from .human_provenance import consume_human_authorization
+
+        if not rationale.strip():
+            raise ValueError("a rationale is required for a human rejection")
+        scope = self.human_authorization_scope(
+            "reject", approval_id, rationale
+        )
+        if not consume_human_authorization(authorization, scope=scope):
+            raise ValueError("a HumanDecisionBroker authorization is required")
+        identity = authorization.identity
+        return self._set_approval_status(
+            approval_id,
+            "rejected",
+            approved_by=identity.reviewer,
+            rationale=rationale,
+            decision_via=authorization.confirmed_via,
+            reviewer_subject=identity.subject,
+            identity_authenticated=identity.authenticated,
+            human_confirmed=True,
+        )
 
     def record_approval_result(
         self,
@@ -719,25 +872,70 @@ class WorkAssistantStore:
         *,
         result: dict[str, Any],
         status: str | None = None,
+        expected_status: str | None = None,
     ) -> bool:
         now = _now()
+        where = "WHERE approval_id = ?"
+        if expected_status is not None:
+            where += " AND status = ?"
         if status:
-            statement = """
+            statement = f"""
                 UPDATE approvals
                 SET result_json = ?, status = ?, updated_at = ?
-                WHERE approval_id = ?
+                {where}
             """
             params: tuple[Any, ...] = (_json_dumps(result), status, now, approval_id)
         else:
-            statement = """
+            statement = f"""
                 UPDATE approvals
                 SET result_json = ?, updated_at = ?
-                WHERE approval_id = ?
+                {where}
             """
             params = (_json_dumps(result), now, approval_id)
+        if expected_status is not None:
+            params = (*params, expected_status)
         with self._connect() as connection:
             cursor = connection.execute(statement, params)
             return cursor.rowcount > 0
+
+    def claim_approval_execution(self, approval_id: str) -> dict[str, Any] | None:
+        """Atomically claim one human-confirmed approval for execution.
+
+        The compare-and-swap prevents two workers from invoking the same
+        connector concurrently.  A failed claim is deliberately ambiguous to
+        callers: the row may be missing, already executing, or no longer
+        approved, and none of those states permits execution.
+        """
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE approvals
+                SET status = 'executing', updated_at = ?
+                WHERE approval_id = ? AND status = 'approved'
+                    AND human_confirmed = 1
+                """,
+                (_now(), approval_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = connection.execute(
+                "SELECT * FROM approvals WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+        return self._approval_row_to_dict(row) if row else None
+
+    def release_approval_execution(self, approval_id: str) -> bool:
+        """Return an in-flight execution claim to the retryable approved state."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE approvals
+                SET status = 'approved', updated_at = ?
+                WHERE approval_id = ? AND status = 'executing'
+                """,
+                (_now(), approval_id),
+            )
+            return cursor.rowcount == 1
 
     def record_activity(
         self,
@@ -1119,15 +1317,32 @@ class WorkAssistantStore:
         status: str,
         *,
         approved_by: str,
+        rationale: str = "",
+        decision_via: str,
+        reviewer_subject: str,
+        identity_authenticated: bool,
+        human_confirmed: bool,
     ) -> bool:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE approvals
-                SET status = ?, approved_by = ?, updated_at = ?
+                SET status = ?, approved_by = ?, rationale = ?, decision_via = ?,
+                    reviewer_subject = ?, identity_authenticated = ?,
+                    human_confirmed = ?, updated_at = ?
                 WHERE approval_id = ? AND status = 'pending'
                 """,
-                (status, approved_by, _now(), approval_id),
+                (
+                    status,
+                    approved_by,
+                    rationale.strip(),
+                    decision_via,
+                    reviewer_subject,
+                    int(identity_authenticated),
+                    int(human_confirmed),
+                    _now(),
+                    approval_id,
+                ),
             )
             return cursor.rowcount > 0
 
@@ -1279,6 +1494,11 @@ class WorkAssistantStore:
             "permission_required": row["permission_required"],
             "requested_by": row["requested_by"],
             "approved_by": row["approved_by"],
+            "rationale": row["rationale"],
+            "decision_via": row["decision_via"],
+            "reviewer_subject": row["reviewer_subject"],
+            "identity_authenticated": bool(row["identity_authenticated"]),
+            "human_confirmed": bool(row["human_confirmed"]),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "expires_at": row["expires_at"],
