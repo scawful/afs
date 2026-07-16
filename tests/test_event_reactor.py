@@ -387,7 +387,7 @@ def test_history_scan_does_not_materialize_daily_file(tmp_path: Path, monkeypatc
     assert [event.label() for event in events] == ["error:streamed"]
 
 
-def test_timestamp_only_state_migrates_without_replay_or_backdated_loss(
+def test_timestamp_only_state_conservatively_replays_extant_history(
     tmp_path: Path,
 ) -> None:
     context = tmp_path / "context"
@@ -400,13 +400,14 @@ def test_timestamp_only_state_migrates_without_replay_or_backdated_loss(
     )
     _write_legacy_v2_state(state)
 
-    assert _collect(context, state, now=NOW + timedelta(seconds=30)) == []
+    events = _collect(context, state, now=NOW + timedelta(seconds=30))
+    assert [event.label() for event in events] == ["error:legacy-old"]
     migrated = _load_state(state)
     assert migrated["history_offsets"]
     assert "history_migration_cutoffs" not in migrated
 
-    # Once positional migration is complete, an append is new regardless of
-    # a caller-supplied timestamp older than the legacy watermark.
+    # Once positional migration is complete, an append remains new regardless
+    # of a caller-supplied timestamp older than the legacy cursor.
     _write_history_event(
         context,
         event_type="error",
@@ -417,14 +418,30 @@ def test_timestamp_only_state_migrates_without_replay_or_backdated_loss(
     assert [event.label() for event in events] == ["error:new-backdated"]
 
 
-def test_history_v2_migration_keeps_watermark_and_cutoff_across_cycles(
+def test_v2_state_written_before_backdated_history_record_does_not_lose_it(
     tmp_path: Path,
 ) -> None:
-    """An out-of-order legacy tail and a post-snapshot append are both kept.
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _write_legacy_v2_state(state)
+    _write_history_event(
+        context,
+        event_type="error",
+        op="landed-after-state",
+        timestamp=NOW - timedelta(days=1),
+    )
 
-    The first batch is deliberately left unacked. Migration boundaries must
-    already be durable at that point or the append would be reclassified as
-    pre-migration input on the retry.
+    events = _collect(context, state, now=NOW + timedelta(minutes=1))
+    assert [event.label() for event in events] == ["error:landed-after-state"]
+
+
+def test_history_v2_replay_shell_survives_unacked_retry_and_backdated_append(
+    tmp_path: Path,
+) -> None:
+    """An extant tail and a post-shell append are both kept.
+
+    The first batch is deliberately left unacked. The v4 replay shell must
+    already be durable so the retry starts from the same empty checkpoints.
     """
     context = tmp_path / "context"
     state = tmp_path / "state"
@@ -452,10 +469,10 @@ def test_history_v2_migration_keeps_watermark_and_cutoff_across_cycles(
         # No ack: the v4 migration shell itself is the only safe early commit.
 
     migration = _load_state(state)
-    cutoff = dict(migration["history_migration_cutoffs"])
     assert migration["version"] == 4
     assert migration["history_offsets"] == {}
-    assert migration["history_migration_watermark"] == NOW.isoformat()
+    assert "history_migration_cutoffs" not in migration
+    assert "history_migration_watermark" not in migration
 
     _write_history_event(
         context,
@@ -463,7 +480,7 @@ def test_history_v2_migration_keeps_watermark_and_cutoff_across_cycles(
         op="post-snapshot-backdated",
         timestamp=NOW - timedelta(seconds=30),
     )
-    assert _load_state(state)["history_migration_cutoffs"] == cutoff
+    assert _load_state(state)["history_offsets"] == {}
 
     seen: list[str] = []
     for cycle in range(2, 5):
@@ -481,17 +498,14 @@ def test_history_v2_migration_keeps_watermark_and_cutoff_across_cycles(
         "legacy-older-later",
         "post-snapshot-backdated",
     ]
-    migrated = _load_state(state)
-    assert "history_migration_cutoffs" not in migrated
-    assert "history_migration_watermark" not in migrated
 
 
-@pytest.mark.parametrize("legacy_v2", [False, True], ids=["prime", "v2-migration"])
-def test_history_snapshot_rounds_partial_record_to_complete_newline(
+@pytest.mark.parametrize("legacy_v2", [False, True], ids=["prime", "v2-replay"])
+def test_partial_history_survives_fresh_prime_or_v2_replay_shell(
     tmp_path: Path,
     legacy_v2: bool,
 ) -> None:
-    """A partial JSONL append cannot become a prime or migration cutoff."""
+    """A partial JSONL append cannot be skipped by either initialization path."""
     context = tmp_path / "context"
     state = tmp_path / "state"
     history = context / "history"
@@ -525,7 +539,7 @@ def test_history_snapshot_rounds_partial_record_to_complete_newline(
     assert shell["version"] == 4
     if legacy_v2:
         assert shell["history_offsets"] == {}
-        assert shell["history_migration_cutoffs"][path.name] == 0
+        assert "history_migration_cutoffs" not in shell
     else:
         assert shell["history_offsets"][path.name] == 0
 
@@ -942,7 +956,25 @@ def test_future_hivemind_file_does_not_block_ripe_candidate(tmp_path: Path) -> N
     assert "hivemind_deferred" not in _load_state(state)
 
 
-def test_hivemind_v2_migration_keeps_watermark_and_cutoff_across_cycles(
+def test_v2_state_written_before_backdated_hivemind_file_does_not_lose_it(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _write_legacy_v2_state(state)
+    _write_hivemind_message(
+        context,
+        filename="landed-after-state.json",
+        topic="must-deliver",
+        timestamp=NOW - timedelta(days=1),
+        mtime_ns=1_600_000_000_000_000_000,
+    )
+
+    events = _collect(context, state, now=NOW + timedelta(minutes=1))
+    assert [event.detail for event in events] == ["must-deliver"]
+
+
+def test_hivemind_v2_replay_shell_drains_across_cycles(
     tmp_path: Path,
 ) -> None:
     context = tmp_path / "context"
@@ -974,11 +1006,9 @@ def test_hivemind_v2_migration_keeps_watermark_and_cutoff_across_cycles(
         batch.ack()
 
     migration = _load_state(state)
-    existing = {
-        directory: dict(files)
-        for directory, files in migration["hivemind_migration_existing"].items()
-    }
-    assert migration["hivemind_migration_watermark"] == NOW.isoformat()
+    assert "legacy-first.json" in migration["hivemind_seen"]["afs-watch"]
+    assert "hivemind_migration_existing" not in migration
+    assert "hivemind_migration_watermark" not in migration
 
     _write_hivemind_message(
         context,
@@ -987,7 +1017,6 @@ def test_hivemind_v2_migration_keeps_watermark_and_cutoff_across_cycles(
         timestamp=NOW - timedelta(seconds=30),
         mtime_ns=base_mtime + 2,
     )
-    assert _load_state(state)["hivemind_migration_existing"] == existing
 
     seen: list[str] = []
     for cycle in range(2, 4):
@@ -1001,9 +1030,6 @@ def test_hivemind_v2_migration_keeps_watermark_and_cutoff_across_cycles(
             batch.ack()
 
     assert seen == ["legacy:older-later", "post-snapshot:backdated"]
-    migrated = _load_state(state)
-    assert "hivemind_migration_existing" not in migrated
-    assert "hivemind_migration_watermark" not in migrated
 
 
 def test_concurrent_reactor_is_locked_out(tmp_path: Path) -> None:

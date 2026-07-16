@@ -75,11 +75,12 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
   prompts; debounce (`event_debounce`, default 5m) is persisted at ack so it
   also covers job actions; future-stamped records are deferred without
   blocking later ripe work; hivemind sends publish atomically and exact file
-  identities preserve newly copied/backdated messages; tuple-based v3 state
-  conservatively replays the extant hivemind inventory once when upgrading to
-  exact identities; stable malformed records, including invalid provided
-  expiries, are skipped and counted; the hivemind bus is canonical (history
-  mirrors of sends are excluded); and
+  identities preserve newly copied/backdated messages; timestamp-only v1/v2
+  state conservatively replays extant source content once when upgrading to
+  positional/exact checkpoints, while tuple-based v3 state does the same for
+  its unprovable hivemind inventory; stable malformed records, including
+  invalid provided expiries, are skipped and counted; the hivemind bus is
+  canonical (history mirrors of sends are excluded); and
   `AgentConfig` round-trips now preserve custom mapping keys.
 
 ### Changed

@@ -1409,46 +1409,28 @@ def _source_watermark(events: list[ReactorEvent], stored: datetime) -> str:
 
 
 def _start_positional_migration(
-    context_path: Path,
     state_dir: Path,
     state: dict[str, Any],
-    *,
-    history_watermark: datetime,
-    hivemind_watermark: datetime,
-    config: Any = None,
 ) -> dict[str, Any]:
-    """Atomically establish immutable v1/v2 migration boundaries.
+    """Persist a fail-safe v4 replay shell for timestamp-only v1/v2 state.
 
-    Migration state is persisted before any events are exposed for dispatch.
-    That makes the source snapshots survive an unacked first batch: a
-    backdated append arriving between retries is after the fixed cutoff and
-    can never be reclassified as legacy input on the next cycle.
+    A timestamp cursor cannot prove when a backdated record actually landed.
+    Filesystem mtimes cannot close that gap either: history files mix many
+    append times and copied hivemind files may preserve caller-controlled
+    mtimes. Conservatively replay extant source content once under positional
+    and exact-identity checkpoints rather than silently acknowledge a record
+    that arrived after the legacy state was written.
     """
     migrated = dict(state)
     migrated["version"] = STATE_VERSION
     migrated["history_offsets"] = {}
-    history_cutoffs = _history_offset_snapshot(context_path, config=config)
-    if history_cutoffs:
-        migrated["history_migration_cutoffs"] = history_cutoffs
-        migrated["history_migration_watermark"] = history_watermark.astimezone(
-            timezone.utc
-        ).isoformat()
-    else:
-        migrated.pop("history_migration_cutoffs", None)
-        migrated.pop("history_migration_watermark", None)
-
+    migrated.pop("history_migration_cutoffs", None)
+    migrated.pop("history_migration_watermark", None)
     migrated["hivemind_seen"] = {}
     migrated.pop("hivemind_files", None)
+    migrated.pop("hivemind_migration_existing", None)
     migrated.pop("hivemind_migration_cutoffs", None)
-    hivemind_existing = _hivemind_signature_snapshot(context_path, config=config)
-    if hivemind_existing:
-        migrated["hivemind_migration_existing"] = hivemind_existing
-        migrated["hivemind_migration_watermark"] = hivemind_watermark.astimezone(
-            timezone.utc
-        ).isoformat()
-    else:
-        migrated.pop("hivemind_migration_existing", None)
-        migrated.pop("hivemind_migration_watermark", None)
+    migrated.pop("hivemind_migration_watermark", None)
     _save_state(state_dir, migrated)
     return migrated
 
@@ -1593,12 +1575,8 @@ def open_event_batch(
 
         if state["version"] in (1, 2):
             state = _start_positional_migration(
-                context_path,
                 state_dir,
                 state,
-                history_watermark=history_stored,
-                hivemind_watermark=hivemind_stored,
-                config=config,
             )
         elif state["version"] == 3:
             state = _upgrade_v3_state(
