@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -13,6 +14,20 @@ from .agent_scope import assert_mount_allowed
 from .config import load_config_model
 from .context_paths import resolve_mount_root
 from .models import MountType
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Publish one file without exposing a partially written final path."""
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(text, encoding="utf-8")
+        os.replace(temporary, path)
+    except OSError:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 @dataclass
@@ -77,7 +92,11 @@ class HivemindSubscription:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> HivemindSubscription:
         ttl_hours_raw = data.get("ttl_hours")
-        ttl_hours = int(ttl_hours_raw) if isinstance(ttl_hours_raw, (int, float)) and int(ttl_hours_raw) > 0 else None
+        ttl_hours = (
+            int(ttl_hours_raw)
+            if isinstance(ttl_hours_raw, (int, float)) and int(ttl_hours_raw) > 0
+            else None
+        )
         return cls(
             agent_name=str(data.get("agent_name", "")),
             topics=list(data.get("topics", [])),
@@ -136,11 +155,10 @@ class HivemindBus:
         agent_dir = self._root / from_agent
         agent_dir.mkdir(parents=True, exist_ok=True)
         msg_path = agent_dir / f"{msg_id}.json"
-        msg_path.write_text(
-            json.dumps(message.to_dict(), indent=2), encoding="utf-8"
-        )
+        _atomic_write_text(msg_path, json.dumps(message.to_dict(), indent=2))
         try:
             from .history import log_hivemind_event
+
             log_hivemind_event(
                 "send",
                 from_agent,
@@ -174,8 +192,7 @@ class HivemindBus:
             scan_dirs = [self._root / agent_name]
         elif self._root.exists():
             scan_dirs = sorted(
-                d for d in self._root.iterdir()
-                if d.is_dir() and not d.name.startswith(".")
+                d for d in self._root.iterdir() if d.is_dir() and not d.name.startswith(".")
             )
         else:
             return []
@@ -212,10 +229,7 @@ class HivemindBus:
     ) -> list[HivemindMessage]:
         """Read messages addressed to a specific agent."""
         all_msgs = self.read(since=since, limit=0)
-        matched = [
-            m for m in all_msgs
-            if m.to == recipient or m.to is None
-        ]
+        matched = [m for m in all_msgs if m.to == recipient or m.to is None]
         matched.sort(key=lambda m: m.timestamp)
         return matched[-limit:] if len(matched) > limit else matched
 
@@ -254,6 +268,7 @@ class HivemindBus:
         sub_path.write_text(json.dumps(sub.to_dict(), indent=2), encoding="utf-8")
         try:
             from .history import log_hivemind_event
+
             log_hivemind_event(
                 "subscribe",
                 agent_name,
@@ -283,6 +298,7 @@ class HivemindBus:
         sub_path.write_text(json.dumps(sub.to_dict(), indent=2), encoding="utf-8")
         try:
             from .history import log_hivemind_event
+
             log_hivemind_event(
                 "unsubscribe",
                 agent_name,
