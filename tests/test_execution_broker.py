@@ -416,17 +416,18 @@ def test_windows_batch_executables_are_blocked_from_structured_mode(
 
 
 def _wait_for_child_exit(pid_file: Path, deadline_seconds: float = 3.0) -> bool:
-    """Poll a recorded descendant PID until it has exited (POSIX only).
+    """Poll a recorded descendant PID until it has exited.
 
     The broker signals descendants before ``execute_checked`` returns, so the
     deadline only needs to absorb reap latency — keeping it tight also bounds
     kill latency, so a broker that defers descendant cleanup fails here. A
-    zombie counts as exited (a pid-1 test runner may never reap orphans), and
-    a PID recycled by another user or an unrelated command means our child is
-    gone.
+    zombie counts as exited (a pid-1 test runner may never reap orphans). The
+    temporary-directory name in the command line proves that a matching PID is
+    still our child; an inaccessible PID remains ambiguous and therefore never
+    counts as exited.
     """
     child_pid = int(pid_file.read_text())
-    reused_marker = str(pid_file.parent)
+    reused_marker = pid_file.parent.name
     deadline = time.monotonic() + deadline_seconds
     while time.monotonic() < deadline:
         try:
@@ -438,15 +439,33 @@ def _wait_for_child_exit(pid_file: Path, deadline_seconds: float = 3.0) -> bool:
         except psutil.NoSuchProcess:
             return True
         except psutil.AccessDenied:
-            return True
+            # AccessDenied does not prove that the child exited. Keep polling
+            # and fail closed if its identity cannot be established.
+            pass
         time.sleep(0.05)
     return False
+
+
+def test_wait_for_child_exit_fails_closed_on_access_denied(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pid_file = tmp_path / "child-pid"
+    pid_file.write_text(str(os.getpid()))
+
+    def deny_process_access(pid: int):
+        raise psutil.AccessDenied(pid)
+
+    monkeypatch.setattr(psutil, "Process", deny_process_access)
+
+    assert not _wait_for_child_exit(pid_file, deadline_seconds=0.01)
 
 
 def test_timeout_terminates_descendant_process(tmp_path: Path, monkeypatch) -> None:
     from afs.execution import broker
 
-    monkeypatch.setattr(broker, "_TERMINATION_GRACE_SECONDS", 0.1)
+    if os.name != "nt":
+        monkeypatch.setattr(broker, "_TERMINATION_GRACE_SECONDS", 0.1)
     ready = tmp_path / "child-ready"
     marker = tmp_path / "child-survived"
     child_pid_file = tmp_path / "child-pid"
@@ -476,15 +495,7 @@ def test_timeout_terminates_descendant_process(tmp_path: Path, monkeypatch) -> N
     assert record.outcome == "timed_out"
     assert record.timed_out
     assert ready.exists()
-    if os.name == "nt":
-        # No safe liveness probe on Windows (os.kill(pid, 0) terminates the
-        # target). execute_checked returns ~3s after the child touched ready,
-        # and a surviving child would touch the marker 10s after ready, so a
-        # duration-based 12s wait lands well past that without depending on
-        # wall-clock/mtime agreement.
-        time.sleep(12.0)
-    else:
-        assert _wait_for_child_exit(child_pid_file)
+    assert _wait_for_child_exit(child_pid_file)
     assert not marker.exists()
 
 
