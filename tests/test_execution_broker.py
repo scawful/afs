@@ -7,6 +7,7 @@ import sys
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 
 from afs.execution import (
@@ -414,68 +415,116 @@ def test_windows_batch_executables_are_blocked_from_structured_mode(
     assert "unsupported_batch_executable" in inspection.reason_codes
 
 
-def test_timeout_terminates_descendant_process(tmp_path: Path) -> None:
+def _wait_for_child_exit(pid_file: Path, deadline_seconds: float = 3.0) -> bool:
+    """Poll a recorded descendant PID until it has exited (POSIX only).
+
+    The broker signals descendants before ``execute_checked`` returns, so the
+    deadline only needs to absorb reap latency — keeping it tight also bounds
+    kill latency, so a broker that defers descendant cleanup fails here. A
+    zombie counts as exited (a pid-1 test runner may never reap orphans), and
+    a PID recycled by another user or an unrelated command means our child is
+    gone.
+    """
+    child_pid = int(pid_file.read_text())
+    reused_marker = str(pid_file.parent)
+    deadline = time.monotonic() + deadline_seconds
+    while time.monotonic() < deadline:
+        try:
+            proc = psutil.Process(child_pid)
+            if proc.status() == psutil.STATUS_ZOMBIE:
+                return True
+            if reused_marker not in " ".join(proc.cmdline()):
+                return True
+        except psutil.NoSuchProcess:
+            return True
+        except psutil.AccessDenied:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_timeout_terminates_descendant_process(tmp_path: Path, monkeypatch) -> None:
+    from afs.execution import broker
+
+    monkeypatch.setattr(broker, "_TERMINATION_GRACE_SECONDS", 0.1)
+    ready = tmp_path / "child-ready"
     marker = tmp_path / "child-survived"
-    child_code = f"import time; time.sleep(1); open({str(marker)!r}, 'w').close()"
+    child_pid_file = tmp_path / "child-pid"
+    child_code = (
+        "import time\n"
+        "from pathlib import Path\n"
+        f"Path({str(ready)!r}).touch()\n"
+        "time.sleep(10)\n"
+        f"Path({str(marker)!r}).touch()\n"
+        "time.sleep(30)\n"
+    )
     parent_code = (
-        "import subprocess,sys,time; "
-        f"subprocess.Popen([sys.executable,'-c',{child_code!r}]); "
-        "time.sleep(30)"
+        "import subprocess,sys,time\n"
+        "from pathlib import Path\n"
+        f"proc = subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+        f"Path({str(child_pid_file)!r}).write_text(str(proc.pid))\n"
+        f"ready = Path({str(ready)!r})\n"
+        "deadline = time.monotonic() + 20\n"
+        "while not ready.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.01)\n"
+        "time.sleep(30)\n"
     )
-    request = _request(
-        tmp_path,
-        sys.executable,
-        "-c",
-        parent_code,
-        timeout_seconds=0.15,
-    )
+    request = _request(tmp_path, sys.executable, "-c", parent_code, timeout_seconds=3)
 
     record = execute_checked(request, _policy(tmp_path))
-    time.sleep(1.2)
 
     assert record.outcome == "timed_out"
     assert record.timed_out
+    assert ready.exists()
+    if os.name == "nt":
+        # No safe liveness probe on Windows (os.kill(pid, 0) terminates the
+        # target). execute_checked returns ~3s after the child touched ready,
+        # and a surviving child would touch the marker 10s after ready, so a
+        # duration-based 12s wait lands well past that without depending on
+        # wall-clock/mtime agreement.
+        time.sleep(12.0)
+    else:
+        assert _wait_for_child_exit(child_pid_file)
     assert not marker.exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group regression")
 def test_successful_parent_cannot_leave_same_session_descendant(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
-    from afs.execution import broker
-
-    monkeypatch.setattr(broker, "_TERMINATION_GRACE_SECONDS", 0.1)
     ready = tmp_path / "child-ready"
     marker = tmp_path / "child-survived"
+    child_pid_file = tmp_path / "child-pid"
     child_code = (
-        "import time\n"
+        "import signal,time\n"
         "from pathlib import Path\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         f"Path({str(ready)!r}).touch()\n"
-        "time.sleep(0.8)\n"
+        "time.sleep(30)\n"
         f"Path({str(marker)!r}).touch()\n"
     )
     parent_code = (
         "import subprocess,sys,time\n"
         "from pathlib import Path\n"
-        "subprocess.Popen(\n"
+        "proc = subprocess.Popen(\n"
         f"    [sys.executable, '-c', {child_code!r}],\n"
         "    stdin=subprocess.DEVNULL,\n"
         "    stdout=subprocess.DEVNULL,\n"
         "    stderr=subprocess.DEVNULL,\n"
         ")\n"
+        f"Path({str(child_pid_file)!r}).write_text(str(proc.pid))\n"
         f"ready = Path({str(ready)!r})\n"
-        "deadline = time.monotonic() + 2\n"
+        "deadline = time.monotonic() + 15\n"
         "while not ready.exists() and time.monotonic() < deadline:\n"
         "    time.sleep(0.01)\n"
     )
-    request = _request(tmp_path, sys.executable, "-c", parent_code)
+    request = _request(tmp_path, sys.executable, "-c", parent_code, timeout_seconds=20)
 
     record = execute_checked(request, _policy(tmp_path))
-    time.sleep(0.9)
 
     assert ready.exists()
     assert record.outcome == "completed"
+    assert _wait_for_child_exit(child_pid_file)
     assert not marker.exists()
 
 
@@ -508,21 +557,22 @@ def test_timeout_kills_descendant_that_ignores_sigterm(
     monkeypatch.setattr(broker, "_TERMINATION_GRACE_SECONDS", 0.1)
     ready = tmp_path / "child-ready"
     marker = tmp_path / "child-survived"
+    child_pid_file = tmp_path / "child-pid"
     child_code = (
         "import signal,time\n"
         "from pathlib import Path\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         f"Path({str(ready)!r}).touch()\n"
-        "time.sleep(0.8)\n"
+        "time.sleep(30)\n"
         f"Path({str(marker)!r}).touch()\n"
-        "time.sleep(5)\n"
     )
     parent_code = (
         "import subprocess,sys,time\n"
         "from pathlib import Path\n"
-        f"subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+        f"proc = subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+        f"Path({str(child_pid_file)!r}).write_text(str(proc.pid))\n"
         f"ready = Path({str(ready)!r})\n"
-        "deadline = time.monotonic() + 2\n"
+        "deadline = time.monotonic() + 15\n"
         "while not ready.exists() and time.monotonic() < deadline:\n"
         "    time.sleep(0.01)\n"
         "time.sleep(30)\n"
@@ -532,14 +582,14 @@ def test_timeout_kills_descendant_that_ignores_sigterm(
         sys.executable,
         "-c",
         parent_code,
-        timeout_seconds=0.3,
+        timeout_seconds=3,
     )
 
     record = execute_checked(request, _policy(tmp_path))
-    time.sleep(0.9)
 
     assert ready.exists()
     assert record.outcome == "timed_out"
+    assert _wait_for_child_exit(child_pid_file)
     assert not marker.exists()
 
 
