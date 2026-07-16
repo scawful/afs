@@ -1985,12 +1985,19 @@ def status_command(args: argparse.Namespace) -> int:
     print(
         "  agents: "
         f"running={counts.get('running', 0)} "
-        f"failed={counts.get('failed', 0)} "
+        f"failed={counts.get('recent_failed', counts.get('failed', 0))} "
+        f"historical_failed={counts.get('historical_failed', 0)} "
         f"stopped={counts.get('stopped', 0)} "
         f"manual_stop={counts.get('manual_stop', 0)}"
     )
-    if supervisor_audit.get("stale_pid_files"):
-        print("  agent_issues: " + ", ".join(supervisor_audit["stale_pid_files"]))
+    if supervisor_audit.get("active_issues"):
+        print("  agent_issues: " + ", ".join(supervisor_audit["active_issues"]))
+    historical_failures = supervisor_audit.get("historical_failures", [])
+    if historical_failures:
+        print(
+            f"  agent_history: {len(historical_failures)} old failed record(s) "
+            "(afs agents ps --all)"
+        )
 
     warm = maintenance["reports"]["context_warm"]
     watch = maintenance["reports"]["context_watch"]
@@ -2024,7 +2031,10 @@ def status_command(args: argparse.Namespace) -> int:
         hints.append("afs index rebuild --path .  # build context index")
     elif index_stats.get("stale"):
         hints.append("afs index rebuild --path .  # refresh stale index")
-    if counts.get("failed", 0) > 0:
+    if (
+        counts.get("recent_failed", counts.get("failed", 0)) > 0
+        or counts.get("circuit_open", 0) > 0
+    ):
         hints.append("afs agents ps --all  # check failed agents")
     if hints:
         print()

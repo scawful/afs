@@ -19,7 +19,12 @@ from afs.agent_registry import (
     AgentRegistry,
 )
 from afs.agents.base import now_iso
-from afs.agents.supervisor import AgentSupervisor, RunningAgent, _watch_signature
+from afs.agents.supervisor import (
+    DEFAULT_FAILURE_HISTORY_SECONDS,
+    AgentSupervisor,
+    RunningAgent,
+    _watch_signature,
+)
 from afs.event_log import read_agent_events
 from afs.schema import (
     AFSConfig,
@@ -568,8 +573,65 @@ def test_supervisor_audit_reports_failed_and_manual_stop(tmp_path: Path) -> None
     audit = supervisor.audit()
 
     assert audit["counts"]["failed"] == 1
+    assert audit["counts"]["recent_failed"] == 1
+    assert audit["counts"]["historical_failed"] == 0
     assert audit["counts"]["manual_stop"] == 1
     assert "failed-agent" in audit["stale_pid_files"]
+    assert "failed-agent" in audit["active_issues"]
+
+
+def test_supervisor_audit_separates_historical_failures(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    supervisor = AgentSupervisor(state_dir=state_dir)
+    supervisor._write_state(
+        RunningAgent(
+            name="old-failure",
+            state="failed",
+            started_at="2020-01-01T00:00:00+00:00",
+            last_error="process exited",
+        )
+    )
+
+    audit = supervisor.audit()
+
+    assert audit["counts"]["failed"] == 1
+    assert audit["counts"]["recent_failed"] == 0
+    assert audit["counts"]["historical_failed"] == 1
+    assert audit["active_issues"] == []
+    assert audit["historical_failures"] == ["old-failure"]
+
+
+def test_supervisor_audit_uses_failure_time_for_long_running_agent(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    supervisor = AgentSupervisor(state_dir=state_dir)
+    supervisor._write_state(
+        RunningAgent(
+            name="fresh-failure",
+            state="failed",
+            started_at="2020-01-01T00:00:00+00:00",
+            last_seen_at=datetime.now().astimezone().isoformat(),
+            last_error="process exited",
+        )
+    )
+
+    audit = supervisor.audit()
+
+    assert audit["counts"]["recent_failed"] == 1
+    assert audit["counts"]["historical_failed"] == 0
+    assert audit["active_issues"] == ["fresh-failure"]
+
+
+@pytest.mark.parametrize("value", ["invalid", "nan", "inf", "-inf"])
+def test_supervisor_audit_rejects_invalid_failure_history_window(
+    tmp_path: Path,
+    monkeypatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv("AFS_AGENT_FAILURE_HISTORY_SECONDS", value)
+
+    audit = AgentSupervisor(state_dir=tmp_path / "state").audit()
+
+    assert audit["failure_history_seconds"] == float(DEFAULT_FAILURE_HISTORY_SECONDS)
 
 
 # --- Dependency management tests ---
