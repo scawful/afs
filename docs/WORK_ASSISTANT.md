@@ -123,8 +123,8 @@ Approvals:
   --action append_sheet_rows \
   --summary "Append approved planning rows" \
   --preview-json '{"range":"Sheet1!A:B","values":[["Task","Owner"],["Draft plan","Dana"]]}'
-./scripts/afs work approvals approve <approval-id> --path . --by human
-./scripts/afs work approvals reject <approval-id> --path . --by human
+./scripts/afs work approvals approve <approval-id> --path . --because "preview verified"
+./scripts/afs work approvals reject <approval-id> --path . --because "scope is too broad"
 ./scripts/afs work approvals execute <approval-id> --path . --dry-run
 ./scripts/afs work approvals execute <approval-id> --path . \
   --executor "python3 scripts/afs-work-approval-echo.py"

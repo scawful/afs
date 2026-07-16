@@ -53,6 +53,7 @@ It provides filesystem-native primitives for:
 - [Work Assistant](WORK_ASSISTANT.md)
 - [Work Assistant Connectors](WORK_ASSISTANT_CONNECTORS.md)
 - [Work Assistant Upgrade Guide](WORK_ASSISTANT_UPGRADE.md)
+- [Engagement Primitives](ENGAGEMENT.md) — rationale gates, mission acceptance, calibration trail
 - [Embeddings](EMBEDDINGS.md)
 - [Knowledge System & Gemini Setup Guide](KNOWLEDGE_SYSTEM_GUIDE.md)
 - [VSCode Extension Review](VSCODE_EXTENSION_REVIEW.md)

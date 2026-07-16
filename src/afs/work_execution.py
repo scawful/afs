@@ -11,6 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .human_provenance import default_terminal_reader
 from .work_assistant import EXTERNAL_WRITE_ACTIONS, WorkAssistantStore
 
 PAYLOAD_VERSION = 1
@@ -39,10 +40,9 @@ class HumanApprovalRequiredError(WorkApprovalExecutionError):
 
     External and communication writes (see :data:`EXTERNAL_WRITE_ACTIONS`) must be
     confirmed by a person at a terminal before an agent may act on the user's behalf.
-    This closes the hole where an agent with shell access could self-approve via
-    ``afs work approvals approve <id> --by human`` (``approved_by`` is unauthenticated
-    free text). Confirmation is read from the controlling terminal, which a headless
-    agent cannot satisfy.
+    The approval store accepts authorization only from the controlling-terminal
+    broker; caller-supplied fields such as ``--by human`` are compatibility metadata,
+    not proof. External writes also receive a fresh execution-time confirmation.
     """
 
 
@@ -142,31 +142,16 @@ def approval_requires_human_ack(approval: dict[str, Any]) -> bool:
     return target_system not in _LOCAL_TARGET_SYSTEMS
 
 
-def _default_tty_reader(tty_path: str) -> Callable[[str], str | None]:
-    """Return a reader that prompts on and reads a line from the controlling terminal.
+def _default_tty_reader(tty_path: str | None) -> Callable[[str], str | None]:
+    """Compatibility seam for the cross-platform controlling-terminal reader."""
 
-    Reads from ``/dev/tty`` rather than stdin so that an agent piping text into the
-    command cannot satisfy the prompt. Returns ``None`` when no terminal is available
-    (a headless or agent context), which the caller treats as a refusal.
-    """
-
-    def _read(prompt: str) -> str | None:
-        try:
-            with open(tty_path, "r+", encoding="utf-8") as tty:
-                tty.write(prompt)
-                tty.flush()
-                line = tty.readline()
-        except OSError:
-            return None
-        return line.rstrip("\r\n")
-
-    return _read
+    return default_terminal_reader(tty_path)
 
 
 def confirm_human_approval(
     approval: dict[str, Any],
     *,
-    tty_path: str = "/dev/tty",
+    tty_path: str | None = None,
     reader: Callable[[str], str | None] | None = None,
 ) -> None:
     """Require interactive human confirmation for an external-write approval.
@@ -235,7 +220,7 @@ def execute_approved_action(
     dry_run: bool = False,
     cwd: Path | None = None,
     require_human_ack: bool = True,
-    tty_path: str = "/dev/tty",
+    tty_path: str | None = None,
     confirm_reader: Callable[[str], str | None] | None = None,
 ) -> dict[str, Any]:
     """Execute one approved action by passing its JSON payload to a command.
@@ -280,6 +265,12 @@ def execute_approved_action(
             "payload": payload,
             "executor_command": command,
         }
+    if not approval.get("human_confirmed"):
+        raise HumanApprovalRequiredError(
+            f"approval {approval_id!r} was recorded programmatically and is not "
+            "human-confirmed; re-run `afs work approvals approve` from a "
+            "controlling terminal"
+        )
     if not command:
         raise WorkApprovalExecutionError("executor command is required")
 
@@ -288,76 +279,105 @@ def execute_approved_action(
 
     resolved_command = [_resolve_executable(command[0]), *command[1:]]
     run_cwd = cwd.expanduser().resolve() if cwd else Path.cwd()
-    with tempfile.TemporaryDirectory(prefix="afs-work-approval-") as temp_dir:
-        payload_path = Path(temp_dir) / "approval.json"
-        payload_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        env = os.environ.copy()
-        env["AFS_CONTEXT_ROOT"] = str(context_root.expanduser().resolve())
-        env["AFS_WORK_APPROVAL_ID"] = approval_id
-        env["AFS_WORK_APPROVAL_FILE"] = str(payload_path)
-        try:
-            completed = subprocess.run(
-                [*resolved_command, str(payload_path)],
-                cwd=run_cwd,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
+    if store.claim_approval_execution(approval_id) is None:
+        raise WorkApprovalExecutionError(
+            f"approval is already executing or no longer approved: {approval_id}"
+        )
+
+    # The claim is a compare-and-swap from approved -> executing.  Always
+    # release it on an unexpected local failure; normal success/failure paths
+    # transition it explicitly to applied/approved below.
+    try:
+        with tempfile.TemporaryDirectory(prefix="afs-work-approval-") as temp_dir:
+            payload_path = Path(temp_dir) / "approval.json"
+            payload_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
             )
-        except subprocess.TimeoutExpired as exc:
-            result = _timeout_result(
-                exc,
-                approval_id=approval_id,
-                executor_command=resolved_command,
+            env = os.environ.copy()
+            env["AFS_CONTEXT_ROOT"] = str(context_root.expanduser().resolve())
+            env["AFS_WORK_APPROVAL_ID"] = approval_id
+            env["AFS_WORK_APPROVAL_FILE"] = str(payload_path)
+            try:
+                completed = subprocess.run(
+                    [*resolved_command, str(payload_path)],
+                    cwd=run_cwd,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                result = _timeout_result(
+                    exc,
+                    approval_id=approval_id,
+                    executor_command=resolved_command,
+                )
+                if not store.record_approval_result(
+                    approval_id,
+                    result=result,
+                    status="approved",
+                    expected_status="executing",
+                ):
+                    raise WorkApprovalExecutionError(
+                        f"lost execution claim while recording timeout: {approval_id}"
+                    ) from exc
+                store.record_activity(
+                    activity_type="approval_execution_failed",
+                    summary=f"Executor timed out for approved action {approval_id}",
+                    target_system=approval["target_system"],
+                    target_id=approval["target_id"],
+                    actor=actor,
+                    metadata={"approval_id": approval_id, "result": result},
+                )
+                return result
+
+        result = _execution_result(
+            completed,
+            approval_id=approval_id,
+            executor_command=resolved_command,
+        )
+        next_status = "applied" if completed.returncode == 0 else "approved"
+        if not store.record_approval_result(
+            approval_id,
+            result=result,
+            status=next_status,
+            expected_status="executing",
+        ):
+            raise WorkApprovalExecutionError(
+                f"lost execution claim while recording result: {approval_id}"
             )
-            store.record_approval_result(approval_id, result=result)
+        if completed.returncode == 0:
+            sample_id = _record_applied_communication_sample(
+                store,
+                approval,
+                result=result,
+                actor=actor,
+            )
+            store.record_activity(
+                activity_type="approval_applied",
+                summary=f"Applied approved action {approval_id}",
+                target_system=approval["target_system"],
+                target_id=approval["target_id"],
+                actor=actor,
+                metadata={
+                    "approval_id": approval_id,
+                    "result": result,
+                    "communication_sample_id": sample_id,
+                },
+            )
+        else:
             store.record_activity(
                 activity_type="approval_execution_failed",
-                summary=f"Executor timed out for approved action {approval_id}",
+                summary=f"Executor failed for approved action {approval_id}",
                 target_system=approval["target_system"],
                 target_id=approval["target_id"],
                 actor=actor,
                 metadata={"approval_id": approval_id, "result": result},
             )
-            return result
-
-    result = _execution_result(
-        completed,
-        approval_id=approval_id,
-        executor_command=resolved_command,
-    )
-    if completed.returncode == 0:
-        store.record_approval_result(approval_id, result=result, status="applied")
-        sample_id = _record_applied_communication_sample(
-            store,
-            approval,
-            result=result,
-            actor=actor,
-        )
-        store.record_activity(
-            activity_type="approval_applied",
-            summary=f"Applied approved action {approval_id}",
-            target_system=approval["target_system"],
-            target_id=approval["target_id"],
-            actor=actor,
-            metadata={
-                "approval_id": approval_id,
-                "result": result,
-                "communication_sample_id": sample_id,
-            },
-        )
-    else:
-        store.record_approval_result(approval_id, result=result)
-        store.record_activity(
-            activity_type="approval_execution_failed",
-            summary=f"Executor failed for approved action {approval_id}",
-            target_system=approval["target_system"],
-            target_id=approval["target_id"],
-            actor=actor,
-            metadata={"approval_id": approval_id, "result": result},
-        )
-    return result
+        return result
+    finally:
+        store.release_approval_execution(approval_id)
 
 
 def _record_applied_communication_sample(

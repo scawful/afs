@@ -28,6 +28,7 @@ from . import (
     briefing,
     bundle,
     cache,
+    calibration,
     claude,
     context,
     core,
@@ -271,6 +272,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
 
     # Register review commands
     review.register_parsers(subparsers)
+
+    # Register calibration trail commands
+    calibration.register_parsers(subparsers)
 
     # Register skill metadata commands
     skills.register_parsers(subparsers)

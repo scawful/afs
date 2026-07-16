@@ -25,26 +25,35 @@ resolves them.
 ## Supervisor Approvals
 
 ```bash
-afs approvals list                         # pending agent/action pairs
-afs approvals history                      # including resolved pairs
-afs approvals approve <agent> <action>     # USER-DIRECTED ONLY
-afs approvals reject <agent> <action>      # USER-DIRECTED ONLY
-afs approvals clear                        # clear completed entries
+afs approvals list                                    # pending agent/action pairs
+afs approvals history                                 # including resolved, with rationales
+afs approvals approve <agent> <action> --because "…"  # USER-DIRECTED ONLY
+afs approvals reject <agent> <action> --because "…"   # USER-DIRECTED ONLY
+afs approvals clear                                   # archive completed; compact active
 ```
 
-`--approvals-file <path>` overrides this global supervisor-approval store.
+`--because` is required on approve/reject (empty rationales are refused), and
+both prompt for an interactive human confirmation — headless approval fails
+closed. The rationale is stored in history and resurfaced by
+`afs calibration review`. `--approvals-file <path>` overrides this global
+supervisor-approval store.
+Clearing preserves completed decision records in append-only history. The
+terminal broker is a cooperative same-user guard, not a hostile-process
+sandbox; public programmatic decisions are labeled unauthenticated and never
+authorize guarded execution.
 
 ## Context-Local Work Approvals
 
 ```bash
 afs work approvals list --path <ws>
 afs work approvals show <approval_id> --path <ws>
-afs work approvals approve <approval_id> --path <ws> --by human  # USER-DIRECTED
-afs work approvals reject <approval_id> --path <ws> --by human   # USER-DIRECTED
+afs work approvals approve <approval_id> --path <ws> --because "…"  # USER-DIRECTED
+afs work approvals reject <approval_id> --path <ws> --because "…"   # USER-DIRECTED
 ```
 
-These ID-based requests gate work-assistant external writes. Their pending
-count, not the global supervisor store, surfaces in `afs session bootstrap`.
+These ID-based requests gate work-assistant external writes; the same
+rationale and interactive-confirmation rules apply. Their pending count,
+not the global supervisor store, surfaces in `afs session bootstrap`.
 
 ## Optimization Gate
 
