@@ -339,6 +339,42 @@ def test_rationale_column_migrated_into_existing_database(tmp_path: Path) -> Non
     assert migrated.get_approval(approval_id)["rationale"] == "restored after migration"
 
 
+def test_legacy_approved_row_is_reopened_for_human_confirmation(tmp_path: Path) -> None:
+    import sqlite3
+
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    approval_id = store.create_approval(
+        target_system="local",
+        target_id="legacy-note",
+        action="internal_note",
+        summary="Legacy approved row",
+    )
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            "UPDATE approvals SET status = 'approved', approved_by = 'legacy-human' "
+            "WHERE approval_id = ?",
+            (approval_id,),
+        )
+        connection.execute("ALTER TABLE approvals DROP COLUMN human_confirmed")
+
+    migrated = WorkAssistantStore(context_root)
+    reopened = migrated.get_approval(approval_id)
+    assert reopened is not None
+    assert reopened["status"] == "pending"
+    assert reopened["human_confirmed"] is False
+
+    authorization = _human_authorization(migrated, approval_id)
+    assert migrated.approve_human(
+        approval_id, rationale="reviewed", authorization=authorization
+    )
+    confirmed = migrated.get_approval(approval_id)
+    assert confirmed is not None
+    assert confirmed["status"] == "approved"
+    assert confirmed["human_confirmed"] is True
+
+
 def test_migration_tolerates_concurrent_first_open(tmp_path: Path) -> None:
     """Two processes can both see the column missing; the loser's ALTER must
     resolve quietly instead of crashing the store open."""

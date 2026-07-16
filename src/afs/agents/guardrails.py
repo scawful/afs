@@ -468,6 +468,10 @@ class ApprovalRequest:
         }
 
 
+class ApprovalStateError(RuntimeError):
+    """The active approval store is unreadable and must not be overwritten."""
+
+
 class ApprovalGate:
     """Gate that blocks dangerous actions until human review."""
 
@@ -516,19 +520,36 @@ class ApprovalGate:
         """
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return []
+        except (json.JSONDecodeError, OSError) as exc:
+            raise ApprovalStateError(
+                f"active approval state is unreadable at {self._path}; "
+                "refusing to overwrite it"
+            ) from exc
         if not isinstance(data, list):
-            return []
+            raise ApprovalStateError(
+                f"active approval state must be a JSON list at {self._path}; "
+                "refusing to overwrite it"
+            )
         requests: list[ApprovalRequest] = []
         backfilled = False
-        for item in data:
+        for index, item in enumerate(data):
             if not isinstance(item, dict):
-                continue
+                raise ApprovalStateError(
+                    f"active approval record {index} is not a JSON object at "
+                    f"{self._path}; refusing to overwrite it"
+                )
             try:
                 request = ApprovalRequest(**item)
-            except TypeError:
-                continue
+            except TypeError as exc:
+                raise ApprovalStateError(
+                    f"active approval record {index} is malformed at {self._path}; "
+                    "refusing to overwrite it"
+                ) from exc
+            # Persisted JSON is an untrusted boundary.  Values such as the
+            # string ``"false"`` are truthy in Python and must never become
+            # authorization provenance merely because they resemble a bool.
+            request.identity_authenticated = item.get("identity_authenticated") is True
+            request.human_confirmed = item.get("human_confirmed") is True
             if not request.request_id:
                 request.request_id = _new_request_id()
                 backfilled = True
@@ -537,13 +558,30 @@ class ApprovalGate:
             self._write_unlocked(requests)
         return requests
 
+    def _current_unlocked(self) -> list[ApprovalRequest]:
+        """Return current disk state; caller must hold the file lock."""
+        return self._read_unlocked() if self._path.exists() else list(self._pending)
+
     def _write_unlocked(self, requests: list[ApprovalRequest]) -> None:
-        """Write requests to disk; caller must hold the file lock."""
+        """Atomically replace requests on disk; caller must hold the file lock."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps([r.to_dict() for r in requests], indent=2),
-            encoding="utf-8",
+        payload = json.dumps([r.to_dict() for r in requests], indent=2)
+        temporary = self._path.with_name(
+            f".{self._path.name}.{uuid.uuid4().hex}.tmp"
         )
+        try:
+            with temporary.open("x", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning("Could not remove approval temp file %s", temporary)
 
     def _save(self) -> None:
         with _file_lock(self._path):
@@ -566,9 +604,12 @@ class ApprovalGate:
             if not isinstance(item, dict):
                 continue
             try:
-                requests.append(ApprovalRequest(**item))
+                request = ApprovalRequest(**item)
             except TypeError:
                 continue
+            request.identity_authenticated = item.get("identity_authenticated") is True
+            request.human_confirmed = item.get("human_confirmed") is True
+            requests.append(request)
         return requests
 
     def _repair_archive_tail_unlocked(self) -> None:
@@ -662,47 +703,67 @@ class ApprovalGate:
         """Check if an action is allowed. Returns True if auto-approved or pre-approved."""
         if action in AUTO_APPROVE:
             return True
-        if action in ALWAYS_APPROVE:
-            # Check if there's a pre-approval for this specific request
-            for req in self._pending:
-                if (req.agent == agent and req.action == action
-                        and req.status == "approved" and req.human_confirmed):
-                    return True
-            # Queue for approval
-            self._queue(agent, action, detail)
-            return False
-        # Unknown action — be conservative, queue it
-        self._queue(agent, action, detail)
+        with _file_lock(self._path):
+            requests = self._current_unlocked()
+            if any(
+                req.agent == agent
+                and req.action == action
+                and req.detail == detail
+                and req.status == "approved"
+                and req.human_confirmed
+                for req in requests
+            ):
+                self._pending = requests
+                return True
+            self._queue_unlocked(requests, agent, action, detail)
         return False
 
     def _queue(self, agent: str, action: str, detail: str) -> None:
         with _file_lock(self._path):
-            requests = (
-                self._read_unlocked() if self._path.exists() else list(self._pending)
-            )
-            # Don't duplicate pending requests
-            for req in requests:
-                if req.agent == agent and req.action == action and req.status == "pending":
-                    self._pending = requests
-                    return
-            requests.append(
-                ApprovalRequest(
-                    agent=agent,
-                    action=action,
-                    detail=detail,
-                    timestamp=datetime.now(timezone.utc).isoformat(),
-                    request_id=_new_request_id(),
-                )
-            )
+            requests = self._current_unlocked()
+            self._queue_unlocked(requests, agent, action, detail)
+
+    def _queue_unlocked(
+        self,
+        requests: list[ApprovalRequest],
+        agent: str,
+        action: str,
+        detail: str,
+    ) -> None:
+        """Queue an exact request; caller must hold the file lock."""
+        if any(
+            req.agent == agent
+            and req.action == action
+            and req.detail == detail
+            and req.status == "pending"
+            for req in requests
+        ):
             self._pending = requests
-            self._write_unlocked(requests)
+            return
+        requests.append(
+            ApprovalRequest(
+                agent=agent,
+                action=action,
+                detail=detail,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                request_id=_new_request_id(),
+            )
+        )
+        self._write_unlocked(requests)
+        self._pending = requests
         logger.info("Queued approval request: agent=%s action=%s", agent, action)
 
     def pending_requests(self) -> list[ApprovalRequest]:
-        return [r for r in self._pending if r.status == "pending"]
+        with _file_lock(self._path):
+            requests = self._current_unlocked()
+            self._pending = requests
+        return [r for r in requests if r.status == "pending"]
 
     def find_pending(self, agent: str, action: str) -> ApprovalRequest | None:
-        for req in self._pending:
+        with _file_lock(self._path):
+            requests = self._current_unlocked()
+            self._pending = requests
+        for req in requests:
             if req.agent == agent and req.action == action and req.status == "pending":
                 return req
         return None
@@ -871,8 +932,8 @@ class ApprovalGate:
                     req.reviewer_subject = reviewer_subject
                     req.identity_authenticated = identity_authenticated
                     req.human_confirmed = human_confirmed
-                    self._pending = requests
                     self._write_unlocked(requests)
+                    self._pending = requests
                     return True
             self._pending = requests
             return False

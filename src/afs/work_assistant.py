@@ -416,6 +416,21 @@ class WorkAssistantStore:
                 if "duplicate column" not in str(exc).lower():
                     raise
 
+        # Rows approved before capability-derived provenance existed cannot
+        # safely execute, but leaving them in ``approved`` makes them
+        # impossible to re-confirm because the human decision API only
+        # resolves pending rows.  Reopen them fail-closed.  This also repairs
+        # databases that were opened once by an intermediate release which
+        # added the column but did not normalize the legacy rows.
+        connection.execute(
+            """
+            UPDATE approvals
+            SET status = 'pending', updated_at = ?
+            WHERE status = 'approved' AND human_confirmed = 0
+            """,
+            (_now(),),
+        )
+
     def upsert_person(self, person: dict[str, Any]) -> str:
         normalized = _normalize_person(person)
         person_id = normalized["person_id"]
@@ -857,25 +872,70 @@ class WorkAssistantStore:
         *,
         result: dict[str, Any],
         status: str | None = None,
+        expected_status: str | None = None,
     ) -> bool:
         now = _now()
+        where = "WHERE approval_id = ?"
+        if expected_status is not None:
+            where += " AND status = ?"
         if status:
-            statement = """
+            statement = f"""
                 UPDATE approvals
                 SET result_json = ?, status = ?, updated_at = ?
-                WHERE approval_id = ?
+                {where}
             """
             params: tuple[Any, ...] = (_json_dumps(result), status, now, approval_id)
         else:
-            statement = """
+            statement = f"""
                 UPDATE approvals
                 SET result_json = ?, updated_at = ?
-                WHERE approval_id = ?
+                {where}
             """
             params = (_json_dumps(result), now, approval_id)
+        if expected_status is not None:
+            params = (*params, expected_status)
         with self._connect() as connection:
             cursor = connection.execute(statement, params)
             return cursor.rowcount > 0
+
+    def claim_approval_execution(self, approval_id: str) -> dict[str, Any] | None:
+        """Atomically claim one human-confirmed approval for execution.
+
+        The compare-and-swap prevents two workers from invoking the same
+        connector concurrently.  A failed claim is deliberately ambiguous to
+        callers: the row may be missing, already executing, or no longer
+        approved, and none of those states permits execution.
+        """
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE approvals
+                SET status = 'executing', updated_at = ?
+                WHERE approval_id = ? AND status = 'approved'
+                    AND human_confirmed = 1
+                """,
+                (_now(), approval_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = connection.execute(
+                "SELECT * FROM approvals WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+        return self._approval_row_to_dict(row) if row else None
+
+    def release_approval_execution(self, approval_id: str) -> bool:
+        """Return an in-flight execution claim to the retryable approved state."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE approvals
+                SET status = 'approved', updated_at = ?
+                WHERE approval_id = ? AND status = 'executing'
+                """,
+                (_now(), approval_id),
+            )
+            return cursor.rowcount == 1
 
     def record_activity(
         self,

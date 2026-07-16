@@ -121,6 +121,37 @@ def test_validate_skeleton_flags_modified_intent(tmp_path, capsys) -> None:
     assert "modified" in capsys.readouterr().out
 
 
+def test_validate_skeleton_json_includes_intent_correction(tmp_path, capsys) -> None:
+    skeleton_path = tmp_path / "skeleton.json"
+    skeleton_path.write_text(
+        json.dumps({"human_intent": {"goal": "human goal"}}),
+        encoding="utf-8",
+    )
+    plan = {
+        "human_intent": {"goal": "agent goal"},
+        "summary": "expanded",
+        "steps": ["do it"],
+        "verification": ["pytest"],
+        "risks": ["none"],
+    }
+
+    rc = schema_validate_command(
+        _args(
+            schema="implementation-plan",
+            text=json.dumps(plan),
+            skeleton=str(skeleton_path),
+            json=True,
+        )
+    )
+
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is False
+    assert payload["human_intent_violations"]
+    assert "Restore the human-authored `human_intent`" in payload["correction"]
+    assert "modified" in payload["correction"]
+
+
 def test_validate_skeleton_passes_when_intent_preserved(tmp_path, capsys) -> None:
     intent = {"goal": "human goal", "done_when": ["tests pass"]}
     skeleton_path = tmp_path / "skeleton.json"

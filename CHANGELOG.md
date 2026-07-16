@@ -28,8 +28,14 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
   Programmatic store APIs cannot forge authorization or calibration
   provenance; programmatic predictions are excluded from human calibration;
   mission text becomes an `acceptance_suggestion` without the capability;
-  approval clearing archives crash-repaired decision history; and empty
-  `human_intent` objects are rejected.
+  approval clearing archives crash-repaired decision history; active approval
+  state is corruption-failing, atomically replaced, refreshed across processes,
+  and bound to exact action details; work approvals use an atomic execution
+  claim and reopen legacy unconfirmed approvals for human review; calibration
+  JSONL appends are locked, fsynced, and repair torn tails; mission updates are
+  serialized and bounded human-confirmed acceptance now reaches bootstrap
+  prompts; and malformed or changed `human_intent` anchors fail with correction
+  guidance.
 - Versioned, packaged JSON Schema contracts for optimization evaluation,
   policy, and decision records.
 - Pure `afs optimize decide` evidence gate with deterministic hashes, stable

@@ -443,10 +443,14 @@ def verify_human_intent_preserved(skeleton: Any, expanded: Any) -> list[str]:
     """
     if not isinstance(skeleton, dict):
         return ["skeleton must be a JSON object (the human-authored plan fragment)"]
+    skeleton_has_intent = "human_intent" in skeleton
     skeleton_intent = skeleton.get("human_intent")
-    expanded_intent = expanded.get("human_intent") if isinstance(expanded, dict) else None
+    expanded_has_intent = (
+        isinstance(expanded, dict) and "human_intent" in expanded
+    )
+    expanded_intent = expanded.get("human_intent") if expanded_has_intent else None
 
-    if skeleton_intent is not None:
+    if skeleton_has_intent:
         if not isinstance(skeleton_intent, dict):
             return [
                 "skeleton human_intent must be an object with goal/non_goals/"
@@ -460,7 +464,7 @@ def verify_human_intent_preserved(skeleton: Any, expanded: Any) -> list[str]:
                 f"skeleton human_intent is invalid: {error}"
                 for error in skeleton_errors[:5]
             ]
-        if expanded_intent is None:
+        if not expanded_has_intent:
             return ["human_intent was removed by the expansion; restore it verbatim"]
         skeleton_canonical = _canonical_json(skeleton_intent)
         expanded_canonical = _canonical_json(expanded_intent)
@@ -475,7 +479,7 @@ def verify_human_intent_preserved(skeleton: Any, expanded: Any) -> list[str]:
                 "reproduce it exactly as the human wrote it"
             ]
         return []
-    if expanded_intent is not None:
+    if expanded_has_intent:
         return [
             "human_intent was authored by the expansion; this section is "
             "human-written only — omit it and ask instead"

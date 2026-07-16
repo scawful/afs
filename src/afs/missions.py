@@ -94,9 +94,10 @@ class Mission:
             return [str(item) for item in value if str(item).strip()]
 
         acceptance = str(data.get("acceptance", ""))
-        acceptance_human_confirmed = bool(
-            data.get("acceptance_human_confirmed", False)
-        )
+        # Mission files are an untrusted persistence boundary.  Only the JSON
+        # literal ``true`` establishes the provenance bit; strings such as
+        # ``"false"`` must fail closed instead of becoming truthy in Python.
+        acceptance_human_confirmed = data.get("acceptance_human_confirmed") is True
         acceptance_suggestion = str(data.get("acceptance_suggestion", ""))
         # Legacy records have no capability-derived confirmation bit. Fail
         # closed by retaining their text only as a clearly labeled suggestion.
@@ -117,8 +118,8 @@ class Mission:
             acceptance_set_at=str(data.get("acceptance_set_at", "")),
             acceptance_set_via=str(data.get("acceptance_set_via", "")),
             acceptance_subject=str(data.get("acceptance_subject", "")),
-            acceptance_identity_authenticated=bool(
-                data.get("acceptance_identity_authenticated", False)
+            acceptance_identity_authenticated=(
+                data.get("acceptance_identity_authenticated") is True
             ),
             acceptance_human_confirmed=acceptance_human_confirmed,
             next_steps=_str_list(data.get("next_steps")),
@@ -198,12 +199,11 @@ class MissionStore:
     def _reconciled_ids(self) -> list[str]:
         """Manifest order plus any on-disk mission the manifest is missing.
 
-        ``_append_manifest`` is a lock-free read-modify-write, so two concurrent
-        ``create`` calls can race and the later manifest write can drop the earlier id.
-        Reconciling reads against the actual ``mission_*.json`` files means a mission is
-        never invisible to ``list``/``active``/session bootstrap just because it lost the
-        race — the durable per-mission file is the source of truth, the manifest only
-        supplies ordering.
+        The manifest update is serialized, but reconciling against the actual
+        ``mission_*.json`` files also recovers records created by older releases,
+        manual repair, or a crash between the mission write and manifest append.  The
+        durable per-mission file remains the source of truth; the manifest supplies
+        ordering.
         """
         manifest = self._load_manifest()
         seen = set(manifest)
@@ -212,10 +212,15 @@ class MissionStore:
 
     def _append_manifest(self, mission_id: str) -> None:
         self._ensure_root()
-        manifest = self._load_manifest()
-        if mission_id not in manifest:
-            manifest.append(mission_id)
-            self._atomic_write(self._manifest_path, json.dumps(manifest, indent=2) + "\n")
+        from .agents.guardrails import _file_lock
+
+        with _file_lock(self._manifest_path):
+            manifest = self._load_manifest()
+            if mission_id not in manifest:
+                manifest.append(mission_id)
+                self._atomic_write(
+                    self._manifest_path, json.dumps(manifest, indent=2) + "\n"
+                )
 
     def _write(self, mission: Mission) -> None:
         self._ensure_root()
@@ -372,83 +377,93 @@ class MissionStore:
         note: str | None = None,
         actor: str = "",
     ) -> Mission:
-        mission = self.get(mission_id)
-        if mission is None:
-            raise MissionNotFoundError(mission_id)
+        # A capability is single-use, so consuming it before an unlocked
+        # read-modify-write could lose the human decision if another writer
+        # replaced the mission in between.  Serialize the complete update per
+        # mission and consume any capability only after the lock is held.
+        from .agents.guardrails import _file_lock
 
-        if status is not None:
-            if status not in VALID_MISSION_STATUSES:
-                raise ValueError(
-                    f"invalid mission status {status!r}; valid: "
-                    + ", ".join(VALID_MISSION_STATUSES)
+        self._ensure_root()
+        with _file_lock(self._mission_path(mission_id)):
+            mission = self.get(mission_id)
+            if mission is None:
+                raise MissionNotFoundError(mission_id)
+
+            if status is not None:
+                if status not in VALID_MISSION_STATUSES:
+                    raise ValueError(
+                        f"invalid mission status {status!r}; valid: "
+                        + ", ".join(VALID_MISSION_STATUSES)
+                    )
+                mission.status = status
+            if summary is not None:
+                mission.summary = summary.strip()
+            if owner is not None:
+                mission.owner = owner.strip()
+            if acceptance is not None:
+                proposed_acceptance = acceptance.strip()
+                acceptance_scope = self.human_acceptance_scope(
+                    "update", mission_id, proposed_acceptance
                 )
-            mission.status = status
-        if summary is not None:
-            mission.summary = summary.strip()
-        if owner is not None:
-            mission.owner = owner.strip()
-        if acceptance is not None:
-            proposed_acceptance = acceptance.strip()
-            acceptance_scope = self.human_acceptance_scope(
-                "update", mission_id, proposed_acceptance
-            )
-            provenance = self._acceptance_provenance(
-                proposed_acceptance,
-                authorization=acceptance_authorization,
-                scope=acceptance_scope,
-            )
-            if not provenance["human_confirmed"]:
-                mission.acceptance_suggestion = proposed_acceptance
-            elif proposed_acceptance != mission.acceptance:
-                mission.acceptance = proposed_acceptance
-                mission.acceptance_suggestion = ""
+                provenance = self._acceptance_provenance(
+                    proposed_acceptance,
+                    authorization=acceptance_authorization,
+                    scope=acceptance_scope,
+                )
+                if not provenance["human_confirmed"]:
+                    mission.acceptance_suggestion = proposed_acceptance
+                elif proposed_acceptance != mission.acceptance:
+                    mission.acceptance = proposed_acceptance
+                    mission.acceptance_suggestion = ""
+                else:
+                    provenance = None
             else:
                 provenance = None
-        else:
-            provenance = None
-        if provenance is not None:
-            timestamp = _now()
-            if provenance["human_confirmed"]:
-                mission.acceptance_set_by = provenance["reviewer"]
-                mission.acceptance_set_at = timestamp
-                mission.acceptance_set_via = provenance["via"]
-                mission.acceptance_subject = provenance["subject"]
-                mission.acceptance_identity_authenticated = provenance[
-                    "identity_authenticated"
-                ]
-                mission.acceptance_human_confirmed = True
-            mission.log.append(
-                {
-                    "timestamp": timestamp,
-                    "actor": mission.acceptance_set_by or actor,
-                    "note": (
-                        "human-confirmed acceptance updated"
-                        if provenance["human_confirmed"]
-                        else "unauthenticated acceptance suggestion updated"
-                    ),
-                }
-            )
-        if next_steps is not None:
-            mission.next_steps = list(next_steps)
-        if blockers is not None:
-            mission.blockers = list(blockers)
-        if link_session:
-            if link_session not in mission.linked_sessions:
+            if provenance is not None:
+                timestamp = _now()
+                if provenance["human_confirmed"]:
+                    mission.acceptance_set_by = provenance["reviewer"]
+                    mission.acceptance_set_at = timestamp
+                    mission.acceptance_set_via = provenance["via"]
+                    mission.acceptance_subject = provenance["subject"]
+                    mission.acceptance_identity_authenticated = provenance[
+                        "identity_authenticated"
+                    ]
+                    mission.acceptance_human_confirmed = True
+                mission.log.append(
+                    {
+                        "timestamp": timestamp,
+                        "actor": (
+                            provenance["reviewer"]
+                            if provenance["human_confirmed"]
+                            else actor.strip() or "unauthenticated"
+                        ),
+                        "note": (
+                            "human-confirmed acceptance updated"
+                            if provenance["human_confirmed"]
+                            else "unauthenticated acceptance suggestion updated"
+                        ),
+                    }
+                )
+            if next_steps is not None:
+                mission.next_steps = list(next_steps)
+            if blockers is not None:
+                mission.blockers = list(blockers)
+            if link_session and link_session not in mission.linked_sessions:
                 mission.linked_sessions.append(link_session)
-        if link_handoff:
-            if link_handoff not in mission.linked_handoffs:
+            if link_handoff and link_handoff not in mission.linked_handoffs:
                 mission.linked_handoffs.append(link_handoff)
-        if add_tags:
-            for tag in add_tags:
-                if tag and tag not in mission.tags:
-                    mission.tags.append(tag)
-        if note and note.strip():
-            mission.log.append(
-                {"timestamp": _now(), "actor": actor, "note": note.strip()}
-            )
+            if add_tags:
+                for tag in add_tags:
+                    if tag and tag not in mission.tags:
+                        mission.tags.append(tag)
+            if note and note.strip():
+                mission.log.append(
+                    {"timestamp": _now(), "actor": actor, "note": note.strip()}
+                )
 
-        mission.updated_at = _now()
-        self._write(mission)
+            mission.updated_at = _now()
+            self._write(mission)
         self._log_event("mission_updated", mission)
         return mission
 

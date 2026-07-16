@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from argparse import Namespace
 from pathlib import Path
 
@@ -81,6 +82,61 @@ def test_prediction_and_outcome_round_trip(tmp_path: Path) -> None:
     score = record_outcome(context, ref=entry["id"], outcome="hit", note="good call")
     assert score["kind"] == "prediction"
     assert load_outcomes(context)[0]["ref"] == entry["id"]
+
+
+def test_prediction_append_repairs_torn_jsonl_tail(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    path = calibration_root(context) / "predictions.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = {
+        "id": "pred_existing",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "kind": "bootstrap_top_priority",
+    }
+    path.write_bytes(
+        (json.dumps(existing) + "\n" + '{"id":"pred_torn"').encode("utf-8")
+    )
+
+    created = record_prediction(
+        context,
+        kind="bootstrap_top_priority",
+        predicted="repair the trail",
+        actual="repair the trail",
+        match=True,
+    )
+
+    assert [entry["id"] for entry in load_predictions(context)] == [
+        "pred_existing",
+        created["id"],
+    ]
+    assert path.read_bytes().endswith(b"\n")
+
+
+def test_prediction_append_preserves_complete_tail_without_newline(
+    tmp_path: Path,
+) -> None:
+    context = _context(tmp_path)
+    path = calibration_root(context) / "predictions.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = {
+        "id": "pred_existing",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "kind": "bootstrap_top_priority",
+    }
+    path.write_text(json.dumps(existing), encoding="utf-8")
+
+    created = record_prediction(
+        context,
+        kind="bootstrap_top_priority",
+        predicted="keep the complete record",
+        actual="keep the complete record",
+        match=True,
+    )
+
+    assert [entry["id"] for entry in load_predictions(context)] == [
+        "pred_existing",
+        created["id"],
+    ]
 
 
 def test_outcome_validation(tmp_path: Path) -> None:

@@ -375,3 +375,22 @@ def test_register_parsers_creates_subcommands() -> None:
     args = parser.parse_args(["approvals", "reject", "myagent", "deploy"])
     assert args.agent == "myagent"
     assert args.action == "deploy"
+
+
+def test_approvals_file_routes_before_or_after_subcommand(tmp_path: Path) -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    register_parsers(subparsers)
+    custom = str(tmp_path / "custom-approvals.json")
+
+    before = parser.parse_args(
+        ["approvals", "--approvals-file", custom, "list"]
+    )
+    after = parser.parse_args(
+        ["approvals", "list", "--approvals-file", custom]
+    )
+
+    assert before.approvals_file == custom
+    assert after.approvals_file == custom

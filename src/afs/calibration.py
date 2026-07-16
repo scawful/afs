@@ -23,6 +23,7 @@ context and let it be scored once per context.
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -62,17 +63,50 @@ def calibration_root(context_path: Path, *, config: Any = None) -> Path:
 
 
 def _append_jsonl(path: Path, entry: dict[str, Any]) -> None:
+    from .agents.guardrails import _file_lock
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    with _file_lock(path):
+        _repair_jsonl_tail_unlocked(path)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+
+def _repair_jsonl_tail_unlocked(path: Path) -> None:
+    """Preserve a complete final value or truncate only a torn final value."""
+    if not path.exists():
+        return
+    with path.open("rb+") as handle:
+        data = handle.read()
+        if not data or data.endswith(b"\n"):
+            return
+        tail_start = data.rfind(b"\n") + 1
+        tail = data[tail_start:]
+        try:
+            parsed = json.loads(tail.decode("utf-8"))
+            if not isinstance(parsed, dict):
+                raise ValueError("JSONL calibration records must be objects")
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            handle.seek(tail_start)
+            handle.truncate()
+        else:
+            handle.seek(0, os.SEEK_END)
+            handle.write(b"\n")
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
+    from .agents.guardrails import _file_lock
+
     entries: list[dict[str, Any]] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        with _file_lock(path):
+            lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
     for line in lines:

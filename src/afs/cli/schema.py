@@ -123,20 +123,25 @@ def schema_validate_command(args: argparse.Namespace) -> int:
         intent_violations = verify_human_intent_preserved(skeleton, result.parsed)
 
     valid = result.valid and not intent_violations
+    correction_parts = [build_schema_correction(result)]
+    if intent_violations:
+        correction_parts.append(
+            "Restore the human-authored `human_intent` section exactly as supplied "
+            "in the skeleton:\n"
+            + "\n".join(f"- {violation}" for violation in intent_violations)
+        )
+    correction = "\n".join(part for part in correction_parts if part)
     if getattr(args, "json", False):
         payload = result.to_dict()
         payload["valid"] = valid
         payload["human_intent_violations"] = intent_violations
-        payload["correction"] = build_schema_correction(result)
+        payload["correction"] = correction
         print(json.dumps(payload, indent=2))
     elif valid:
         print(f"valid: response matches `{schema_name}`")
     else:
-        correction = build_schema_correction(result)
         if correction:
             print(correction)
-        for violation in intent_violations:
-            print(f"- {violation}")
 
     return 0 if valid else 1
 

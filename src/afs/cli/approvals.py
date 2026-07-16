@@ -255,13 +255,21 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 
     # list
     list_parser = approvals_sub.add_parser("list", help="List pending approval requests.")
-    list_parser.add_argument("--approvals-file", help="Path to approvals JSON file.")
+    list_parser.add_argument(
+        "--approvals-file",
+        default=argparse.SUPPRESS,
+        help="Path to approvals JSON file.",
+    )
     list_parser.add_argument("--json", action="store_true", help="Output JSON.")
     list_parser.set_defaults(func=approvals_list_command)
 
     # approve
     approve_parser = approvals_sub.add_parser("approve", help="Approve a pending request.")
-    approve_parser.add_argument("--approvals-file", help="Path to approvals JSON file.")
+    approve_parser.add_argument(
+        "--approvals-file",
+        default=argparse.SUPPRESS,
+        help="Path to approvals JSON file.",
+    )
     approve_parser.add_argument("agent", help="Agent name.")
     approve_parser.add_argument("action", help="Action name.")
     approve_parser.add_argument(
@@ -272,7 +280,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 
     # reject
     reject_parser = approvals_sub.add_parser("reject", help="Reject a pending request.")
-    reject_parser.add_argument("--approvals-file", help="Path to approvals JSON file.")
+    reject_parser.add_argument(
+        "--approvals-file",
+        default=argparse.SUPPRESS,
+        help="Path to approvals JSON file.",
+    )
     reject_parser.add_argument("agent", help="Agent name.")
     reject_parser.add_argument("action", help="Action name.")
     reject_parser.add_argument(
@@ -285,7 +297,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     clear_parser = approvals_sub.add_parser(
         "clear", help="Archive completed requests and compact active state."
     )
-    clear_parser.add_argument("--approvals-file", help="Path to approvals JSON file.")
+    clear_parser.add_argument(
+        "--approvals-file",
+        default=argparse.SUPPRESS,
+        help="Path to approvals JSON file.",
+    )
     clear_parser.add_argument("--json", action="store_true", help="Output JSON.")
     clear_parser.set_defaults(func=approvals_clear_command)
 
@@ -293,6 +309,10 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     history_parser = approvals_sub.add_parser(
         "history", help="Show all requests including completed ones."
     )
-    history_parser.add_argument("--approvals-file", help="Path to approvals JSON file.")
+    history_parser.add_argument(
+        "--approvals-file",
+        default=argparse.SUPPRESS,
+        help="Path to approvals JSON file.",
+    )
     history_parser.add_argument("--json", action="store_true", help="Output JSON.")
     history_parser.set_defaults(func=approvals_history_command)

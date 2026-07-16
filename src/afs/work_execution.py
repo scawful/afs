@@ -279,76 +279,105 @@ def execute_approved_action(
 
     resolved_command = [_resolve_executable(command[0]), *command[1:]]
     run_cwd = cwd.expanduser().resolve() if cwd else Path.cwd()
-    with tempfile.TemporaryDirectory(prefix="afs-work-approval-") as temp_dir:
-        payload_path = Path(temp_dir) / "approval.json"
-        payload_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        env = os.environ.copy()
-        env["AFS_CONTEXT_ROOT"] = str(context_root.expanduser().resolve())
-        env["AFS_WORK_APPROVAL_ID"] = approval_id
-        env["AFS_WORK_APPROVAL_FILE"] = str(payload_path)
-        try:
-            completed = subprocess.run(
-                [*resolved_command, str(payload_path)],
-                cwd=run_cwd,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
+    if store.claim_approval_execution(approval_id) is None:
+        raise WorkApprovalExecutionError(
+            f"approval is already executing or no longer approved: {approval_id}"
+        )
+
+    # The claim is a compare-and-swap from approved -> executing.  Always
+    # release it on an unexpected local failure; normal success/failure paths
+    # transition it explicitly to applied/approved below.
+    try:
+        with tempfile.TemporaryDirectory(prefix="afs-work-approval-") as temp_dir:
+            payload_path = Path(temp_dir) / "approval.json"
+            payload_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
             )
-        except subprocess.TimeoutExpired as exc:
-            result = _timeout_result(
-                exc,
-                approval_id=approval_id,
-                executor_command=resolved_command,
+            env = os.environ.copy()
+            env["AFS_CONTEXT_ROOT"] = str(context_root.expanduser().resolve())
+            env["AFS_WORK_APPROVAL_ID"] = approval_id
+            env["AFS_WORK_APPROVAL_FILE"] = str(payload_path)
+            try:
+                completed = subprocess.run(
+                    [*resolved_command, str(payload_path)],
+                    cwd=run_cwd,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                result = _timeout_result(
+                    exc,
+                    approval_id=approval_id,
+                    executor_command=resolved_command,
+                )
+                if not store.record_approval_result(
+                    approval_id,
+                    result=result,
+                    status="approved",
+                    expected_status="executing",
+                ):
+                    raise WorkApprovalExecutionError(
+                        f"lost execution claim while recording timeout: {approval_id}"
+                    ) from exc
+                store.record_activity(
+                    activity_type="approval_execution_failed",
+                    summary=f"Executor timed out for approved action {approval_id}",
+                    target_system=approval["target_system"],
+                    target_id=approval["target_id"],
+                    actor=actor,
+                    metadata={"approval_id": approval_id, "result": result},
+                )
+                return result
+
+        result = _execution_result(
+            completed,
+            approval_id=approval_id,
+            executor_command=resolved_command,
+        )
+        next_status = "applied" if completed.returncode == 0 else "approved"
+        if not store.record_approval_result(
+            approval_id,
+            result=result,
+            status=next_status,
+            expected_status="executing",
+        ):
+            raise WorkApprovalExecutionError(
+                f"lost execution claim while recording result: {approval_id}"
             )
-            store.record_approval_result(approval_id, result=result)
+        if completed.returncode == 0:
+            sample_id = _record_applied_communication_sample(
+                store,
+                approval,
+                result=result,
+                actor=actor,
+            )
+            store.record_activity(
+                activity_type="approval_applied",
+                summary=f"Applied approved action {approval_id}",
+                target_system=approval["target_system"],
+                target_id=approval["target_id"],
+                actor=actor,
+                metadata={
+                    "approval_id": approval_id,
+                    "result": result,
+                    "communication_sample_id": sample_id,
+                },
+            )
+        else:
             store.record_activity(
                 activity_type="approval_execution_failed",
-                summary=f"Executor timed out for approved action {approval_id}",
+                summary=f"Executor failed for approved action {approval_id}",
                 target_system=approval["target_system"],
                 target_id=approval["target_id"],
                 actor=actor,
                 metadata={"approval_id": approval_id, "result": result},
             )
-            return result
-
-    result = _execution_result(
-        completed,
-        approval_id=approval_id,
-        executor_command=resolved_command,
-    )
-    if completed.returncode == 0:
-        store.record_approval_result(approval_id, result=result, status="applied")
-        sample_id = _record_applied_communication_sample(
-            store,
-            approval,
-            result=result,
-            actor=actor,
-        )
-        store.record_activity(
-            activity_type="approval_applied",
-            summary=f"Applied approved action {approval_id}",
-            target_system=approval["target_system"],
-            target_id=approval["target_id"],
-            actor=actor,
-            metadata={
-                "approval_id": approval_id,
-                "result": result,
-                "communication_sample_id": sample_id,
-            },
-        )
-    else:
-        store.record_approval_result(approval_id, result=result)
-        store.record_activity(
-            activity_type="approval_execution_failed",
-            summary=f"Executor failed for approved action {approval_id}",
-            target_system=approval["target_system"],
-            target_id=approval["target_id"],
-            actor=actor,
-            metadata={"approval_id": approval_id, "result": result},
-        )
-    return result
+        return result
+    finally:
+        store.release_approval_execution(approval_id)
 
 
 def _record_applied_communication_sample(

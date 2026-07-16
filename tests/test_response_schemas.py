@@ -225,6 +225,13 @@ def test_human_intent_shape_bypasses_are_closed() -> None:
         for v in verify_human_intent_preserved(bad_anchor, fabricated)
     )
 
+    # Explicit null is a malformed anchor, not the same as an omitted key.
+    null_anchor = {"human_intent": None, "summary": "seed"}
+    assert any(
+        "must be an object" in v
+        for v in verify_human_intent_preserved(null_anchor, dict(_VALID_PLAN))
+    )
+
     # A skeleton violating the human_intent contract is invalid, not absent.
     invalid_anchor = {"human_intent": {"goal": 42}, "summary": "seed"}
     assert any(

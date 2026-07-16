@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -248,6 +250,46 @@ def test_execute_internal_action_needs_no_terminal(tmp_path: Path) -> None:
         confirm_reader=lambda _prompt: None,  # would refuse if consulted
     )
     assert result["status"] == "applied"
+
+
+def test_execute_claim_allows_only_one_concurrent_connector_run(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    approval_id = _approved_action(
+        store, action="internal_note", target_system="local"
+    )
+    marker = tmp_path / "executions.txt"
+    start = threading.Barrier(2)
+
+    def invoke() -> tuple[str, object]:
+        start.wait(timeout=5)
+        try:
+            result = execute_approved_action(
+                store,
+                context_root=context_root,
+                approval_id=approval_id,
+                executor_command=[
+                    sys.executable,
+                    "-c",
+                    (
+                        "import pathlib,sys,time; time.sleep(0.25); "
+                        "pathlib.Path(sys.argv[1]).open('a').write('ran\\n')"
+                    ),
+                    str(marker),
+                ],
+                require_human_ack=False,
+            )
+        except WorkApprovalExecutionError as exc:
+            return "blocked", str(exc)
+        return "applied", result
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [future.result(timeout=10) for future in [pool.submit(invoke), pool.submit(invoke)]]
+
+    assert sorted(kind for kind, _value in results) == ["applied", "blocked"]
+    assert marker.read_text(encoding="utf-8").splitlines() == ["ran"]
+    assert store.get_approval(approval_id)["status"] == "applied"  # type: ignore[index]
 
 
 def test_execute_external_target_backstop_refuses_unclassified_action(tmp_path: Path) -> None:
