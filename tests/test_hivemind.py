@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,35 @@ def test_hivemind_send_creates_file(tmp_path: Path) -> None:
     assert agent_dir.exists()
     files = list(agent_dir.glob("*.json"))
     assert len(files) == 1
+
+
+def test_hivemind_send_publishes_final_file_with_atomic_replace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ctx = tmp_path / ".context"
+    ctx.mkdir()
+    (ctx / "hivemind").mkdir()
+    original_replace = os.replace
+    publishes: list[tuple[Path, Path]] = []
+
+    def _track_replace(source, target) -> None:
+        source_path = Path(source)
+        target_path = Path(target)
+        if target_path.parent.name == "agent-a" and target_path.suffix == ".json":
+            assert source_path.exists()
+            assert source_path.suffix == ".tmp"
+            assert not target_path.exists()
+            publishes.append((source_path, target_path))
+        original_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", _track_replace)
+    HivemindBus(ctx).send("agent-a", "status", {})
+
+    assert len(publishes) == 1
+    source, target = publishes[0]
+    assert not source.exists()
+    assert target.exists()
 
 
 def test_hivemind_read_filters_by_agent(tmp_path: Path) -> None:

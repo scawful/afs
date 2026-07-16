@@ -42,6 +42,7 @@ It provides filesystem-native primitives for:
 - [Research Lineage](LINEAGE.md) — how AFS maps to the Agentic File System paper and where it goes beyond it
 - [Agent Surfaces](AGENT_SURFACES.md)
 - [Agent Operations](AGENT_OPERATIONS.md)
+- [Event Reactor](EVENT_REACTOR.md) — on_event supervisor triggers with transactional delivery
 - [Agent Integration Upgrade](AGENT_INTEGRATION_UPGRADE.md)
 - [Guided Setup](SETUP_GUIDE.md)
 - [Architecture](ARCHITECTURE.md)

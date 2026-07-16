@@ -49,6 +49,8 @@ def test_default_agent_configs_shape(tmp_path: Path) -> None:
 
     rebuild = defaults["index-rebuild"]
     assert rebuild.module == "afs.agents.index_rebuild"
+    assert rebuild.restart_on_failure is True
+    assert rebuild.max_restarts == 3
     context_root = config.general.context_root
     assert rebuild.watch_paths == [context_root / "knowledge", context_root / "memory"]
 

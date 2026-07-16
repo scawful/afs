@@ -61,6 +61,35 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
   agent list implicitly.
 - Versioned extension-manifest validation with bounded diagnostics, isolated
   CLI registration failures, and surfaced doctor/plugin reports.
+- Event reactor: `on_event` agent start conditions match history events and
+  hivemind messages with `"<kind>[:<detail>]"` fnmatch patterns. Delivery is
+  transactional — bounded source checkpoints and a coalesced per-agent
+  pending-route outbox commit together under an exclusive lock, so blocked
+  routes retry without pinning unrelated backlog and a failed state save loses
+  neither side. Complete positional/exact-identity records are delivered on
+  durable arrival regardless of untrusted future or skewed timestamps.
+  Unknown `on_event_action` values fail closed; the `job` action passes the
+  same supervisor gates as spawns and embeds only sanitized event labels in
+  prompts; debounce (`event_debounce`, default 5m) is persisted at ack so it
+  also covers job actions, while failed/future start clocks cannot suppress a
+  retry; recovery config edits preserve parked routes; hivemind sends publish
+  atomically and exact file identities preserve newly copied/backdated
+  messages; finite discovery/file rounds plus exact retry identities prevent
+  unreadable files, copied/backdated ingress, or partial history tails from
+  starving one another across bounded scans;
+  timestamp-only v1/v2
+  state conservatively replays extant source content once when upgrading to
+  positional/exact checkpoints, while tuple-based v3 state does the same for
+  its unprovable hivemind inventory; stable malformed records, including
+  strict-JSON violations, unsafe timestamp offsets, invalid provided expiries,
+  and oversized complete
+  history records are skipped and counted; transient history mount loss fails
+  closed without pruning offsets; initialized markers/checkpoints use bounded
+  ASCII parsing; source checkpoint names must be UTF-8 and lock/source I/O
+  failures preserve durable state; persistent process-launch failures reuse
+  restart backoff and circuit-breaker gates without advancing debounce; the
+  hivemind bus is canonical (history mirrors of sends are excluded); and
+  `AgentConfig` round-trips now preserve custom mapping keys.
 
 ### Changed
 
