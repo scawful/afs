@@ -1248,6 +1248,81 @@ class AgentSupervisor:
                 return parsed
         return DEFAULT_EVENT_DEBOUNCE_SECONDS
 
+    def _matched_event_records(
+        self,
+        events: list[ReactorEvent],
+        agent_configs: list[AgentConfig],
+        *,
+        action: str | None = None,
+        batch: ReactorBatch | None = None,
+    ) -> list[tuple[AgentConfig, str]]:
+        """Return valid event matches, optionally owned by one action path."""
+        results: list[tuple[AgentConfig, str]] = []
+        for config, reason in match_event_rules(events, agent_configs):
+            if config.on_event_action not in VALID_EVENT_ACTIONS:
+                should_log = batch is None or batch.mark_rejected(
+                    config.name,
+                    reason="invalid_action",
+                )
+                if should_log:
+                    _log.warning(
+                        "Agent '%s' has invalid on_event_action %r "
+                        "(valid: %s); rejecting its event trigger",
+                        config.name,
+                        config.on_event_action,
+                        ", ".join(VALID_EVENT_ACTIONS),
+                    )
+                continue
+            if action is not None and config.on_event_action != action:
+                continue
+            results.append((config, reason))
+        return results
+
+    def _event_is_debounced(
+        self,
+        config: AgentConfig,
+        *,
+        current: datetime,
+        batch: ReactorBatch | None,
+        existing: RunningAgent | None,
+    ) -> bool:
+        debounce = self._event_debounce_seconds(config)
+        dispatched = batch.last_dispatch(config.name) if batch else None
+        if dispatched and (current - dispatched).total_seconds() < debounce:
+            return True
+        if existing:
+            last_start = _parse_timestamp(existing.started_at)
+            if last_start and (current - last_start).total_seconds() < debounce:
+                return True
+        return False
+
+    @staticmethod
+    def _event_state_gate(existing: RunningAgent | None) -> tuple[str, str] | None:
+        """Classify existing-agent state before debounce or dispatch."""
+        if existing is None:
+            return None
+        if existing.manually_stopped:
+            return "deferred", "manual_stop"
+        if existing.state == "circuit_open":
+            return "deferred", "circuit_open"
+        if existing.state == "awaiting_review":
+            return "deferred", "awaiting_review"
+        if existing.state == "running":
+            return "coalesced", "running"
+        return None
+
+    @staticmethod
+    def _record_event_gate(
+        batch: ReactorBatch,
+        agent_name: str,
+        gate: tuple[str, str],
+    ) -> None:
+        state, reason = gate
+        if state == "deferred":
+            batch.mark_dispatch_deferred(agent_name, reason=reason)
+        else:
+            batch.mark_coalesced(agent_name, reason=reason)
+
     def evaluate_event_records(
         self,
         events: list[ReactorEvent],
@@ -1266,28 +1341,21 @@ class AgentSupervisor:
         """
         current = now or _now_utc()
         results: list[tuple[AgentConfig, str]] = []
-        for config, reason in match_event_rules(events, agent_configs):
-            if config.on_event_action not in VALID_EVENT_ACTIONS:
-                _log.warning(
-                    "Agent '%s' has invalid on_event_action %r "
-                    "(valid: %s); skipping its event trigger",
-                    config.name,
-                    config.on_event_action,
-                    ", ".join(VALID_EVENT_ACTIONS),
-                )
-                continue
-            debounce = self._event_debounce_seconds(config)
-            dispatched = batch.last_dispatch(config.name) if batch else None
-            if dispatched and (current - dispatched).total_seconds() < debounce:
-                continue
+        for config, reason in self._matched_event_records(
+            events,
+            agent_configs,
+            batch=batch,
+        ):
             existing = self.status(config.name)
-            if existing:
-                last_start = _parse_timestamp(existing.started_at)
-                if (
-                    last_start
-                    and (current - last_start).total_seconds() < debounce
-                ):
-                    continue
+            if self._event_is_debounced(
+                config,
+                current=current,
+                batch=batch,
+                existing=existing,
+            ):
+                if batch:
+                    batch.mark_coalesced(config.name, reason="debounce")
+                continue
             results.append((config, reason))
         return results
 
@@ -1308,14 +1376,46 @@ class AgentSupervisor:
         config plus the sanitized event label only; event payload text never
         reaches a job prompt.
         """
-        matches = [
-            (config, reason)
-            for config, reason in self.evaluate_event_records(
-                batch.events, agent_configs, now=now, batch=batch
-            )
-            if config.on_event_action == "job"
-        ]
+        current = now or _now_utc()
+        matches = self._matched_event_records(
+            batch.events,
+            agent_configs,
+            action="job",
+            batch=batch,
+        )
         if not matches:
+            return []
+        ready_matches: list[tuple[AgentConfig, str]] = []
+        for config, reason in matches:
+            if not config.module:
+                batch.mark_dispatch_deferred(config.name, reason="missing_module")
+                continue
+            existing = self.status(config.name)
+            state_gate = self._event_state_gate(existing)
+            if state_gate is not None:
+                self._record_event_gate(batch, config.name, state_gate)
+                continue
+            ready, dep_reason = self._check_dependencies(
+                config.name,
+                config,
+                agent_configs,
+            )
+            if not ready:
+                _log.info(
+                    "Deferring event job for '%s': %s", config.name, dep_reason
+                )
+                batch.mark_dispatch_deferred(config.name, reason="dependency")
+                continue
+            if self._event_is_debounced(
+                config,
+                current=current,
+                batch=batch,
+                existing=existing,
+            ):
+                batch.mark_coalesced(config.name, reason="debounce")
+                continue
+            ready_matches.append((config, reason))
+        if not ready_matches:
             return []
         from ..agent_jobs import AgentJobQueue
 
@@ -1331,27 +1431,14 @@ class AgentSupervisor:
             }
         except Exception:  # noqa: BLE001 - an unusable queue must defer ack
             _log.exception("Event job queue is unavailable")
-            for config, _reason in matches:
-                batch.mark_dispatch_failed(config.name)
+            for config, _reason in ready_matches:
+                batch.mark_dispatch_failed(config.name, reason="queue_unavailable")
             return []
         created: list[str] = []
-        for config, reason in matches:
-            existing = self.status(config.name)
-            if existing and (
-                existing.state in ("running", "awaiting_review", "circuit_open")
-                or existing.manually_stopped
-            ):
-                continue
-            ready, dep_reason = self._check_dependencies(
-                config.name, config, agent_configs,
-            )
-            if not ready:
-                _log.info(
-                    "Skipping event job for '%s': %s", config.name, dep_reason
-                )
-                continue
+        for config, reason in ready_matches:
             dedupe_key = f"on_event:{config.name}"
             if dedupe_key in active_keys:
+                batch.mark_coalesced(config.name, reason="active_job")
                 continue
             prompt = (
                 f"Agent config '{config.name}' matched {reason}. "
@@ -1370,10 +1457,10 @@ class AgentSupervisor:
                 )
             except Exception:  # noqa: BLE001 - a failed enqueue must defer ack
                 _log.exception("Could not enqueue event job for '%s'", config.name)
-                batch.mark_dispatch_failed(config.name)
+                batch.mark_dispatch_failed(config.name, reason="enqueue_failed")
                 continue
             active_keys.add(dedupe_key)
-            batch.mark_dispatched(config.name)
+            batch.mark_dispatched(config.name, reason="job")
             created.append(job.id)
         return created
 
@@ -1398,23 +1485,36 @@ class AgentSupervisor:
             for config in self.evaluate_watch_paths(changed_paths, agent_configs):
                 candidates.setdefault(config.name, (config, "file_watch"))
         if event_batch and event_batch.events:
-            for config, reason in self.evaluate_event_records(
-                event_batch.events, agent_configs, now=now, batch=event_batch
+            for config, reason in self._matched_event_records(
+                event_batch.events,
+                agent_configs,
+                action="spawn",
+                batch=event_batch,
             ):
-                if config.on_event_action == "job":
-                    continue  # enqueue_event_jobs owns the job action
-                if config.name not in candidates:
-                    candidates[config.name] = (config, reason)
-                    event_candidates.add(config.name)
+                candidates.setdefault(config.name, (config, reason))
+                event_candidates.add(config.name)
         for config in self.due_schedules(agent_configs, now=now):
             candidates.setdefault(config.name, (config, f"schedule:{config.schedule}"))
 
         started: list[RunningAgent] = []
         for config, reason in candidates.values():
+            is_event_candidate = bool(
+                event_batch and config.name in event_candidates
+            )
             if not config.module:
+                if is_event_candidate and event_batch:
+                    event_batch.mark_dispatch_deferred(
+                        config.name,
+                        reason="missing_module",
+                    )
                 continue
             existing = self.status(config.name)
-            if existing and (
+            if is_event_candidate and event_batch:
+                state_gate = self._event_state_gate(existing)
+                if state_gate is not None:
+                    self._record_event_gate(event_batch, config.name, state_gate)
+                    continue
+            elif existing and (
                 existing.state in ("running", "awaiting_review", "circuit_open")
                 or existing.manually_stopped
             ):
@@ -1428,6 +1528,24 @@ class AgentSupervisor:
                     config.name,
                     dep_reason,
                 )
+                if is_event_candidate and event_batch:
+                    event_batch.mark_dispatch_deferred(
+                        config.name,
+                        reason="dependency",
+                    )
+                continue
+            current = now or _now_utc()
+            if (
+                is_event_candidate
+                and event_batch
+                and self._event_is_debounced(
+                    config,
+                    current=current,
+                    batch=event_batch,
+                    existing=existing,
+                )
+            ):
+                event_batch.mark_coalesced(config.name, reason="debounce")
                 continue
             try:
                 started.append(
@@ -1439,18 +1557,21 @@ class AgentSupervisor:
                     )
                 )
             except RuntimeError:
-                if event_batch and config.name in event_candidates:
+                if is_event_candidate and event_batch:
                     # Acking over a failed event spawn would consume the
                     # event with zero deliveries; deferring ack redelivers
                     # it. The failed attempt's started_at debounces the
-                    # retry, and a persistent failure opens the circuit
-                    # breaker, whose gate then lets the cursor advance.
-                    event_batch.mark_dispatch_failed(config.name)
+                    # retry. A persistent failure may open the circuit, but
+                    # that retryable gate also leaves the batch unacked.
+                    event_batch.mark_dispatch_failed(
+                        config.name,
+                        reason="spawn_failed",
+                    )
                 continue
-            if event_batch and config.name in event_candidates:
+            if is_event_candidate and event_batch:
                 # Debounce keys off actual dispatches, so only a spawn that
                 # really happened advances the agent's dispatch time.
-                event_batch.mark_dispatched(config.name)
+                event_batch.mark_dispatched(config.name, reason="spawn")
 
         # After spawning, check for targeted handoff-driven agents.
         # We scan for any agents that completed during this reconcile cycle
@@ -1658,7 +1779,7 @@ def _run_once(
         notes.append("reactor lock contended; events deferred one cycle")
     if reactor_dispatch_failures:
         notes.append(
-            f"{reactor_dispatch_failures} event dispatch(es) failed; "
+            f"{reactor_dispatch_failures} event dispatch(es) failed or deferred; "
             "batch unacked for redelivery"
         )
     if reactor_state_error:

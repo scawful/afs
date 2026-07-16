@@ -6,6 +6,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from afs.agent_defaults import default_agent_configs
 from afs.agents.event_reactor import (
     ReactorBatch,
@@ -19,7 +21,7 @@ from afs.agents.event_reactor import (
     pattern_matches,
     sanitize_label,
 )
-from afs.agents.supervisor import AgentSupervisor
+from afs.agents.supervisor import AgentSupervisor, RunningAgent
 from afs.schema import AFSConfig, AgentConfig, GeneralConfig
 
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
@@ -718,6 +720,19 @@ def _supervisor(tmp_path: Path) -> AgentSupervisor:
     )
 
 
+def _dispatch_event(
+    supervisor: AgentSupervisor,
+    batch: ReactorBatch,
+    config: AgentConfig,
+    *,
+    action: str,
+    now: datetime = NOW,
+) -> list[object] | list[str]:
+    if action == "job":
+        return supervisor.enqueue_event_jobs(batch, [config], now=now)
+    return list(supervisor.reconcile([config], event_batch=batch, now=now))
+
+
 def test_evaluate_event_records_applies_debounce(tmp_path: Path, monkeypatch) -> None:
     supervisor = _supervisor(tmp_path)
     config = AgentConfig(name="reactor", module="x.y", on_event=["error"])
@@ -768,6 +783,20 @@ def test_persisted_debounce_covers_job_actions(tmp_path: Path) -> None:
     ] == ["jobber"]
 
 
+def test_debounce_is_explicitly_coalesced(tmp_path: Path) -> None:
+    supervisor = _supervisor(tmp_path)
+    config = AgentConfig(
+        name="jobber", module="x.y", on_event=["error"], on_event_action="job"
+    )
+    batch = _make_batch(tmp_path / "state", [_event("error", "boom")])
+    batch._state["last_dispatch"]["jobber"] = NOW.isoformat()
+
+    assert supervisor.enqueue_event_jobs(batch, [config], now=NOW) == []
+    assert batch.dispatch_failures == 0
+    assert batch.dispatch_outcomes["jobber"].state == "coalesced"
+    assert batch.dispatch_outcomes["jobber"].reason == "debounce"
+
+
 def test_invalid_event_action_fails_closed(tmp_path: Path, monkeypatch) -> None:
     """A typo'd on_event_action must never fall through to a spawn or a job."""
     supervisor = _supervisor(tmp_path)
@@ -787,6 +816,9 @@ def test_invalid_event_action_fails_closed(tmp_path: Path, monkeypatch) -> None:
     supervisor.reconcile([config], event_batch=batch, now=NOW)
     assert spawned == []
     assert supervisor.enqueue_event_jobs(batch, [config], now=NOW) == []
+    assert batch.dispatch_failures == 0
+    assert batch.dispatch_outcomes["typo"].state == "rejected"
+    assert batch.dispatch_outcomes["typo"].reason == "invalid_action"
 
 
 def test_reconcile_spawns_for_event_batch(tmp_path: Path, monkeypatch) -> None:
@@ -806,6 +838,8 @@ def test_reconcile_spawns_for_event_batch(tmp_path: Path, monkeypatch) -> None:
     # failure was counted so the caller defers ack and redelivers.
     assert batch.last_dispatch("reactor") is None
     assert batch.dispatch_failures == 1
+    assert batch.dispatch_outcomes["reactor"].state == "deferred"
+    assert batch.dispatch_outcomes["reactor"].reason == "spawn_failed"
 
 
 def test_successful_event_spawn_marks_dispatch(tmp_path: Path, monkeypatch) -> None:
@@ -820,6 +854,8 @@ def test_successful_event_spawn_marks_dispatch(tmp_path: Path, monkeypatch) -> N
     batch = _make_batch(tmp_path / "state", [_event("error", "boom")])
     supervisor.reconcile([config], event_batch=batch, now=NOW)
     assert batch.last_dispatch("reactor") is not None
+    assert batch.dispatch_outcomes["reactor"].state == "dispatched"
+    assert batch.dispatch_outcomes["reactor"].reason == "spawn"
 
 
 def test_reconcile_skips_job_action_configs(tmp_path: Path, monkeypatch) -> None:
@@ -858,6 +894,14 @@ def test_enqueue_event_jobs_dedupes_while_queued(tmp_path: Path) -> None:
     assert jobs[0].dedupe_key == "on_event:jobber"
     assert "event:error:boom" in jobs[0].title
 
+    # A fresh reactor cycle has no in-memory debounce outcome, but the active
+    # queue key still intentionally coalesces the redelivered route.
+    deduped = _make_batch(tmp_path / "state-2", [_event("error", "again")])
+    assert supervisor.enqueue_event_jobs(deduped, [config], now=NOW) == []
+    assert deduped.dispatch_failures == 0
+    assert deduped.dispatch_outcomes["jobber"].state == "coalesced"
+    assert deduped.dispatch_outcomes["jobber"].reason == "active_job"
+
 
 def test_failed_job_enqueue_defers_ack(tmp_path: Path, monkeypatch) -> None:
     """A job that never reached the queue must not count as dispatched."""
@@ -876,6 +920,8 @@ def test_failed_job_enqueue_defers_ack(tmp_path: Path, monkeypatch) -> None:
     assert supervisor.enqueue_event_jobs(batch, [config], now=NOW) == []
     assert batch.last_dispatch("jobber") is None
     assert batch.dispatch_failures == 1
+    assert batch.dispatch_outcomes["jobber"].state == "deferred"
+    assert batch.dispatch_outcomes["jobber"].reason == "enqueue_failed"
 
 
 def test_event_jobs_respect_supervisor_gates(tmp_path: Path, monkeypatch) -> None:
@@ -893,6 +939,152 @@ def test_event_jobs_respect_supervisor_gates(tmp_path: Path, monkeypatch) -> Non
 
     monkeypatch.setattr(supervisor, "status", lambda name: _Stopped())
     assert supervisor.enqueue_event_jobs(batch, [config], now=NOW) == []
+    assert batch.dispatch_failures == 1
+    assert batch.dispatch_outcomes["jobber"].state == "deferred"
+    assert batch.dispatch_outcomes["jobber"].reason == "manual_stop"
+
+
+@pytest.mark.parametrize("action", ["spawn", "job"])
+@pytest.mark.parametrize(
+    ("gate", "expected_reason"),
+    [
+        ("manual_stop", "manual_stop"),
+        ("circuit_open", "circuit_open"),
+        ("awaiting_review", "awaiting_review"),
+        ("dependency", "dependency"),
+        ("missing_module", "missing_module"),
+    ],
+)
+def test_retryable_event_gates_defer_batch_ack(
+    tmp_path: Path,
+    monkeypatch,
+    action: str,
+    gate: str,
+    expected_reason: str,
+) -> None:
+    supervisor = _supervisor(tmp_path)
+    config = AgentConfig(
+        name="reactor",
+        module="" if gate == "missing_module" else "x.y",
+        on_event=["error"],
+        on_event_action=action,
+        depends_on=["dep"] if gate == "dependency" else [],
+    )
+    batch = _make_batch(tmp_path / "state", [_event("error", "boom")])
+
+    def _status(name: str) -> RunningAgent | None:
+        if gate == "manual_stop" and name == config.name:
+            return RunningAgent(name=name, manually_stopped=True)
+        if gate in {"circuit_open", "awaiting_review"} and name == config.name:
+            return RunningAgent(name=name, state=gate)
+        return None
+
+    monkeypatch.setattr(supervisor, "status", _status)
+    assert _dispatch_event(supervisor, batch, config, action=action) == []
+    assert batch.dispatch_failures == 1
+    assert batch.dispatch_outcomes[config.name].state == "deferred"
+    assert batch.dispatch_outcomes[config.name].reason == expected_reason
+    assert batch.last_dispatch(config.name) is None
+
+
+@pytest.mark.parametrize("action", ["spawn", "job"])
+def test_running_agent_explicitly_coalesces_event(
+    tmp_path: Path,
+    monkeypatch,
+    action: str,
+) -> None:
+    supervisor = _supervisor(tmp_path)
+    config = AgentConfig(
+        name="reactor",
+        module="x.y",
+        on_event=["error"],
+        on_event_action=action,
+    )
+    batch = _make_batch(tmp_path / "state", [_event("error", "boom")])
+    monkeypatch.setattr(
+        supervisor,
+        "status",
+        lambda name: RunningAgent(name=name, state="running"),
+    )
+
+    assert _dispatch_event(supervisor, batch, config, action=action) == []
+    assert batch.dispatch_failures == 0
+    assert batch.dispatch_outcomes[config.name].state == "coalesced"
+    assert batch.dispatch_outcomes[config.name].reason == "running"
+
+
+@pytest.mark.parametrize("action", ["spawn", "job"])
+@pytest.mark.parametrize("gate", ["manual_stop", "dependency"])
+def test_retryable_gate_redelivers_then_dispatches_after_clear(
+    tmp_path: Path,
+    monkeypatch,
+    action: str,
+    gate: str,
+) -> None:
+    context = tmp_path / "context"
+    supervisor = _supervisor(tmp_path)
+    config = AgentConfig(
+        name="reactor",
+        module="x.y",
+        on_event=["error"],
+        on_event_action=action,
+        depends_on=["dep"] if gate == "dependency" else [],
+    )
+    _collect(context, supervisor._state_dir, now=NOW - timedelta(seconds=60))
+    _write_history_event(
+        context,
+        event_type="error",
+        op="boom",
+        timestamp=NOW - timedelta(seconds=30),
+    )
+    gate_closed = True
+
+    def _status(name: str) -> RunningAgent | None:
+        if gate == "manual_stop" and name == config.name and gate_closed:
+            return RunningAgent(name=name, manually_stopped=True)
+        if gate == "dependency" and name == "dep" and not gate_closed:
+            return RunningAgent(name=name, state="stopped")
+        return None
+
+    monkeypatch.setattr(supervisor, "status", _status)
+    spawned: list[str] = []
+    monkeypatch.setattr(
+        supervisor,
+        "spawn",
+        lambda name, module, args=None, *, reason="", agent_config=None: spawned.append(name),
+    )
+
+    with open_event_batch(context, supervisor._state_dir, now=NOW) as first:
+        assert [event.label() for event in first.events] == ["error:boom"]
+        assert _dispatch_event(supervisor, first, config, action=action) == []
+        assert first.dispatch_failures == 1
+        assert first.acked is False
+
+    gate_closed = False
+    with open_event_batch(
+        context,
+        supervisor._state_dir,
+        now=NOW + timedelta(seconds=30),
+    ) as redelivered:
+        assert [event.label() for event in redelivered.events] == ["error:boom"]
+        dispatched = _dispatch_event(
+            supervisor,
+            redelivered,
+            config,
+            action=action,
+            now=NOW + timedelta(seconds=30),
+        )
+        assert len(dispatched) == 1
+        assert redelivered.dispatch_failures == 0
+        assert redelivered.dispatch_outcomes[config.name].state == "dispatched"
+        redelivered.ack()
+
+    with open_event_batch(
+        context,
+        supervisor._state_dir,
+        now=NOW + timedelta(seconds=60),
+    ) as drained:
+        assert drained.events == []
 
 
 def test_event_job_prompt_sanitizes_event_label(tmp_path: Path) -> None:

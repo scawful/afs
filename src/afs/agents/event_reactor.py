@@ -686,6 +686,14 @@ def _hivemind_events_since(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class ReactorDispatchOutcome:
+    """One event route's terminal result for the current batch."""
+
+    state: str
+    reason: str
+
+
 @dataclass
 class ReactorBatch:
     """One cycle's events plus the cursor advance that ack() will commit."""
@@ -704,13 +712,38 @@ class ReactorBatch:
     _pending_hivemind_migration_cutoffs: dict[str, str] = field(default_factory=dict)
     acked: bool = False
     dispatch_failures: int = 0
+    dispatch_outcomes: dict[str, ReactorDispatchOutcome] = field(default_factory=dict)
 
     def last_dispatch(self, agent_name: str) -> datetime | None:
         """Persisted time of the last event-triggered dispatch for an agent."""
         raw = self._state.get("last_dispatch", {}).get(agent_name, "")
         return _parse_timestamp(raw) if isinstance(raw, str) else None
 
-    def mark_dispatched(self, agent_name: str) -> None:
+    def _record_dispatch_outcome(
+        self,
+        agent_name: str,
+        state: str,
+        reason: str,
+    ) -> bool:
+        """Record one explicit route outcome and maintain the defer count."""
+        previous = self.dispatch_outcomes.get(agent_name)
+        if previous == ReactorDispatchOutcome(state=state, reason=reason):
+            return False
+        # Once work reached its destination, later duplicate/coalescing checks
+        # in the same cycle must not downgrade that successful delivery.
+        if previous is not None and previous.state == "dispatched":
+            return False
+        if previous is not None and previous.state == "deferred":
+            self.dispatch_failures = max(0, self.dispatch_failures - 1)
+        if state == "deferred":
+            self.dispatch_failures += 1
+        self.dispatch_outcomes[agent_name] = ReactorDispatchOutcome(
+            state=state,
+            reason=reason,
+        )
+        return True
+
+    def mark_dispatched(self, agent_name: str, *, reason: str = "dispatch") -> None:
         """Record an actual dispatch (spawn or job enqueue) for debounce.
 
         In memory until ack() persists it: in the crash window before ack the
@@ -718,18 +751,38 @@ class ReactorBatch:
         duplicates, not this table.
         """
         self._state.setdefault("last_dispatch", {})[agent_name] = self._now.isoformat()
+        self._record_dispatch_outcome(agent_name, "dispatched", reason)
 
-    def mark_dispatch_failed(self, agent_name: str) -> None:
+    def mark_dispatch_deferred(self, agent_name: str, *, reason: str) -> None:
+        """Record a retryable gate and require batch redelivery."""
+        if not self._record_dispatch_outcome(agent_name, "deferred", reason):
+            return
+        _log.warning(
+            "Event delivery for agent '%s' deferred (%s); batch will redeliver",
+            agent_name,
+            reason,
+        )
+
+    def mark_coalesced(self, agent_name: str, *, reason: str) -> None:
+        """Record an intentional delivery coalescing decision."""
+        self._record_dispatch_outcome(agent_name, "coalesced", reason)
+
+    def mark_rejected(self, agent_name: str, *, reason: str) -> bool:
+        """Record a terminal fail-closed rejection and permit cursor advance."""
+        return self._record_dispatch_outcome(agent_name, "rejected", reason)
+
+    def mark_dispatch_failed(
+        self,
+        agent_name: str,
+        *,
+        reason: str = "dispatch_failed",
+    ) -> None:
         """Record that an event-triggered dispatch failed.
 
         The caller must then skip ack() so the batch is redelivered: acking
         over a failed dispatch would consume the event with zero deliveries.
         """
-        _log.warning(
-            "Event dispatch for agent '%s' failed; deferring ack for redelivery",
-            agent_name,
-        )
-        self.dispatch_failures += 1
+        self.mark_dispatch_deferred(agent_name, reason=reason)
 
     def prune_dispatch(self, active_names: Iterable[str]) -> None:
         """Drop persisted dispatch times for agents no longer configured."""

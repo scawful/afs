@@ -38,11 +38,11 @@ Delivery is transactional, at-least-once:
 - Each cycle reads events oldest-first under an exclusive lock, dispatches
   matches, and only then advances the cursors (the commit is an atomic
   temp-file rename). A crash anywhere before ack redelivers the batch next
-  cycle; a failed dispatch (spawn or enqueue) defers the ack itself
-  (`reactor_dispatch_failures`), so an event is never consumed with zero
-  deliveries. If the commit cannot be persisted the cycle reports
-  `reactor_state_error` and the cursors stay put — again redelivery, not
-  loss.
+  cycle; a failed dispatch or retryable delivery gate defers the ack itself
+  (`reactor_dispatch_failures`), so an event is never consumed while its
+  route is waiting for permission or readiness. If the commit cannot be
+  persisted the cycle reports `reactor_state_error` and the cursors stay put
+  — again redelivery, not loss.
 - Events stamped within the last ~5 seconds are deferred one cycle: writers
   stamp before their write lands, so consuming right up to "now" could move
   the watermark past an in-flight write. The residual assumption is that a
@@ -84,8 +84,13 @@ Delivery is transactional, at-least-once:
   while one is queued or running. Both actions pass the same gates: circuit
   breaker, manual stop, and dependency checks — `job` is a delivery mode, not
   an authorization bypass.
+- Manual stops, open circuits, agents awaiting review, missing modules, and
+  unmet dependency or mutex gates are retryable: the batch remains unacked
+  and is redelivered after the gate clears. A currently running agent, an
+  active deduped job, or the configured debounce window intentionally
+  coalesces the trigger and permits the cursor to advance.
 - Any other `on_event_action` value fails closed: the trigger is skipped with
-  a warning, nothing spawns.
+  a warning and recorded as a terminal rejection; nothing spawns or enqueues.
 - Job prompts are built from operator config plus a sanitized event label;
   event payload text never reaches a job prompt.
 - Debounce (`event_debounce`, schedule grammar, default `5m`) is keyed off
