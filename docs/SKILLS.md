@@ -40,8 +40,10 @@ Every `SKILL.md` found under those roots is a candidate, bounded to 256 KiB
 per file. If a skill declares `profiles:`, it is only visible when the active
 profile is listed (or the skill lists `general`). Skills without a `profiles:`
 field are visible everywhere. Extensions contribute additional roots via
-`skill_roots` in `extension.toml`. When two roots define the same skill name,
-the earlier root wins.
+`skill_roots` in `extension.toml`. Raw discovery does not deduplicate skill
+names, so `afs skills list` and `afs skills match` can show more than one file
+with the same declared name. Runtime matching resolves those collisions as
+described below.
 
 ## Frontmatter
 
@@ -75,11 +77,19 @@ supported and are silently ignored — keep frontmatter flat.
 
 ## Matching and Ranking
 
-`skills match`, `skill.match`, and the session launch paths all use the same
-scoring rule: each trigger that appears in the prompt (as a whole word or a
-substring) adds one point. Skills scoring zero are dropped; ties are broken by
-root priority (earlier roots win), then name. At most 10 matches are returned
-regardless of the requested `top_k`.
+`skills match`, `skill.match`, and the session launch paths use the same scoring
+rule: each trigger that appears in the prompt (as a whole word or a substring)
+adds one point, and skills scoring zero are dropped. They differ after scoring:
+
+- `afs skills match` ranks the raw discovery results by score. Equal scores keep
+  discovery order, which is name-sorted; duplicate names remain visible. Its
+  `--top-k` value is applied directly and is not the runtime 10-match cap.
+- `skill.match` and session launch use `build_skill_matches`. It deduplicates
+  names case-insensitively before scoring, keeping the first discovered entry
+  (earlier root, then earlier path within that root). It breaks score ties by
+  root priority, then name and path, and returns at most 10 matches. The MCP
+  tool validates `top_k` from 1 through 10; session callers are clamped by the
+  same 10-match builder cap.
 
 Practical authoring consequences:
 
@@ -87,14 +97,15 @@ Practical authoring consequences:
   "verification". List both forms as triggers when both phrasings are likely.
 - Multi-word triggers match as substrings, so `"verification plan"` is a
   strong, specific signal.
-- A one-trigger match can lose a tie to an irrelevant one-trigger match from
-  an earlier root or earlier name; give important skills enough distinct
-  triggers to win on score, not on tiebreak.
+- A one-trigger runtime match can lose a tie to a skill from an earlier root;
+  the CLI preview orders the same score by name instead. Give important skills
+  enough distinct triggers to win on score, not on a tiebreak.
 
 ## Body Injection
 
-Matched skills are not just named — their instructions are delivered inline
-under two budgets:
+Session launch matches are delivered inline, as are `skill.match` results when
+`include_bodies: true` is requested. The CLI `afs skills match` preview is
+metadata-only. Runtime body delivery uses two budgets:
 
 - The top **3** matches include their `SKILL.md` body (frontmatter stripped),
   each bounded to **2,000** characters.
@@ -147,8 +158,9 @@ Engineering-practice skills apply across repos: `code-review`,
 3. Front-load the command table or core rules; keep the body under 2,000
    characters so it always injects whole.
 4. Add `enforcement` lines for anything the agent must never skip.
-5. Verify matching: `afs skills match "<a realistic task phrase>"` should
-   rank your skill first for its intended prompts.
+5. Check trigger scoring with `afs skills match "<a realistic task phrase>"`.
+   Use `skill.match` or a session bootstrap when verifying runtime duplicate
+   resolution, root-priority, match-cap, or body-injection behavior.
 
 The `skill-authoring` bundled skill carries the same checklist in
 agent-facing form.
