@@ -189,6 +189,27 @@ def _initialized_path(state_dir: Path) -> Path:
     return state_dir / STATE_DIR_NAME / INITIALIZED_FILE_NAME
 
 
+def _read_initialized_version(state_dir: Path) -> int | None:
+    path = _initialized_path(state_dir)
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ReactorStateError(
+            f"could not read event reactor initialized marker from {path}: {exc}"
+        ) from exc
+    if not raw.isdigit():
+        raise ReactorStateError(f"event reactor initialized marker is malformed: {path}")
+    version = int(raw)
+    if version not in (2, 3, STATE_VERSION):
+        raise ReactorStateError(
+            f"event reactor initialized marker version {version} is unsupported; "
+            f"expected 2, 3, or {STATE_VERSION}: {path}"
+        )
+    return version
+
+
 def _read_state_file(path: Path) -> dict[str, Any] | None:
     try:
         raw = path.read_text(encoding="utf-8")
@@ -207,65 +228,164 @@ def _read_state_file(path: Path) -> dict[str, Any] | None:
     return payload
 
 
+def _state_version(payload: dict[str, Any], *, path: Path) -> int:
+    """Validate and return an explicitly supported persisted-state version."""
+    if "version" not in payload:
+        if "cursor" in payload:
+            return 1
+        raise ReactorStateError(
+            f"event reactor state has no supported version or legacy cursor: {path}"
+        )
+    raw_version = payload["version"]
+    if isinstance(raw_version, bool) or not isinstance(raw_version, int):
+        raise ReactorStateError(f"event reactor state version must be an integer: {path}")
+    if raw_version not in (1, 2, 3, STATE_VERSION):
+        raise ReactorStateError(
+            f"event reactor state version {raw_version} is unsupported; "
+            f"supported versions are 1, 2, 3, and {STATE_VERSION}: {path}"
+        )
+    return raw_version
+
+
+def _normalize_state(payload: dict[str, Any], *, path: Path) -> dict[str, Any]:
+    """Normalize legacy cursors while rejecting ambiguous current state."""
+    if not payload:
+        raise ReactorStateError(f"event reactor state is empty: {path}")
+    version = _state_version(payload, path=path)
+    state = dict(payload)
+    if version == 1:
+        legacy = state.get("cursor")
+        if not isinstance(legacy, str):
+            raise ReactorStateError(f"event reactor version-1 state has an invalid cursor: {path}")
+        state = {
+            "version": 1,
+            "history_cursor": legacy,
+            "hivemind_cursor": legacy,
+            "last_dispatch": {},
+        }
+    else:
+        missing_cursors = [key for key in ("history_cursor", "hivemind_cursor") if key not in state]
+        if missing_cursors:
+            raise ReactorStateError(
+                "event reactor state is partial; missing cursor field(s): "
+                + ", ".join(missing_cursors)
+                + f": {path}"
+            )
+
+    last_dispatch = state.setdefault("last_dispatch", {})
+    if not isinstance(last_dispatch, dict):
+        raise ReactorStateError(
+            f"event reactor state field 'last_dispatch' must be an object: {path}"
+        )
+
+    if version == 3:
+        missing_maps = [key for key in ("history_offsets", "hivemind_files") if key not in state]
+        if missing_maps:
+            raise ReactorStateError(
+                "event reactor version-3 state is partial; missing positional map(s): "
+                + ", ".join(missing_maps)
+                + f": {path}"
+            )
+        for cutoff_key, watermark_key in (
+            ("history_migration_cutoffs", "history_migration_watermark"),
+            ("hivemind_migration_cutoffs", "hivemind_migration_watermark"),
+        ):
+            if (cutoff_key in state) != (watermark_key in state):
+                raise ReactorStateError(
+                    "event reactor version-3 migration state is partial; "
+                    f"{cutoff_key!r} and {watermark_key!r} must appear together: {path}"
+                )
+    elif version == STATE_VERSION:
+        missing_maps = [key for key in ("history_offsets", "hivemind_seen") if key not in state]
+        if missing_maps:
+            raise ReactorStateError(
+                f"event reactor version-{STATE_VERSION} state is partial; "
+                "missing positional map(s): " + ", ".join(missing_maps) + f": {path}"
+            )
+        if ("history_migration_cutoffs" in state) != ("history_migration_watermark" in state):
+            raise ReactorStateError(
+                f"event reactor version-{STATE_VERSION} migration state is partial; "
+                "'history_migration_cutoffs' and 'history_migration_watermark' "
+                f"must appear together: {path}"
+            )
+        has_hivemind_boundary = (
+            "hivemind_migration_existing" in state or "hivemind_migration_cutoffs" in state
+        )
+        if has_hivemind_boundary != ("hivemind_migration_watermark" in state):
+            raise ReactorStateError(
+                f"event reactor version-{STATE_VERSION} migration state is partial; "
+                "a hivemind migration boundary and 'hivemind_migration_watermark' "
+                f"must appear together: {path}"
+            )
+    return state
+
+
 def _load_state(state_dir: Path) -> dict[str, Any]:
     state_path = _state_path(state_dir)
+    initialized_version = _read_initialized_version(state_dir)
     payload = _read_state_file(state_path)
+    loaded_path = state_path
     if payload is None:
         # Migrate state written by earlier versions directly into the state
         # dir. The legacy file is removed on the next successful save, never
         # before, so a crash mid-migration cannot lose the cursors.
         legacy_path = state_dir / LEGACY_CURSOR_FILE_NAME
         payload = _read_state_file(legacy_path)
+        loaded_path = legacy_path
     if payload is None:
-        if _initialized_path(state_dir).exists():
+        if initialized_version is not None:
             raise ReactorStateError(
                 f"event reactor cursor is missing after initialization: {state_path}; "
                 "restore the cursor or remove the initialized marker only when an "
                 "explicit re-prime is intended"
             )
         return {}
-    if "version" not in payload and "cursor" in payload:
-        # v1 state kept a single shared cursor; both sources start from it.
-        legacy = payload.get("cursor")
-        legacy = legacy if isinstance(legacy, str) else ""
-        return {
-            "version": STATE_VERSION,
-            "history_cursor": legacy,
-            "hivemind_cursor": legacy,
-            "last_dispatch": {},
-        }
-    if not payload:
-        raise ReactorStateError(f"event reactor state is empty: {state_path}")
-    payload.setdefault("last_dispatch", {})
-    if not isinstance(payload.get("last_dispatch"), dict):
-        payload["last_dispatch"] = {}
-    return payload
+    state = _normalize_state(payload, path=loaded_path)
+    if loaded_path == state_path and state["version"] in (2, 3, STATE_VERSION):
+        if initialized_version != state["version"]:
+            raise ReactorStateError(
+                f"event reactor version-{state['version']} state is missing its matching "
+                f"initialized marker: {state_path}"
+            )
+    return state
 
 
 def _save_state(state_dir: Path, state: dict[str, Any]) -> None:
     """Persist reactor state atomically; raise :class:`ReactorStateError` on failure.
 
     The write goes through a temp file + ``os.replace`` so a crash or full
-    disk mid-write can never leave a truncated state file (which would read
-    as first-run and silently re-prime the cursors past the backlog). A
-    failure must propagate: an ack that silently didn't commit is the one
-    way this module can still lose events.
+    disk mid-write can never leave a truncated state file. The initialized
+    marker is atomically installed first when needed; a marker failure leaves
+    the old state authoritative, while a later first-state failure leaves the
+    marker behind to force an explicit repair instead of a silent re-prime. A
+    failure must propagate: an ack that silently didn't commit is the one way
+    this module can still lose events.
     """
     path = _state_path(state_dir)
+    marker_path = _initialized_path(state_dir)
     tmp_path = path.with_suffix(".json.tmp")
+    marker_tmp_path = marker_path.with_suffix(".tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path.write_text(
             json.dumps({**state, "version": STATE_VERSION}) + "\n",
             encoding="utf-8",
         )
+        # Establish the durable initialized sentinel before committing cursor
+        # offsets. If marker persistence fails, os.replace() below never runs
+        # and the previous cursor remains authoritative. If the later state
+        # replace fails during first use, the marker makes the next cycle fail
+        # closed instead of silently re-priming.
+        if _read_initialized_version(state_dir) != STATE_VERSION:
+            marker_tmp_path.write_text(f"{STATE_VERSION}\n", encoding="utf-8")
+            os.replace(marker_tmp_path, marker_path)
         os.replace(tmp_path, path)
-        _initialized_path(state_dir).write_text(f"{STATE_VERSION}\n", encoding="utf-8")
     except OSError as exc:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        for candidate in (tmp_path, marker_tmp_path):
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise ReactorStateError(f"could not persist event reactor state to {path}: {exc}") from exc
     try:
         (state_dir / LEGACY_CURSOR_FILE_NAME).unlink(missing_ok=True)
@@ -337,13 +457,39 @@ def _history_offset_snapshot(
     *,
     config: Any = None,
 ) -> dict[str, int]:
-    """Current append offsets used when priming or migrating state."""
+    """Last complete-record offsets used when priming or migrating state.
+
+    A writer may have appended only part of its next JSONL record. Capturing
+    raw ``st_size`` would checkpoint inside that record; after completion the
+    saved position would either skip its prefix or fail the boundary check.
+    Inspect at most one record-cap window from EOF and round down to the last
+    newline instead.
+    """
     snapshot: dict[str, int] = {}
     for path in _history_files(context_path, config=config):
         try:
-            snapshot[path.name] = path.stat().st_size
-        except OSError:
-            continue
+            with path.open("rb") as handle:
+                size = os.fstat(handle.fileno()).st_size
+                if size == 0:
+                    snapshot[path.name] = 0
+                    continue
+                start = max(0, size - (MAX_HISTORY_RECORD_BYTES + 1))
+                handle.seek(start)
+                tail = handle.read(MAX_HISTORY_RECORD_BYTES + 1)
+        except OSError as exc:
+            raise ReactorStateError(
+                f"could not snapshot history record boundary for {path}: {exc}"
+            ) from exc
+        newline = tail.rfind(b"\n")
+        if newline < 0:
+            if start > 0:
+                raise ReactorStateError(
+                    f"trailing partial history record exceeds "
+                    f"{MAX_HISTORY_RECORD_BYTES} bytes: {path}"
+                )
+            snapshot[path.name] = 0
+        else:
+            snapshot[path.name] = start + newline + 1
     return snapshot
 
 
@@ -457,7 +603,7 @@ def _read_deferred_history_event(
 
 def _history_events_since(
     context_path: Path,
-    cursor: datetime,
+    migration_watermark: datetime | None,
     until: datetime,
     *,
     config: Any = None,
@@ -480,8 +626,11 @@ def _history_events_since(
     bounds record payload reads after file discovery, without assuming callers
     append timestamp-monotonic records.
     ``migration_cutoffs`` marks bytes that predate an older timestamp-only
-    cursor; those records are filtered once while offsets catch up. Offsets are
-    returned separately and persist only when the enclosing batch is acked.
+    cursor. ``migration_watermark`` is that cursor's immutable value: the
+    normal delivery watermark may advance while a bounded migration drains,
+    but later out-of-order legacy records must still be compared with the
+    original cursor. Offsets are returned separately and persist only when the
+    enclosing batch is acked.
     """
     paths = _history_files(context_path, config=config)
     path_by_name = {path.name: path for path in paths}
@@ -539,17 +688,30 @@ def _history_events_since(
             break
         name = path.name
         offset = pending_offsets.get(name, 0)
+        handle = None
         try:
-            size = path.stat().st_size
+            handle = path.open("rb")
+            size = os.fstat(handle.fileno()).st_size
             if size < offset:
+                handle.close()
                 raise ReactorStateError(
                     f"history file shrank below its reactor checkpoint: {path} ({size} < {offset})"
                 )
-            handle = path.open("rb")
+            if offset:
+                handle.seek(offset - 1)
+                if handle.read(1) != b"\n":
+                    handle.close()
+                    raise ReactorStateError(
+                        f"history reactor checkpoint is not a record boundary: "
+                        f"{path} at offset {offset}"
+                    )
         except ReactorStateError:
             raise
         except OSError:
+            if handle is not None:
+                handle.close()
             continue
+        assert handle is not None
         with handle:
             handle.seek(offset)
             while handle.tell() < size:
@@ -596,7 +758,11 @@ def _history_events_since(
                     skipped += 1
                     continue
                 cutoff = pending_cutoffs.get(name, 0)
-                if line_start < cutoff and stamp <= cursor:
+                if (
+                    line_start < cutoff
+                    and migration_watermark is not None
+                    and stamp <= migration_watermark
+                ):
                     continue
                 if stamp > until:
                     pending_deferred.append(
@@ -854,15 +1020,22 @@ def _seen_from_legacy_checkpoints(
     inventory: dict[str, dict[str, _HivemindFile]],
     checkpoints: dict[str, str],
 ) -> dict[str, dict[str, str]]:
-    """Translate version-3 mtime checkpoints into exact extant identities."""
+    """Translate version-3 checkpoints without preserving their tuple-loss bug.
+
+    The old ``(mtime, filename)`` high-water mark cannot distinguish a newly
+    copied lower filename from one already delivered at the same mtime. Replay
+    the ambiguous same-mtime group (except the checkpoint file itself): an
+    at-least-once duplicate is safer than silently consuming a new message.
+    """
     seen: dict[str, dict[str, str]] = {}
     for directory, files in inventory.items():
         checkpoint = _decode_hivemind_checkpoint(checkpoints.get(directory, ""))
-        migrated = {
-            filename: item.signature
-            for filename, item in files.items()
-            if (item.mtime_ns, filename) <= checkpoint
-        }
+        migrated = {}
+        for filename, item in files.items():
+            if item.mtime_ns < checkpoint[0] or (
+                item.mtime_ns == checkpoint[0] and filename == checkpoint[1]
+            ):
+                migrated[filename] = item.signature
         if migrated:
             seen[directory] = migrated
     return seen
@@ -892,7 +1065,7 @@ def _hivemind_candidates(
 
 def _hivemind_events_since(
     context_path: Path,
-    cursor: datetime,
+    migration_watermark: datetime | None,
     until: datetime,
     *,
     config: Any = None,
@@ -1014,11 +1187,13 @@ def _hivemind_events_since(
         predates_legacy_cursor = bool(
             legacy_cutoff
             and (item.mtime_ns, item.filename) <= _decode_hivemind_checkpoint(legacy_cutoff)
-            and stamp <= cursor
+            and migration_watermark is not None
+            and stamp <= migration_watermark
         )
         existed_at_migration = (
             pending_migration.get(item.directory, {}).get(item.filename) == item.signature
-            and stamp <= cursor
+            and migration_watermark is not None
+            and stamp <= migration_watermark
         )
         mark_seen(item)
         if expires is not None and expires <= expiry_now:
@@ -1197,6 +1372,7 @@ class ReactorBatch:
             self._state["history_migration_cutoffs"] = self._pending_history_migration_cutoffs
         else:
             self._state.pop("history_migration_cutoffs", None)
+            self._state.pop("history_migration_watermark", None)
         if self._pending_history_deferred:
             self._state["history_deferred"] = [
                 reference.to_dict() for reference in self._pending_history_deferred
@@ -1220,6 +1396,11 @@ class ReactorBatch:
             self._state["hivemind_migration_cutoffs"] = self._pending_hivemind_legacy_cutoffs
         else:
             self._state.pop("hivemind_migration_cutoffs", None)
+        if (
+            not self._pending_hivemind_migration_existing
+            and not self._pending_hivemind_legacy_cutoffs
+        ):
+            self._state.pop("hivemind_migration_watermark", None)
         self._state.pop("hivemind_files", None)
         _save_state(self._state_dir, self._state)
         self.acked = True
@@ -1242,6 +1423,93 @@ def _source_watermark(events: list[ReactorEvent], stored: datetime) -> str:
         if stamp is not None and stamp > newest:
             newest = stamp
     return newest.astimezone(timezone.utc).isoformat()
+
+
+def _start_positional_migration(
+    context_path: Path,
+    state_dir: Path,
+    state: dict[str, Any],
+    *,
+    history_watermark: datetime,
+    hivemind_watermark: datetime,
+    config: Any = None,
+) -> dict[str, Any]:
+    """Atomically establish immutable v1/v2 migration boundaries.
+
+    Migration state is persisted before any events are exposed for dispatch.
+    That makes the source snapshots survive an unacked first batch: a
+    backdated append arriving between retries is after the fixed cutoff and
+    can never be reclassified as legacy input on the next cycle.
+    """
+    migrated = dict(state)
+    migrated["version"] = STATE_VERSION
+    migrated["history_offsets"] = {}
+    history_cutoffs = _history_offset_snapshot(context_path, config=config)
+    if history_cutoffs:
+        migrated["history_migration_cutoffs"] = history_cutoffs
+        migrated["history_migration_watermark"] = history_watermark.astimezone(
+            timezone.utc
+        ).isoformat()
+    else:
+        migrated.pop("history_migration_cutoffs", None)
+        migrated.pop("history_migration_watermark", None)
+
+    migrated["hivemind_seen"] = {}
+    migrated.pop("hivemind_files", None)
+    migrated.pop("hivemind_migration_cutoffs", None)
+    hivemind_existing = _hivemind_signature_snapshot(context_path, config=config)
+    if hivemind_existing:
+        migrated["hivemind_migration_existing"] = hivemind_existing
+        migrated["hivemind_migration_watermark"] = hivemind_watermark.astimezone(
+            timezone.utc
+        ).isoformat()
+    else:
+        migrated.pop("hivemind_migration_existing", None)
+        migrated.pop("hivemind_migration_watermark", None)
+    _save_state(state_dir, migrated)
+    return migrated
+
+
+def _upgrade_v3_state(
+    context_path: Path,
+    state_dir: Path,
+    state: dict[str, Any],
+    *,
+    config: Any = None,
+) -> dict[str, Any]:
+    """Persist a version-4 exact-identity shell before reading v3 state."""
+    checkpoints = _string_checkpoint_map(state["hivemind_files"], key="hivemind_files")
+    root = _hivemind_root(context_path, config=config)
+    inventory = _hivemind_inventory(root) if root is not None else {}
+    upgraded = dict(state)
+    upgraded["version"] = STATE_VERSION
+    upgraded["hivemind_seen"] = _seen_from_legacy_checkpoints(inventory, checkpoints)
+    upgraded.pop("hivemind_files", None)
+    _save_state(state_dir, upgraded)
+    return upgraded
+
+
+def _migration_watermark(
+    state: dict[str, Any],
+    *,
+    source: str,
+) -> datetime | None:
+    watermark_key = f"{source}_migration_watermark"
+    if source == "hivemind":
+        has_boundary = (
+            "hivemind_migration_existing" in state or "hivemind_migration_cutoffs" in state
+        )
+    else:
+        has_boundary = f"{source}_migration_cutoffs" in state
+    if not has_boundary:
+        return None
+    parsed = _parse_timestamp(str(state.get(watermark_key, "")))
+    if parsed is None:
+        raise ReactorStateError(
+            f"event reactor state has an invalid {watermark_key!r}; "
+            "repair the migration state explicitly"
+        )
+    return parsed
 
 
 @contextmanager
@@ -1292,9 +1560,11 @@ def open_event_batch(
 
         if fresh_state:
             history_stored = current
+            state["version"] = STATE_VERSION
             state["history_cursor"] = current.isoformat()
             hivemind_stored = current
             state["hivemind_cursor"] = current.isoformat()
+            state["last_dispatch"] = {}
             state["history_offsets"] = _history_offset_snapshot(context_path, config=config)
             state["hivemind_seen"] = _hivemind_signature_snapshot(context_path, config=config)
             _save_state(state_dir, state)
@@ -1324,47 +1594,41 @@ def open_event_batch(
                 + "; repair the state explicitly instead of skipping backlog"
             )
 
-        if "history_offsets" in state:
-            history_offsets = _offset_map(state["history_offsets"], key="history_offsets")
-            history_migration_cutoffs = _offset_map(
-                state.get("history_migration_cutoffs", {}),
-                key="history_migration_cutoffs",
+        if state["version"] in (1, 2):
+            state = _start_positional_migration(
+                context_path,
+                state_dir,
+                state,
+                history_watermark=history_stored,
+                hivemind_watermark=hivemind_stored,
+                config=config,
             )
-        else:
-            # Upgrade timestamp-only state without an unbounded catch-up read.
-            # Existing bytes are scanned in bounded slices and filtered against
-            # the old timestamp cursor; bytes appended after this snapshot are
-            # always delivered, even if their caller supplied an older stamp.
-            history_offsets = {}
-            history_migration_cutoffs = _history_offset_snapshot(context_path, config=config)
+        elif state["version"] == 3:
+            state = _upgrade_v3_state(
+                context_path,
+                state_dir,
+                state,
+                config=config,
+            )
+
+        history_offsets = _offset_map(state["history_offsets"], key="history_offsets")
+        history_migration_cutoffs = _offset_map(
+            state.get("history_migration_cutoffs", {}),
+            key="history_migration_cutoffs",
+        )
+        history_migration_watermark = _migration_watermark(state, source="history")
         history_deferred = _history_deferred_records(state.get("history_deferred", []))
 
-        legacy_hivemind_files: dict[str, str] | None = None
-        if "hivemind_files" in state:
-            legacy_hivemind_files = _string_checkpoint_map(
-                state["hivemind_files"], key="hivemind_files"
-            )
+        hivemind_seen = _nested_string_map(state["hivemind_seen"], key="hivemind_seen")
+        hivemind_migration_existing = _nested_string_map(
+            state.get("hivemind_migration_existing", {}),
+            key="hivemind_migration_existing",
+        )
         legacy_hivemind_cutoffs = _string_checkpoint_map(
             state.get("hivemind_migration_cutoffs", {}),
             key="hivemind_migration_cutoffs",
         )
-        if "hivemind_seen" in state:
-            hivemind_seen = _nested_string_map(state["hivemind_seen"], key="hivemind_seen")
-            hivemind_migration_existing = _nested_string_map(
-                state.get("hivemind_migration_existing", {}),
-                key="hivemind_migration_existing",
-            )
-        elif legacy_hivemind_files is not None:
-            root = _hivemind_root(context_path, config=config)
-            inventory = _hivemind_inventory(root) if root is not None else {}
-            hivemind_seen = _seen_from_legacy_checkpoints(inventory, legacy_hivemind_files)
-            hivemind_migration_existing = {}
-        else:
-            # Timestamp-only state: remember exact identities that existed at
-            # migration. A later copy is new even when its name and mtime are
-            # older than the timestamp cursor.
-            hivemind_seen = {}
-            hivemind_migration_existing = _hivemind_signature_snapshot(context_path, config=config)
+        hivemind_migration_watermark = _migration_watermark(state, source="hivemind")
         hivemind_malformed = _nested_string_map(
             state.get("hivemind_malformed", {}), key="hivemind_malformed"
         )
@@ -1379,7 +1643,7 @@ def open_event_batch(
             pending_history_deferred,
         ) = _history_events_since(
             context_path,
-            history_stored,
+            history_migration_watermark,
             ripe_until,
             config=config,
             offsets=history_offsets,
@@ -1399,7 +1663,7 @@ def open_event_batch(
             pending_hivemind_legacy_cutoffs,
         ) = _hivemind_events_since(
             context_path,
-            hivemind_stored,
+            hivemind_migration_watermark,
             ripe_until,
             config=config,
             seen=hivemind_seen,

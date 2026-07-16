@@ -55,14 +55,43 @@ def _write_history_event(
         handle.write(json.dumps(record) + "\n")
 
 
+def _write_legacy_v2_state(
+    state_path: Path,
+    *,
+    history_cursor: datetime = NOW,
+    hivemind_cursor: datetime = NOW,
+) -> Path:
+    state_path.mkdir(parents=True, exist_ok=True)
+    path = state_path / "event_reactor_cursor.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "history_cursor": history_cursor.isoformat(),
+                "hivemind_cursor": hivemind_cursor.isoformat(),
+                "last_dispatch": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def _write_hivemind_message(
     context_path: Path,
     *,
-    filename: str,
     timestamp: datetime,
     topic: str,
+    filename: str | None = None,
+    name: str | None = None,
     from_agent: str = "afs-watch",
+    mtime_ns: int | None = None,
 ) -> Path:
+    if filename is None:
+        if name is None:
+            raise ValueError("filename or name is required")
+        filename = f"{name}.json"
     directory = context_path / "hivemind" / from_agent
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / filename
@@ -80,6 +109,8 @@ def _write_hivemind_message(
         ),
         encoding="utf-8",
     )
+    if mtime_ns is not None:
+        os.utime(path, ns=(mtime_ns, mtime_ns))
     return path
 
 
@@ -361,18 +392,13 @@ def test_timestamp_only_state_migrates_without_replay_or_backdated_loss(
 ) -> None:
     context = tmp_path / "context"
     state = tmp_path / "state"
-    _collect(context, state, now=NOW)
     _write_history_event(
         context,
         event_type="error",
         op="legacy-old",
         timestamp=NOW - timedelta(minutes=10),
     )
-
-    cursor_path = state / "event_reactor" / "cursor.json"
-    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
-    payload.pop("history_offsets", None)
-    cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    _write_legacy_v2_state(state)
 
     assert _collect(context, state, now=NOW + timedelta(seconds=30)) == []
     migrated = _load_state(state)
@@ -389,6 +415,134 @@ def test_timestamp_only_state_migrates_without_replay_or_backdated_loss(
     )
     events = _collect(context, state, now=NOW + timedelta(minutes=1))
     assert [event.label() for event in events] == ["error:new-backdated"]
+
+
+def test_history_v2_migration_keeps_watermark_and_cutoff_across_cycles(
+    tmp_path: Path,
+) -> None:
+    """An out-of-order legacy tail and a post-snapshot append are both kept.
+
+    The first batch is deliberately left unacked. Migration boundaries must
+    already be durable at that point or the append would be reclassified as
+    pre-migration input on the retry.
+    """
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _write_history_event(
+        context,
+        event_type="error",
+        op="legacy-newest-first",
+        timestamp=NOW + timedelta(seconds=30),
+    )
+    _write_history_event(
+        context,
+        event_type="error",
+        op="legacy-older-later",
+        timestamp=NOW + timedelta(seconds=10),
+    )
+    _write_legacy_v2_state(state)
+
+    with open_event_batch(
+        context,
+        state,
+        now=NOW + timedelta(minutes=1),
+        max_events=1,
+    ) as batch:
+        assert [event.detail for event in batch.events] == ["legacy-newest-first"]
+        # No ack: the v4 migration shell itself is the only safe early commit.
+
+    migration = _load_state(state)
+    cutoff = dict(migration["history_migration_cutoffs"])
+    assert migration["version"] == 4
+    assert migration["history_offsets"] == {}
+    assert migration["history_migration_watermark"] == NOW.isoformat()
+
+    _write_history_event(
+        context,
+        event_type="error",
+        op="post-snapshot-backdated",
+        timestamp=NOW - timedelta(seconds=30),
+    )
+    assert _load_state(state)["history_migration_cutoffs"] == cutoff
+
+    seen: list[str] = []
+    for cycle in range(2, 5):
+        with open_event_batch(
+            context,
+            state,
+            now=NOW + timedelta(minutes=cycle),
+            max_events=1,
+        ) as batch:
+            seen.extend(event.detail for event in batch.events)
+            batch.ack()
+
+    assert seen == [
+        "legacy-newest-first",
+        "legacy-older-later",
+        "post-snapshot-backdated",
+    ]
+    migrated = _load_state(state)
+    assert "history_migration_cutoffs" not in migrated
+    assert "history_migration_watermark" not in migrated
+
+
+@pytest.mark.parametrize("legacy_v2", [False, True], ids=["prime", "v2-migration"])
+def test_history_snapshot_rounds_partial_record_to_complete_newline(
+    tmp_path: Path,
+    legacy_v2: bool,
+) -> None:
+    """A partial JSONL append cannot become a prime or migration cutoff."""
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    history = context / "history"
+    history.mkdir(parents=True)
+    path = history / f"events_{NOW:%Y%m%d}.jsonl"
+    record = (
+        json.dumps(
+            {
+                "timestamp": (NOW - timedelta(seconds=30)).isoformat(),
+                "type": "error",
+                "op": "inflight",
+            }
+        )
+        + "\n"
+    )
+    split = len(record) // 2
+    path.write_text(record[:split], encoding="utf-8")
+    if legacy_v2:
+        _write_legacy_v2_state(state)
+
+    # Leave the migration batch unacked, matching the original loss repro.
+    with open_event_batch(
+        context,
+        state,
+        now=NOW + timedelta(minutes=1),
+        max_events=1,
+    ) as batch:
+        assert batch.events == []
+
+    shell = _load_state(state)
+    assert shell["version"] == 4
+    if legacy_v2:
+        assert shell["history_offsets"] == {}
+        assert shell["history_migration_cutoffs"][path.name] == 0
+    else:
+        assert shell["history_offsets"][path.name] == 0
+
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(record[split:])
+
+    seen: list[str] = []
+    for cycle in range(2, 5):
+        with open_event_batch(
+            context,
+            state,
+            now=NOW + timedelta(minutes=cycle),
+            max_events=1,
+        ) as batch:
+            seen.extend(event.detail for event in batch.events)
+            batch.ack()
+    assert seen == ["inflight"]
 
 
 def test_offset_checkpoint_safely_splits_a_timestamp_group(tmp_path: Path) -> None:
@@ -599,6 +753,74 @@ def test_new_hivemind_file_with_backdated_mtime_is_delivered(tmp_path: Path) -> 
     assert [event.detail for event in events] == ["context:copied"]
 
 
+def test_v4_exact_identity_delivers_same_mtime_lower_filename(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    shared_mtime = 1_700_000_000_000_000_000
+    _write_hivemind_message(
+        context,
+        filename="z-seen.json",
+        timestamp=NOW - timedelta(seconds=40),
+        topic="context:first",
+        mtime_ns=shared_mtime,
+    )
+    assert [event.detail for event in _collect(context, state, now=NOW)] == ["context:first"]
+
+    _write_hivemind_message(
+        context,
+        filename="a-new.json",
+        timestamp=NOW - timedelta(seconds=30),
+        topic="context:lower",
+        mtime_ns=shared_mtime,
+    )
+    events = _collect(context, state, now=NOW + timedelta(seconds=30))
+    assert [event.detail for event in events] == ["context:lower"]
+
+
+def test_v3_upgrade_replays_ambiguous_same_mtime_lower_filename(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    shared_mtime = 1_700_000_000_000_000_000
+    _write_hivemind_message(
+        context,
+        filename="z-checkpoint.json",
+        timestamp=NOW - timedelta(seconds=40),
+        topic="context:already-seen",
+        mtime_ns=shared_mtime,
+    )
+    _write_hivemind_message(
+        context,
+        filename="a-ambiguous.json",
+        timestamp=NOW - timedelta(seconds=30),
+        topic="context:must-replay",
+        mtime_ns=shared_mtime,
+    )
+    reactor_state = state / "event_reactor"
+    reactor_state.mkdir(parents=True)
+    (reactor_state / "cursor.json").write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "history_cursor": (NOW - timedelta(minutes=1)).isoformat(),
+                "hivemind_cursor": (NOW - timedelta(minutes=1)).isoformat(),
+                "last_dispatch": {},
+                "history_offsets": {},
+                "hivemind_files": {"afs-watch": f"{shared_mtime}:z-checkpoint.json"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (reactor_state / "initialized").write_text("3\n", encoding="utf-8")
+
+    events = _collect(context, state, now=NOW + timedelta(minutes=1))
+    assert [event.detail for event in events] == ["context:must-replay"]
+    assert _load_state(state)["version"] == 4
+
+
 def test_future_hivemind_file_does_not_block_ripe_candidate(tmp_path: Path) -> None:
     context = tmp_path / "context"
     state = tmp_path / "state"
@@ -627,6 +849,70 @@ def test_future_hivemind_file_does_not_block_ripe_candidate(tmp_path: Path) -> N
     third = _collect(context, state, now=NOW + timedelta(minutes=6))
     assert [event.detail for event in third] == ["context:future"]
     assert "hivemind_deferred" not in _load_state(state)
+
+
+def test_hivemind_v2_migration_keeps_watermark_and_cutoff_across_cycles(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    base_mtime = 1_700_000_000_000_000_000
+    _write_hivemind_message(
+        context,
+        name="legacy-first",
+        topic="legacy:newest-first",
+        timestamp=NOW + timedelta(seconds=30),
+        mtime_ns=base_mtime,
+    )
+    _write_hivemind_message(
+        context,
+        name="legacy-second",
+        topic="legacy:older-later",
+        timestamp=NOW + timedelta(seconds=10),
+        mtime_ns=base_mtime + 1,
+    )
+    _write_legacy_v2_state(state)
+
+    with open_event_batch(
+        context,
+        state,
+        now=NOW + timedelta(minutes=1),
+        max_events=1,
+    ) as batch:
+        assert [event.detail for event in batch.events] == ["legacy:newest-first"]
+        batch.ack()
+
+    migration = _load_state(state)
+    existing = {
+        directory: dict(files)
+        for directory, files in migration["hivemind_migration_existing"].items()
+    }
+    assert migration["hivemind_migration_watermark"] == NOW.isoformat()
+
+    _write_hivemind_message(
+        context,
+        name="post-snapshot",
+        topic="post-snapshot:backdated",
+        timestamp=NOW - timedelta(seconds=30),
+        mtime_ns=base_mtime + 2,
+    )
+    assert _load_state(state)["hivemind_migration_existing"] == existing
+
+    seen: list[str] = []
+    for cycle in range(2, 4):
+        with open_event_batch(
+            context,
+            state,
+            now=NOW + timedelta(minutes=cycle),
+            max_events=1,
+        ) as batch:
+            seen.extend(event.detail for event in batch.events)
+            batch.ack()
+
+    assert seen == ["legacy:older-later", "post-snapshot:backdated"]
+    migrated = _load_state(state)
+    assert "hivemind_migration_existing" not in migrated
+    assert "hivemind_migration_watermark" not in migrated
 
 
 def test_concurrent_reactor_is_locked_out(tmp_path: Path) -> None:
@@ -686,6 +972,37 @@ def test_legacy_state_file_is_migrated_and_removed(tmp_path: Path) -> None:
 
     assert (state / "event_reactor" / "cursor.json").exists()
     assert not legacy.exists()
+
+
+def test_version_2_subdirectory_state_and_marker_are_upgraded(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    reactor_state = state / "event_reactor"
+    reactor_state.mkdir(parents=True)
+    (reactor_state / "cursor.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "history_cursor": NOW.isoformat(),
+                "hivemind_cursor": NOW.isoformat(),
+                "last_dispatch": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (reactor_state / "initialized").write_text("2\n", encoding="utf-8")
+    _write_history_event(
+        context,
+        event_type="error",
+        op="after-v2",
+        timestamp=NOW + timedelta(seconds=10),
+    )
+
+    events = _collect(context, state, now=NOW + timedelta(minutes=1))
+    assert [event.label() for event in events] == ["error:after-v2"]
+    assert _load_state(state)["version"] == 4
+    assert (reactor_state / "initialized").read_text(encoding="utf-8") == "4\n"
 
 
 def test_state_lives_outside_agent_state_namespace(tmp_path: Path) -> None:
@@ -818,7 +1135,6 @@ def test_corrupt_positional_checkpoints_fail_closed(tmp_path: Path) -> None:
 
     for key, value in (
         ("history_offsets", {"events.jsonl": -1}),
-        ("hivemind_files", {"agent": "not-a-checkpoint"}),
         ("hivemind_seen", {"agent": {"message.json": "not-an-identity"}}),
     ):
         payload = dict(valid)
@@ -829,6 +1145,137 @@ def test_corrupt_positional_checkpoints_fail_closed(tmp_path: Path) -> None:
                 raise AssertionError(f"invalid {key} was accepted")
         except ReactorStateError:
             pass
+
+
+@pytest.mark.parametrize("missing_key", ["history_offsets", "hivemind_seen"])
+def test_partial_v4_positional_state_fails_closed(
+    tmp_path: Path,
+    missing_key: str,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW)
+    cursor_path = state / "event_reactor" / "cursor.json"
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+    payload.pop(missing_key)
+    cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ReactorStateError, match="partial.*positional map"):
+        with open_event_batch(context, state, now=NOW + timedelta(minutes=1)):
+            pass
+
+
+@pytest.mark.parametrize("version", [0, 5, "4", True])
+def test_unsupported_or_ambiguous_state_version_fails_closed(
+    tmp_path: Path,
+    version: object,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW)
+    cursor_path = state / "event_reactor" / "cursor.json"
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+    payload["version"] = version
+    cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ReactorStateError, match="version"):
+        with open_event_batch(context, state, now=NOW + timedelta(minutes=1)):
+            pass
+
+
+@pytest.mark.parametrize(
+    ("cutoff_key", "watermark_key"),
+    [
+        ("history_migration_cutoffs", "history_migration_watermark"),
+        ("hivemind_migration_existing", "hivemind_migration_watermark"),
+        ("hivemind_migration_cutoffs", "hivemind_migration_watermark"),
+    ],
+)
+def test_partial_v4_migration_pair_fails_closed(
+    tmp_path: Path,
+    cutoff_key: str,
+    watermark_key: str,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW)
+    cursor_path = state / "event_reactor" / "cursor.json"
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+    payload[cutoff_key] = {}
+    payload.pop(watermark_key, None)
+    cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ReactorStateError, match="migration state is partial"):
+        with open_event_batch(context, state, now=NOW + timedelta(minutes=1)):
+            pass
+
+
+def test_history_checkpoint_must_be_at_newline_boundary(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _write_history_event(
+        context,
+        event_type="error",
+        op="existing",
+        timestamp=NOW - timedelta(minutes=1),
+    )
+    _collect(context, state, now=NOW)
+    cursor_path = state / "event_reactor" / "cursor.json"
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+    history_name = next(iter(payload["history_offsets"]))
+    payload["history_offsets"][history_name] = 1
+    cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ReactorStateError, match="not a record boundary"):
+        with open_event_batch(context, state, now=NOW + timedelta(minutes=1)):
+            pass
+
+
+def test_marker_failure_cannot_commit_migration_offsets(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from afs.agents import event_reactor as reactor_module
+
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _write_history_event(
+        context,
+        event_type="error",
+        op="must-redeliver",
+        timestamp=NOW + timedelta(seconds=10),
+    )
+    legacy_path = _write_legacy_v2_state(state)
+    original_legacy = legacy_path.read_bytes()
+    cursor_path = state / "event_reactor" / "cursor.json"
+    marker_path = state / "event_reactor" / "initialized"
+    replace_destinations: list[Path] = []
+    original_replace = reactor_module.os.replace
+
+    def _fail_marker_replace(source, destination) -> None:
+        target = Path(destination)
+        replace_destinations.append(target)
+        if target == marker_path:
+            raise PermissionError("marker blocked")
+        original_replace(source, destination)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(reactor_module.os, "replace", _fail_marker_replace)
+        with pytest.raises(ReactorStateError, match="marker blocked"):
+            with open_event_batch(
+                context,
+                state,
+                now=NOW + timedelta(minutes=1),
+            ):
+                pass
+
+    assert replace_destinations == [marker_path]
+    assert legacy_path.read_bytes() == original_legacy
+    assert not cursor_path.exists()
+    assert not marker_path.exists()
+
+    events = _collect(context, state, now=NOW + timedelta(minutes=2))
+    assert [event.label() for event in events] == ["error:must-redeliver"]
 
 
 def test_missing_initialized_cursor_requires_explicit_reprime(tmp_path: Path) -> None:

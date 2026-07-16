@@ -63,23 +63,40 @@ Delivery is transactional, at-least-once:
   Source discovery still enumerates the extant history log filenames and all
   final hivemind `*.json` metadata each cycle. Those filesystem walks (and the
   hivemind identity map) are proportional to live files, not bounded to 500.
-  The exact hivemind inventory is required to find
-  a newly copied file even when its filename and mtime are older than every
-  previously delivered file. Payload contents remain bounded and larger
-  backlogs resume across cycles. History checkpoints are append-position based,
-  so a newly appended event is delivered even if its caller supplied a
-  backdated timestamp. One caveat: hivemind messages carry an optional TTL
-  enforced at read time, so a message that expires while waiting out a long
-  drain or an unacked crash window is gone when its redelivery cycle arrives.
+  The exact hivemind inventory is required to find a newly copied file even
+  when its filename and mtime are older than every previously delivered file.
+  Payload contents remain bounded and larger backlogs resume across cycles.
+  History checkpoints are append-position based, so a newly appended event is
+  delivered even if its caller supplied a backdated timestamp. Prime and
+  migration snapshots round history offsets down to the last complete newline,
+  so an in-flight partial JSONL append is never checkpointed or skipped.
+- Timestamp-only v1/v2 state migrates through a version-4 shell persisted
+  before its first dispatch. The shell keeps immutable timestamp watermarks,
+  complete-record history cutoffs, and exact identities for hivemind files
+  extant at the snapshot until each legacy slice drains. Consequently, an
+  unacked retry cannot move the boundary, later out-of-order legacy records
+  are still evaluated against the original cursor, and post-snapshot
+  backdated appends remain new. Version-3 tuple checkpoints are upgraded to
+  version 4 before reading; ambiguous same-mtime lower filenames replay rather
+  than risk silent loss. Strict bounds may split a same-timestamp group, which
+  is safe because byte/exact-identity checkpoints resume the remainder. One
+  caveat: hivemind messages carry an optional TTL enforced at read time, so a
+  message that expires while waiting out a long drain or an unacked crash
+  window is gone when its redelivery cycle arrives.
 - The version-4 cursor state (`supervisor/event_reactor/cursor.json`) keeps
   independent per-source watermarks, history offsets/deferred references, and
-  exact identities for extant hivemind files. It is
-  primed to "now" only for a genuinely
-  new state, so enabling the reactor never replays historical events as a
-  spawn storm. Once initialized, a missing, unreadable, malformed, or partial
-  cursor fails closed with `reactor_state_error`; repair is explicit and no
-  backlog is silently skipped. An adjacent `initialized` marker distinguishes
-  first use from accidental cursor deletion.
+  exact identities for extant hivemind files. It is primed to "now" only for
+  a genuinely new state, so enabling the reactor never replays historical
+  events as a spawn storm. Once initialized, a missing, unreadable, malformed,
+  or partial cursor fails closed with `reactor_state_error`; repair is explicit
+  and no backlog is silently skipped. Only explicit v1/v2 state may enter
+  timestamp migration; version-3 state may enter the one-way exact-identity
+  upgrade.
+  Unsupported versions, incomplete version-4 positional maps or migration
+  pairs, and history offsets that are not newline boundaries are rejected. An
+  adjacent `initialized` marker distinguishes first use from accidental cursor
+  deletion. The marker is committed before cursor offsets, so failure to
+  persist it cannot consume a batch.
 - Complete malformed history records are skipped and counted. A malformed
   hivemind identity is retried for one acked cycle in case an external writer
   was still copying it; only the same unchanged identity on the next cycle is
