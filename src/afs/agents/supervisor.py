@@ -37,6 +37,7 @@ from .event_reactor import (
     ReactorBatch,
     ReactorBusyError,
     ReactorEvent,
+    ReactorStateError,
     match_event_rules,
     open_event_batch,
 )
@@ -1318,15 +1319,21 @@ class AgentSupervisor:
             return []
         from ..agent_jobs import AgentJobQueue
 
-        resolved_config = self._config or load_config_model(merge_user=True)
-        queue = AgentJobQueue(resolved_config.general.context_root)
-        queue.ensure()
-        active_keys = {
-            job.dedupe_key
-            for status in ("queue", "running")
-            for job in queue.list(status=status)
-            if job.dedupe_key
-        }
+        try:
+            resolved_config = self._config or load_config_model(merge_user=True)
+            queue = AgentJobQueue(resolved_config.general.context_root)
+            queue.ensure()
+            active_keys = {
+                job.dedupe_key
+                for status in ("queue", "running")
+                for job in queue.list(status=status)
+                if job.dedupe_key
+            }
+        except Exception:  # noqa: BLE001 - an unusable queue must defer ack
+            _log.exception("Event job queue is unavailable")
+            for config, _reason in matches:
+                batch.mark_dispatch_failed(config.name)
+            return []
         created: list[str] = []
         for config, reason in matches:
             existing = self.status(config.name)
@@ -1354,12 +1361,17 @@ class AgentSupervisor:
                     else config.description
                 )
             ).strip()
-            job = queue.create(
-                title=f"{config.name}: react to {reason}",
-                prompt=prompt,
-                created_by=AGENT_NAME,
-                dedupe_key=dedupe_key,
-            )
+            try:
+                job = queue.create(
+                    title=f"{config.name}: react to {reason}",
+                    prompt=prompt,
+                    created_by=AGENT_NAME,
+                    dedupe_key=dedupe_key,
+                )
+            except Exception:  # noqa: BLE001 - a failed enqueue must defer ack
+                _log.exception("Could not enqueue event job for '%s'", config.name)
+                batch.mark_dispatch_failed(config.name)
+                continue
             active_keys.add(dedupe_key)
             batch.mark_dispatched(config.name)
             created.append(job.id)
@@ -1427,6 +1439,13 @@ class AgentSupervisor:
                     )
                 )
             except RuntimeError:
+                if event_batch and config.name in event_candidates:
+                    # Acking over a failed event spawn would consume the
+                    # event with zero deliveries; deferring ack redelivers
+                    # it. The failed attempt's started_at debounces the
+                    # retry, and a persistent failure opens the circuit
+                    # breaker, whose gate then lets the cursor advance.
+                    event_batch.mark_dispatch_failed(config.name)
                 continue
             if event_batch and config.name in event_candidates:
                 # Debounce keys off actual dispatches, so only a spawn that
@@ -1567,6 +1586,8 @@ def _run_once(
     reactor_skipped = 0
     reactor_truncated = False
     reactor_busy = False
+    reactor_dispatch_failures = 0
+    reactor_state_error = False
     try:
         with open_event_batch(
             config.general.context_root,
@@ -1589,9 +1610,33 @@ def _run_once(
                 profile.agent_configs,
                 now=_now_utc(),
             )
-            batch.ack()
+            reactor_dispatch_failures = batch.dispatch_failures
+            if not batch.dispatch_failures:
+                batch.prune_dispatch(c.name for c in profile.agent_configs)
+                try:
+                    batch.ack()
+                except ReactorStateError:
+                    # Cursors did not commit: the batch redelivers next
+                    # cycle instead of being lost. Dispatches that did
+                    # happen stay debounced by job dedupe keys and the
+                    # started agents' own state.
+                    _log.exception("Event reactor ack failed")
+                    reactor_state_error = True
     except ReactorBusyError:
         reactor_busy = True
+        started_agents = supervisor.reconcile(
+            profile.agent_configs,
+            event="on_boot" if first_run else None,
+            changed_paths=changed_paths,
+            now=_now_utc(),
+        )
+        event_jobs = []
+    except ReactorStateError:
+        # Priming could not be persisted (unwritable state dir): run the
+        # cycle without event handling rather than replaying history against
+        # cursors that can never advance.
+        _log.exception("Event reactor state is unwritable; skipping events")
+        reactor_state_error = True
         started_agents = supervisor.reconcile(
             profile.agent_configs,
             event="on_boot" if first_run else None,
@@ -1611,6 +1656,13 @@ def _run_once(
         notes.append(f"{reactor_skipped} malformed reactor records skipped")
     if reactor_busy:
         notes.append("reactor lock contended; events deferred one cycle")
+    if reactor_dispatch_failures:
+        notes.append(
+            f"{reactor_dispatch_failures} event dispatch(es) failed; "
+            "batch unacked for redelivery"
+        )
+    if reactor_state_error:
+        notes.append("reactor state not persisted; cursors unchanged")
     if first_run:
         notes.append("boot reconciliation complete")
     result = AgentResult(
@@ -1627,6 +1679,8 @@ def _run_once(
             "reactor_skipped_malformed": reactor_skipped,
             "reactor_truncated": int(reactor_truncated),
             "reactor_busy": int(reactor_busy),
+            "reactor_dispatch_failures": reactor_dispatch_failures,
+            "reactor_state_error": int(reactor_state_error),
             "event_jobs": len(event_jobs),
             "running_agents": int(audit["counts"]["running"]),
             "failed_agents": int(audit["counts"]["failed"]),

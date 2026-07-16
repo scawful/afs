@@ -11,6 +11,8 @@ from afs.agents.event_reactor import (
     ReactorBatch,
     ReactorBusyError,
     ReactorEvent,
+    ReactorStateError,
+    _cut_at_timestamp_boundary,
     _load_state,
     match_event_rules,
     open_event_batch,
@@ -263,7 +265,9 @@ def test_hivemind_backlog_is_not_sliced_to_newest(tmp_path: Path) -> None:
     context = tmp_path / "context"
     (context / "hivemind").mkdir(parents=True)
     state = tmp_path / "state"
-    _collect(context, state, now=NOW - timedelta(seconds=60))
+    # bus.send stamps at the real wall clock, so cycles anchor on real time.
+    base = datetime.now(timezone.utc)
+    _collect(context, state, now=base - timedelta(seconds=60))
 
     bus = HivemindBus(context)
     for index in range(5):
@@ -272,19 +276,16 @@ def test_hivemind_backlog_is_not_sliced_to_newest(tmp_path: Path) -> None:
     drained: list[str] = []
     for cycle in range(1, 10):
         with open_event_batch(
-            context, state, now=NOW + timedelta(minutes=cycle), max_events=2
+            context, state, now=base + timedelta(minutes=cycle), max_events=2
         ) as batch:
-            # bus.send also logs "send" history events; only the delivered
-            # topics are under test here.
-            drained.extend(
-                event.detail
-                for event in batch.events
-                if event.detail.startswith("context:repair")
-            )
+            drained.extend(event.detail for event in batch.events)
             batch.ack()
             if not batch.events:
                 break
-    # All five arrive oldest-first; nothing was dropped by a newest-N slice.
+    # All five arrive oldest-first, nothing was dropped by a newest-N slice,
+    # and each message arrives exactly once: bus.send's history mirror (a
+    # type "hivemind" record with op "send") is excluded from the history
+    # source, so one send never yields two events.
     assert drained == [f"context:repair{index}" for index in range(5)]
 
 
@@ -313,6 +314,183 @@ def test_legacy_v1_cursor_is_migrated(tmp_path: Path) -> None:
     )
     events = _collect(context, state, now=NOW + timedelta(seconds=30))
     assert [event.label() for event in events] == ["error:boom"]
+
+
+def test_legacy_state_file_is_migrated_and_removed(tmp_path: Path) -> None:
+    """State written directly into the state dir moves to the subdirectory."""
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    legacy = state / "event_reactor_cursor.json"
+    legacy.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "history_cursor": (NOW - timedelta(seconds=60)).isoformat(),
+                "hivemind_cursor": (NOW - timedelta(seconds=60)).isoformat(),
+                "last_dispatch": {"keep": (NOW - timedelta(seconds=45)).isoformat()},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _write_history_event(
+        context, event_type="error", op="boom", timestamp=NOW - timedelta(seconds=30)
+    )
+
+    with open_event_batch(context, state, now=NOW) as batch:
+        # Cursors were honored (no re-prime), and dispatch times survived.
+        assert [event.label() for event in batch.events] == ["error:boom"]
+        assert batch.last_dispatch("keep") is not None
+        batch.ack()
+
+    assert (state / "event_reactor" / "cursor.json").exists()
+    assert not legacy.exists()
+
+
+def test_state_lives_outside_agent_state_namespace(tmp_path: Path) -> None:
+    """The supervisor treats top-level *.json in the state dir as agent state,
+    so the cursor file must not surface there as a phantom agent."""
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW)
+    assert list(state.glob("*.json")) == []
+    assert (state / "event_reactor" / "cursor.json").exists()
+
+
+def test_recently_stamped_events_are_deferred_one_cycle(tmp_path: Path) -> None:
+    """Writers stamp before their write lands; events younger than the grace
+    window must not be consumed, or the watermark could pass an in-flight
+    write forever."""
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(seconds=60))
+    _write_history_event(
+        context, event_type="error", op="young", timestamp=NOW - timedelta(seconds=2)
+    )
+
+    assert _collect(context, state, now=NOW) == []
+    # Once the stamp is older than the grace window it is delivered.
+    events = _collect(context, state, now=NOW + timedelta(seconds=10))
+    assert [event.label() for event in events] == ["error:young"]
+
+
+def test_cursor_never_advances_past_undelivered_stamps(tmp_path: Path) -> None:
+    """A write stamped before a batch's *now* but landing after it must still
+    be delivered later: the watermark tracks delivered events, bounded by the
+    ripeness cutoff, never *now* itself."""
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(seconds=60))
+    _write_history_event(
+        context, event_type="error", op="early", timestamp=NOW - timedelta(seconds=30)
+    )
+    events = _collect(context, state, now=NOW)
+    assert [event.label() for event in events] == ["error:early"]
+
+    # Lands only now, but was stamped before the previous batch ran.
+    _write_history_event(
+        context, event_type="error", op="late", timestamp=NOW - timedelta(seconds=2)
+    )
+    events = _collect(context, state, now=NOW + timedelta(seconds=10))
+    assert [event.label() for event in events] == ["error:late"]
+
+
+def test_ack_failure_raises_and_batch_redelivers(tmp_path: Path) -> None:
+    """A cursor commit that cannot persist must fail loudly: swallowing it
+    would read as first-run next cycle and silently drop the backlog."""
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(seconds=60))
+    _write_history_event(
+        context, event_type="error", op="boom", timestamp=NOW - timedelta(seconds=30)
+    )
+
+    state_subdir = state / "event_reactor"
+    try:
+        with open_event_batch(context, state, now=NOW) as batch:
+            assert [event.label() for event in batch.events] == ["error:boom"]
+            state_subdir.chmod(0o500)
+            try:
+                batch.ack()
+                raise AssertionError("ack persisted into a read-only state dir")
+            except ReactorStateError:
+                pass
+            assert batch.acked is False
+    finally:
+        state_subdir.chmod(0o755)
+
+    # Cursors were untouched, so the event redelivers.
+    events = _collect(context, state, now=NOW + timedelta(seconds=30))
+    assert [event.label() for event in events] == ["error:boom"]
+
+
+def test_one_corrupt_cursor_reprimes_only_that_source(tmp_path: Path) -> None:
+    """A mangled hivemind cursor must not drop the history backlog too."""
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(seconds=60))
+    cursor_path = state / "event_reactor" / "cursor.json"
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+    payload["hivemind_cursor"] = "not a timestamp"
+    cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    _write_history_event(
+        context, event_type="error", op="boom", timestamp=NOW - timedelta(seconds=30)
+    )
+
+    with open_event_batch(context, state, now=NOW) as batch:
+        assert [event.label() for event in batch.events] == ["error:boom"]
+        batch.ack()
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+    assert payload["hivemind_cursor"] == NOW.isoformat()
+
+
+def test_day_grace_reads_files_named_for_the_previous_day(tmp_path: Path) -> None:
+    """A writer whose local date lags the cursor's UTC date files events under
+    yesterday's name; the scan must still read that file."""
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(seconds=60))
+
+    history = context / "history"
+    history.mkdir(parents=True, exist_ok=True)
+    skewed_name = f"events_{(NOW - timedelta(days=1)):%Y%m%d}.jsonl"
+    record = {
+        "id": "abc123",
+        "timestamp": (NOW - timedelta(seconds=30)).isoformat(),
+        "type": "error",
+        "op": "skewed",
+        "source": "test",
+        "metadata": {},
+    }
+    (history / skewed_name).write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    events = _collect(context, state, now=NOW)
+    assert [event.label() for event in events] == ["error:skewed"]
+
+
+def test_boundary_cut_handles_nonpositive_limit_and_whole_group() -> None:
+    distinct = [_event("error", str(index), offset_seconds=index) for index in range(4)]
+    assert _cut_at_timestamp_boundary(distinct, 0) == (distinct, False)
+    assert _cut_at_timestamp_boundary(distinct, -1) == (distinct, False)
+
+    # A single same-instant group larger than the limit is kept whole, and
+    # only reports truncation when a remainder actually exists.
+    group = [_event("error", str(index)) for index in range(4)]
+    assert _cut_at_timestamp_boundary(group, 2) == (group, False)
+    tail = group + [_event("error", "tail", offset_seconds=5)]
+    kept, truncated = _cut_at_timestamp_boundary(tail, 2)
+    assert kept == group
+    assert truncated is True
+
+
+def test_prune_dispatch_drops_unconfigured_agents(tmp_path: Path) -> None:
+    batch = _make_batch(tmp_path / "state", [])
+    batch.mark_dispatched("kept")
+    batch.mark_dispatched("removed")
+    batch.prune_dispatch(["kept"])
+    assert batch.last_dispatch("kept") is not None
+    assert batch.last_dispatch("removed") is None
 
 
 # ---------------------------------------------------------------------------
@@ -411,8 +589,10 @@ def test_reconcile_spawns_for_event_batch(tmp_path: Path, monkeypatch) -> None:
     batch = _make_batch(tmp_path / "state", [_event("hivemind", "context:repair")])
     supervisor.reconcile([config], event_batch=batch, now=NOW)
     assert spawned == [("reactor", "event:hivemind:context:repair")]
-    # The spawn raised, so no dispatch was recorded for debounce.
+    # The spawn raised, so no dispatch was recorded for debounce, and the
+    # failure was counted so the caller defers ack and redelivers.
     assert batch.last_dispatch("reactor") is None
+    assert batch.dispatch_failures == 1
 
 
 def test_successful_event_spawn_marks_dispatch(tmp_path: Path, monkeypatch) -> None:
@@ -464,6 +644,25 @@ def test_enqueue_event_jobs_dedupes_while_queued(tmp_path: Path) -> None:
     assert len(jobs) == 1
     assert jobs[0].dedupe_key == "on_event:jobber"
     assert "event:error:boom" in jobs[0].title
+
+
+def test_failed_job_enqueue_defers_ack(tmp_path: Path, monkeypatch) -> None:
+    """A job that never reached the queue must not count as dispatched."""
+    from afs.agent_jobs import AgentJobQueue
+
+    def _boom(self, **kwargs):
+        raise RuntimeError("queue write failed")
+
+    monkeypatch.setattr(AgentJobQueue, "create", _boom)
+    supervisor = _supervisor(tmp_path)
+    config = AgentConfig(
+        name="jobber", module="x.y", on_event=["error"], on_event_action="job"
+    )
+    batch = _make_batch(tmp_path / "state", [_event("error", "boom")])
+
+    assert supervisor.enqueue_event_jobs(batch, [config], now=NOW) == []
+    assert batch.last_dispatch("jobber") is None
+    assert batch.dispatch_failures == 1
 
 
 def test_event_jobs_respect_supervisor_gates(tmp_path: Path, monkeypatch) -> None:

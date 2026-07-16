@@ -4,29 +4,35 @@ The supervisor's reconcile loop opens an :func:`open_event_batch` each cycle:
 events are read oldest-first from both sources under an exclusive lock, the
 supervisor dispatches matches against ``AgentConfig.on_event`` patterns, and
 only then acks the batch. Cursors never advance before dispatch, so a crash
-mid-cycle redelivers instead of losing events (at-least-once delivery); the
-persisted per-agent dispatch times make redelivery safe, and the lock closes
-the read->dispatch->ack window against concurrent supervisors so a batch is
-never double-dispatched.
+mid-cycle redelivers instead of losing events (at-least-once delivery).
+Redelivery is kept safe by three overlapping guards — dispatch times
+persisted at ack, job dedupe keys that live as long as the job is queued or
+running, and the started agent's own state — and the lock closes the
+read->dispatch->ack window against concurrent supervisors holding the same
+state directory, so a batch is never double-dispatched on one host.
 
 Pattern grammar: ``"<kind>"`` or ``"<kind>:<detail>"``, both sides fnmatch
 globs. ``kind`` is the history event ``type`` (``mcp_tool``, ``error``,
 ``agent_lifecycle``, ...) or the literal ``hivemind``; ``detail`` is the
 history event ``op`` or the hivemind topic. Only the first ``:`` splits, so
-``hivemind:context:repair`` matches topic ``context:repair``.
+``hivemind:context:repair`` matches topic ``context:repair``. The hivemind
+bus is the canonical source for ``hivemind`` events: history records of type
+``hivemind`` (the send-op mirror of each bus message) are excluded so one
+message never yields two events.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from ..context_paths import resolve_mount_root
 from ..history import EVENT_FILE_PREFIX
@@ -36,7 +42,13 @@ from .guardrails import _file_lock
 
 _log = logging.getLogger(__name__)
 
-CURSOR_FILE_NAME = "event_reactor_cursor.json"
+# Reactor state lives in its own subdirectory: the supervisor treats every
+# top-level *.json in the state dir as an agent state file, so a sibling
+# cursor file would surface as a phantom agent (and an agent with the same
+# name would clobber the cursors).
+STATE_DIR_NAME = "event_reactor"
+CURSOR_FILE_NAME = "cursor.json"
+LEGACY_CURSOR_FILE_NAME = "event_reactor_cursor.json"
 STATE_VERSION = 2
 DEFAULT_EVENT_DEBOUNCE_SECONDS = 300.0
 HIVEMIND_KIND = "hivemind"
@@ -44,6 +56,10 @@ HIVEMIND_KIND = "hivemind"
 # across cycles (oldest first) instead of being dropped or read unbounded.
 MAX_EVENTS_PER_CYCLE = 500
 LOCK_TIMEOUT_SECONDS = 5.0
+# Writers stamp events before the write lands (history hashes and may write a
+# payload file first). Events younger than this are deferred one cycle so the
+# watermark can never advance past a stamped-but-not-yet-visible write.
+WATERMARK_GRACE_SECONDS = 5.0
 
 VALID_EVENT_ACTIONS = ("spawn", "job")
 
@@ -53,6 +69,15 @@ _LABEL_MAX = 80
 
 class ReactorBusyError(RuntimeError):
     """Another process holds the reactor cursor lock for this context."""
+
+
+class ReactorStateError(RuntimeError):
+    """Reactor cursor state could not be persisted.
+
+    Raised instead of being swallowed: a failed cursor commit that looked
+    successful would silently re-prime on the next cycle and drop the
+    unacked backlog. Leaving the cursors unchanged redelivers instead.
+    """
 
 
 @dataclass(frozen=True)
@@ -130,15 +155,25 @@ def _parse_timestamp(raw: str) -> datetime | None:
 
 
 def _state_path(state_dir: Path) -> Path:
-    return state_dir / CURSOR_FILE_NAME
+    return state_dir / STATE_DIR_NAME / CURSOR_FILE_NAME
+
+
+def _read_state_file(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _load_state(state_dir: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(_state_path(state_dir).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(payload, dict):
+    payload = _read_state_file(_state_path(state_dir))
+    if payload is None:
+        # Migrate state written by earlier versions directly into the state
+        # dir. The legacy file is removed on the next successful save, never
+        # before, so a crash mid-migration cannot lose the cursors.
+        payload = _read_state_file(state_dir / LEGACY_CURSOR_FILE_NAME)
+    if payload is None:
         return {}
     if "version" not in payload and "cursor" in payload:
         # v1 state kept a single shared cursor; both sources start from it.
@@ -157,14 +192,35 @@ def _load_state(state_dir: Path) -> dict[str, Any]:
 
 
 def _save_state(state_dir: Path, state: dict[str, Any]) -> None:
+    """Persist reactor state atomically; raise :class:`ReactorStateError` on failure.
+
+    The write goes through a temp file + ``os.replace`` so a crash or full
+    disk mid-write can never leave a truncated state file (which would read
+    as first-run and silently re-prime the cursors past the backlog). A
+    failure must propagate: an ack that silently didn't commit is the one
+    way this module can still lose events.
+    """
+    path = _state_path(state_dir)
+    tmp_path = path.with_suffix(".json.tmp")
     try:
-        state_dir.mkdir(parents=True, exist_ok=True)
-        _state_path(state_dir).write_text(
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text(
             json.dumps({**state, "version": STATE_VERSION}) + "\n",
             encoding="utf-8",
         )
-    except OSError as exc:  # state loss degrades to re-priming, never crashes
-        _log.warning("Could not persist event reactor state: %s", exc)
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ReactorStateError(
+            f"could not persist event reactor state to {path}: {exc}"
+        ) from exc
+    try:
+        (state_dir / LEGACY_CURSOR_FILE_NAME).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -178,38 +234,49 @@ def _cut_at_timestamp_boundary(
     """Truncate an oldest-first event list without splitting a timestamp group.
 
     Cursors are timestamps, so cutting in the middle of a group of events that
-    share one timestamp would skip the rest of the group forever (the next
-    cycle reads strictly-greater-than the cursor). The cut lands on the last
-    complete timestamp boundary; if every event shares one timestamp the whole
-    group is kept even when it exceeds the limit.
+    share one instant would skip the rest of the group forever (the next
+    cycle reads strictly-greater-than the cursor). Grouping compares parsed
+    timestamps, not raw strings, so ``Z`` vs ``+00:00`` spellings of the same
+    instant stay in one group. The cut lands on the last complete boundary;
+    if every event shares one instant the whole group is kept even when it
+    exceeds the limit. A non-positive limit means unbounded.
     """
-    if len(events) <= limit:
+    if limit <= 0 or len(events) <= limit:
         return events, False
-    boundary_stamp = events[limit - 1].timestamp
-    if events[limit].timestamp != boundary_stamp:
+    stamps = [_parse_timestamp(event.timestamp) for event in events]
+    boundary_stamp = stamps[limit - 1]
+    if stamps[limit] != boundary_stamp:
         # The cut already falls on a timestamp boundary.
         return events[:limit], True
     # The cut would split a same-timestamp group: back off to the previous
     # distinct timestamp so the whole group arrives together next cycle.
     cut = limit
-    while cut > 0 and events[cut - 1].timestamp == boundary_stamp:
+    while cut > 0 and stamps[cut - 1] == boundary_stamp:
         cut -= 1
     if cut == 0:
         # One giant same-timestamp group: keep it whole rather than lose it.
         cut = limit
-        while cut < len(events) and events[cut].timestamp == boundary_stamp:
+        while cut < len(stamps) and stamps[cut] == boundary_stamp:
             cut += 1
-    return events[:cut], True
+    return events[:cut], cut < len(events)
+
+
+def _event_sort_key(event: ReactorEvent) -> datetime:
+    # Every ingested event passed the parse filter, so this cannot be None;
+    # parsed comparison keeps mixed Z/+00:00/fractional spellings in order
+    # where raw string comparison would not.
+    return _parse_timestamp(event.timestamp) or datetime.min.replace(tzinfo=timezone.utc)
 
 
 def _history_events_since(
     context_path: Path,
     cursor: datetime,
+    until: datetime,
     *,
     config: Any = None,
     limit: int = MAX_EVENTS_PER_CYCLE,
 ) -> tuple[list[ReactorEvent], bool, int]:
-    """Oldest-first history events after ``cursor``: (events, truncated, skipped)."""
+    """Oldest-first history events in ``(cursor, until]``: (events, truncated, skipped)."""
     try:
         history_root = resolve_mount_root(context_path, MountType.HISTORY, config=config)
     except Exception:  # noqa: BLE001 - missing mounts must not break reconcile
@@ -217,10 +284,13 @@ def _history_events_since(
     if not history_root.exists():
         return [], False, 0
 
-    # History files are daily (events_YYYYMMDD.jsonl); files whose date is
-    # before the cursor's day cannot contain newer events, so the scan is
-    # bounded by the cursor instead of the full history.
-    cursor_stamp = cursor.strftime("%Y%m%d")
+    # History files are daily (events_YYYYMMDD.jsonl); files dated before the
+    # cursor's day cannot contain newer events, so the scan is bounded by the
+    # cursor instead of the full history. One day of grace covers filenames
+    # stamped in a writer's local day that differs from the cursor's UTC day.
+    cursor_stamp = (
+        cursor.astimezone(timezone.utc) - timedelta(days=1)
+    ).strftime("%Y%m%d")
     events: list[ReactorEvent] = []
     skipped = 0
     for path in sorted(history_root.glob(f"{EVENT_FILE_PREFIX}_*.jsonl")):
@@ -244,13 +314,20 @@ def _history_events_since(
                 skipped += 1
                 continue
             try:
+                kind = str(record.get("type", ""))
+                if kind == HIVEMIND_KIND:
+                    # The bus is the canonical hivemind source; its history
+                    # mirror (op "send") would double-deliver every message
+                    # under a bare "hivemind" pattern with an op, not a
+                    # topic, in the detail slot.
+                    continue
                 stamp = _parse_timestamp(str(record.get("timestamp", "")))
-                if stamp is None or stamp <= cursor:
+                if stamp is None or stamp <= cursor or stamp > until:
                     continue
                 metadata = record.get("metadata")
                 events.append(
                     ReactorEvent(
-                        kind=str(record.get("type", "")),
+                        kind=kind,
                         detail=str(record.get("op", "") or ""),
                         source=str(record.get("source", "")),
                         timestamp=str(record.get("timestamp", "")),
@@ -260,7 +337,7 @@ def _history_events_since(
             except Exception:  # noqa: BLE001 - one bad record never stops ingestion
                 skipped += 1
                 continue
-    events.sort(key=lambda event: event.timestamp)
+    events.sort(key=_event_sort_key)
     events, truncated = _cut_at_timestamp_boundary(events, limit)
     return events, truncated, skipped
 
@@ -268,11 +345,12 @@ def _history_events_since(
 def _hivemind_events_since(
     context_path: Path,
     cursor: datetime,
+    until: datetime,
     *,
     config: Any = None,
     limit: int = MAX_EVENTS_PER_CYCLE,
 ) -> tuple[list[ReactorEvent], bool, int]:
-    """Oldest-first hivemind events after ``cursor``: (events, truncated, skipped)."""
+    """Oldest-first hivemind events in ``(cursor, until]``: (events, truncated, skipped)."""
     try:
         from ..hivemind import HivemindBus
 
@@ -287,7 +365,7 @@ def _hivemind_events_since(
     for message in messages:
         try:
             stamp = _parse_timestamp(message.timestamp)
-            if stamp is None or stamp <= cursor:
+            if stamp is None or stamp <= cursor or stamp > until:
                 continue
             events.append(
                 ReactorEvent(
@@ -301,7 +379,7 @@ def _hivemind_events_since(
         except Exception:  # noqa: BLE001 - one bad message never stops ingestion
             skipped += 1
             continue
-    events.sort(key=lambda event: event.timestamp)
+    events.sort(key=_event_sort_key)
     events, truncated = _cut_at_timestamp_boundary(events, limit)
     return events, truncated, skipped
 
@@ -324,6 +402,7 @@ class ReactorBatch:
     _pending_hivemind_cursor: str
     _now: datetime
     acked: bool = False
+    dispatch_failures: int = 0
 
     def last_dispatch(self, agent_name: str) -> datetime | None:
         """Persisted time of the last event-triggered dispatch for an agent."""
@@ -331,14 +410,40 @@ class ReactorBatch:
         return _parse_timestamp(raw) if isinstance(raw, str) else None
 
     def mark_dispatched(self, agent_name: str) -> None:
-        """Record an actual dispatch (spawn or job enqueue) for debounce."""
+        """Record an actual dispatch (spawn or job enqueue) for debounce.
+
+        In memory until ack() persists it: in the crash window before ack the
+        job dedupe key and the started agent's own state are what suppress
+        duplicates, not this table.
+        """
         self._state.setdefault("last_dispatch", {})[agent_name] = self._now.isoformat()
 
+    def mark_dispatch_failed(self, agent_name: str) -> None:
+        """Record that an event-triggered dispatch failed.
+
+        The caller must then skip ack() so the batch is redelivered: acking
+        over a failed dispatch would consume the event with zero deliveries.
+        """
+        _log.warning(
+            "Event dispatch for agent '%s' failed; deferring ack for redelivery",
+            agent_name,
+        )
+        self.dispatch_failures += 1
+
+    def prune_dispatch(self, active_names: Iterable[str]) -> None:
+        """Drop persisted dispatch times for agents no longer configured."""
+        table = self._state.get("last_dispatch", {})
+        keep = set(active_names)
+        for name in [key for key in table if key not in keep]:
+            table.pop(name, None)
+
     def ack(self) -> None:
-        """Commit the cursor advance. Call only after dispatch succeeded.
+        """Commit the cursor advance. Call only after every dispatch succeeded.
 
         Skipping ack (or crashing before it) leaves the cursors unchanged, so
         the same events are redelivered next cycle instead of being lost.
+        Raises :class:`ReactorStateError` when the commit itself cannot be
+        persisted — the batch then counts as unacked and redelivers.
         """
         self._state["history_cursor"] = self._pending_history_cursor
         self._state["hivemind_cursor"] = self._pending_hivemind_cursor
@@ -350,16 +455,19 @@ def _source_watermark(events: list[ReactorEvent], stored: datetime) -> str:
     """Cursor value a source may advance to after this batch is dispatched.
 
     The cursor only ever advances to the newest event actually delivered —
-    never to ``now`` — so a truncated backlog arrives next cycle and a write
-    that lands mid-read with an earlier stamp is picked up later instead of
-    being skipped forever.
+    never to ``now`` — so a truncated backlog arrives next cycle. Because
+    delivered events are bounded by the ripeness cutoff (``now`` minus
+    :data:`WATERMARK_GRACE_SECONDS`), a writer that stamped an event before
+    the read but landed it after is still ahead of the cursor as long as its
+    stamp-to-land delay is under the grace window; without the cutoff such a
+    write would be skipped forever.
     """
     newest = stored
     for event in events:
         stamp = _parse_timestamp(event.timestamp)
         if stamp is not None and stamp > newest:
             newest = stamp
-    return newest.isoformat()
+    return newest.astimezone(timezone.utc).isoformat()
 
 
 @contextmanager
@@ -371,18 +479,28 @@ def open_event_batch(
     now: datetime | None = None,
     max_events: int = MAX_EVENTS_PER_CYCLE,
     lock_timeout: float = LOCK_TIMEOUT_SECONDS,
+    grace_seconds: float = WATERMARK_GRACE_SECONDS,
 ) -> Iterator[ReactorBatch]:
     """Read new events under an exclusive per-context lock.
 
     The lock is held for the whole with-block (read -> dispatch -> ack), so
-    two supervisors reconciling the same context can never both deliver one
-    batch. Raises :class:`ReactorBusyError` when the lock is contended — the
-    caller skips event handling for that cycle and retries on the next.
+    two supervisors sharing this state directory can never both deliver one
+    batch (the lock is advisory and host-local: a second supervisor pointed
+    at a different ``AFS_AGENT_STATE_DIR``, or another host on a synced
+    filesystem, is outside its reach). Raises :class:`ReactorBusyError` when
+    the lock is contended — the caller skips event handling for that cycle
+    and retries on the next.
 
-    The first call primes the cursors to *now* and yields an empty batch, so
-    enabling the reactor never replays weeks of history as a spawn storm.
+    Events stamped within ``grace_seconds`` of *now* are deferred one cycle:
+    writers stamp before their write lands, so consuming right up to *now*
+    could advance the watermark past a stamped-but-in-flight event.
+
+    A missing or unreadable cursor is primed to *now* per source, so first
+    enabling the reactor never replays weeks of history as a spawn storm and
+    one corrupt cursor never drops the other source's backlog.
     """
     current = now or datetime.now(timezone.utc)
+    ripe_until = current - timedelta(seconds=max(grace_seconds, 0.0))
     with ExitStack() as stack:
         try:
             stack.enter_context(_file_lock(_state_path(state_dir), timeout=lock_timeout))
@@ -395,33 +513,46 @@ def open_event_batch(
         history_stored = _parse_timestamp(str(state.get("history_cursor", "")))
         hivemind_stored = _parse_timestamp(str(state.get("hivemind_cursor", "")))
 
-        if history_stored is None or hivemind_stored is None:
-            primed = current.isoformat()
-            state["history_cursor"] = primed
-            state["hivemind_cursor"] = primed
+        primed_sources: list[str] = []
+        if history_stored is None:
+            history_stored = current
+            state["history_cursor"] = current.isoformat()
+            primed_sources.append("history")
+        if hivemind_stored is None:
+            hivemind_stored = current
+            state["hivemind_cursor"] = current.isoformat()
+            primed_sources.append("hivemind")
+        if primed_sources:
+            if len(primed_sources) < 2:
+                # A fresh install primes both; one missing cursor on an
+                # initialized state means corruption or manual edits.
+                _log.warning(
+                    "Event reactor cursor for %s was missing or unreadable; "
+                    "primed to now, its pre-cursor backlog is skipped",
+                    ", ".join(primed_sources),
+                )
             _save_state(state_dir, state)
+        if len(primed_sources) == 2:
             yield ReactorBatch(
                 events=[],
                 truncated=False,
                 skipped_malformed=0,
                 _state_dir=state_dir,
                 _state=state,
-                _pending_history_cursor=primed,
-                _pending_hivemind_cursor=primed,
+                _pending_history_cursor=state["history_cursor"],
+                _pending_hivemind_cursor=state["hivemind_cursor"],
                 _now=current,
                 acked=True,
             )
             return
 
         history_events, history_truncated, history_skipped = _history_events_since(
-            context_path, history_stored, config=config, limit=max_events
+            context_path, history_stored, ripe_until, config=config, limit=max_events
         )
         hivemind_events, hivemind_truncated, hivemind_skipped = _hivemind_events_since(
-            context_path, hivemind_stored, config=config, limit=max_events
+            context_path, hivemind_stored, ripe_until, config=config, limit=max_events
         )
-        events = sorted(
-            history_events + hivemind_events, key=lambda event: event.timestamp
-        )
+        events = sorted(history_events + hivemind_events, key=_event_sort_key)
         skipped = history_skipped + hivemind_skipped
         if skipped:
             _log.warning("Event reactor skipped %d malformed record(s)", skipped)

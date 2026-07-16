@@ -63,15 +63,19 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
   CLI registration failures, and surfaced doctor/plugin reports.
 - Event reactor: `on_event` agent start conditions match history events and
   hivemind messages with `"<kind>[:<detail>]"` fnmatch patterns. Delivery is
-  transactional — events are read oldest-first under an exclusive per-context
-  lock with bounded per-cycle batches, dispatched, and only then acked, so a
-  crash redelivers instead of losing events and concurrent supervisors never
-  double-deliver. Unknown `on_event_action` values fail closed; the `job`
-  action passes the same supervisor gates as spawns and embeds only sanitized
-  event labels in prompts; debounce (`event_debounce`, default 5m) is
-  persisted per agent so it also covers job actions; malformed records are
-  skipped and counted; and `AgentConfig` round-trips now preserve custom
-  mapping keys.
+  transactional — events are read oldest-first under an exclusive lock with
+  bounded per-cycle batches, dispatched, and only then acked via an atomic
+  state commit, so a crash redelivers instead of losing events and
+  supervisors sharing a state directory never double-deliver. A failed
+  dispatch defers the ack (redelivery, not silent consumption); events
+  stamped within a short grace window are deferred one cycle so the
+  watermark cannot pass an in-flight write; cursors prime per source.
+  Unknown `on_event_action` values fail closed; the `job` action passes the
+  same supervisor gates as spawns and embeds only sanitized event labels in
+  prompts; debounce (`event_debounce`, default 5m) is persisted at ack so it
+  also covers job actions; malformed records are skipped and counted; the
+  hivemind bus is canonical (history mirrors of sends are excluded); and
+  `AgentConfig` round-trips now preserve custom mapping keys.
 
 ### Changed
 
