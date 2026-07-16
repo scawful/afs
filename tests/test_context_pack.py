@@ -34,6 +34,10 @@ def _make_manager(tmp_path: Path) -> AFSManager:
     return manager
 
 
+def _section_bodies(pack: dict) -> str:
+    return "\n".join(section["body"] for section in pack["sections"])
+
+
 def test_build_context_pack_respects_sensitivity_and_budget(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     context_root = manager.config.general.context_root
@@ -536,7 +540,7 @@ def test_stable_prefix_hash_ignores_scratchpad_and_task_drift(tmp_path: Path) ->
         task="Task A",
         model="gemini",
         workflow="edit_fast",
-        token_budget=900,
+        token_budget=4000,
     )
 
     # Change scratchpad content
@@ -549,8 +553,14 @@ def test_stable_prefix_hash_ignores_scratchpad_and_task_drift(tmp_path: Path) ->
         task="Task B",
         model="gemini",
         workflow="edit_fast",
-        token_budget=900,
+        token_budget=4000,
     )
+
+    # Section cost includes absolute paths, so a tight budget under a deep
+    # tmp_path (e.g. pytest-xdist basetemp) can evict the knowledge section
+    # and make this equality vacuous. Assert the premise explicitly.
+    assert "stable reference doc" in _section_bodies(first)
+    assert "stable reference doc" in _section_bodies(second)
 
     # stable_prefix_hash should match (scratchpad is volatile, excluded)
     assert first["cache"]["stable_prefix_hash"] == second["cache"]["stable_prefix_hash"]
@@ -576,7 +586,7 @@ def test_stable_prefix_hash_changes_when_knowledge_changes(tmp_path: Path) -> No
         context_root,
         query="knowledge",
         model="gemini",
-        token_budget=700,
+        token_budget=4000,
     )
 
     (knowledge_root / "ref.md").write_text("knowledge version B", encoding="utf-8")
@@ -590,8 +600,15 @@ def test_stable_prefix_hash_changes_when_knowledge_changes(tmp_path: Path) -> No
         context_root,
         query="knowledge",
         model="gemini",
-        token_budget=700,
+        token_budget=4000,
     )
+
+    # Guard the premise: if the budget ever evicts the knowledge section
+    # (its cost includes the absolute file path, which grows under deep
+    # tmp_path roots), both packs render identically and the hash
+    # comparison below fails without naming the real cause.
+    assert "knowledge version A" in _section_bodies(first)
+    assert "knowledge version B" in _section_bodies(second)
 
     assert first["cache"]["stable_prefix_hash"] != second["cache"]["stable_prefix_hash"]
 
