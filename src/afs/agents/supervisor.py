@@ -33,9 +33,12 @@ from ..schema import AFSConfig, AgentConfig
 from .base import AgentResult, build_base_parser, configure_logging, emit_result, now_iso
 from .event_reactor import (
     DEFAULT_EVENT_DEBOUNCE_SECONDS,
+    VALID_EVENT_ACTIONS,
+    ReactorBatch,
+    ReactorBusyError,
     ReactorEvent,
-    collect_new_events,
     match_event_rules,
+    open_event_batch,
 )
 
 _log = logging.getLogger(__name__)
@@ -1250,18 +1253,38 @@ class AgentSupervisor:
         agent_configs: list[AgentConfig],
         *,
         now: datetime | None = None,
+        batch: ReactorBatch | None = None,
     ) -> list[tuple[AgentConfig, str]]:
-        """Match reactor events against on_event rules with per-agent debounce."""
+        """Match reactor events against on_event rules with per-agent debounce.
+
+        Configs with an unknown ``on_event_action`` are skipped entirely (fail
+        closed): a typo must never fall through to a spawn. Debounce checks
+        the persisted per-agent dispatch time from the reactor state first —
+        job actions never start an agent, so the agent's own start time cannot
+        debounce them — and the agent's last start as a fallback.
+        """
         current = now or _now_utc()
         results: list[tuple[AgentConfig, str]] = []
         for config, reason in match_event_rules(events, agent_configs):
+            if config.on_event_action not in VALID_EVENT_ACTIONS:
+                _log.warning(
+                    "Agent '%s' has invalid on_event_action %r "
+                    "(valid: %s); skipping its event trigger",
+                    config.name,
+                    config.on_event_action,
+                    ", ".join(VALID_EVENT_ACTIONS),
+                )
+                continue
+            debounce = self._event_debounce_seconds(config)
+            dispatched = batch.last_dispatch(config.name) if batch else None
+            if dispatched and (current - dispatched).total_seconds() < debounce:
+                continue
             existing = self.status(config.name)
             if existing:
                 last_start = _parse_timestamp(existing.started_at)
                 if (
                     last_start
-                    and (current - last_start).total_seconds()
-                    < self._event_debounce_seconds(config)
+                    and (current - last_start).total_seconds() < debounce
                 ):
                     continue
             results.append((config, reason))
@@ -1269,20 +1292,25 @@ class AgentSupervisor:
 
     def enqueue_event_jobs(
         self,
-        events: list[ReactorEvent],
+        batch: ReactorBatch,
         agent_configs: list[AgentConfig],
         *,
         now: datetime | None = None,
     ) -> list[str]:
         """Enqueue agent-jobs for on_event matches with action \"job\".
 
-        A job is skipped while another job with the same dedupe key is still
-        queued or running, so event bursts collapse into one pending job.
+        Job enqueues pass the same authorization gates as event spawns —
+        circuit breaker / manual stop / dependency checks — so ``job`` is a
+        delivery mode, not a bypass. The whole read->enqueue window runs
+        inside the reactor batch lock, so the queued/running dedupe check
+        cannot race a concurrent supervisor. Prompts are built from operator
+        config plus the sanitized event label only; event payload text never
+        reaches a job prompt.
         """
         matches = [
             (config, reason)
             for config, reason in self.evaluate_event_records(
-                events, agent_configs, now=now
+                batch.events, agent_configs, now=now, batch=batch
             )
             if config.on_event_action == "job"
         ]
@@ -1301,6 +1329,20 @@ class AgentSupervisor:
         }
         created: list[str] = []
         for config, reason in matches:
+            existing = self.status(config.name)
+            if existing and (
+                existing.state in ("running", "awaiting_review", "circuit_open")
+                or existing.manually_stopped
+            ):
+                continue
+            ready, dep_reason = self._check_dependencies(
+                config.name, config, agent_configs,
+            )
+            if not ready:
+                _log.info(
+                    "Skipping event job for '%s': %s", config.name, dep_reason
+                )
+                continue
             dedupe_key = f"on_event:{config.name}"
             if dedupe_key in active_keys:
                 continue
@@ -1319,6 +1361,7 @@ class AgentSupervisor:
                 dedupe_key=dedupe_key,
             )
             active_keys.add(dedupe_key)
+            batch.mark_dispatched(config.name)
             created.append(job.id)
         return created
 
@@ -1328,10 +1371,11 @@ class AgentSupervisor:
         *,
         event: str | None = None,
         changed_paths: list[Path] | None = None,
-        event_records: list[ReactorEvent] | None = None,
+        event_batch: ReactorBatch | None = None,
         now: datetime | None = None,
     ) -> list[RunningAgent]:
         candidates: dict[str, tuple[AgentConfig, str]] = {}
+        event_candidates: set[str] = set()
         for config in agent_configs:
             if config.auto_start:
                 candidates.setdefault(config.name, (config, "auto_start"))
@@ -1341,13 +1385,15 @@ class AgentSupervisor:
         if changed_paths:
             for config in self.evaluate_watch_paths(changed_paths, agent_configs):
                 candidates.setdefault(config.name, (config, "file_watch"))
-        if event_records:
+        if event_batch and event_batch.events:
             for config, reason in self.evaluate_event_records(
-                event_records, agent_configs, now=now
+                event_batch.events, agent_configs, now=now, batch=event_batch
             ):
                 if config.on_event_action == "job":
                     continue  # enqueue_event_jobs owns the job action
-                candidates.setdefault(config.name, (config, reason))
+                if config.name not in candidates:
+                    candidates[config.name] = (config, reason)
+                    event_candidates.add(config.name)
         for config in self.due_schedules(agent_configs, now=now):
             candidates.setdefault(config.name, (config, f"schedule:{config.schedule}"))
 
@@ -1382,6 +1428,10 @@ class AgentSupervisor:
                 )
             except RuntimeError:
                 continue
+            if event_batch and config.name in event_candidates:
+                # Debounce keys off actual dispatches, so only a spawn that
+                # really happened advances the agent's dispatch time.
+                event_batch.mark_dispatched(config.name)
 
         # After spawning, check for targeted handoff-driven agents.
         # We scan for any agents that completed during this reconcile cycle
@@ -1508,30 +1558,59 @@ def _run_once(
         if previous_watch_state
         else []
     )
-    event_records = collect_new_events(
-        config.general.context_root,
-        supervisor._state_dir,
-        config=config,
-        now=_now_utc(),
-    )
-    started_agents = supervisor.reconcile(
-        profile.agent_configs,
-        event="on_boot" if first_run else None,
-        changed_paths=changed_paths,
-        event_records=event_records,
-        now=_now_utc(),
-    )
-    event_jobs = supervisor.enqueue_event_jobs(
-        event_records,
-        profile.agent_configs,
-        now=_now_utc(),
-    )
+    # Event handling is transactional: dispatch happens inside the batch and
+    # the cursor only advances on ack afterwards, so a crash mid-dispatch
+    # redelivers next cycle instead of losing events. A contended lock means
+    # another supervisor owns this cycle's events — skip them, never double
+    # deliver.
+    reactor_event_count = 0
+    reactor_skipped = 0
+    reactor_truncated = False
+    reactor_busy = False
+    try:
+        with open_event_batch(
+            config.general.context_root,
+            supervisor._state_dir,
+            config=config,
+            now=_now_utc(),
+        ) as batch:
+            reactor_event_count = len(batch.events)
+            reactor_skipped = batch.skipped_malformed
+            reactor_truncated = batch.truncated
+            started_agents = supervisor.reconcile(
+                profile.agent_configs,
+                event="on_boot" if first_run else None,
+                changed_paths=changed_paths,
+                event_batch=batch,
+                now=_now_utc(),
+            )
+            event_jobs = supervisor.enqueue_event_jobs(
+                batch,
+                profile.agent_configs,
+                now=_now_utc(),
+            )
+            batch.ack()
+    except ReactorBusyError:
+        reactor_busy = True
+        started_agents = supervisor.reconcile(
+            profile.agent_configs,
+            event="on_boot" if first_run else None,
+            changed_paths=changed_paths,
+            now=_now_utc(),
+        )
+        event_jobs = []
     audit = supervisor.audit()
     notes: list[str] = []
     if changed_paths:
         notes.append("watch-path changes detected")
-    if event_records:
-        notes.append(f"{len(event_records)} new reactor events")
+    if reactor_event_count:
+        notes.append(f"{reactor_event_count} new reactor events")
+    if reactor_truncated:
+        notes.append("reactor backlog truncated; remainder next cycle")
+    if reactor_skipped:
+        notes.append(f"{reactor_skipped} malformed reactor records skipped")
+    if reactor_busy:
+        notes.append("reactor lock contended; events deferred one cycle")
     if first_run:
         notes.append("boot reconciliation complete")
     result = AgentResult(
@@ -1544,7 +1623,10 @@ def _run_once(
             "configured_agents": len(profile.agent_configs),
             "started_agents": len(started_agents),
             "changed_watch_paths": len(changed_paths),
-            "reactor_events": len(event_records),
+            "reactor_events": reactor_event_count,
+            "reactor_skipped_malformed": reactor_skipped,
+            "reactor_truncated": int(reactor_truncated),
+            "reactor_busy": int(reactor_busy),
             "event_jobs": len(event_jobs),
             "running_agents": int(audit["counts"]["running"]),
             "failed_agents": int(audit["counts"]["failed"]),

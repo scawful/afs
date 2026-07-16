@@ -360,6 +360,35 @@ class AgentConfig:
     max_restarts: int = 3
     depends_on: list[str] = field(default_factory=list)
     mutex_group: str = ""
+    # Mapping keys AFS does not recognize (extension- or user-defined) are
+    # preserved verbatim so a from_dict/to_dict round trip never silently
+    # strips custom configuration.
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    _KNOWN_FIELDS = frozenset(
+        {
+            "name",
+            "role",
+            "backend",
+            "description",
+            "tags",
+            "auto_start",
+            "triggers",
+            "schedule",
+            "module",
+            "watch_paths",
+            "on_event",
+            "on_event_action",
+            "event_debounce",
+            "allowed_mounts",
+            "allowed_tools",
+            "workspace_isolated",
+            "restart_on_failure",
+            "max_restarts",
+            "depends_on",
+            "mutex_group",
+        }
+    )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AgentConfig:
@@ -368,6 +397,7 @@ class AgentConfig:
             tags = [tag for tag in tags if isinstance(tag, str)]
         else:
             tags = []
+        extra = {key: value for key, value in data.items() if key not in cls._KNOWN_FIELDS}
         return cls(
             name=str(data.get("name", "")).strip(),
             role=str(data.get("role", "general")).strip() or "general",
@@ -380,7 +410,10 @@ class AgentConfig:
             module=str(data.get("module", "")).strip(),
             watch_paths=_as_path_list(data.get("watch_paths")),
             on_event=_as_str_list(data.get("on_event")),
-            on_event_action=str(data.get("on_event_action", "spawn")).strip() or "spawn",
+            # Normalized but not coerced: an invalid value survives to the
+            # reactor, which fails closed on it (no spawn, no job) and warns.
+            on_event_action=str(data.get("on_event_action", "spawn")).strip().lower()
+            or "spawn",
             event_debounce=str(data.get("event_debounce", "")).strip(),
             allowed_mounts=_as_str_list(data.get("allowed_mounts")),
             allowed_tools=_as_str_list(data.get("allowed_tools")),
@@ -389,10 +422,12 @@ class AgentConfig:
             max_restarts=int(data.get("max_restarts", 3)),
             depends_on=_as_str_list(data.get("depends_on")),
             mutex_group=str(data.get("mutex_group", "")).strip(),
+            extra=extra,
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            **self.extra,
             "name": self.name,
             "role": self.role,
             "backend": self.backend,

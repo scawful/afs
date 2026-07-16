@@ -23,10 +23,9 @@ Manage background agent processes via the AFS supervisor.
 
 ## Default Set
 
-An empty profile agent list gets `context-warm` (network-free daily audit),
-`index-rebuild` (knowledge/memory changes), `skills-mine` (weekly), and
-`morning-briefing` (daily interval). Custom lists are unchanged. Disable with
-`[agents] default_set = false` or `AFS_DEFAULT_AGENTS=off`. Starting the
+An empty profile agent list gets `context-warm`, `index-rebuild`,
+`skills-mine`, and `morning-briefing`; custom lists are unchanged. Disable
+with `[agents] default_set = false` or `AFS_DEFAULT_AGENTS=off`. Starting the
 supervisor is always an explicit operator action.
 
 ## Commands
@@ -34,8 +33,7 @@ supervisor is always an explicit operator action.
 | Command | Description |
 |---------|-------------|
 | `afs agents list` | Show available built-in agents |
-| `afs agents ps` | Show running background agents |
-| `afs agents ps --all` | Include stopped/failed agents |
+| `afs agents ps [--all]` | Show running (or all) background agents |
 | `afs agents run <name>` | Run an agent in foreground |
 | `afs agents watch <name>` | Tail progress events for an agent |
 
@@ -47,13 +45,9 @@ at `awaiting_review` until the user approves or rejects it.
 
 ## Triggers
 
-AgentConfig supports four start conditions: `auto_start`, `schedule`
-(`hourly`/`daily`/`weekly`/`30m`), `watch_paths` (file changes), and
-`on_event` — fnmatch patterns like `error`, `mcp_tool:call`, or
-`hivemind:context:repair` matched against new event-log entries and hivemind
-topics each reconcile cycle. `on_event_action = "job"` enqueues a deduped
-agent-job instead of spawning; `event_debounce` (default 300s) suppresses
-re-spawn bursts.
+`auto_start`, `schedule` (`hourly`/`30m`), `watch_paths`, and `on_event`
+fnmatch patterns (`error`, `hivemind:context:*`) on new log/hivemind entries.
+`on_event_action = "job"` enqueues a deduped job; `event_debounce` bounds bursts.
 
 ## Jobs, Runs, and Hooks
 
