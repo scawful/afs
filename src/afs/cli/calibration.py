@@ -17,12 +17,16 @@ from pathlib import Path
 from ..calibration import (
     VALID_OUTCOMES,
     collect_decisions,
-    record_outcome,
+    human_outcome_scope,
+    record_human_outcome,
 )
-from ..human_provenance import confirm_typed_token
+from ..human_provenance import (
+    HumanAuthorization,
+    _broker_for_reader,
+)
 from ._utils import load_manager, resolve_context_paths
 
-# Test seam: tests inject a fake terminal reader; production uses /dev/tty.
+# Test seam: production uses the platform controlling-terminal backend.
 _TTY_READER = None
 
 
@@ -118,14 +122,22 @@ def _print_markdown(report: dict) -> int:
     return 0
 
 
-def _confirm_outcome_score(ref: str, outcome: str) -> str | None:
+def _confirm_outcome_score(
+    context_path: Path,
+    ref: str,
+    outcome: str,
+    *,
+    note: str,
+    config,
+) -> HumanAuthorization | None:
     """Interactive human confirmation for recording an outcome score.
 
     The outcome score is the judgment the whole calibration trail exists to
     capture — an agent recording one headlessly would be grading its own
     work, the exact offload the trail is meant to counter. The operator must
     re-type the outcome on the controlling tty, which piped stdin cannot
-    satisfy. Returns the OS-level reviewer identity, or ``None`` to refuse.
+    satisfy. Returns a decision-scoped broker authorization, or ``None`` to
+    refuse.
     """
     prompt = "\n".join(
         [
@@ -133,17 +145,33 @@ def _confirm_outcome_score(ref: str, outcome: str) -> str | None:
             "=== HUMAN CONFIRMATION REQUIRED (calibration score) ===",
             f"  ref:     {ref}",
             f"  outcome: {outcome}",
+            f"  note:    {note or '(none)'}",
             "Outcome scores are the human half of the calibration trail.",
             f"Type '{outcome}' to confirm, anything else aborts: ",
         ]
     )
-    return confirm_typed_token(outcome, prompt, reader=_TTY_READER)
+    scope = human_outcome_scope(
+        context_path,
+        ref=ref,
+        outcome=outcome,
+        note=note,
+        config=config,
+    )
+    return _broker_for_reader(_TTY_READER).confirm_token(
+        outcome, prompt, scope=scope
+    )
 
 
 def calibration_score_command(args: argparse.Namespace) -> int:
     context_path, config = _context_path(args)
-    reviewer = _confirm_outcome_score(args.ref, args.outcome)
-    if reviewer is None:
+    authorization = _confirm_outcome_score(
+        context_path,
+        args.ref,
+        args.outcome,
+        note=args.note or "",
+        config=config,
+    )
+    if authorization is None:
         print(
             "score requires an interactive human confirmation on a terminal; "
             "refusing in a non-interactive context. Re-run `afs calibration "
@@ -152,13 +180,12 @@ def calibration_score_command(args: argparse.Namespace) -> int:
         )
         return 2
     try:
-        entry = record_outcome(
+        entry = record_human_outcome(
             context_path,
             ref=args.ref,
             outcome=args.outcome,
             note=getattr(args, "note", "") or "",
-            scored_by=reviewer,
-            scored_via="tty",
+            authorization=authorization,
             config=config,
         )
     except ValueError as exc:

@@ -333,6 +333,10 @@ class WorkAssistantStore:
                     requested_by TEXT NOT NULL,
                     approved_by TEXT NOT NULL DEFAULT '',
                     rationale TEXT NOT NULL DEFAULT '',
+                    decision_via TEXT NOT NULL DEFAULT '',
+                    reviewer_subject TEXT NOT NULL DEFAULT '',
+                    identity_authenticated INTEGER NOT NULL DEFAULT 0,
+                    human_confirmed INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     expires_at TEXT,
@@ -394,11 +398,20 @@ class WorkAssistantStore:
         approval_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(approvals)")
         }
-        if "rationale" not in approval_columns:
+        missing_columns = {
+            "rationale": "rationale TEXT NOT NULL DEFAULT ''",
+            "decision_via": "decision_via TEXT NOT NULL DEFAULT ''",
+            "reviewer_subject": "reviewer_subject TEXT NOT NULL DEFAULT ''",
+            "identity_authenticated": (
+                "identity_authenticated INTEGER NOT NULL DEFAULT 0"
+            ),
+            "human_confirmed": "human_confirmed INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, definition in missing_columns.items():
+            if name in approval_columns:
+                continue
             try:
-                connection.execute(
-                    "ALTER TABLE approvals ADD COLUMN rationale TEXT NOT NULL DEFAULT ''"
-                )
+                connection.execute(f"ALTER TABLE approvals ADD COLUMN {definition}")
             except sqlite3.OperationalError as exc:
                 if "duplicate column" not in str(exc).lower():
                     raise
@@ -730,18 +743,112 @@ class WorkAssistantStore:
             ).fetchone()
         return self._approval_row_to_dict(row) if row else None
 
+    def human_authorization_scope(
+        self, decision: str, approval_id: str, rationale: str
+    ) -> str:
+        """Return the broker scope for one decision in this exact database."""
+        from .human_provenance import decision_scope_parts
+
+        return decision_scope_parts(
+            "work-approval",
+            decision,
+            str(self.db_path),
+            approval_id,
+            rationale.strip(),
+        )
+
     def approve(
         self, approval_id: str, *, approved_by: str = "human", rationale: str = ""
     ) -> bool:
+        """Record a non-authoritative programmatic approval.
+
+        The compatibility API retains the ``approved`` status for reporting,
+        but ignores claimable provenance and sets ``human_confirmed = false``.
+        Execution and calibration never accept it as human authorization. Use
+        :meth:`approve_human` with a broker capability for that.
+        """
         return self._set_approval_status(
-            approval_id, "approved", approved_by=approved_by, rationale=rationale
+            approval_id,
+            "approved",
+            approved_by="unauthenticated",
+            rationale=rationale,
+            decision_via="programmatic",
+            reviewer_subject="",
+            identity_authenticated=False,
+            human_confirmed=False,
+        )
+
+    def approve_human(
+        self,
+        approval_id: str,
+        *,
+        rationale: str,
+        authorization: Any,
+    ) -> bool:
+        """Authorize an approval using a broker-minted capability."""
+        from .human_provenance import consume_human_authorization
+
+        if not rationale.strip():
+            raise ValueError("a rationale is required for a human approval")
+        scope = self.human_authorization_scope(
+            "approve", approval_id, rationale
+        )
+        if not consume_human_authorization(authorization, scope=scope):
+            raise ValueError("a HumanDecisionBroker authorization is required")
+        identity = authorization.identity
+        return self._set_approval_status(
+            approval_id,
+            "approved",
+            approved_by=identity.reviewer,
+            rationale=rationale,
+            decision_via=authorization.confirmed_via,
+            reviewer_subject=identity.subject,
+            identity_authenticated=identity.authenticated,
+            human_confirmed=True,
         )
 
     def reject(
         self, approval_id: str, *, rejected_by: str = "human", rationale: str = ""
     ) -> bool:
+        """Record a fail-safe, non-authoritative programmatic rejection."""
         return self._set_approval_status(
-            approval_id, "rejected", approved_by=rejected_by, rationale=rationale
+            approval_id,
+            "rejected",
+            approved_by="unauthenticated",
+            rationale=rationale,
+            decision_via="programmatic",
+            reviewer_subject="",
+            identity_authenticated=False,
+            human_confirmed=False,
+        )
+
+    def reject_human(
+        self,
+        approval_id: str,
+        *,
+        rationale: str,
+        authorization: Any,
+    ) -> bool:
+        """Record a human-confirmed rejection using a broker capability."""
+        from .human_provenance import consume_human_authorization
+
+        if not rationale.strip():
+            raise ValueError("a rationale is required for a human rejection")
+        scope = self.human_authorization_scope(
+            "reject", approval_id, rationale
+        )
+        if not consume_human_authorization(authorization, scope=scope):
+            raise ValueError("a HumanDecisionBroker authorization is required")
+        identity = authorization.identity
+        return self._set_approval_status(
+            approval_id,
+            "rejected",
+            approved_by=identity.reviewer,
+            rationale=rationale,
+            decision_via=authorization.confirmed_via,
+            reviewer_subject=identity.subject,
+            identity_authenticated=identity.authenticated,
+            human_confirmed=True,
         )
 
     def record_approval_result(
@@ -1151,15 +1258,31 @@ class WorkAssistantStore:
         *,
         approved_by: str,
         rationale: str = "",
+        decision_via: str,
+        reviewer_subject: str,
+        identity_authenticated: bool,
+        human_confirmed: bool,
     ) -> bool:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE approvals
-                SET status = ?, approved_by = ?, rationale = ?, updated_at = ?
+                SET status = ?, approved_by = ?, rationale = ?, decision_via = ?,
+                    reviewer_subject = ?, identity_authenticated = ?,
+                    human_confirmed = ?, updated_at = ?
                 WHERE approval_id = ? AND status = 'pending'
                 """,
-                (status, approved_by, rationale.strip(), _now(), approval_id),
+                (
+                    status,
+                    approved_by,
+                    rationale.strip(),
+                    decision_via,
+                    reviewer_subject,
+                    int(identity_authenticated),
+                    int(human_confirmed),
+                    _now(),
+                    approval_id,
+                ),
             )
             return cursor.rowcount > 0
 
@@ -1312,6 +1435,10 @@ class WorkAssistantStore:
             "requested_by": row["requested_by"],
             "approved_by": row["approved_by"],
             "rationale": row["rationale"],
+            "decision_via": row["decision_via"],
+            "reviewer_subject": row["reviewer_subject"],
+            "identity_authenticated": bool(row["identity_authenticated"]),
+            "human_confirmed": bool(row["human_confirmed"]),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "expires_at": row["expires_at"],

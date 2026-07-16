@@ -2,8 +2,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from afs.personal_context import load_personal_context
 from afs.work_assistant import WorkAssistantStore, enrich_logged_event
+
+
+def _human_authorization(
+    store: WorkAssistantStore, approval_id: str, decision: str = "approve"
+):
+    from afs.human_provenance import _broker_for_reader
+
+    authorization = _broker_for_reader(lambda _prompt: "confirm").confirm_token(
+        "confirm",
+        "prompt",
+        scope=store.human_authorization_scope(decision, approval_id, "reviewed"),
+    )
+    assert authorization is not None
+    return authorization
 
 
 def test_store_tracks_people_relationships_reviewers_and_approvals(tmp_path: Path) -> None:
@@ -55,8 +71,10 @@ def test_store_tracks_people_relationships_reviewers_and_approvals(tmp_path: Pat
     assert store.approve(approval_id, approved_by="human", rationale="intro edit matches style guide")
     assert store.list_approvals(status="pending") == []
     approved = store.list_approvals(status="approved")[0]
-    assert approved["approved_by"] == "human"
+    assert approved["approved_by"] == "unauthenticated"
     assert approved["rationale"] == "intro edit matches style guide"
+    assert approved["decision_via"] == "programmatic"
+    assert approved["human_confirmed"] is False
 
     sample_id = store.record_communication_sample(
         person_id=person_id,
@@ -79,6 +97,60 @@ def test_store_tracks_people_relationships_reviewers_and_approvals(tmp_path: Pat
     assert style_summary["style_notes"] == ["direct", "specific"]
     assert any("explicit approval" in line for line in style_summary["guidance"])
     assert store.summary()["communication_samples"] == 1
+
+
+def test_store_requires_broker_capability_for_human_authorization(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    approval_id = store.create_approval(
+        target_system="local",
+        target_id="note",
+        action="internal_note",
+        summary="Review note",
+    )
+
+    assert store.approve(approval_id, approved_by="human", rationale="claimed")
+    untrusted = store.get_approval(approval_id)
+    assert untrusted is not None
+    assert untrusted["human_confirmed"] is False
+    assert untrusted["approved_by"] == "unauthenticated"
+
+    second_id = store.create_approval(
+        target_system="local",
+        target_id="note-2",
+        action="internal_note",
+        summary="Review second note",
+    )
+    authorization = _human_authorization(store, second_id)
+    with pytest.raises(ValueError, match="authorization"):
+        store.approve_human(
+            second_id,
+            rationale="caller changed the rationale",
+            authorization=authorization,
+        )
+    assert store.approve_human(
+        second_id,
+        rationale="reviewed",
+        authorization=authorization,
+    )
+    trusted = store.get_approval(second_id)
+    assert trusted is not None
+    assert trusted["human_confirmed"] is True
+    assert trusted["decision_via"] == "controlling_terminal"
+
+    third_id = store.create_approval(
+        target_system="local",
+        target_id="note-3",
+        action="internal_note",
+        summary="Replay target",
+    )
+    with pytest.raises(ValueError, match="authorization"):
+        store.approve_human(
+            third_id,
+            rationale="replayed",
+            authorization=authorization,
+        )
 
 
 def test_enrich_logged_event_extracts_people_routes_approvals_and_activity(tmp_path: Path) -> None:

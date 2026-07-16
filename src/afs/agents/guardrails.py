@@ -445,7 +445,10 @@ class ApprovalRequest:
     reviewed_at: str = ""
     rationale: str = ""
     request_id: str = ""
-    reviewed_via: str = ""  # "tty" when a typed terminal confirmation happened
+    reviewed_via: str = ""
+    reviewer_subject: str = ""
+    identity_authenticated: bool = False
+    human_confirmed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -459,6 +462,9 @@ class ApprovalRequest:
             "rationale": self.rationale,
             "request_id": self.request_id,
             "reviewed_via": self.reviewed_via,
+            "reviewer_subject": self.reviewer_subject,
+            "identity_authenticated": self.identity_authenticated,
+            "human_confirmed": self.human_confirmed,
         }
 
 
@@ -475,7 +481,24 @@ class ApprovalGate:
             )
         )
         self._pending: list[ApprovalRequest] = []
+        self._archive_path = self._path.with_name(
+            f"{self._path.stem}.history.jsonl"
+        )
         self._load()
+
+    def human_authorization_scope(
+        self, decision: str, request_id: str, rationale: str
+    ) -> str:
+        """Return the broker scope for one decision in this exact store."""
+        from ..human_provenance import decision_scope_parts
+
+        return decision_scope_parts(
+            "approval-gate",
+            decision,
+            str(self._path),
+            request_id,
+            rationale.strip(),
+        )
 
     def _load(self) -> None:
         if not self._path.exists():
@@ -526,8 +549,97 @@ class ApprovalGate:
         with _file_lock(self._path):
             self._write_unlocked(self._pending)
 
+    def _read_archive_unlocked(self) -> list[ApprovalRequest]:
+        """Read immutable completed-decision snapshots from the archive."""
+        if not self._archive_path.exists():
+            return []
+        try:
+            lines = self._archive_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        requests: list[ApprovalRequest] = []
+        for line in lines:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(item, dict):
+                continue
+            try:
+                requests.append(ApprovalRequest(**item))
+            except TypeError:
+                continue
+        return requests
+
+    def _repair_archive_tail_unlocked(self) -> None:
+        """Repair a torn final JSONL record before appending more history.
+
+        The active approvals file is compacted only after the archive append
+        is durable. If a prior process died during that append, blindly
+        appending would concatenate the next record onto the partial tail and
+        make both unreadable. Preserve a complete final JSON value by adding
+        its missing newline; otherwise truncate only the incomplete tail.
+        """
+        if not self._archive_path.exists():
+            return
+        with self._archive_path.open("rb+") as handle:
+            data = handle.read()
+            if not data or data.endswith(b"\n"):
+                return
+            tail_start = data.rfind(b"\n") + 1
+            tail = data[tail_start:]
+            try:
+                json.loads(tail.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                handle.seek(tail_start)
+                handle.truncate()
+            else:
+                handle.seek(0, os.SEEK_END)
+                handle.write(b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def _archive_completed_unlocked(self, requests: list[ApprovalRequest]) -> None:
+        """Append new completed snapshots before removing them from active state.
+
+        The approvals-file lock serializes writers. Existing request ids are
+        skipped so a crash after the append but before rewriting active state
+        cannot duplicate the immutable history on retry.
+        """
+        if not requests:
+            return
+        self._repair_archive_tail_unlocked()
+        existing_ids = {
+            request.request_id for request in self._read_archive_unlocked()
+        }
+        additions = [
+            request for request in requests if request.request_id not in existing_ids
+        ]
+        if not additions:
+            return
+        self._archive_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._archive_path.open("a", encoding="utf-8") as handle:
+            for request in additions:
+                handle.write(json.dumps(request.to_dict(), ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def all_requests(self) -> list[ApprovalRequest]:
+        """Return archived history plus active requests, deduplicated by id."""
+        with _file_lock(self._path):
+            archived = self._read_archive_unlocked()
+            active = self._read_unlocked() if self._path.exists() else list(self._pending)
+        by_id = {request.request_id: request for request in archived}
+        for request in active:
+            by_id[request.request_id] = request
+        return list(by_id.values())
+
     def clear_completed(self) -> tuple[int, int]:
-        """Drop approved/rejected records; returns (removed, remaining).
+        """Archive completed records and compact active state.
+
+        Returns ``(archived, remaining)``. Approved/rejected rationales and
+        provenance remain available through :meth:`all_requests` and
+        calibration after compaction.
 
         Read-modify-write under one file lock: clearing from the in-memory
         snapshot and saving would clobber any request another process queued
@@ -537,9 +649,11 @@ class ApprovalGate:
             requests = (
                 self._read_unlocked() if self._path.exists() else list(self._pending)
             )
+            completed = [r for r in requests if r.status != "pending"]
             kept = [r for r in requests if r.status == "pending"]
-            removed = len(requests) - len(kept)
-            if removed:
+            removed = len(completed)
+            if completed:
+                self._archive_completed_unlocked(completed)
                 self._write_unlocked(kept)
             self._pending = kept
         return removed, len(kept)
@@ -552,7 +666,7 @@ class ApprovalGate:
             # Check if there's a pre-approval for this specific request
             for req in self._pending:
                 if (req.agent == agent and req.action == action
-                        and req.status == "approved"):
+                        and req.status == "approved" and req.human_confirmed):
                     return True
             # Queue for approval
             self._queue(agent, action, detail)
@@ -602,8 +716,59 @@ class ApprovalGate:
         rationale: str = "",
         reviewed_via: str = "",
     ) -> bool:
+        """Record a non-authoritative programmatic approval decision.
+
+        Compatibility callers may still record the result, but caller-supplied
+        reviewer/via strings are untrusted and this record never authorizes
+        :meth:`check`. Use :meth:`approve_human` with a broker capability for
+        an authoritative approval.
+        """
         return self._resolve(
-            agent, action, "approved", reviewer, rationale, reviewed_via
+            agent,
+            action,
+            "approved",
+            "unauthenticated",
+            rationale,
+            "programmatic",
+            reviewer_subject="",
+            identity_authenticated=False,
+            human_confirmed=False,
+            expected_request_id=None,
+        )
+
+    def approve_human(
+        self,
+        agent: str,
+        action: str,
+        *,
+        rationale: str,
+        authorization: Any,
+    ) -> bool:
+        """Authorize a pending request using a broker-minted capability."""
+        from ..human_provenance import consume_human_authorization
+
+        if not rationale.strip():
+            raise ValueError("a rationale is required for a human approval")
+        request = self.find_pending(agent, action)
+        if request is None:
+            return False
+        scope = self.human_authorization_scope(
+            "approve", request.request_id, rationale
+        )
+        if not consume_human_authorization(authorization, scope=scope):
+            raise ValueError("a HumanDecisionBroker authorization is required")
+        identity = authorization.identity
+        return self._resolve(
+            agent,
+            action,
+            "approved",
+            identity.reviewer,
+            rationale,
+            authorization.confirmed_via,
+            reviewer_subject=identity.subject,
+            identity_authenticated=identity.authenticated,
+            human_confirmed=True,
+            expected_request_id=request.request_id,
         )
 
     def reject(
@@ -615,8 +780,53 @@ class ApprovalGate:
         rationale: str = "",
         reviewed_via: str = "",
     ) -> bool:
+        """Record a fail-safe, non-authoritative programmatic rejection."""
         return self._resolve(
-            agent, action, "rejected", reviewer, rationale, reviewed_via
+            agent,
+            action,
+            "rejected",
+            "unauthenticated",
+            rationale,
+            "programmatic",
+            reviewer_subject="",
+            identity_authenticated=False,
+            human_confirmed=False,
+            expected_request_id=None,
+        )
+
+    def reject_human(
+        self,
+        agent: str,
+        action: str,
+        *,
+        rationale: str,
+        authorization: Any,
+    ) -> bool:
+        """Record a human-confirmed rejection using a broker capability."""
+        from ..human_provenance import consume_human_authorization
+
+        if not rationale.strip():
+            raise ValueError("a rationale is required for a human rejection")
+        request = self.find_pending(agent, action)
+        if request is None:
+            return False
+        scope = self.human_authorization_scope(
+            "reject", request.request_id, rationale
+        )
+        if not consume_human_authorization(authorization, scope=scope):
+            raise ValueError("a HumanDecisionBroker authorization is required")
+        identity = authorization.identity
+        return self._resolve(
+            agent,
+            action,
+            "rejected",
+            identity.reviewer,
+            rationale,
+            authorization.confirmed_via,
+            reviewer_subject=identity.subject,
+            identity_authenticated=identity.authenticated,
+            human_confirmed=True,
+            expected_request_id=request.request_id,
         )
 
     def _resolve(
@@ -627,6 +837,11 @@ class ApprovalGate:
         reviewer: str,
         rationale: str,
         reviewed_via: str,
+        *,
+        reviewer_subject: str,
+        identity_authenticated: bool,
+        human_confirmed: bool,
+        expected_request_id: str | None,
     ) -> bool:
         """Resolve a pending request under the file lock.
 
@@ -639,12 +854,23 @@ class ApprovalGate:
                 self._read_unlocked() if self._path.exists() else list(self._pending)
             )
             for req in requests:
-                if req.agent == agent and req.action == action and req.status == "pending":
+                if (
+                    req.agent == agent
+                    and req.action == action
+                    and req.status == "pending"
+                    and (
+                        expected_request_id is None
+                        or req.request_id == expected_request_id
+                    )
+                ):
                     req.status = status
                     req.reviewed_by = reviewer
                     req.reviewed_at = datetime.now(timezone.utc).isoformat()
                     req.rationale = rationale.strip()
                     req.reviewed_via = reviewed_via
+                    req.reviewer_subject = reviewer_subject
+                    req.identity_authenticated = identity_authenticated
+                    req.human_confirmed = human_confirmed
                     self._pending = requests
                     self._write_unlocked(requests)
                     return True

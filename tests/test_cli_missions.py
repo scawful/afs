@@ -100,6 +100,8 @@ def test_cli_create_with_acceptance(tmp_path, monkeypatch, capsys) -> None:
     assert created["acceptance"] == "all five steps land with tests"
     assert created["acceptance_set_by"]  # OS user recorded as provenance
     assert created["acceptance_set_at"]
+    assert created["acceptance_human_confirmed"] is True
+    assert created["acceptance_set_via"] == "controlling_terminal"
 
 
 def test_cli_create_acceptance_refused_headless(tmp_path, monkeypatch, capsys) -> None:
@@ -153,6 +155,7 @@ def test_cli_create_interactive_prompt_records_provenance(
     mission = store.list(limit=1)[0]
     assert mission.acceptance == "demo runs end to end"
     assert mission.acceptance_set_by
+    assert mission.acceptance_human_confirmed is True
 
 
 def _update_args(mid: str, **overrides):
@@ -185,6 +188,7 @@ def test_cli_update_acceptance(tmp_path, monkeypatch, capsys) -> None:
     updated = json.loads(capsys.readouterr().out)
     assert updated["acceptance"] == "v2 with docs"
     assert updated["acceptance_set_by"]
+    assert updated["acceptance_human_confirmed"] is True
 
 
 def test_cli_update_acceptance_refused_headless(tmp_path, monkeypatch, capsys) -> None:

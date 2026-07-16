@@ -31,6 +31,9 @@ afs schema validate --schema implementation-plan --file plan.json \
   --skeleton human_plan.json   # fails if human_intent was edited/authored
 ```
 
+When `human_intent` is present it must contain at least one declared field;
+an empty object is not a valid human-authored anchor.
+
 ## Validation
 
 - `--schema <name>` or `--workflow <workflow>` (resolves the schema bound to

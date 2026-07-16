@@ -123,7 +123,8 @@ def test_approve_flow(tmp_path: Path, capsys, monkeypatch) -> None:
     assert len(gate.pending_requests()) == 0
     assert gate._pending[0].status == "approved"
     assert gate._pending[0].reviewed_by  # OS user, never a claimable flag
-    assert gate._pending[0].reviewed_via == "tty"
+    assert gate._pending[0].reviewed_via == "controlling_terminal"
+    assert gate._pending[0].human_confirmed is True
     assert gate._pending[0].rationale == "push is release-gated"
     assert gate._pending[0].request_id.startswith("gate_")
 
@@ -188,9 +189,10 @@ def test_approve_requires_rationale(tmp_path: Path, capsys) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_reject_flow(tmp_path: Path, capsys) -> None:
+def test_reject_flow(tmp_path: Path, capsys, monkeypatch) -> None:
     requests = [_sample_request()]
     approvals_file = _make_gate(tmp_path, requests)
+    monkeypatch.setattr(cli_approvals, "_TTY_READER", lambda prompt: "scout:git_push")
 
     exit_code = approvals_reject_command(
         _ns(approvals_file, agent="scout", action="git_push", because="branch is frozen")
@@ -200,13 +202,13 @@ def test_reject_flow(tmp_path: Path, capsys) -> None:
     assert "Rejected" in out
 
     # Verify it's now rejected in the file, with the rationale stored.
-    # Rejection is fail-safe (it denies the agent) so it works headlessly,
-    # but the reviewer identity comes from the OS user.
+    # CLI judgments carry broker-derived human provenance.
     gate = ApprovalGate(path=approvals_file)
     assert len(gate.pending_requests()) == 0
     assert gate._pending[0].status == "rejected"
     assert gate._pending[0].reviewed_by
-    assert gate._pending[0].reviewed_via == "cli"
+    assert gate._pending[0].reviewed_via == "controlling_terminal"
+    assert gate._pending[0].human_confirmed is True
     assert gate._pending[0].rationale == "branch is frozen"
 
 
@@ -250,7 +252,7 @@ def test_clear_removes_completed(tmp_path: Path, capsys) -> None:
     exit_code = approvals_clear_command(_ns(approvals_file))
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "Cleared 2" in out
+    assert "Archived 2" in out
     assert "1 pending" in out
 
     # Verify only the pending request remains
@@ -258,6 +260,8 @@ def test_clear_removes_completed(tmp_path: Path, capsys) -> None:
     assert len(gate._pending) == 1
     assert gate._pending[0].agent == "janitor"
     assert gate._pending[0].status == "pending"
+    archived = [request for request in gate.all_requests() if request.status != "pending"]
+    assert len(archived) == 2
 
 
 def test_clear_nothing_to_clear(tmp_path: Path, capsys) -> None:
@@ -267,7 +271,7 @@ def test_clear_nothing_to_clear(tmp_path: Path, capsys) -> None:
     exit_code = approvals_clear_command(_ns(approvals_file))
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "Cleared 0" in out
+    assert "Archived 0" in out
 
 
 def test_clear_json(tmp_path: Path, capsys) -> None:
@@ -323,7 +327,7 @@ def test_history_shows_rationale(tmp_path: Path, capsys, monkeypatch) -> None:
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "because: verified locally" in out
-    assert "(tty)" in out  # reviewer provenance is visible
+    assert "(controlling_terminal)" in out  # reviewer provenance is visible
     assert "ref: gate_" in out  # calibration ref is visible
 
 

@@ -31,7 +31,17 @@ def _approved_action(
         preview=preview or {"diff": "-old\n+new"},
         permission_required="doc edit approval",
     )
-    assert store.approve(approval_id, approved_by="human")
+    from afs.human_provenance import _broker_for_reader
+
+    authorization = _broker_for_reader(lambda _prompt: approval_id).confirm_token(
+        approval_id,
+        "prompt",
+        scope=store.human_authorization_scope("approve", approval_id, "reviewed"),
+    )
+    assert authorization is not None
+    assert store.approve_human(
+        approval_id, rationale="reviewed", authorization=authorization
+    )
     return approval_id
 
 
@@ -184,9 +194,8 @@ def test_execute_approved_action_dry_run_returns_payload(tmp_path: Path) -> None
 
 
 def test_execute_external_write_refused_without_terminal(tmp_path: Path) -> None:
-    # A row can reach `approved` by any path (here store.approve directly, mimicking a
-    # pre-existing row or a non-CLI approve). Execution must still demand a human ack,
-    # and a headless agent (reader returns None) cannot satisfy it.
+    # Even a human-confirmed row demands a fresh execution-time ack for an
+    # outward action; a headless agent cannot satisfy it.
     context_root = tmp_path / ".context"
     context_root.mkdir()
     store = WorkAssistantStore(context_root)
@@ -251,7 +260,17 @@ def test_execute_external_target_backstop_refuses_unclassified_action(tmp_path: 
         action="internal_note",
         summary="Misclassified external update",
     )
-    assert store.approve(approval_id, approved_by="human")
+    from afs.human_provenance import _broker_for_reader
+
+    authorization = _broker_for_reader(lambda _prompt: approval_id).confirm_token(
+        approval_id,
+        "prompt",
+        scope=store.human_authorization_scope("approve", approval_id, "reviewed"),
+    )
+    assert authorization is not None
+    assert store.approve_human(
+        approval_id, rationale="reviewed", authorization=authorization
+    )
 
     with pytest.raises(HumanApprovalRequiredError, match="no terminal"):
         execute_approved_action(
@@ -280,6 +299,30 @@ def test_execute_requires_approved_status(tmp_path: Path) -> None:
             context_root=context_root,
             approval_id=approval_id,
             executor_command=[sys.executable, "-c", "print('nope')"],
+        )
+
+
+def test_programmatic_approval_never_authorizes_execution(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    approval_id = store.create_approval(
+        target_system="local",
+        target_id="note",
+        action="internal_note",
+        summary="Claimed approval",
+    )
+    assert store.approve(
+        approval_id, approved_by="human", rationale="claimed terminal review"
+    )
+
+    with pytest.raises(HumanApprovalRequiredError, match="programmatically"):
+        execute_approved_action(
+            store,
+            context_root=context_root,
+            approval_id=approval_id,
+            executor_command=[sys.executable, "-c", "print('must not run')"],
+            require_human_ack=False,
         )
 
 

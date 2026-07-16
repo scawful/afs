@@ -144,18 +144,57 @@ def test_mission_dataclass_round_trip() -> None:
     assert Mission.from_dict(mission.to_dict()) == mission
 
 
-def test_acceptance_round_trips_and_updates(tmp_path: Path) -> None:
+def test_programmatic_acceptance_is_only_a_suggestion(tmp_path: Path) -> None:
     store = _store(tmp_path)
     mission = store.create(
         title="Ship the reactor",
         acceptance="reactor starts agents from history events with tests",
+        acceptance_set_by="human",
     )
     loaded = store.get(mission.mission_id)
     assert loaded is not None
-    assert loaded.acceptance == "reactor starts agents from history events with tests"
+    assert loaded.acceptance == ""
+    assert (
+        loaded.acceptance_suggestion
+        == "reactor starts agents from history events with tests"
+    )
+    assert loaded.acceptance_human_confirmed is False
 
     store.update(mission.mission_id, acceptance="also covers hivemind topics")
-    assert store.get(mission.mission_id).acceptance == "also covers hivemind topics"
+    updated = store.get(mission.mission_id)
+    assert updated is not None
+    assert updated.acceptance == ""
+    assert updated.acceptance_suggestion == "also covers hivemind topics"
 
     # Records written before the field existed load with an empty acceptance.
     assert Mission.from_dict({"mission_id": "mission_old", "title": "Old"}).acceptance == ""
+
+
+def test_broker_authorized_acceptance_round_trips(tmp_path: Path) -> None:
+    from afs.human_provenance import _broker_for_reader
+
+    acceptance = "reactor starts agents with tests"
+    store = _store(tmp_path)
+    authorization = _broker_for_reader(lambda _prompt: "human").confirm_token(
+        "human",
+        "prompt",
+        scope=store.human_acceptance_scope(
+            "create", "Ship the reactor", acceptance
+        ),
+    )
+    assert authorization is not None
+    mission = store.create(
+        title="Ship the reactor",
+        acceptance=acceptance,
+        acceptance_authorization=authorization,
+    )
+    loaded = store.get(mission.mission_id)
+    assert loaded is not None
+    assert loaded.acceptance == "reactor starts agents with tests"
+    assert loaded.acceptance_human_confirmed is True
+    with pytest.raises(ValueError, match="fresh HumanDecisionBroker"):
+        store.create(
+            title="Ship the reactor",
+            acceptance=acceptance,
+            acceptance_authorization=authorization,
+        )

@@ -33,6 +33,8 @@ clearing it requires a typed confirmation on an interactive terminal, so a
 headless agent passing `--acceptance` is refused (exit 2). Closed missions
 are resurfaced by `afs calibration review` for outcome scoring against that
 acceptance.
+Direct store callers cannot forge this anchor with `acceptance_set_by`; text
+without a broker capability is retained only as `acceptance_suggestion`.
 
 ## Lifecycle
 

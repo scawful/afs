@@ -23,6 +23,20 @@ from afs.cli.work import (
 from afs.work_assistant import WorkAssistantStore
 
 
+def _authorize(store: WorkAssistantStore, approval_id: str) -> None:
+    from afs.human_provenance import _broker_for_reader
+
+    authorization = _broker_for_reader(lambda _prompt: approval_id).confirm_token(
+        approval_id,
+        "prompt",
+        scope=store.human_authorization_scope("approve", approval_id, "reviewed"),
+    )
+    assert authorization is not None
+    assert store.approve_human(
+        approval_id, rationale="reviewed", authorization=authorization
+    )
+
+
 def _args(context_root: Path, **kwargs) -> Namespace:
     values = {
         "config": None,
@@ -227,10 +241,7 @@ def test_work_approval_request_and_approve(tmp_path: Path, capsys, monkeypatch) 
 
     # post_ticket_comment is an external write, so approve now requires interactive
     # human confirmation. Simulate the operator typing the approval id at the terminal.
-    monkeypatch.setattr(
-        "afs.work_execution._default_tty_reader",
-        lambda tty_path: (lambda prompt: approval_id),
-    )
+    monkeypatch.setattr("afs.cli.work._TTY_READER", lambda prompt: approval_id)
     assert approvals_approve_command(
         _args(context_root, approval_id=approval_id, by="human", because="ticket comment reviewed")
     ) == 0
@@ -273,10 +284,7 @@ def test_work_approval_external_write_refused_without_tty(tmp_path: Path, capsys
         summary="Send approved email",
     )
     # No controlling terminal (headless/agent context): the reader returns None.
-    monkeypatch.setattr(
-        "afs.work_execution._default_tty_reader",
-        lambda tty_path: (lambda prompt: None),
-    )
+    monkeypatch.setattr("afs.cli.work._TTY_READER", lambda prompt: None)
     assert approvals_approve_command(
         _args(context_root, approval_id=approval_id, by="human", because="email content verified")
     ) == 2
@@ -285,7 +293,9 @@ def test_work_approval_external_write_refused_without_tty(tmp_path: Path, capsys
     assert store.get_approval(approval_id)["status"] == "pending"  # type: ignore[index]
 
 
-def test_work_approval_internal_action_skips_confirmation(tmp_path: Path, capsys) -> None:
+def test_work_approval_internal_action_requires_human_provenance(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     context_root = tmp_path / ".context"
     context_root.mkdir()
     store = WorkAssistantStore(context_root)
@@ -295,7 +305,7 @@ def test_work_approval_internal_action_skips_confirmation(tmp_path: Path, capsys
         action="internal_note",  # not an external/communication write
         summary="Record an internal note",
     )
-    # No tty monkeypatch: a non-external action must approve without any prompt.
+    monkeypatch.setattr("afs.cli.work._TTY_READER", lambda prompt: approval_id)
     assert approvals_approve_command(
         _args(context_root, approval_id=approval_id, by="human", because="internal note is safe")
     ) == 0
@@ -304,7 +314,9 @@ def test_work_approval_internal_action_skips_confirmation(tmp_path: Path, capsys
     assert approved["rationale"] == "internal note is safe"  # type: ignore[index]
 
 
-def test_by_flag_is_not_honored_without_confirmation(tmp_path: Path, capsys) -> None:
+def test_by_flag_is_not_honored_without_confirmation(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     """--by is a claimable string: without the terminal confirmation vouching
     for a person, the recorded identity is the non-claimable OS user."""
     from afs.human_provenance import os_reviewer
@@ -318,16 +330,17 @@ def test_by_flag_is_not_honored_without_confirmation(tmp_path: Path, capsys) -> 
         action="internal_note",
         summary="Record an internal note",
     )
+    monkeypatch.setattr("afs.cli.work._TTY_READER", lambda prompt: approval_id)
     assert approvals_approve_command(
         _args(context_root, approval_id=approval_id, by="alleged-human", because="safe")
     ) == 0
     captured = capsys.readouterr()
-    assert "only honored with an interactive confirmation" in captured.err
+    assert "claimable metadata" in captured.err
     approved = store.get_approval(approval_id)
     assert approved["approved_by"] == os_reviewer()  # type: ignore[index]
 
 
-def test_reject_always_records_os_user(tmp_path: Path, capsys) -> None:
+def test_reject_always_records_os_user(tmp_path: Path, capsys, monkeypatch) -> None:
     from afs.cli.work import approvals_reject_command
     from afs.human_provenance import os_reviewer
 
@@ -340,6 +353,7 @@ def test_reject_always_records_os_user(tmp_path: Path, capsys) -> None:
         action="internal_note",
         summary="Record an internal note",
     )
+    monkeypatch.setattr("afs.cli.work._TTY_READER", lambda prompt: approval_id)
     assert approvals_reject_command(
         _args(context_root, approval_id=approval_id, by="alleged-human", because="not needed")
     ) == 0
@@ -376,7 +390,7 @@ def test_work_approval_execute_command(tmp_path: Path, capsys, monkeypatch) -> N
         action="edit_doc",
         summary="Apply approved edit",
     )
-    assert store.approve(approval_id, approved_by="human")
+    _authorize(store, approval_id)
 
     # edit_doc is an external write, so execution (where the connector actually fires)
     # now also requires a terminal confirmation. Simulate the operator at the terminal.
@@ -417,7 +431,7 @@ def test_work_approval_execute_refused_without_tty(tmp_path: Path, capsys, monke
         action="send_email",
         summary="Send approved email",
     )
-    assert store.approve(approval_id, approved_by="human")
+    _authorize(store, approval_id)
     monkeypatch.setattr(
         "afs.work_execution._default_tty_reader",
         lambda tty_path: (lambda prompt: None),  # no controlling terminal

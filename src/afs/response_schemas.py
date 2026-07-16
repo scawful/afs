@@ -212,6 +212,7 @@ _SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
         "properties": {
             "human_intent": {
                 "type": "object",
+                "minProperties": 1,
                 "description": (
                     "Human-authored skeleton the plan expands on: goal, "
                     "non-goals, and done-when in the human's own words. "
@@ -434,8 +435,8 @@ def verify_human_intent_preserved(skeleton: Any, expanded: Any) -> list[str]:
 
     ``skeleton`` is the human's original plan (or plan fragment) and
     ``expanded`` is the agent-produced plan. The ``human_intent`` section is
-    the one part agents must never author: it must survive expansion
-    byte-for-byte, and it must not appear from nowhere. The skeleton's own
+    the one part agents must never author: it must remain canonically
+    unchanged, and it must not appear from nowhere. The skeleton's own
     ``human_intent`` must satisfy the schema contract — a malformed anchor is
     rejected rather than silently treated as absent. Returns a list of
     violations (empty when preserved).
@@ -477,7 +478,7 @@ def verify_human_intent_preserved(skeleton: Any, expanded: Any) -> list[str]:
     if expanded_intent is not None:
         return [
             "human_intent was authored by the expansion; this section is "
-            "human-written only — leave it empty and ask instead"
+            "human-written only — omit it and ask instead"
         ]
     return []
 

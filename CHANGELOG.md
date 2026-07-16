@@ -21,6 +21,15 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
   trail; and the `implementation-plan` schema gains a `human_intent` section
   agents must never author, enforced structurally by
   `afs schema validate --skeleton`.
+- Human judgments now cross a decision-scoped store capability minted by a
+  cross-platform controlling-terminal broker, with UID/SID-derived identity
+  and fail-closed refusal when OS identity is unavailable. Capabilities bind
+  the exact store, record, rationale/note, and process and are single-use.
+  Programmatic store APIs cannot forge authorization or calibration
+  provenance; programmatic predictions are excluded from human calibration;
+  mission text becomes an `acceptance_suggestion` without the capability;
+  approval clearing archives crash-repaired decision history; and empty
+  `human_intent` objects are rejected.
 - Versioned, packaged JSON Schema contracts for optimization evaluation,
   policy, and decision records.
 - Pure `afs optimize decide` evidence gate with deterministic hashes, stable

@@ -11,13 +11,29 @@ from afs.calibration import (
     UnknownDecisionRefError,
     calibration_root,
     collect_decisions,
+    human_outcome_scope,
+    human_prediction_scope,
     load_outcomes,
     load_predictions,
+    record_human_outcome,
+    record_human_prediction,
     record_outcome,
     record_prediction,
 )
 from afs.missions import MissionStore
 from afs.work_assistant import WorkAssistantStore
+
+
+def _human_authorization(scope: str):
+    from afs.human_provenance import _broker_for_reader
+
+    authorization = _broker_for_reader(lambda _prompt: "confirm").confirm_token(
+        "confirm",
+        "prompt",
+        scope=scope,
+    )
+    assert authorization is not None
+    return authorization
 
 
 @pytest.fixture(autouse=True)
@@ -54,10 +70,13 @@ def test_prediction_and_outcome_round_trip(tmp_path: Path) -> None:
         session_id="sess-1",
     )
     assert entry["id"].startswith("pred_")
+    assert entry["human_confirmed"] is False
+    assert entry["predicted_via"] == "programmatic"
 
     loaded = load_predictions(context)
     assert len(loaded) == 1
     assert loaded[0]["match"] is True
+    assert collect_decisions(context, days=7)["predictions"] == []
 
     score = record_outcome(context, ref=entry["id"], outcome="hit", note="good call")
     assert score["kind"] == "prediction"
@@ -120,6 +139,104 @@ def test_known_refs_are_accepted(tmp_path: Path, monkeypatch) -> None:
     )
 
 
+def test_programmatic_outcome_cannot_forge_human_score(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    mission = MissionStore(context).create(title="Real mission")
+    MissionStore(context).update(mission.mission_id, status="done")
+
+    entry = record_outcome(
+        context,
+        ref=mission.mission_id,
+        outcome="hit",
+        scored_by="human",
+        scored_via="controlling_terminal",
+    )
+    assert entry["human_confirmed"] is False
+    assert entry["scored_by"] == "unauthenticated"
+    assert collect_decisions(context, days=7)["scored"] == {}
+
+
+def test_human_prediction_capability_binds_content_and_is_single_use(
+    tmp_path: Path,
+) -> None:
+    context = _context(tmp_path)
+    scope = human_prediction_scope(
+        context,
+        kind="bootstrap_top_priority",
+        predicted="repair archive",
+        actual="repair archive",
+        match=True,
+    )
+    authorization = _human_authorization(scope)
+
+    with pytest.raises(ValueError, match="authorization"):
+        record_human_prediction(
+            context,
+            kind="bootstrap_top_priority",
+            predicted="different claim",
+            actual="repair archive",
+            match=True,
+            authorization=authorization,
+        )
+    record_human_prediction(
+        context,
+        kind="bootstrap_top_priority",
+        predicted="repair archive",
+        actual="repair archive",
+        match=True,
+        authorization=authorization,
+    )
+    with pytest.raises(ValueError, match="authorization"):
+        record_human_prediction(
+            context,
+            kind="bootstrap_top_priority",
+            predicted="repair archive",
+            actual="repair archive",
+            match=True,
+            authorization=authorization,
+        )
+
+
+def test_human_outcome_capability_binds_note_and_is_single_use(
+    tmp_path: Path,
+) -> None:
+    context = _context(tmp_path)
+    missions = MissionStore(context)
+    mission = missions.create(title="Real mission")
+    missions.update(mission.mission_id, status="done")
+    scope = human_outcome_scope(
+        context,
+        ref=mission.mission_id,
+        outcome="hit",
+        note="verified in production",
+    )
+    authorization = _human_authorization(scope)
+
+    with pytest.raises(ValueError, match="authorization"):
+        record_human_outcome(
+            context,
+            ref=mission.mission_id,
+            outcome="hit",
+            note="caller changed the note",
+            authorization=authorization,
+        )
+    record_human_outcome(
+        context,
+        ref=mission.mission_id,
+        outcome="hit",
+        note="verified in production",
+        authorization=authorization,
+    )
+    with pytest.raises(ValueError, match="authorization"):
+        record_human_outcome(
+            context,
+            ref=mission.mission_id,
+            outcome="hit",
+            note="verified in production",
+            authorization=authorization,
+        )
+
+
 # ---------------------------------------------------------------------------
 # collect_decisions
 # ---------------------------------------------------------------------------
@@ -145,14 +262,42 @@ def test_collect_decisions_surfaces_rationales_and_acceptance(
         action="internal_note",
         summary="Record a note",
     )
-    store.approve(approval_id, approved_by="human", rationale="note content verified")
+    store.approve_human(
+        approval_id,
+        rationale="note content verified",
+        authorization=_human_authorization(
+            store.human_authorization_scope(
+                "approve", approval_id, "note content verified"
+            )
+        ),
+    )
 
     missions = MissionStore(context)
-    mission = missions.create(title="Ship it", acceptance="lands with tests")
+    mission = missions.create(
+        title="Ship it",
+        acceptance="lands with tests",
+        acceptance_authorization=_human_authorization(
+            missions.human_acceptance_scope(
+                "create", "Ship it", "lands with tests"
+            )
+        ),
+    )
     missions.update(mission.mission_id, status="done")
 
-    record_prediction(
-        context, kind="bootstrap_top_priority", predicted="a", actual="b", match=False
+    prediction_scope = human_prediction_scope(
+        context,
+        kind="bootstrap_top_priority",
+        predicted="a",
+        actual="b",
+        match=False,
+    )
+    record_human_prediction(
+        context,
+        kind="bootstrap_top_priority",
+        predicted="a",
+        actual="b",
+        match=False,
+        authorization=_human_authorization(prediction_scope),
     )
 
     report = collect_decisions(context, days=7)
@@ -170,7 +315,16 @@ def test_collect_decisions_surfaces_rationales_and_acceptance(
     assert report["predictions"][0]["match"] is False
 
     # Scoring shows up in the scored map on the next collect.
-    record_outcome(context, ref=mission.mission_id, outcome="hit")
+    record_human_outcome(
+        context,
+        ref=mission.mission_id,
+        outcome="hit",
+        authorization=_human_authorization(
+            human_outcome_scope(
+                context, ref=mission.mission_id, outcome="hit"
+            )
+        ),
+    )
     rescored = collect_decisions(context, days=7)
     assert rescored["scored"][mission.mission_id]["outcome"] == "hit"
 
@@ -201,21 +355,22 @@ def test_collect_decisions_includes_gate_decisions(tmp_path: Path, monkeypatch) 
     _isolate_gate(monkeypatch, tmp_path)
     context = _context(tmp_path)
 
-    from datetime import datetime, timezone
-
-    from afs.agents.guardrails import ApprovalGate, ApprovalRequest
+    from afs.agents.guardrails import ApprovalGate
 
     gate = ApprovalGate()
-    gate._pending.append(
-        ApprovalRequest(
-            agent="scout",
-            action="git_push",
-            detail="push to origin",
-            timestamp=datetime.now(timezone.utc).isoformat(),
-        )
+    gate._queue("scout", "git_push", "push to origin")
+    request = gate.find_pending("scout", "git_push")
+    assert request is not None
+    gate.approve_human(
+        "scout",
+        "git_push",
+        rationale="diff reviewed",
+        authorization=_human_authorization(
+            gate.human_authorization_scope(
+                "approve", request.request_id, "diff reviewed"
+            )
+        ),
     )
-    gate._save()
-    gate.approve("scout", "git_push", rationale="diff reviewed")
 
     report = collect_decisions(context, days=7)
     gate_entries = [e for e in report["approvals"] if e["source"] == "gate"]
@@ -236,14 +391,65 @@ def test_gate_refs_are_unique_per_request(tmp_path: Path, monkeypatch) -> None:
     gate = ApprovalGate()
     gate._queue("scout", "git_push", "push to origin")
     gate._queue("scout", "mass_delete", "clean old artifacts")
-    gate.approve("scout", "git_push", rationale="diff reviewed")
-    gate.reject("scout", "mass_delete", rationale="too broad")
+    approve_request = gate.find_pending("scout", "git_push")
+    reject_request = gate.find_pending("scout", "mass_delete")
+    assert approve_request is not None and reject_request is not None
+    gate.approve_human(
+        "scout",
+        "git_push",
+        rationale="diff reviewed",
+        authorization=_human_authorization(
+            gate.human_authorization_scope(
+                "approve", approve_request.request_id, "diff reviewed"
+            )
+        ),
+    )
+    gate.reject_human(
+        "scout",
+        "mass_delete",
+        rationale="too broad",
+        authorization=_human_authorization(
+            gate.human_authorization_scope(
+                "reject", reject_request.request_id, "too broad"
+            )
+        ),
+    )
 
     report = collect_decisions(context, days=7)
     refs = [e["ref"] for e in report["approvals"] if e["source"] == "gate"]
     assert len(refs) == 2
     assert len(set(refs)) == 2
     assert all(ref.startswith("gate_") for ref in refs)
+
+
+def test_cleared_gate_decision_remains_in_calibration_history(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _isolate_gate(monkeypatch, tmp_path)
+    context = _context(tmp_path)
+
+    from afs.agents.guardrails import ApprovalGate
+
+    gate = ApprovalGate()
+    gate._queue("scout", "git_push", "push to origin")
+    request = gate.find_pending("scout", "git_push")
+    assert request is not None
+    gate.approve_human(
+        "scout",
+        "git_push",
+        rationale="diff reviewed",
+        authorization=_human_authorization(
+            gate.human_authorization_scope(
+                "approve", request.request_id, "diff reviewed"
+            )
+        ),
+    )
+    ref = gate.all_requests()[0].request_id
+    removed, remaining = gate.clear_completed()
+    assert (removed, remaining) == (1, 0)
+
+    report = collect_decisions(context, days=7)
+    assert ref in {entry["ref"] for entry in report["approvals"]}
 
 
 def test_collect_decisions_includes_applied_work_approvals(
@@ -260,7 +466,15 @@ def test_collect_decisions_includes_applied_work_approvals(
         action="internal_note",
         summary="Record a note",
     )
-    store.approve(approval_id, approved_by="human", rationale="content verified")
+    store.approve_human(
+        approval_id,
+        rationale="content verified",
+        authorization=_human_authorization(
+            store.human_authorization_scope(
+                "approve", approval_id, "content verified"
+            )
+        ),
+    )
     store.record_approval_result(
         approval_id, result={"ok": True}, status="applied"
     )
@@ -338,7 +552,15 @@ def test_cli_review_and_score(tmp_path: Path, monkeypatch, capsys) -> None:
     context_root = _wire_cli(tmp_path, monkeypatch)
 
     missions = MissionStore(context_root)
-    mission = missions.create(title="Ship it", acceptance="lands with tests")
+    mission = missions.create(
+        title="Ship it",
+        acceptance="lands with tests",
+        acceptance_authorization=_human_authorization(
+            missions.human_acceptance_scope(
+                "create", "Ship it", "lands with tests"
+            )
+        ),
+    )
     missions.update(mission.mission_id, status="done")
 
     assert calibration_review_command(_cli_args(context_root, days=7, markdown=False)) == 0
@@ -369,11 +591,32 @@ def test_cli_review_markdown_digest(tmp_path: Path, monkeypatch, capsys) -> None
     context_root = _wire_cli(tmp_path, monkeypatch)
     missions = MissionStore(context_root)
     missions.update(
-        missions.create(title="Ship it", acceptance="lands with tests").mission_id,
+        missions.create(
+            title="Ship it",
+            acceptance="lands with tests",
+            acceptance_authorization=_human_authorization(
+                missions.human_acceptance_scope(
+                    "create", "Ship it", "lands with tests"
+                )
+            ),
+        ).mission_id,
         status="done",
     )
-    record_prediction(
-        context_root, kind="bootstrap_top_priority", predicted="a", actual="a", match=True
+    record_human_prediction(
+        context_root,
+        kind="bootstrap_top_priority",
+        predicted="a",
+        actual="a",
+        match=True,
+        authorization=_human_authorization(
+            human_prediction_scope(
+                context_root,
+                kind="bootstrap_top_priority",
+                predicted="a",
+                actual="a",
+                match=True,
+            )
+        ),
     )
 
     assert calibration_review_command(_cli_args(context_root, days=7, markdown=True)) == 0
@@ -413,17 +656,18 @@ def test_top_priority_item_precedence() -> None:
     assert top_priority_item(summary) == ""
 
 
-def test_run_engage_prediction_records_trail(tmp_path: Path, capsys) -> None:
+def test_run_engage_prediction_records_trail(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import afs.session_bootstrap as session_bootstrap
     from afs.session_bootstrap import run_engage_prediction
 
     context = _context(tmp_path)
     summary = {"handoff": {"next_steps": ["Fix the reactor cursor race"]}}
-    entry = run_engage_prediction(
-        context,
-        summary,
-        input_fn=lambda prompt: "fix the reactor",
-        interactive=True,
+    monkeypatch.setattr(
+        session_bootstrap, "_ENGAGE_READER", lambda prompt: "fix the reactor"
     )
+    entry = run_engage_prediction(context, summary)
     assert entry is not None
     assert entry["match"] is True
     assert "matched" in capsys.readouterr().out
@@ -431,23 +675,22 @@ def test_run_engage_prediction_records_trail(tmp_path: Path, capsys) -> None:
     trail = load_predictions(context)
     assert len(trail) == 1
     assert trail[0]["kind"] == "bootstrap_top_priority"
+    assert trail[0]["human_confirmed"] is True
 
 
 def test_run_engage_prediction_skips_when_headless_or_empty(
-    tmp_path: Path, capsys
+    tmp_path: Path, monkeypatch, capsys
 ) -> None:
+    import afs.session_bootstrap as session_bootstrap
     from afs.session_bootstrap import run_engage_prediction
 
     context = _context(tmp_path)
-    assert run_engage_prediction(context, {}, interactive=False) is None
-    assert "requires an interactive terminal" in capsys.readouterr().out
+    monkeypatch.setattr(session_bootstrap, "_ENGAGE_READER", lambda prompt: None)
+    assert run_engage_prediction(context, {}) is None
+    assert "requires an interactive controlling terminal" in capsys.readouterr().out
 
-    assert (
-        run_engage_prediction(
-            context, {}, input_fn=lambda prompt: "   ", interactive=True
-        )
-        is None
-    )
+    monkeypatch.setattr(session_bootstrap, "_ENGAGE_READER", lambda prompt: "   ")
+    assert run_engage_prediction(context, {}) is None
     assert load_predictions(context) == []
 
 
@@ -500,8 +743,9 @@ def test_cli_score_records_provenance(tmp_path: Path, monkeypatch, capsys) -> No
     )
     assert exit_code == 0
     (entry,) = load_outcomes(context_root)
-    assert entry["scored_via"] == "tty"
+    assert entry["scored_via"] == "controlling_terminal"
     assert entry["scored_by"]
+    assert entry["human_confirmed"] is True
 
 
 def test_gate_outcomes_are_global_across_contexts(tmp_path: Path, monkeypatch) -> None:
@@ -516,11 +760,27 @@ def test_gate_outcomes_are_global_across_contexts(tmp_path: Path, monkeypatch) -
 
     gate = ApprovalGate()
     gate._queue("scout", "git_push", "push to origin")
-    gate.approve("scout", "git_push", rationale="diff reviewed")
+    request = gate.find_pending("scout", "git_push")
+    assert request is not None
+    gate.approve_human(
+        "scout",
+        "git_push",
+        rationale="diff reviewed",
+        authorization=_human_authorization(
+            gate.human_authorization_scope(
+                "approve", request.request_id, "diff reviewed"
+            )
+        ),
+    )
     ref = ApprovalGate()._pending[0].request_id
 
-    entry = record_outcome(
-        context_a, ref=ref, outcome="hit", scored_by="tester", scored_via="tty"
+    entry = record_human_outcome(
+        context_a,
+        ref=ref,
+        outcome="hit",
+        authorization=_human_authorization(
+            human_outcome_scope(context_a, ref=ref, outcome="hit")
+        ),
     )
     assert entry["kind"] == "gate"
     # The score landed in the global trail, not context A's outcomes file.

@@ -9,16 +9,19 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ..human_provenance import os_reviewer
+from ..human_provenance import (
+    HumanAuthorization,
+    _broker_for_reader,
+)
 from ..work_assistant import WorkAssistantStore
 from ..work_execution import (
-    HumanApprovalRequiredError,
     WorkApprovalExecutionError,
-    approval_requires_human_ack,
-    confirm_human_approval,
     execute_approved_action,
 )
 from ._utils import load_manager, resolve_context_paths
+
+# Test seam: production reads the cross-platform controlling terminal.
+_TTY_READER = None
 
 
 def _add_context_args(parser: argparse.ArgumentParser) -> None:
@@ -152,6 +155,7 @@ def approvals_list_command(args: argparse.Namespace) -> int:
         [
             ("approval_id", "APPROVAL ID"),
             ("status", "STATUS"),
+            ("decision_via", "PROVENANCE"),
             ("target_system", "SYSTEM"),
             ("action", "ACTION"),
             ("summary", "SUMMARY"),
@@ -218,6 +222,35 @@ def _require_decision_rationale(args: argparse.Namespace, decision: str) -> str 
     return None
 
 
+def _confirm_work_decision(
+    store: WorkAssistantStore,
+    approval: dict[str, Any],
+    decision: str,
+    rationale: str,
+) -> HumanAuthorization | None:
+    approval_id = str(approval.get("approval_id") or "")
+    prompt = "\n".join(
+        [
+            "",
+            "=== HUMAN CONFIRMATION REQUIRED (work approval) ===",
+            f"  decision: {decision}",
+            f"  action:   {approval.get('action') or '?'}",
+            f"  target:   {approval.get('target_system') or '?'}:"
+            f"{approval.get('target_id') or '?'}",
+            f"  summary:  {approval.get('summary') or ''}",
+            f"  approval: {approval_id}",
+            f"  because:  {rationale}",
+            f"Type '{approval_id}' to confirm, anything else aborts: ",
+        ]
+    )
+    scope = store.human_authorization_scope(
+        decision, approval_id, rationale
+    )
+    return _broker_for_reader(_TTY_READER).confirm_token(
+        approval_id, prompt, scope=scope
+    )
+
+
 def approvals_approve_command(args: argparse.Namespace) -> int:
     rationale = _require_decision_rationale(args, "approve")
     if rationale is None:
@@ -227,26 +260,29 @@ def approvals_approve_command(args: argparse.Namespace) -> int:
     if approval is None or approval.get("status") != "pending":
         print(f"No pending approval found: {args.approval_id}")
         return 1
-    # External/communication writes require an interactive human confirmation that a
-    # headless agent cannot satisfy. This is the single chokepoint: execute() only
-    # runs on already-approved actions, so gating approve gates the outward action.
-    ack_required = approval_requires_human_ack(approval)
-    try:
-        confirm_human_approval(approval)
-    except HumanApprovalRequiredError as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
-    # --by is a free-form claim; without the terminal confirmation vouching
-    # for a person, the recorded identity stays the non-claimable OS user.
-    requested_by = (args.by or "").strip()
-    approved_by = requested_by if (requested_by and ack_required) else os_reviewer()
-    if requested_by and approved_by != requested_by:
+    authorization = _confirm_work_decision(
+        store, approval, "approve", rationale
+    )
+    if authorization is None:
         print(
-            f"--by {requested_by!r} is only honored with an interactive "
-            f"confirmation; recording {approved_by!r}.",
+            "approval requires an interactive human confirmation on a "
+            "controlling terminal; refusing to record programmatic input as "
+            "human authorization.",
             file=sys.stderr,
         )
-    if store.approve(args.approval_id, approved_by=approved_by, rationale=rationale):
+        return 2
+    requested_by = (args.by or "").strip()
+    if requested_by and requested_by != authorization.identity.reviewer:
+        print(
+            f"--by {requested_by!r} is claimable metadata; recording the "
+            f"OS-derived reviewer {authorization.identity.reviewer!r}.",
+            file=sys.stderr,
+        )
+    if store.approve_human(
+        args.approval_id,
+        rationale=rationale,
+        authorization=authorization,
+    ):
         print(f"Approved: {args.approval_id}")
         return 0
     print(f"No pending approval found: {args.approval_id}")
@@ -258,17 +294,33 @@ def approvals_reject_command(args: argparse.Namespace) -> int:
     if rationale is None:
         return 2
     store, _context_path = _store_from_args(args)
-    # Rejection is the fail-safe direction and stays headless-capable, so the
-    # identity is never taken from a claimable flag.
-    rejected_by = os_reviewer()
-    requested_by = (args.by or "").strip()
-    if requested_by and requested_by != rejected_by:
+    approval = store.get_approval(args.approval_id)
+    if approval is None or approval.get("status") != "pending":
+        print(f"No pending approval found: {args.approval_id}")
+        return 1
+    authorization = _confirm_work_decision(
+        store, approval, "reject", rationale
+    )
+    if authorization is None:
         print(
-            f"--by {requested_by!r} is a claimable identity; recording "
-            f"{rejected_by!r}.",
+            "rejection requires an interactive human confirmation to be "
+            "recorded as a calibration judgment; programmatic callers may use "
+            "WorkAssistantStore.reject for an unauthenticated fail-safe denial.",
             file=sys.stderr,
         )
-    if store.reject(args.approval_id, rejected_by=rejected_by, rationale=rationale):
+        return 2
+    requested_by = (args.by or "").strip()
+    if requested_by and requested_by != authorization.identity.reviewer:
+        print(
+            f"--by {requested_by!r} is claimable metadata; recording the "
+            f"OS-derived reviewer {authorization.identity.reviewer!r}.",
+            file=sys.stderr,
+        )
+    if store.reject_human(
+        args.approval_id,
+        rationale=rationale,
+        authorization=authorization,
+    ):
         print(f"Rejected: {args.approval_id}")
         return 0
     print(f"No pending approval found: {args.approval_id}")
@@ -551,15 +603,15 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     approvals_approve = approvals_sub.add_parser("approve", help="Approve one request.")
     _add_context_args(approvals_approve)
     approvals_approve.add_argument("approval_id", help="Approval id.")
-    # "human" (or any name) is a claim every process can make. The flag is
-    # honored only when the terminal confirmation actually ran; otherwise the
-    # recorded identity is the OS user.
+    # "human" (or any name) is a claim every process can make. Keep the flag
+    # only for CLI compatibility; the broker-derived OS identity is always
+    # authoritative.
     approvals_approve.add_argument(
         "--by",
         default=None,
         help=(
-            "Approver identity; honored only alongside an interactive "
-            "confirmation (default: OS user)."
+            "Compatibility display hint only; ignored for authorization "
+            "(the broker records OS identity)."
         ),
     )
     approvals_approve.add_argument(
@@ -574,7 +626,10 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     approvals_reject.add_argument(
         "--by",
         default=None,
-        help="Reviewer identity; the OS user is always recorded when omitted.",
+        help=(
+            "Compatibility display hint only; ignored for authorization "
+            "(the broker records OS identity)."
+        ),
     )
     approvals_reject.add_argument(
         "--because",

@@ -43,8 +43,13 @@ class Mission:
     # is later scored against. Provenance records who set it and when — the
     # CLI only sets it after an interactive terminal confirmation.
     acceptance: str = ""
+    acceptance_suggestion: str = ""
     acceptance_set_by: str = ""
     acceptance_set_at: str = ""
+    acceptance_set_via: str = ""
+    acceptance_subject: str = ""
+    acceptance_identity_authenticated: bool = False
+    acceptance_human_confirmed: bool = False
     next_steps: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     linked_sessions: list[str] = field(default_factory=list)
@@ -64,8 +69,13 @@ class Mission:
             "summary": self.summary,
             "owner": self.owner,
             "acceptance": self.acceptance,
+            "acceptance_suggestion": self.acceptance_suggestion,
             "acceptance_set_by": self.acceptance_set_by,
             "acceptance_set_at": self.acceptance_set_at,
+            "acceptance_set_via": self.acceptance_set_via,
+            "acceptance_subject": self.acceptance_subject,
+            "acceptance_identity_authenticated": self.acceptance_identity_authenticated,
+            "acceptance_human_confirmed": self.acceptance_human_confirmed,
             "next_steps": list(self.next_steps),
             "blockers": list(self.blockers),
             "linked_sessions": list(self.linked_sessions),
@@ -83,6 +93,16 @@ class Mission:
                 return []
             return [str(item) for item in value if str(item).strip()]
 
+        acceptance = str(data.get("acceptance", ""))
+        acceptance_human_confirmed = bool(
+            data.get("acceptance_human_confirmed", False)
+        )
+        acceptance_suggestion = str(data.get("acceptance_suggestion", ""))
+        # Legacy records have no capability-derived confirmation bit. Fail
+        # closed by retaining their text only as a clearly labeled suggestion.
+        if acceptance and not acceptance_human_confirmed:
+            acceptance_suggestion = acceptance_suggestion or acceptance
+            acceptance = ""
         return cls(
             mission_id=str(data.get("mission_id", "")),
             title=str(data.get("title", "")),
@@ -91,9 +111,16 @@ class Mission:
             updated_at=str(data.get("updated_at", "")),
             summary=str(data.get("summary", "")),
             owner=str(data.get("owner", "")),
-            acceptance=str(data.get("acceptance", "")),
+            acceptance=acceptance,
+            acceptance_suggestion=acceptance_suggestion,
             acceptance_set_by=str(data.get("acceptance_set_by", "")),
             acceptance_set_at=str(data.get("acceptance_set_at", "")),
+            acceptance_set_via=str(data.get("acceptance_set_via", "")),
+            acceptance_subject=str(data.get("acceptance_subject", "")),
+            acceptance_identity_authenticated=bool(
+                data.get("acceptance_identity_authenticated", False)
+            ),
+            acceptance_human_confirmed=acceptance_human_confirmed,
             next_steps=_str_list(data.get("next_steps")),
             blockers=_str_list(data.get("blockers")),
             linked_sessions=_str_list(data.get("linked_sessions")),
@@ -122,6 +149,20 @@ class MissionStore:
             self._context_path, MountType.ITEMS, config=config
         ) / "missions"
         self._manifest_path = self._root / "_manifest.json"
+
+    def human_acceptance_scope(
+        self, decision: str, record_subject: str, acceptance: str
+    ) -> str:
+        """Return the broker scope for acceptance in this exact store."""
+        from .human_provenance import decision_scope_parts
+
+        return decision_scope_parts(
+            "mission-acceptance",
+            decision,
+            str(self._root.resolve()),
+            record_subject,
+            acceptance,
+        )
 
     # -- persistence helpers -------------------------------------------------
     def _ensure_root(self) -> None:
@@ -192,6 +233,7 @@ class MissionStore:
         owner: str = "",
         acceptance: str = "",
         acceptance_set_by: str = "",
+        acceptance_authorization: Any = None,
         next_steps: list[str] | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
@@ -200,6 +242,16 @@ class MissionStore:
             raise ValueError("mission title is required")
         now = _now()
         acceptance = acceptance.strip()
+        acceptance_scope = self.human_acceptance_scope(
+            "create", title.strip(), acceptance
+        )
+        provenance = self._acceptance_provenance(
+            acceptance,
+            authorization=acceptance_authorization,
+            scope=acceptance_scope,
+        )
+        human_acceptance = acceptance if provenance["human_confirmed"] else ""
+        acceptance_suggestion = "" if provenance["human_confirmed"] else acceptance
         mission = Mission(
             mission_id=f"mission_{uuid.uuid4().hex[:12]}",
             title=title.strip(),
@@ -208,9 +260,14 @@ class MissionStore:
             updated_at=now,
             summary=summary.strip(),
             owner=owner.strip(),
-            acceptance=acceptance,
-            acceptance_set_by=acceptance_set_by.strip() if acceptance else "",
-            acceptance_set_at=now if acceptance else "",
+            acceptance=human_acceptance,
+            acceptance_suggestion=acceptance_suggestion,
+            acceptance_set_by=provenance["reviewer"],
+            acceptance_set_at=now if provenance["human_confirmed"] else "",
+            acceptance_set_via=provenance["via"],
+            acceptance_subject=provenance["subject"],
+            acceptance_identity_authenticated=provenance["identity_authenticated"],
+            acceptance_human_confirmed=provenance["human_confirmed"],
             next_steps=list(next_steps or []),
             tags=list(tags or []),
             metadata=dict(metadata or {}),
@@ -219,6 +276,50 @@ class MissionStore:
         self._append_manifest(mission.mission_id)
         self._log_event("mission_created", mission)
         return mission
+
+    @staticmethod
+    def _acceptance_provenance(
+        acceptance: str, *, authorization: Any, scope: str
+    ) -> dict[str, Any]:
+        """Return capability-derived provenance for an acceptance value.
+
+        ``acceptance_set_by`` remains in the public API for source
+        compatibility but is intentionally ignored: claimable strings cannot
+        establish human authorship. Programmatic acceptance text is retained
+        as an explicit unauthenticated suggestion and is excluded from human
+        calibration. CLI paths pass a broker capability.
+        """
+        from .human_provenance import consume_human_authorization
+
+        if consume_human_authorization(authorization, scope=scope):
+            identity = authorization.identity
+            return {
+                "reviewer": identity.reviewer,
+                "via": authorization.confirmed_via,
+                "subject": identity.subject,
+                "identity_authenticated": identity.authenticated,
+                "human_confirmed": True,
+            }
+        if authorization is not None:
+            raise ValueError(
+                "a fresh HumanDecisionBroker authorization is required"
+            )
+        if not acceptance:
+            return {
+                "reviewer": "",
+                "via": "",
+                "subject": "",
+                "identity_authenticated": False,
+                "human_confirmed": False,
+            }
+        else:
+            return {
+                "reviewer": "unauthenticated",
+                "via": "programmatic",
+                "subject": "",
+                "identity_authenticated": False,
+                "human_confirmed": False,
+            }
 
     def get(self, mission_id: str) -> Mission | None:
         path = self._mission_path(mission_id)
@@ -262,6 +363,7 @@ class MissionStore:
         owner: str | None = None,
         acceptance: str | None = None,
         acceptance_set_by: str = "",
+        acceptance_authorization: Any = None,
         next_steps: list[str] | None = None,
         blockers: list[str] | None = None,
         link_session: str | None = None,
@@ -285,15 +387,45 @@ class MissionStore:
             mission.summary = summary.strip()
         if owner is not None:
             mission.owner = owner.strip()
-        if acceptance is not None and acceptance.strip() != mission.acceptance:
-            mission.acceptance = acceptance.strip()
-            mission.acceptance_set_by = acceptance_set_by.strip()
-            mission.acceptance_set_at = _now()
+        if acceptance is not None:
+            proposed_acceptance = acceptance.strip()
+            acceptance_scope = self.human_acceptance_scope(
+                "update", mission_id, proposed_acceptance
+            )
+            provenance = self._acceptance_provenance(
+                proposed_acceptance,
+                authorization=acceptance_authorization,
+                scope=acceptance_scope,
+            )
+            if not provenance["human_confirmed"]:
+                mission.acceptance_suggestion = proposed_acceptance
+            elif proposed_acceptance != mission.acceptance:
+                mission.acceptance = proposed_acceptance
+                mission.acceptance_suggestion = ""
+            else:
+                provenance = None
+        else:
+            provenance = None
+        if provenance is not None:
+            timestamp = _now()
+            if provenance["human_confirmed"]:
+                mission.acceptance_set_by = provenance["reviewer"]
+                mission.acceptance_set_at = timestamp
+                mission.acceptance_set_via = provenance["via"]
+                mission.acceptance_subject = provenance["subject"]
+                mission.acceptance_identity_authenticated = provenance[
+                    "identity_authenticated"
+                ]
+                mission.acceptance_human_confirmed = True
             mission.log.append(
                 {
-                    "timestamp": mission.acceptance_set_at,
-                    "actor": acceptance_set_by.strip() or actor,
-                    "note": "acceptance updated",
+                    "timestamp": timestamp,
+                    "actor": mission.acceptance_set_by or actor,
+                    "note": (
+                        "human-confirmed acceptance updated"
+                        if provenance["human_confirmed"]
+                        else "unauthenticated acceptance suggestion updated"
+                    ),
                 }
             )
         if next_steps is not None:

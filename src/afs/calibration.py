@@ -101,7 +101,108 @@ def record_prediction(
     session_id: str = "",
     config: Any = None,
 ) -> dict[str, Any]:
-    """Append one predict-before-reveal entry to the calibration trail."""
+    """Append a non-authoritative programmatic prediction annotation."""
+    return _record_prediction(
+        context_path,
+        kind=kind,
+        predicted=predicted,
+        actual=actual,
+        match=match,
+        session_id=session_id,
+        predicted_by="unauthenticated",
+        predicted_via="programmatic",
+        reviewer_subject="",
+        identity_authenticated=False,
+        human_confirmed=False,
+        config=config,
+    )
+
+
+def human_prediction_scope(
+    context_path: Path,
+    *,
+    kind: str,
+    predicted: str,
+    actual: str,
+    match: bool | None,
+    session_id: str = "",
+    config: Any = None,
+) -> str:
+    """Return the broker scope for a prediction in its exact trail."""
+    from .human_provenance import decision_scope_parts
+
+    store_path = (
+        calibration_root(context_path, config=config) / PREDICTIONS_FILE_NAME
+    ).expanduser().resolve()
+    return decision_scope_parts(
+        "calibration-prediction",
+        "record",
+        str(store_path),
+        kind.strip(),
+        predicted.strip(),
+        actual.strip(),
+        json.dumps(match),
+        session_id.strip(),
+    )
+
+
+def record_human_prediction(
+    context_path: Path,
+    *,
+    kind: str,
+    predicted: str,
+    actual: str,
+    authorization: Any,
+    match: bool | None = None,
+    session_id: str = "",
+    config: Any = None,
+) -> dict[str, Any]:
+    """Append a broker-confirmed human prediction."""
+    from .human_provenance import consume_human_authorization
+
+    scope = human_prediction_scope(
+        context_path,
+        kind=kind,
+        predicted=predicted,
+        actual=actual,
+        match=match,
+        session_id=session_id,
+        config=config,
+    )
+    if not consume_human_authorization(authorization, scope=scope):
+        raise ValueError("a HumanDecisionBroker authorization is required")
+    identity = authorization.identity
+    return _record_prediction(
+        context_path,
+        kind=kind,
+        predicted=predicted,
+        actual=actual,
+        match=match,
+        session_id=session_id,
+        predicted_by=identity.reviewer,
+        predicted_via=authorization.confirmed_via,
+        reviewer_subject=identity.subject,
+        identity_authenticated=identity.authenticated,
+        human_confirmed=True,
+        config=config,
+    )
+
+
+def _record_prediction(
+    context_path: Path,
+    *,
+    kind: str,
+    predicted: str,
+    actual: str,
+    match: bool | None,
+    session_id: str,
+    predicted_by: str,
+    predicted_via: str,
+    reviewer_subject: str,
+    identity_authenticated: bool,
+    human_confirmed: bool,
+    config: Any,
+) -> dict[str, Any]:
     entry = {
         "id": f"pred_{uuid.uuid4().hex[:12]}",
         "timestamp": _now().isoformat(),
@@ -110,6 +211,11 @@ def record_prediction(
         "actual": actual.strip(),
         "match": match,
         "session_id": session_id,
+        "predicted_by": predicted_by,
+        "predicted_via": predicted_via,
+        "reviewer_subject": reviewer_subject,
+        "identity_authenticated": identity_authenticated,
+        "human_confirmed": human_confirmed,
     }
     _append_jsonl(
         calibration_root(context_path, config=config) / PREDICTIONS_FILE_NAME, entry
@@ -132,18 +238,101 @@ def record_outcome(
     config: Any = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    """Score a past decision. ``ref`` is an approval/mission/prediction id.
+    """Record a non-authoritative programmatic outcome annotation.
+
+    ``ref`` is an approval/mission/prediction id. This compatibility API does
+    not accept caller-supplied ``scored_by``/``scored_via`` as proof of human
+    provenance; the entry is explicitly marked programmatic and never counts
+    as a human calibration score. Use :func:`record_human_outcome` with a
+    :class:`~afs.human_provenance.HumanAuthorization` for an authoritative
+    score.
 
     The ref must name a real decision — a typo'd or fabricated ref would
     silently poison the trail. Raises :class:`UnknownDecisionRefError` for
     refs that no known store contains; ``force=True`` is the explicit
     escape hatch for scoring a decision whose store is unavailable.
 
-    ``scored_by``/``scored_via`` record who made the judgment and through
-    which surface. The CLI stamps the OS user and ``tty`` after its
-    interactive confirmation; entries without ``scored_via="tty"`` are
-    distinguishable as not human-confirmed.
     """
+    return _record_outcome(
+        context_path,
+        ref=ref,
+        outcome=outcome,
+        note=note,
+        scored_by="unauthenticated",
+        scored_via="programmatic",
+        reviewer_subject="",
+        identity_authenticated=False,
+        human_confirmed=False,
+        config=config,
+        force=force,
+    )
+
+
+def record_human_outcome(
+    context_path: Path,
+    *,
+    ref: str,
+    outcome: str,
+    authorization: Any,
+    note: str = "",
+    config: Any = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Record an authoritative outcome using a broker-minted capability."""
+    from .human_provenance import consume_human_authorization
+
+    normalized_ref = ref.strip()
+    if outcome not in VALID_OUTCOMES:
+        raise ValueError(
+            f"invalid outcome {outcome!r}; valid: " + ", ".join(VALID_OUTCOMES)
+        )
+    if not normalized_ref:
+        raise ValueError("a decision ref is required")
+    if not force and not ref_is_known(context_path, normalized_ref, config=config):
+        raise UnknownDecisionRefError(
+            f"unknown decision ref {normalized_ref!r}; run `afs calibration review` "
+            "to see valid refs (approval request ids, mission ids, prediction ids)"
+        )
+
+    scope = human_outcome_scope(
+        context_path,
+        ref=normalized_ref,
+        outcome=outcome,
+        note=note,
+        config=config,
+    )
+    if not consume_human_authorization(authorization, scope=scope):
+        raise ValueError("a HumanDecisionBroker authorization is required")
+    identity = authorization.identity
+    return _record_outcome(
+        context_path,
+        ref=normalized_ref,
+        outcome=outcome,
+        note=note,
+        scored_by=identity.reviewer,
+        scored_via=authorization.confirmed_via,
+        reviewer_subject=identity.subject,
+        identity_authenticated=identity.authenticated,
+        human_confirmed=True,
+        config=config,
+        force=force,
+    )
+
+
+def _record_outcome(
+    context_path: Path,
+    *,
+    ref: str,
+    outcome: str,
+    note: str,
+    scored_by: str,
+    scored_via: str,
+    reviewer_subject: str,
+    identity_authenticated: bool,
+    human_confirmed: bool,
+    config: Any,
+    force: bool,
+) -> dict[str, Any]:
     if outcome not in VALID_OUTCOMES:
         raise ValueError(
             f"invalid outcome {outcome!r}; valid: " + ", ".join(VALID_OUTCOMES)
@@ -164,6 +353,9 @@ def record_outcome(
         "note": note.strip(),
         "scored_by": scored_by.strip(),
         "scored_via": scored_via.strip(),
+        "reviewer_subject": reviewer_subject,
+        "identity_authenticated": identity_authenticated,
+        "human_confirmed": human_confirmed,
         "timestamp": _now().isoformat(),
     }
     _append_jsonl(_outcomes_path_for_kind(context_path, kind, config=config), entry)
@@ -197,6 +389,31 @@ def _outcomes_path_for_kind(
     return calibration_root(context_path, config=config) / OUTCOMES_FILE_NAME
 
 
+def human_outcome_scope(
+    context_path: Path,
+    *,
+    ref: str,
+    outcome: str,
+    note: str = "",
+    config: Any = None,
+) -> str:
+    """Return the broker scope for a score in its exact outcome store."""
+    from .human_provenance import decision_scope_parts
+
+    normalized_ref = ref.strip()
+    kind = _ref_kind(normalized_ref)
+    store_path = _outcomes_path_for_kind(
+        context_path, kind, config=config
+    ).expanduser().resolve()
+    return decision_scope_parts(
+        "calibration",
+        outcome,
+        str(store_path),
+        normalized_ref,
+        note.strip(),
+    )
+
+
 def ref_is_known(context_path: Path, ref: str, *, config: Any = None) -> bool:
     """True when ``ref`` names a decision some known store actually contains."""
     kind = _ref_kind(ref)
@@ -217,7 +434,7 @@ def ref_is_known(context_path: Path, ref: str, *, config: Any = None) -> bool:
             from .agents.guardrails import ApprovalGate
 
             return any(
-                request.request_id == ref for request in ApprovalGate()._pending
+                request.request_id == ref for request in ApprovalGate().all_requests()
             )
         except Exception:
             return False
@@ -289,8 +506,10 @@ def _gate_decisions(since: datetime) -> list[dict[str, Any]]:
     except Exception:
         return []
     decisions: list[dict[str, Any]] = []
-    for request in gate._pending:
+    for request in gate.all_requests():
         if request.status not in ("approved", "rejected"):
+            continue
+        if not request.human_confirmed:
             continue
         decided_at = _parse_timestamp(request.reviewed_at)
         if decided_at is None or decided_at < since:
@@ -307,6 +526,9 @@ def _gate_decisions(since: datetime) -> list[dict[str, Any]]:
                 "decided_at": request.reviewed_at,
                 "decided_by": request.reviewed_by,
                 "decided_via": request.reviewed_via,
+                "reviewer_subject": request.reviewer_subject,
+                "identity_authenticated": request.identity_authenticated,
+                "human_confirmed": request.human_confirmed,
                 "rationale": request.rationale,
             }
         )
@@ -328,6 +550,8 @@ def _work_decisions(
     for approval in approvals:
         if approval.get("status") not in _WORK_DECIDED_STATUSES:
             continue
+        if not approval.get("human_confirmed"):
+            continue
         decided_at = _parse_timestamp(approval.get("updated_at"))
         if decided_at is None or decided_at < since:
             continue
@@ -340,6 +564,12 @@ def _work_decisions(
                 "status": str(approval.get("status", "")),
                 "decided_at": str(approval.get("updated_at", "")),
                 "decided_by": str(approval.get("approved_by", "")),
+                "decided_via": str(approval.get("decision_via", "")),
+                "reviewer_subject": str(approval.get("reviewer_subject", "")),
+                "identity_authenticated": bool(
+                    approval.get("identity_authenticated", False)
+                ),
+                "human_confirmed": True,
                 "rationale": str(approval.get("rationale", "")),
             }
         )
@@ -368,7 +598,10 @@ def _closed_missions(
                 "ref": mission.mission_id,
                 "title": mission.title,
                 "status": mission.status,
-                "acceptance": mission.acceptance,
+                "acceptance": (
+                    mission.acceptance if mission.acceptance_human_confirmed else ""
+                ),
+                "acceptance_human_confirmed": mission.acceptance_human_confirmed,
                 "summary": mission.summary,
                 "closed_at": mission.updated_at,
             }
@@ -390,13 +623,23 @@ def collect_decisions(
     """
     current = now or _now()
     since = current - timedelta(days=max(1, days))
-    scored = {entry.get("ref"): entry for entry in load_outcomes(context_path, config=config)}
+    scored = {
+        entry.get("ref"): entry
+        for entry in load_outcomes(context_path, config=config)
+        if entry.get("human_confirmed") is True
+    }
     return {
         "window_days": max(1, days),
         "since": since.isoformat(),
         "approvals": _gate_decisions(since)
         + _work_decisions(context_path, since, config=config),
         "missions": _closed_missions(context_path, since, config=config),
-        "predictions": load_predictions(context_path, since=since, config=config),
+        "predictions": [
+            entry
+            for entry in load_predictions(
+                context_path, since=since, config=config
+            )
+            if entry.get("human_confirmed") is True
+        ],
         "scored": scored,
     }

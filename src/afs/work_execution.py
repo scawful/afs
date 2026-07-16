@@ -11,6 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .human_provenance import default_terminal_reader
 from .work_assistant import EXTERNAL_WRITE_ACTIONS, WorkAssistantStore
 
 PAYLOAD_VERSION = 1
@@ -39,10 +40,9 @@ class HumanApprovalRequiredError(WorkApprovalExecutionError):
 
     External and communication writes (see :data:`EXTERNAL_WRITE_ACTIONS`) must be
     confirmed by a person at a terminal before an agent may act on the user's behalf.
-    This closes the hole where an agent with shell access could self-approve via
-    ``afs work approvals approve <id> --by human`` (``approved_by`` is unauthenticated
-    free text). Confirmation is read from the controlling terminal, which a headless
-    agent cannot satisfy.
+    The approval store accepts authorization only from the controlling-terminal
+    broker; caller-supplied fields such as ``--by human`` are compatibility metadata,
+    not proof. External writes also receive a fresh execution-time confirmation.
     """
 
 
@@ -142,31 +142,16 @@ def approval_requires_human_ack(approval: dict[str, Any]) -> bool:
     return target_system not in _LOCAL_TARGET_SYSTEMS
 
 
-def _default_tty_reader(tty_path: str) -> Callable[[str], str | None]:
-    """Return a reader that prompts on and reads a line from the controlling terminal.
+def _default_tty_reader(tty_path: str | None) -> Callable[[str], str | None]:
+    """Compatibility seam for the cross-platform controlling-terminal reader."""
 
-    Reads from ``/dev/tty`` rather than stdin so that an agent piping text into the
-    command cannot satisfy the prompt. Returns ``None`` when no terminal is available
-    (a headless or agent context), which the caller treats as a refusal.
-    """
-
-    def _read(prompt: str) -> str | None:
-        try:
-            with open(tty_path, "r+", encoding="utf-8") as tty:
-                tty.write(prompt)
-                tty.flush()
-                line = tty.readline()
-        except OSError:
-            return None
-        return line.rstrip("\r\n")
-
-    return _read
+    return default_terminal_reader(tty_path)
 
 
 def confirm_human_approval(
     approval: dict[str, Any],
     *,
-    tty_path: str = "/dev/tty",
+    tty_path: str | None = None,
     reader: Callable[[str], str | None] | None = None,
 ) -> None:
     """Require interactive human confirmation for an external-write approval.
@@ -235,7 +220,7 @@ def execute_approved_action(
     dry_run: bool = False,
     cwd: Path | None = None,
     require_human_ack: bool = True,
-    tty_path: str = "/dev/tty",
+    tty_path: str | None = None,
     confirm_reader: Callable[[str], str | None] | None = None,
 ) -> dict[str, Any]:
     """Execute one approved action by passing its JSON payload to a command.
@@ -280,6 +265,12 @@ def execute_approved_action(
             "payload": payload,
             "executor_command": command,
         }
+    if not approval.get("human_confirmed"):
+        raise HumanApprovalRequiredError(
+            f"approval {approval_id!r} was recorded programmatically and is not "
+            "human-confirmed; re-run `afs work approvals approve` from a "
+            "controlling terminal"
+        )
     if not command:
         raise WorkApprovalExecutionError("executor command is required")
 

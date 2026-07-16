@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import shlex
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -39,6 +38,9 @@ SESSION_BOOTSTRAP_MARKDOWN = "session_bootstrap.md"
 _MAX_TEXT_CHARS = 1500
 _MAX_LIST_ITEMS = 8
 _MAX_SKILL_SIGNAL_CHARS = 8_000
+
+# Private test seam; production reads the platform controlling terminal.
+_ENGAGE_READER = None
 
 
 def build_agent_discovery_path(context_path: Path) -> dict[str, Any]:
@@ -1465,8 +1467,6 @@ def run_engage_prediction(
     summary: dict[str, Any],
     *,
     config: Any = None,
-    input_fn: Any = input,
-    interactive: bool | None = None,
 ) -> dict[str, Any] | None:
     """Predict-before-reveal micro-question for session bootstrap ``--engage``.
 
@@ -1475,33 +1475,52 @@ def run_engage_prediction(
     reveal is the engagement point; skipping (empty input, no tty) is always
     allowed and never blocks the bootstrap itself.
     """
-    if interactive is None:
-        interactive = sys.stdin.isatty() and sys.stdout.isatty()
-    if not interactive:
-        print("engage: skipped (requires an interactive terminal)")
-        return None
+    from .calibration import (
+        human_prediction_scope,
+        record_human_prediction,
+    )
+    from .human_provenance import _broker_for_reader
+
+    kind = "bootstrap_top_priority"
+    actual = top_priority_item(summary)
     try:
-        predicted = str(
-            input_fn("Before the reveal — what is the top queued item right now? ")
-        ).strip()
+        result = _broker_for_reader(_ENGAGE_READER).read_line(
+            "Before the reveal — what is the top queued item right now? ",
+            scope=lambda response: human_prediction_scope(
+                context_path,
+                kind=kind,
+                predicted=response.strip(),
+                actual=actual,
+                match=(
+                    _prediction_matches(response.strip(), actual)
+                    if actual
+                    else None
+                ),
+                config=config,
+            ),
+        )
     except (EOFError, KeyboardInterrupt):
         return None
+    if result is None:
+        print("engage: skipped (requires an interactive controlling terminal)")
+        return None
+    predicted_raw, authorization = result
+    predicted = predicted_raw.strip()
     if not predicted:
         return None
-    actual = top_priority_item(summary)
     match = _prediction_matches(predicted, actual) if actual else None
     try:
-        from .calibration import record_prediction
-
-        entry = record_prediction(
+        entry = record_human_prediction(
             context_path,
-            kind="bootstrap_top_priority",
+            kind=kind,
             predicted=predicted,
             actual=actual,
             match=match,
+            authorization=authorization,
             config=config,
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to record engage prediction: %s", exc)
         entry = None
     marker = {True: "matched", False: "different", None: "unresolved"}[match]
     print(f"engage: you predicted {predicted!r}; the queue says {actual!r} ({marker})")

@@ -266,10 +266,46 @@ class TestApprovalGate:
         gate.check("agent1", "git_push")
         assert len(gate.pending_requests()) == 1
 
-    def test_approve_allows_action(self, tmp_path: Path) -> None:
+    def test_programmatic_approve_does_not_authorize_action(self, tmp_path: Path) -> None:
         gate = ApprovalGate(path=tmp_path / "approvals.json")
         gate.check("agent1", "git_push")
-        assert gate.approve("agent1", "git_push") is True
+        assert gate.approve(
+            "agent1", "git_push", reviewer="human", reviewed_via="tty"
+        ) is True
+        assert gate._pending[0].human_confirmed is False
+        assert gate._pending[0].reviewed_via == "programmatic"
+        assert gate.check("agent1", "git_push") is False
+
+    def test_broker_authorized_approve_allows_action(self, tmp_path: Path) -> None:
+        from afs.human_provenance import _broker_for_reader
+
+        gate = ApprovalGate(path=tmp_path / "approvals.json")
+        gate.check("agent1", "git_push")
+        request = gate.find_pending("agent1", "git_push")
+        assert request is not None
+        authorization = _broker_for_reader(
+            lambda _prompt: "confirm"
+        ).confirm_token(
+            "confirm",
+            "prompt",
+            scope=gate.human_authorization_scope(
+                "approve", request.request_id, "reviewed"
+            ),
+        )
+        assert authorization is not None
+        with pytest.raises(ValueError, match="authorization"):
+            gate.approve_human(
+                "agent1",
+                "git_push",
+                rationale="caller changed the rationale",
+                authorization=authorization,
+            )
+        assert gate.approve_human(
+            "agent1",
+            "git_push",
+            rationale="reviewed",
+            authorization=authorization,
+        )
         assert gate.check("agent1", "git_push") is True
 
     def test_reject_keeps_blocked(self, tmp_path: Path) -> None:
@@ -352,6 +388,29 @@ class TestApprovalGate:
         assert remaining == 1
         final = ApprovalGate(path=path)
         assert [(r.agent, r.status) for r in final._pending] == [("agent2", "pending")]
+        history = final.all_requests()
+        archived = [request for request in history if request.agent == "agent1"]
+        assert len(archived) == 1
+        assert archived[0].rationale == "reviewed"
+
+    def test_clear_repairs_torn_archive_tail_before_compacting(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "approvals.json"
+        gate = ApprovalGate(path=path)
+        gate.check("agent1", "git_push")
+        request = gate.find_pending("agent1", "git_push")
+        assert request is not None
+        assert gate.reject("agent1", "git_push", rationale="unsafe target")
+
+        # Simulate a process dying partway through a prior JSONL append.
+        gate._archive_path.write_bytes(b'{"request_id":"torn"')
+
+        assert gate.clear_completed() == (1, 0)
+        history = gate.all_requests()
+        assert [item.request_id for item in history] == [request.request_id]
+        assert history[0].rationale == "unsafe target"
+        assert gate._archive_path.read_bytes().endswith(b"\n")
 
     def test_one_malformed_record_does_not_drop_the_rest(self, tmp_path: Path) -> None:
         import json as json_module

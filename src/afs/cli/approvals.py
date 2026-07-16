@@ -8,9 +8,12 @@ import sys
 from pathlib import Path
 
 from ..agents.guardrails import ApprovalGate, ApprovalRequest
-from ..human_provenance import confirm_typed_token, os_reviewer
+from ..human_provenance import (
+    HumanAuthorization,
+    _broker_for_reader,
+)
 
-# Test seam: tests inject a fake terminal reader; production uses /dev/tty.
+# Test seam: production uses the platform controlling-terminal backend.
 _TTY_READER = None
 
 
@@ -20,13 +23,19 @@ def _load_gate(args: argparse.Namespace) -> ApprovalGate:
     return ApprovalGate(path=path)
 
 
-def _confirm_gate_approval(request: ApprovalRequest) -> str | None:
-    """Interactive human confirmation for granting an agent a guarded action.
+def _confirm_gate_decision(
+    gate: ApprovalGate,
+    request: ApprovalRequest,
+    decision: str,
+    rationale: str,
+) -> HumanAuthorization | None:
+    """Interactive human confirmation for an agent-gate decision.
 
     Every request the gate queues is for a dangerous or unknown action, so
-    approval always requires a person at a terminal: the operator must re-type
+    a decision requires a person at a terminal: the operator must re-type
     the agent:action pair on the controlling tty, which piped stdin cannot
-    satisfy. Returns the OS-level reviewer identity, or ``None`` to refuse.
+    satisfy. Returns a decision-scoped broker authorization, or ``None`` to
+    refuse.
     """
     token = f"{request.agent}:{request.action}"
     prompt = "\n".join(
@@ -37,11 +46,15 @@ def _confirm_gate_approval(request: ApprovalRequest) -> str | None:
             f"  action:  {request.action}",
             f"  detail:  {request.detail}",
             f"  request: {request.request_id}",
-            "Approving lets this agent perform the guarded action under your authority.",
+            f"  because: {rationale}",
+            f"Decision: {decision} this guarded action.",
             f"Type '{token}' to confirm, anything else aborts: ",
         ]
     )
-    return confirm_typed_token(token, prompt, reader=_TTY_READER)
+    scope = gate.human_authorization_scope(
+        decision, request.request_id, rationale
+    )
+    return _broker_for_reader(_TTY_READER).confirm_token(token, prompt, scope=scope)
 
 
 def _require_rationale(args: argparse.Namespace, decision: str) -> str | None:
@@ -103,8 +116,10 @@ def approvals_approve_command(args: argparse.Namespace) -> int:
     if request is None:
         print(f"No pending request found for agent={args.agent} action={args.action}")
         return 1
-    reviewer = _confirm_gate_approval(request)
-    if reviewer is None:
+    authorization = _confirm_gate_decision(
+        gate, request, "approve", rationale
+    )
+    if authorization is None:
         print(
             "approve requires an interactive human confirmation on a terminal; "
             "refusing in a non-interactive context. Re-run `afs approvals approve` "
@@ -112,37 +127,52 @@ def approvals_approve_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    ok = gate.approve(
+    ok = gate.approve_human(
         args.agent,
         args.action,
-        reviewer=reviewer,
         rationale=rationale,
-        reviewed_via="tty",
+        authorization=authorization,
     )
     if ok:
-        print(f"Approved: agent={args.agent} action={args.action} by {reviewer}")
+        print(
+            f"Approved: agent={args.agent} action={args.action} "
+            f"by {authorization.identity.reviewer}"
+        )
         return 0
     print(f"No pending request found for agent={args.agent} action={args.action}")
     return 1
 
 
 def approvals_reject_command(args: argparse.Namespace) -> int:
-    """Reject a pending request.
+    """Reject a pending request with human provenance.
 
-    Rejection is the fail-safe direction (it denies the agent), so it does
-    not require a terminal — but the reviewer identity is still recorded from
-    the OS user, not a claimable flag.
+    Programmatic callers may still deny through ``ApprovalGate.reject`` but
+    that record is explicitly unauthenticated and is not a human calibration
+    judgment. The CLI's judgment-bearing path requires the broker.
     """
     rationale = _require_rationale(args, "reject")
     if rationale is None:
         return 2
     gate = _load_gate(args)
-    ok = gate.reject(
+    request = gate.find_pending(args.agent, args.action)
+    if request is None:
+        print(f"No pending request found for agent={args.agent} action={args.action}")
+        return 1
+    authorization = _confirm_gate_decision(
+        gate, request, "reject", rationale
+    )
+    if authorization is None:
+        print(
+            "reject requires an interactive human confirmation on a terminal; "
+            "refusing to label a programmatic denial as human-reviewed.",
+            file=sys.stderr,
+        )
+        return 2
+    ok = gate.reject_human(
         args.agent,
         args.action,
-        reviewer=os_reviewer(),
         rationale=rationale,
-        reviewed_via="cli",
+        authorization=authorization,
     )
     if ok:
         print(f"Rejected: agent={args.agent} action={args.action}")
@@ -152,22 +182,22 @@ def approvals_reject_command(args: argparse.Namespace) -> int:
 
 
 def approvals_clear_command(args: argparse.Namespace) -> int:
-    """Clear all completed (approved/rejected) requests."""
+    """Archive completed requests and compact active state."""
     gate = _load_gate(args)
     removed, remaining = gate.clear_completed()
 
     if getattr(args, "json", False):
-        print(json.dumps({"cleared": removed, "remaining": remaining}))
+        print(json.dumps({"archived": removed, "cleared": removed, "remaining": remaining}))
         return 0
 
-    print(f"Cleared {removed} completed request(s), {remaining} pending remain.")
+    print(f"Archived {removed} completed request(s), {remaining} pending remain.")
     return 0
 
 
 def approvals_history_command(args: argparse.Namespace) -> int:
     """Show all requests including completed ones."""
     gate = _load_gate(args)
-    all_requests = gate._pending
+    all_requests = gate.all_requests()
 
     if getattr(args, "json", False):
         print(json.dumps([r.to_dict() for r in all_requests], indent=2))
@@ -236,7 +266,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     approve_parser.add_argument("action", help="Action name.")
     approve_parser.add_argument(
         "--because",
-        help="Required rationale for the decision; stored in approvals history.",
+        help="Required rationale for the decision; stored in immutable approvals history.",
     )
     approve_parser.set_defaults(func=approvals_approve_command)
 
@@ -247,13 +277,13 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     reject_parser.add_argument("action", help="Action name.")
     reject_parser.add_argument(
         "--because",
-        help="Required rationale for the decision; stored in approvals history.",
+        help="Required rationale for the decision; stored in immutable approvals history.",
     )
     reject_parser.set_defaults(func=approvals_reject_command)
 
     # clear
     clear_parser = approvals_sub.add_parser(
-        "clear", help="Clear completed (approved/rejected) requests."
+        "clear", help="Archive completed requests and compact active state."
     )
     clear_parser.add_argument("--approvals-file", help="Path to approvals JSON file.")
     clear_parser.add_argument("--json", action="store_true", help="Output JSON.")

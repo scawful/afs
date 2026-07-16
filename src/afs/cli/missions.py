@@ -12,11 +12,14 @@ import json
 import sys
 from pathlib import Path
 
-from ..human_provenance import confirm_typed_token, os_reviewer, read_human_line
+from ..human_provenance import (
+    HumanAuthorization,
+    _broker_for_reader,
+)
 from ..missions import MissionNotFoundError, MissionStore
 from ._utils import load_manager, resolve_context_paths
 
-# Test seam: tests inject a fake terminal reader; production uses /dev/tty.
+# Test seam: production uses the platform controlling-terminal backend.
 _TTY_READER = None
 
 
@@ -35,17 +38,19 @@ def _print_mission_line(mission) -> None:
     print(f"{mission.mission_id}  ({mission.status}){owner}  {mission.title}{steps}")
 
 
-def _confirm_flag_acceptance(text: str) -> str | None:
+def _confirm_flag_acceptance(
+    text: str, *, scope: str
+) -> HumanAuthorization | None:
     """Confirm a ``--acceptance`` flag value on the controlling terminal.
 
     Acceptance is the human-authored definition of done that later outcome
     scoring calibrates against, so setting, changing, or clearing it requires
     typing ``human`` on the tty — piped stdin cannot satisfy it, and headless
-    callers (agents) are refused. Returns the OS reviewer identity, or
-    ``None`` to refuse.
+    callers (agents) are refused. Returns a decision-scoped broker
+    authorization, or ``None`` to refuse.
     """
     shown = text if text else "(clear the existing acceptance)"
-    reviewer = confirm_typed_token(
+    authorization = _broker_for_reader(_TTY_READER).confirm_token(
         "human",
         "\n".join(
             [
@@ -55,55 +60,65 @@ def _confirm_flag_acceptance(text: str) -> str | None:
                 "Type 'human' to confirm you (not an agent) authored this change: ",
             ]
         ),
-        reader=_TTY_READER,
+        scope=scope,
     )
-    if reviewer is None:
+    if authorization is None:
         print(
             "acceptance is human-authored; setting or clearing it requires an "
             "interactive terminal confirmation. Agents must leave it unset and "
             "surface the nudge instead.",
             file=sys.stderr,
         )
-    return reviewer
+    return authorization
 
 
-def _prompt_for_acceptance(args: argparse.Namespace) -> tuple[str, str]:
+def _prompt_for_acceptance(
+    args: argparse.Namespace, *, title: str, store: MissionStore
+) -> tuple[str, HumanAuthorization | None]:
     """Ask the human to author acceptance when creating a mission.
 
     The prompt is written to and read from the controlling terminal, so it
     never contaminates stdout and piped stdin cannot answer it. Headless
     callers are never blocked: without a terminal the prompt is skipped and
     the follow-up nudge is printed instead. Never prompts in ``--json`` mode.
-    Returns ``(acceptance, set_by)``.
+    Returns ``(acceptance, authorization)``.
     """
     if getattr(args, "json", False):
-        return "", ""
-    line = read_human_line(
+        return "", None
+    result = _broker_for_reader(_TTY_READER).read_line(
         "Acceptance — what does done look like? (enter to skip): ",
-        reader=_TTY_READER,
+        scope=lambda response: store.human_acceptance_scope(
+            "create", title.strip(), response.strip()
+        ),
     )
-    if line is None:
-        return "", ""
+    if result is None:
+        return "", None
+    line, authorization = result
     acceptance = line.strip()
-    return acceptance, (os_reviewer() if acceptance else "")
+    return acceptance, (authorization if acceptance else None)
 
 
 def mission_create_command(args: argparse.Namespace) -> int:
     store = _store(args)
     flag = str(getattr(args, "acceptance", None) or "").strip()
     if flag:
-        reviewer = _confirm_flag_acceptance(flag)
-        if reviewer is None:
+        scope = store.human_acceptance_scope(
+            "create", args.title.strip(), flag
+        )
+        authorization = _confirm_flag_acceptance(flag, scope=scope)
+        if authorization is None:
             return 2
-        acceptance, acceptance_set_by = flag, reviewer
+        acceptance = flag
     else:
-        acceptance, acceptance_set_by = _prompt_for_acceptance(args)
+        acceptance, authorization = _prompt_for_acceptance(
+            args, title=args.title, store=store
+        )
     mission = store.create(
         title=args.title,
         summary=getattr(args, "summary", "") or "",
         owner=getattr(args, "owner", "") or "",
         acceptance=acceptance,
-        acceptance_set_by=acceptance_set_by,
+        acceptance_authorization=authorization,
         next_steps=list(getattr(args, "next_step", None) or []),
         tags=list(getattr(args, "tag", None) or []),
     )
@@ -148,13 +163,17 @@ def mission_show_command(args: argparse.Namespace) -> int:
 def mission_update_command(args: argparse.Namespace) -> int:
     store = _store(args)
     acceptance = getattr(args, "acceptance", None)
-    acceptance_set_by = ""
+    acceptance_authorization = None
     if acceptance is not None:
         acceptance = str(acceptance).strip()
-        reviewer = _confirm_flag_acceptance(acceptance)
-        if reviewer is None:
+        scope = store.human_acceptance_scope(
+            "update", args.mission_id, acceptance
+        )
+        acceptance_authorization = _confirm_flag_acceptance(
+            acceptance, scope=scope
+        )
+        if acceptance_authorization is None:
             return 2
-        acceptance_set_by = reviewer
     try:
         mission = store.update(
             args.mission_id,
@@ -162,7 +181,7 @@ def mission_update_command(args: argparse.Namespace) -> int:
             summary=getattr(args, "summary", None),
             owner=getattr(args, "owner", None),
             acceptance=acceptance,
-            acceptance_set_by=acceptance_set_by,
+            acceptance_authorization=acceptance_authorization,
             next_steps=list(args.next_step) if getattr(args, "next_step", None) else None,
             blockers=list(args.blocker) if getattr(args, "blocker", None) else None,
             link_session=getattr(args, "link_session", None),

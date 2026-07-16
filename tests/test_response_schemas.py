@@ -177,6 +177,14 @@ def test_plan_human_intent_rejects_unknown_keys() -> None:
     assert result.valid is False
 
 
+def test_plan_rejects_empty_human_intent_object() -> None:
+    result = validate_structured_response(
+        "implementation-plan", {**_VALID_PLAN, "human_intent": {}}
+    )
+    assert result.valid is False
+    assert any("non-empty" in error or "property" in error for error in result.errors)
+
+
 def test_human_intent_preserved_checks() -> None:
     from afs.response_schemas import verify_human_intent_preserved
 
@@ -230,14 +238,16 @@ def test_human_intent_shape_bypasses_are_closed() -> None:
         for v in verify_human_intent_preserved(["not", "a", "dict"], fabricated)
     )
 
-    # An explicitly empty anchor must stay exactly empty.
+    # An explicitly empty anchor is malformed, not a valid trust anchor.
     empty_anchor = {"human_intent": {}, "summary": "seed"}
     filled = {**_VALID_PLAN, "human_intent": {"goal": "agent filled it in"}}
     assert any(
-        "modified" in v for v in verify_human_intent_preserved(empty_anchor, filled)
+        "invalid" in v for v in verify_human_intent_preserved(empty_anchor, filled)
     )
     kept_empty = {**_VALID_PLAN, "human_intent": {}}
-    assert verify_human_intent_preserved(empty_anchor, kept_empty) == []
+    assert any(
+        "invalid" in v for v in verify_human_intent_preserved(empty_anchor, kept_empty)
+    )
 
 
 def test_canonical_json_distinguishes_python_equality_quirks() -> None:
