@@ -36,17 +36,6 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
   serialized and bounded human-confirmed acceptance now reaches bootstrap
   prompts; and malformed or changed `human_intent` anchors fail with correction
   guidance.
-- Event reactor: `on_event` agent start conditions match history events and
-  hivemind messages with `"<kind>[:<detail>]"` fnmatch patterns. Delivery is
-  transactional — events are read oldest-first under an exclusive per-context
-  lock with bounded per-cycle batches, dispatched, and only then acked, so a
-  crash redelivers instead of losing events and concurrent supervisors never
-  double-deliver. Unknown `on_event_action` values fail closed; the `job`
-  action passes the same supervisor gates as spawns and embeds only sanitized
-  event labels in prompts; debounce (`event_debounce`, default 5m) is
-  persisted per agent so it also covers job actions; malformed records are
-  skipped and counted; and `AgentConfig` round-trips now preserve custom
-  mapping keys.
 - Versioned, packaged JSON Schema contracts for optimization evaluation,
   policy, and decision records.
 - Pure `afs optimize decide` evidence gate with deterministic hashes, stable
@@ -72,6 +61,17 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
   agent list implicitly.
 - Versioned extension-manifest validation with bounded diagnostics, isolated
   CLI registration failures, and surfaced doctor/plugin reports.
+- Event reactor: `on_event` agent start conditions match history events and
+  hivemind messages with `"<kind>[:<detail>]"` fnmatch patterns. Delivery is
+  transactional — events are read oldest-first under an exclusive per-context
+  lock with bounded per-cycle batches, dispatched, and only then acked, so a
+  crash redelivers instead of losing events and concurrent supervisors never
+  double-deliver. Unknown `on_event_action` values fail closed; the `job`
+  action passes the same supervisor gates as spawns and embeds only sanitized
+  event labels in prompts; debounce (`event_debounce`, default 5m) is
+  persisted per agent so it also covers job actions; malformed records are
+  skipped and counted; and `AgentConfig` round-trips now preserve custom
+  mapping keys.
 
 ### Changed
 
