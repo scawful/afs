@@ -39,6 +39,7 @@ nav:
     - Agent Surfaces: AGENT_SURFACES.md
     - Architecture: ARCHITECTURE.md
     - Profiles and Hooks: PROFILES.md
+    - Skills: SKILLS.md
     - Extensions: PLUGINS.md
     - Extension Authoring: EXTENSION_AUTHORING.md
     - Autonomous Optimization: OPTIMIZATION_PROTOCOL.md

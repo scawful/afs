@@ -46,6 +46,7 @@ It provides filesystem-native primitives for:
 - [Guided Setup](SETUP_GUIDE.md)
 - [Architecture](ARCHITECTURE.md)
 - [Profiles and Hooks](PROFILES.md)
+- [Skills](SKILLS.md)
 - [Extensions](PLUGINS.md)
 - [Extension Authoring](EXTENSION_AUTHORING.md)
 - [MCP Server](MCP_SERVER.md)
