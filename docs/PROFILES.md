@@ -14,6 +14,13 @@ extension_repo_roots = ["~/src/lab"]
 extension_repo_prefixes = ["afs_", "afs-"]
 manifest_filenames = ["extension.toml"]
 
+[agents]
+# A profile with an empty agent list receives the shipped default set
+# (context-warm, index-rebuild, skills-mine, morning-briefing); profiles that
+# configure any agents are never augmented. Disable here or per-environment
+# with AFS_DEFAULT_AGENTS=off.
+default_set = true
+
 [profiles]
 active_profile = "work"
 auto_apply = true
@@ -87,6 +94,10 @@ name: workspace-navigator
 triggers: ["workspace", "context"]
 requires: ["mcp", "knowledge/work"]
 profiles: ["work", "general"]
+enforcement:
+  - Rules the agent must follow while the skill is active.
+verification:
+  - How to check the work.
 ---
 ```
 
@@ -96,6 +107,9 @@ Use:
 ./scripts/afs skills list --profile work
 ./scripts/afs skills match "debug mcp tool registration" --profile work
 ```
+
+See `docs/SKILLS.md` for matching rules, session body injection, the
+`skill.match`/`skill.read` MCP tools, and the bundled skill library.
 
 ## Monorepo Bridge
 
