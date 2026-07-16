@@ -203,7 +203,8 @@ scripts/afs work communication guide --path .
 scripts/afs work communication preflight --path .
 scripts/afs work approvals list --path .
 scripts/afs work approvals request --path . ...
-scripts/afs work approvals approve <approval-id> --path . --by human
+scripts/afs work approvals approve <approval-id> --path . \
+  --because "preview and target verified"
 scripts/afs work approvals execute <approval-id> --path . --dry-run --json
 scripts/afs work approvals execute <approval-id> --path . --executor "<connector command>"
 ```

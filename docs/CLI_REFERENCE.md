@@ -288,7 +288,8 @@ It is intentionally not exposed as a broad MCP CRUD surface.
   --action send_email \
   --summary "Send approved follow-up email" \
   --preview-json '{"to":"person@example.com","subject":"Follow-up","body":"Thanks for the update."}'
-./scripts/afs work approvals approve <approval-id> --path . --by human
+./scripts/afs work approvals approve <approval-id> --path . \
+  --because "preview and target verified"
 ./scripts/afs work approvals execute <approval-id> --path . --dry-run --json
 ./scripts/afs work approvals execute <approval-id> --path . \
   --executor "python3 scripts/afs-work-approval-echo.py"

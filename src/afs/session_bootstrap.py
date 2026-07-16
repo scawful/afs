@@ -39,6 +39,9 @@ _MAX_TEXT_CHARS = 1500
 _MAX_LIST_ITEMS = 8
 _MAX_SKILL_SIGNAL_CHARS = 8_000
 
+# Private test seam; production reads the platform controlling terminal.
+_ENGAGE_READER = None
+
 
 def build_agent_discovery_path(context_path: Path) -> dict[str, Any]:
     """Return the deterministic, low-noise AFS discovery path for agents."""
@@ -119,6 +122,7 @@ def _estimate_tokens(text: str) -> int:
 # dropped first when the bootstrap exceeds the token budget.
 _SECTION_PRIORITY = [
     "handoff",          # critical: what happened last session
+    "missions",         # critical: durable in-flight goals and human done criteria
     "scratchpad",       # high: current working state
     "agent_manifest",   # high: shared harness/source-of-truth state
     "skills",           # high: task-matched local operating instructions
@@ -478,6 +482,7 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
     diff = summary["diff"]
     scratchpad = summary["scratchpad"]
     tasks = summary["tasks"]
+    missions = summary.get("missions", {})
     agent_manifest = summary.get("agent_manifest", {})
     skills = summary.get("skills", {})
     agent_jobs = summary.get("agent_jobs", {})
@@ -599,6 +604,36 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
             lines.append(
                 f"  - [{item['status']}] p{item['priority']} {item['title']}{assigned}"
             )
+
+    lines.extend(["", "## Active Missions"])
+    if missions.get("truncated"):
+        lines.append("- truncated: token_budget")
+    elif not missions.get("available", True):
+        lines.append(f"- unavailable: {missions.get('error', 'unknown error')}")
+    else:
+        active_missions = missions.get("active") or []
+        lines.append(f"- total: {missions.get('active_count', len(active_missions))}")
+        if not active_missions:
+            lines.append("- none")
+        for mission in active_missions:
+            if not isinstance(mission, dict):
+                continue
+            owner = f" -> {mission['owner']}" if mission.get("owner") else ""
+            lines.append(
+                f"- [{mission.get('status', 'active')}] "
+                f"{mission.get('title', '')} ({mission.get('mission_id', '?')}){owner}"
+            )
+            if (
+                mission.get("acceptance_human_confirmed") is True
+                and mission.get("acceptance")
+            ):
+                lines.append(f"  - done_when: {mission['acceptance']}")
+            if mission.get("summary"):
+                lines.append(f"  - summary: {mission['summary']}")
+            for step in mission.get("next_steps") or []:
+                lines.append(f"  - next: {step}")
+            for blocker in mission.get("blockers") or []:
+                lines.append(f"  - blocker: {blocker}")
 
     lines.extend(["", "## Work Assistant"])
     if work_assistant.get("available", True):
@@ -1066,10 +1101,52 @@ def _collect_missions(
         active = store.active(limit=max(1, limit))
     except Exception as exc:
         return {"available": False, "active": [], "active_count": 0, "error": str(exc)}
+    def bounded_text(value: Any, *, max_chars: int) -> str:
+        text = str(value or "").strip()
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 3].rstrip() + "..."
+
+    def bounded_list(value: Any, *, limit: int, max_chars: int) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [
+            bounded_text(item, max_chars=max_chars)
+            for item in value[:limit]
+            if str(item or "").strip()
+        ]
+
+    active_payload: list[dict[str, Any]] = []
+    for mission in active:
+        # Bootstrap is a prompt surface, not a mission backup.  Exclude
+        # unbounded logs, metadata, and link histories; retain only the
+        # actionable fields a resumed agent needs.
+        active_payload.append(
+            {
+                "mission_id": bounded_text(mission.mission_id, max_chars=80),
+                "title": bounded_text(mission.title, max_chars=240),
+                "status": bounded_text(mission.status, max_chars=32),
+                "owner": bounded_text(mission.owner, max_chars=120),
+                "summary": bounded_text(mission.summary, max_chars=_MAX_TEXT_CHARS),
+                "acceptance": (
+                    bounded_text(mission.acceptance, max_chars=_MAX_TEXT_CHARS)
+                    if mission.acceptance_human_confirmed is True
+                    else ""
+                ),
+                "acceptance_human_confirmed": (
+                    mission.acceptance_human_confirmed is True
+                ),
+                "next_steps": bounded_list(
+                    mission.next_steps, limit=5, max_chars=400
+                ),
+                "blockers": bounded_list(mission.blockers, limit=5, max_chars=400),
+                "tags": bounded_list(mission.tags, limit=10, max_chars=80),
+            }
+        )
     return {
         "available": True,
-        "active": [mission.to_dict() for mission in active],
-        "active_count": len(active),
+        "active": active_payload,
+        "active_count": len(active_payload),
     }
 
 
@@ -1423,3 +1500,102 @@ def _indent_block(text: str, *, bullet: str | None = None) -> list[str]:
         output.append(bullet)
     output.extend(f"  {line}" for line in lines)
     return output
+
+# -- engage mode ---------------------------------------------------------------
+
+
+def top_priority_item(summary: dict[str, Any]) -> str:
+    """The single item a human triaging this session should name first.
+
+    Precedence mirrors how the rendered bootstrap leads: the latest handoff's
+    first next step, then the newest active mission, then the first open task.
+    """
+    handoff = summary.get("handoff") or {}
+    for step in handoff.get("next_steps") or []:
+        text = str(step).strip()
+        if text:
+            return text
+    for mission in (summary.get("missions") or {}).get("active") or []:
+        if isinstance(mission, dict):
+            title = str(mission.get("title") or "").strip()
+            if title:
+                return title
+    for task in (summary.get("tasks") or {}).get("items") or []:
+        if isinstance(task, dict):
+            title = str(task.get("title") or "").strip()
+            if title:
+                return title
+    return ""
+
+
+def _prediction_matches(predicted: str, actual: str) -> bool:
+    left = " ".join(predicted.lower().split())
+    right = " ".join(actual.lower().split())
+    if not left or not right:
+        return False
+    return left in right or right in left
+
+
+def run_engage_prediction(
+    context_path: Path,
+    summary: dict[str, Any],
+    *,
+    config: Any = None,
+) -> dict[str, Any] | None:
+    """Predict-before-reveal micro-question for session bootstrap ``--engage``.
+
+    Asks the human to guess the top queued item before the packet is shown,
+    then logs prediction vs actual to the calibration trail. Generation before
+    reveal is the engagement point; skipping (empty input, no tty) is always
+    allowed and never blocks the bootstrap itself.
+    """
+    from .calibration import (
+        human_prediction_scope,
+        record_human_prediction,
+    )
+    from .human_provenance import _broker_for_reader
+
+    kind = "bootstrap_top_priority"
+    actual = top_priority_item(summary)
+    try:
+        result = _broker_for_reader(_ENGAGE_READER).read_line(
+            "Before the reveal — what is the top queued item right now? ",
+            scope=lambda response: human_prediction_scope(
+                context_path,
+                kind=kind,
+                predicted=response.strip(),
+                actual=actual,
+                match=(
+                    _prediction_matches(response.strip(), actual)
+                    if actual
+                    else None
+                ),
+                config=config,
+            ),
+        )
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if result is None:
+        print("engage: skipped (requires an interactive controlling terminal)")
+        return None
+    predicted_raw, authorization = result
+    predicted = predicted_raw.strip()
+    if not predicted:
+        return None
+    match = _prediction_matches(predicted, actual) if actual else None
+    try:
+        entry = record_human_prediction(
+            context_path,
+            kind=kind,
+            predicted=predicted,
+            actual=actual,
+            match=match,
+            authorization=authorization,
+            config=config,
+        )
+    except Exception as exc:
+        logger.warning("Failed to record engage prediction: %s", exc)
+        entry = None
+    marker = {True: "matched", False: "different", None: "unresolved"}[match]
+    print(f"engage: you predicted {predicted!r}; the queue says {actual!r} ({marker})")
+    return entry

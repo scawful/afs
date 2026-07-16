@@ -286,6 +286,9 @@ def test_session_context_surfaces_active_missions() -> None:
                         "owner": "gemini",
                         "next_steps": ["pull logs"],
                         "blockers": ["waiting on access"],
+                        "acceptance": "logs captured and incident owner assigned",
+                        "acceptance_suggestion": "agent-written substitute",
+                        "acceptance_human_confirmed": True,
                     }
                 ],
                 "active_count": 1,
@@ -296,6 +299,32 @@ def test_session_context_surfaces_active_missions() -> None:
     assert "[blocked, owner=gemini] Triage incident 4821" in prompt
     assert "next: pull logs" in prompt
     assert "blocked: waiting on access" in prompt
+    assert "done when: logs captured and incident owner assigned" in prompt
+    assert "agent-written substitute" not in prompt
+
+
+def test_session_context_omits_unconfirmed_mission_acceptance() -> None:
+    prompt = build_model_system_prompt(
+        base_prompt="Base behavior.",
+        session_state={
+            "project": "afs",
+            "profile": "default",
+            "missions": {
+                "available": True,
+                "active": [
+                    {
+                        "title": "Agent-proposed mission",
+                        "status": "active",
+                        "acceptance": "claim this is human intent",
+                        "acceptance_human_confirmed": False,
+                    }
+                ],
+                "active_count": 1,
+            },
+        },
+    )
+    assert "Agent-proposed mission" in prompt
+    assert "claim this is human intent" not in prompt
 
 
 def test_session_context_no_mission_block_when_none_active() -> None:

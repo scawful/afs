@@ -6,6 +6,36 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 
 ### Added
 
+- Engagement primitives that keep human judgment in the loop: approvals
+  approve/reject on both surfaces now require a `--because` rationale and an
+  interactive human confirmation (headless approval fails closed), with
+  reviewer provenance recorded in history; missions carry a human-authored
+  `acceptance` field with recorded provenance; `afs calibration review`
+  resurfaces the window's decisions with their rationales for outcome
+  scoring (`afs calibration score` is itself confirmation-gated with
+  scored-by provenance, rejects unknown refs, and stores global gate-
+  decision outcomes globally so they never resurface unscored in another
+  context; `--markdown` emits a weekly-review digest);
+  `afs session bootstrap --engage` asks for a top-priority prediction before
+  revealing the queue (never in `--json` mode) and logs it to the calibration
+  trail; and the `implementation-plan` schema gains a `human_intent` section
+  agents must never author, enforced structurally by
+  `afs schema validate --skeleton`.
+- Human judgments now cross a decision-scoped store capability minted by a
+  cross-platform controlling-terminal broker, with UID/SID-derived identity
+  and fail-closed refusal when OS identity is unavailable. Capabilities bind
+  the exact store, record, rationale/note, and process and are single-use.
+  Programmatic store APIs cannot forge authorization or calibration
+  provenance; programmatic predictions are excluded from human calibration;
+  mission text becomes an `acceptance_suggestion` without the capability;
+  approval clearing archives crash-repaired decision history; active approval
+  state is corruption-failing, atomically replaced, refreshed across processes,
+  and bound to exact action details; work approvals use an atomic execution
+  claim and reopen legacy unconfirmed approvals for human review; calibration
+  JSONL appends are locked, fsynced, and repair torn tails; mission updates are
+  serialized and bounded human-confirmed acceptance now reaches bootstrap
+  prompts; and malformed or changed `human_intent` anchors fail with correction
+  guidance.
 - Versioned, packaged JSON Schema contracts for optimization evaluation,
   policy, and decision records.
 - Pure `afs optimize decide` evidence gate with deterministic hashes, stable

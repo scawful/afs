@@ -109,7 +109,8 @@ Review and approve:
 ```bash
 ./scripts/afs work approvals list --path ~/src/project-a
 ./scripts/afs work approvals show <approval-id> --path ~/src/project-a
-./scripts/afs work approvals approve <approval-id> --path ~/src/project-a --by human
+./scripts/afs work approvals approve <approval-id> --path ~/src/project-a \
+  --because "preview and target verified"
 ```
 
 Preview execution payload:

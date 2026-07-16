@@ -12,11 +12,13 @@ import json
 import sys
 from pathlib import Path
 
+from ..protocols.canonical_json import strict_json_loads
 from ..response_schemas import (
     build_schema_correction,
     get_response_schema,
     list_response_schema_names,
     validate_structured_response,
+    verify_human_intent_preserved,
 )
 
 
@@ -98,16 +100,50 @@ def schema_validate_command(args: argparse.Namespace) -> int:
         return 2
     result = validate_structured_response(schema_name, response_text)
 
+    intent_violations: list[str] = []
+    skeleton_arg = getattr(args, "skeleton", None)
+    if skeleton_arg:
+        try:
+            skeleton_text = Path(skeleton_arg).expanduser().read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"cannot read skeleton: {exc}", file=sys.stderr)
+            return 2
+        # The skeleton is a trust anchor: parse it at least as strictly as the
+        # response it verifies — no fence extraction or repairs, no duplicate
+        # object keys (first key shown, last key verified), no NaN/Infinity —
+        # so that what is verified is exactly what the human wrote.
+        try:
+            skeleton = strict_json_loads(skeleton_text)
+        except ValueError as exc:
+            print(f"invalid skeleton: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(skeleton, dict):
+            print("invalid skeleton: must be a JSON object", file=sys.stderr)
+            return 2
+        intent_violations = verify_human_intent_preserved(skeleton, result.parsed)
+
+    valid = result.valid and not intent_violations
+    correction_parts = [build_schema_correction(result)]
+    if intent_violations:
+        correction_parts.append(
+            "Restore the human-authored `human_intent` section exactly as supplied "
+            "in the skeleton:\n"
+            + "\n".join(f"- {violation}" for violation in intent_violations)
+        )
+    correction = "\n".join(part for part in correction_parts if part)
     if getattr(args, "json", False):
         payload = result.to_dict()
-        payload["correction"] = build_schema_correction(result)
+        payload["valid"] = valid
+        payload["human_intent_violations"] = intent_violations
+        payload["correction"] = correction
         print(json.dumps(payload, indent=2))
-    elif result.valid:
+    elif valid:
         print(f"valid: response matches `{schema_name}`")
     else:
-        print(build_schema_correction(result))
+        if correction:
+            print(correction)
 
-    return 0 if result.valid else 1
+    return 0 if valid else 1
 
 
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
@@ -138,6 +174,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     source.add_argument("--text", help="Response text to validate (inline).")
     source.add_argument(
         "--file", help="Read response from a file ('-' or omitted reads stdin)."
+    )
+    validate_parser.add_argument(
+        "--skeleton",
+        help="Human-authored skeleton plan (JSON file); fails validation if "
+        "the response modified or authored its human_intent section.",
     )
     validate_parser.add_argument(
         "--json",
