@@ -29,8 +29,20 @@ from ..config import load_config_model
 from ..context_index import INDEX_SCAN_SKIP_NAMES
 from ..context_paths import resolve_agent_output_root
 from ..profiles import resolve_active_profile
-from ..schema import AFSConfig, AgentConfig
+from ..schema import MAX_AGENT_RESTARTS, AFSConfig, AgentConfig
 from .base import AgentResult, build_base_parser, configure_logging, emit_result, now_iso
+from .event_reactor import (
+    DEFAULT_EVENT_DEBOUNCE_SECONDS,
+    VALID_EVENT_ACTIONS,
+    ReactorBatch,
+    ReactorBusyError,
+    ReactorEvent,
+    ReactorStateError,
+    event_config_digest,
+    legacy_event_config_digest,
+    match_event_rules,
+    open_event_batch,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -451,8 +463,12 @@ class AgentSupervisor:
 
     def _backoff_delay(self, failure_count: int) -> float:
         """Calculate exponential backoff: min(base * 2^(n-1), max_delay)."""
+        # AgentConfig loading and durable reactor state both cap this count,
+        # but direct API callers can construct AgentConfig instances. Clamp
+        # before exponentiation so malformed/untrusted values stay cheap.
+        exponent = max(0, min(failure_count - 1, MAX_AGENT_RESTARTS - 1))
         return min(
-            self.RESTART_BASE_DELAY * (2 ** (failure_count - 1)),
+            self.RESTART_BASE_DELAY * (2**exponent),
             self.RESTART_MAX_DELAY,
         )
 
@@ -482,11 +498,12 @@ class AgentSupervisor:
             return True
 
         # Budget check
-        if failure_count >= agent_config.max_restarts:
+        restart_limit = max(0, min(agent_config.max_restarts, MAX_AGENT_RESTARTS))
+        if failure_count >= restart_limit:
             _log.warning(
                 "Agent %s: max restarts (%d) exhausted, opening circuit breaker",
                 name,
-                agent_config.max_restarts,
+                restart_limit,
             )
             self._circuit_opened_at[name] = now
             return False
@@ -967,6 +984,7 @@ class AgentSupervisor:
         except Exception as exc:
             agent.state = "failed"
             agent.last_error = str(exc)
+            failure_count = self._record_failure(name)
             self._write_state(agent)
             self._update_registry(
                 agent,
@@ -982,6 +1000,7 @@ class AgentSupervisor:
                     "launch_reason": reason,
                     "module": module,
                     "error": str(exc),
+                    "failure_count": failure_count,
                 },
             )
             raise RuntimeError(f"Failed to spawn agent {name}: {exc}") from exc
@@ -1231,15 +1250,367 @@ class AgentSupervisor:
                 due.append(config)
         return due
 
+    def _event_debounce_seconds(self, config: AgentConfig) -> float:
+        if config.event_debounce:
+            parsed = _parse_schedule_interval(config.event_debounce)
+            if parsed is not None:
+                return parsed
+        return DEFAULT_EVENT_DEBOUNCE_SECONDS
+
+    def _matched_event_records(
+        self,
+        events: list[ReactorEvent],
+        agent_configs: list[AgentConfig],
+        *,
+        action: str | None = None,
+        batch: ReactorBatch | None = None,
+    ) -> list[tuple[AgentConfig, str]]:
+        """Return source and parked matches, optionally for one action path."""
+        results: list[tuple[AgentConfig, str]] = []
+        result_names: set[str] = set()
+        config_by_name = {config.name: config for config in agent_configs}
+        digests: dict[str, str] = {}
+        if batch is not None:
+            valid_routes: dict[str, tuple[str, str, str]] = {}
+            for config in agent_configs:
+                if (
+                    not config.name.strip()
+                    or not config.on_event
+                    or config.on_event_action not in VALID_EVENT_ACTIONS
+                ):
+                    continue
+                digest = event_config_digest(config)
+                digests[config.name] = digest
+                valid_routes[config.name] = (
+                    config.on_event_action,
+                    digest,
+                    legacy_event_config_digest(config),
+                )
+            batch.prune_pending_routes(valid_routes)
+            for route in batch.pending_routes(action=action):
+                config = config_by_name.get(route.agent_name)
+                if config is None:
+                    continue
+                batch.register_route(
+                    config.name,
+                    action=route.action,
+                    reason=route.reason,
+                    config_digest=route.config_digest,
+                )
+                results.append((config, route.reason))
+                result_names.add(config.name)
+        for config, reason in match_event_rules(events, agent_configs):
+            if not config.name.strip():
+                should_log = batch is None or batch.mark_rejected(
+                    config.name,
+                    reason="invalid_name",
+                )
+                if should_log:
+                    _log.warning("Rejecting event trigger for agent with an empty name")
+                continue
+            if config.on_event_action not in VALID_EVENT_ACTIONS:
+                should_log = batch is None or batch.mark_rejected(
+                    config.name,
+                    reason="invalid_action",
+                )
+                if should_log:
+                    _log.warning(
+                        "Agent '%s' has invalid on_event_action %r "
+                        "(valid: %s); rejecting its event trigger",
+                        config.name,
+                        config.on_event_action,
+                        ", ".join(VALID_EVENT_ACTIONS),
+                    )
+                continue
+            if action is not None and config.on_event_action != action:
+                continue
+            if batch is not None:
+                route = batch.register_route(
+                    config.name,
+                    action=config.on_event_action,
+                    reason=reason,
+                    config_digest=digests[config.name],
+                )
+                reason = route.reason
+            if config.name in result_names:
+                continue
+            results.append((config, reason))
+            result_names.add(config.name)
+        return results
+
+    def _event_is_debounced(
+        self,
+        config: AgentConfig,
+        *,
+        current: datetime,
+        batch: ReactorBatch | None,
+        existing: RunningAgent | None,
+    ) -> bool:
+        debounce = self._event_debounce_seconds(config)
+        dispatched = batch.last_dispatch(config.name) if batch else None
+        if dispatched:
+            elapsed = (current - dispatched).total_seconds()
+            if 0 <= elapsed < debounce:
+                return True
+        if existing and getattr(existing, "state", "stopped") == "stopped":
+            last_start = _parse_timestamp(existing.started_at)
+            if last_start:
+                elapsed = (current - last_start).total_seconds()
+                if 0 <= elapsed < debounce:
+                    return True
+        return False
+
+    @staticmethod
+    def _event_state_gate(existing: RunningAgent | None) -> tuple[str, str] | None:
+        """Classify existing-agent state before debounce or dispatch."""
+        if existing is None:
+            return None
+        if existing.manually_stopped:
+            return "deferred", "manual_stop"
+        if existing.state == "circuit_open":
+            return "deferred", "circuit_open"
+        if existing.state == "awaiting_review":
+            return "deferred", "awaiting_review"
+        if existing.state == "running":
+            return "coalesced", "running"
+        return None
+
+    def _event_launch_failure_gate(
+        self,
+        batch: ReactorBatch,
+        existing: RunningAgent | None,
+        config: AgentConfig,
+        *,
+        current: datetime,
+    ) -> tuple[str, str] | None:
+        """Apply durable restart/backoff/circuit policy to one parked route."""
+        route = batch.pending_route(config.name)
+        if route is None:
+            return None
+        if route.launch_failure_count == 0:
+            # Fail closed for a legacy persisted circuit that predates durable
+            # route retry metadata; its cooldown instant cannot be recovered.
+            if existing is not None and existing.state == "circuit_open":
+                return "deferred", "circuit_open"
+            return None
+        if not config.restart_on_failure:
+            return "deferred", "restart_disabled"
+        failed_at = _parse_timestamp(route.last_launch_failure_at)
+        if route.launch_circuit_opened_at:
+            opened = _parse_timestamp(route.launch_circuit_opened_at)
+            if opened is None:
+                return "deferred", "circuit_open"
+            if failed_at is not None and opened < failed_at:
+                # Repair state written by an older rollback-vulnerable gate:
+                # a circuit cannot predate the failure that exhausted it.
+                opened = failed_at
+                batch.open_launch_circuit(config.name, at=opened)
+            elapsed = (current - opened).total_seconds()
+            if elapsed < self.CIRCUIT_COOLDOWN:
+                return "deferred", "circuit_open"
+            batch.reset_launch_failures(config.name)
+            if existing is not None and existing.state == "circuit_open":
+                existing.state = "failed"
+                existing.last_event = "circuit_cooldown_elapsed"
+                existing.last_seen_at = now_iso()
+                self._write_state(existing)
+                self._update_registry(existing)
+            return None
+        restart_limit = max(0, min(config.max_restarts, MAX_AGENT_RESTARTS))
+        if route.launch_failure_count >= restart_limit:
+            # A wall-clock rollback must not backdate the circuit before the
+            # failure that opened it; correction would otherwise consume the
+            # cooldown instantly. Persist the later trusted route instant.
+            opened_at = (
+                failed_at
+                if failed_at is not None and failed_at > current
+                else current
+            )
+            batch.open_launch_circuit(config.name, at=opened_at)
+            if existing is not None and existing.state != "circuit_open":
+                existing.state = "circuit_open"
+                existing.last_event = "circuit_open"
+                existing.last_seen_at = now_iso()
+                self._write_state(existing)
+                self._update_registry(existing)
+            return "deferred", "circuit_open"
+        if failed_at is not None:
+            elapsed = (current - failed_at).total_seconds()
+            required_delay = self._backoff_delay(route.launch_failure_count)
+            if elapsed < required_delay:
+                return "deferred", "restart_backoff"
+        if existing is not None and existing.state == "circuit_open":
+            existing.state = "failed"
+            existing.last_event = "launch_retry"
+            existing.last_seen_at = now_iso()
+            self._write_state(existing)
+            self._update_registry(existing)
+        return None
+
+    @staticmethod
+    def _record_event_gate(
+        batch: ReactorBatch,
+        agent_name: str,
+        gate: tuple[str, str],
+    ) -> None:
+        state, reason = gate
+        if state == "deferred":
+            batch.mark_dispatch_deferred(agent_name, reason=reason)
+        else:
+            batch.mark_coalesced(agent_name, reason=reason)
+
+    def evaluate_event_records(
+        self,
+        events: list[ReactorEvent],
+        agent_configs: list[AgentConfig],
+        *,
+        now: datetime | None = None,
+        batch: ReactorBatch | None = None,
+    ) -> list[tuple[AgentConfig, str]]:
+        """Match reactor events against on_event rules with per-agent debounce.
+
+        Configs with an unknown ``on_event_action`` are skipped entirely (fail
+        closed): a typo must never fall through to a spawn. Debounce checks
+        the persisted per-agent dispatch time from the reactor state first —
+        job actions never start an agent, so the agent's own start time cannot
+        debounce them — and the agent's last start as a fallback.
+        """
+        current = now or _now_utc()
+        results: list[tuple[AgentConfig, str]] = []
+        for config, reason in self._matched_event_records(
+            events,
+            agent_configs,
+            batch=batch,
+        ):
+            existing = self.status(config.name)
+            if self._event_is_debounced(
+                config,
+                current=current,
+                batch=batch,
+                existing=existing,
+            ):
+                if batch:
+                    batch.mark_coalesced(config.name, reason="debounce")
+                continue
+            results.append((config, reason))
+        return results
+
+    def enqueue_event_jobs(
+        self,
+        batch: ReactorBatch,
+        agent_configs: list[AgentConfig],
+        *,
+        now: datetime | None = None,
+    ) -> list[str]:
+        """Enqueue agent-jobs for on_event matches with action \"job\".
+
+        Job enqueues pass the same authorization gates as event spawns —
+        circuit breaker / manual stop / dependency checks — so ``job`` is a
+        delivery mode, not a bypass. The whole read->enqueue window runs
+        inside the reactor batch lock, so the queued/running dedupe check
+        cannot race a concurrent supervisor. Prompts are built from operator
+        config plus the sanitized event label only; event payload text never
+        reaches a job prompt.
+        """
+        current = now or _now_utc()
+        matches = self._matched_event_records(
+            batch.events,
+            agent_configs,
+            action="job",
+            batch=batch,
+        )
+        if not matches:
+            return []
+        ready_matches: list[tuple[AgentConfig, str]] = []
+        for config, reason in matches:
+            if not config.module:
+                batch.mark_dispatch_deferred(config.name, reason="missing_module")
+                continue
+            existing = self.status(config.name)
+            state_gate = self._event_state_gate(existing)
+            if state_gate is not None:
+                self._record_event_gate(batch, config.name, state_gate)
+                continue
+            ready, dep_reason = self._check_dependencies(
+                config.name,
+                config,
+                agent_configs,
+            )
+            if not ready:
+                _log.info(
+                    "Deferring event job for '%s': %s", config.name, dep_reason
+                )
+                batch.mark_dispatch_deferred(config.name, reason="dependency")
+                continue
+            if self._event_is_debounced(
+                config,
+                current=current,
+                batch=batch,
+                existing=existing,
+            ):
+                batch.mark_coalesced(config.name, reason="debounce")
+                continue
+            ready_matches.append((config, reason))
+        if not ready_matches:
+            return []
+        from ..agent_jobs import AgentJobQueue
+
+        try:
+            resolved_config = self._config or load_config_model(merge_user=True)
+            queue = AgentJobQueue(resolved_config.general.context_root)
+            queue.ensure()
+            active_keys = {
+                job.dedupe_key
+                for status in ("queue", "running")
+                for job in queue.list(status=status)
+                if job.dedupe_key
+            }
+        except Exception:  # noqa: BLE001 - an unusable queue must park the route
+            _log.exception("Event job queue is unavailable")
+            for config, _reason in ready_matches:
+                batch.mark_dispatch_failed(config.name, reason="queue_unavailable")
+            return []
+        created: list[str] = []
+        for config, reason in ready_matches:
+            dedupe_key = f"on_event:{config.name}"
+            if dedupe_key in active_keys:
+                batch.mark_coalesced(config.name, reason="active_job")
+                continue
+            prompt = (
+                f"Agent config '{config.name}' matched {reason}. "
+                + (
+                    f"Run `python -m {config.module}` and review its result."
+                    if config.module
+                    else config.description
+                )
+            ).strip()
+            try:
+                job = queue.create(
+                    title=f"{config.name}: react to {reason}",
+                    prompt=prompt,
+                    created_by=AGENT_NAME,
+                    dedupe_key=dedupe_key,
+                )
+            except Exception:  # noqa: BLE001 - a failed enqueue must park the route
+                _log.exception("Could not enqueue event job for '%s'", config.name)
+                batch.mark_dispatch_failed(config.name, reason="enqueue_failed")
+                continue
+            active_keys.add(dedupe_key)
+            batch.mark_dispatched(config.name, reason="job")
+            created.append(job.id)
+        return created
+
     def reconcile(
         self,
         agent_configs: list[AgentConfig],
         *,
         event: str | None = None,
         changed_paths: list[Path] | None = None,
+        event_batch: ReactorBatch | None = None,
         now: datetime | None = None,
     ) -> list[RunningAgent]:
         candidates: dict[str, tuple[AgentConfig, str]] = {}
+        event_candidates: set[str] = set()
         for config in agent_configs:
             if config.auto_start:
                 candidates.setdefault(config.name, (config, "auto_start"))
@@ -1249,15 +1620,59 @@ class AgentSupervisor:
         if changed_paths:
             for config in self.evaluate_watch_paths(changed_paths, agent_configs):
                 candidates.setdefault(config.name, (config, "file_watch"))
+        if event_batch:
+            for config, reason in self._matched_event_records(
+                event_batch.events,
+                agent_configs,
+                action="spawn",
+                batch=event_batch,
+            ):
+                candidates.setdefault(config.name, (config, reason))
+                event_candidates.add(config.name)
         for config in self.due_schedules(agent_configs, now=now):
             candidates.setdefault(config.name, (config, f"schedule:{config.schedule}"))
 
         started: list[RunningAgent] = []
         for config, reason in candidates.values():
+            is_event_candidate = bool(
+                event_batch and config.name in event_candidates
+            )
             if not config.module:
+                if is_event_candidate and event_batch:
+                    event_batch.mark_dispatch_deferred(
+                        config.name,
+                        reason="missing_module",
+                    )
                 continue
+            current = now or _now_utc()
             existing = self.status(config.name)
-            if existing and (
+            if is_event_candidate and event_batch:
+                state_gate = self._event_state_gate(existing)
+                # Manual stop, review, and a manually recovered running agent
+                # take precedence over stale launch-retry metadata. A circuit
+                # is different: its durable route timestamp owns cooldown.
+                if state_gate is not None and state_gate[1] != "circuit_open":
+                    self._record_event_gate(event_batch, config.name, state_gate)
+                    continue
+                failure_gate = self._event_launch_failure_gate(
+                    event_batch,
+                    existing,
+                    config,
+                    current=current,
+                )
+                if failure_gate is not None:
+                    self._record_event_gate(
+                        event_batch,
+                        config.name,
+                        failure_gate,
+                    )
+                    continue
+                # A cooldown reset may have changed circuit_open -> failed.
+                state_gate = self._event_state_gate(existing)
+                if state_gate is not None:
+                    self._record_event_gate(event_batch, config.name, state_gate)
+                    continue
+            elif existing and (
                 existing.state in ("running", "awaiting_review", "circuit_open")
                 or existing.manually_stopped
             ):
@@ -1271,6 +1686,23 @@ class AgentSupervisor:
                     config.name,
                     dep_reason,
                 )
+                if is_event_candidate and event_batch:
+                    event_batch.mark_dispatch_deferred(
+                        config.name,
+                        reason="dependency",
+                    )
+                continue
+            if (
+                is_event_candidate
+                and event_batch
+                and self._event_is_debounced(
+                    config,
+                    current=current,
+                    batch=event_batch,
+                    existing=existing,
+                )
+            ):
+                event_batch.mark_coalesced(config.name, reason="debounce")
                 continue
             try:
                 started.append(
@@ -1282,7 +1714,23 @@ class AgentSupervisor:
                     )
                 )
             except RuntimeError:
+                if is_event_candidate and event_batch:
+                    # Keep one durable route while source offsets advance.
+                    # Failed agent state never supplies fallback debounce, so
+                    # recovery can retry; a later open circuit parks it too.
+                    event_batch.record_launch_failure(
+                        config.name,
+                        at=current,
+                    )
+                    event_batch.mark_dispatch_failed(
+                        config.name,
+                        reason="spawn_failed",
+                    )
                 continue
+            if is_event_candidate and event_batch:
+                # Debounce keys off actual dispatches, so only a spawn that
+                # really happened advances the agent's dispatch time.
+                event_batch.mark_dispatched(config.name, reason="spawn")
 
         # After spawning, check for targeted handoff-driven agents.
         # We scan for any agents that completed during this reconcile cycle
@@ -1409,16 +1857,90 @@ def _run_once(
         if previous_watch_state
         else []
     )
-    started_agents = supervisor.reconcile(
-        profile.agent_configs,
-        event="on_boot" if first_run else None,
-        changed_paths=changed_paths,
-        now=_now_utc(),
-    )
+    # Event handling is transactional: source checkpoints and the coalesced
+    # pending-route outbox commit together after routing. A crash before that
+    # ack reconstructs routes from source; a retryable gate is safely parked
+    # without pinning unrelated backlog. A contended lock means another
+    # supervisor owns this cycle's events — skip them, never double deliver.
+    reactor_event_count = 0
+    reactor_skipped = 0
+    reactor_truncated = False
+    reactor_busy = False
+    reactor_dispatch_failures = 0
+    reactor_state_error = False
+    try:
+        with open_event_batch(
+            config.general.context_root,
+            supervisor._state_dir,
+            config=config,
+            now=_now_utc(),
+        ) as batch:
+            reactor_event_count = len(batch.events)
+            reactor_skipped = batch.skipped_malformed
+            reactor_truncated = batch.truncated
+            started_agents = supervisor.reconcile(
+                profile.agent_configs,
+                event="on_boot" if first_run else None,
+                changed_paths=changed_paths,
+                event_batch=batch,
+                now=_now_utc(),
+            )
+            event_jobs = supervisor.enqueue_event_jobs(
+                batch,
+                profile.agent_configs,
+                now=_now_utc(),
+            )
+            reactor_dispatch_failures = batch.dispatch_failures
+            batch.prune_dispatch(c.name for c in profile.agent_configs)
+            try:
+                batch.ack()
+            except ReactorStateError:
+                # Neither source cursors nor the pending-route outbox
+                # committed. Source matches therefore reconstruct the route
+                # on the next cycle instead of being lost.
+                _log.exception("Event reactor ack failed")
+                reactor_state_error = True
+    except ReactorBusyError:
+        reactor_busy = True
+        started_agents = supervisor.reconcile(
+            profile.agent_configs,
+            event="on_boot" if first_run else None,
+            changed_paths=changed_paths,
+            now=_now_utc(),
+        )
+        event_jobs = []
+    except ReactorStateError:
+        # Priming could not be persisted (unwritable state dir): run the
+        # cycle without event handling rather than replaying history against
+        # cursors that can never advance.
+        _log.exception("Event reactor state is unwritable; skipping events")
+        reactor_state_error = True
+        started_agents = supervisor.reconcile(
+            profile.agent_configs,
+            event="on_boot" if first_run else None,
+            changed_paths=changed_paths,
+            now=_now_utc(),
+        )
+        event_jobs = []
     audit = supervisor.audit()
     notes: list[str] = []
     if changed_paths:
         notes.append("watch-path changes detected")
+    if reactor_event_count:
+        notes.append(f"{reactor_event_count} new reactor events")
+    if reactor_truncated:
+        notes.append("reactor backlog truncated; remainder next cycle")
+    if reactor_skipped:
+        notes.append(f"{reactor_skipped} malformed reactor records skipped")
+    if reactor_busy:
+        notes.append("reactor lock contended; events deferred one cycle")
+    if reactor_dispatch_failures:
+        notes.append(
+            f"{reactor_dispatch_failures} event dispatch(es) failed or deferred; "
+            "routes parked for retry"
+        )
+    if reactor_state_error:
+        notes.append("reactor state not persisted; cursors unchanged")
     if first_run:
         notes.append("boot reconciliation complete")
     result = AgentResult(
@@ -1431,6 +1953,13 @@ def _run_once(
             "configured_agents": len(profile.agent_configs),
             "started_agents": len(started_agents),
             "changed_watch_paths": len(changed_paths),
+            "reactor_events": reactor_event_count,
+            "reactor_skipped_malformed": reactor_skipped,
+            "reactor_truncated": int(reactor_truncated),
+            "reactor_busy": int(reactor_busy),
+            "reactor_dispatch_failures": reactor_dispatch_failures,
+            "reactor_state_error": int(reactor_state_error),
+            "event_jobs": len(event_jobs),
             "running_agents": int(audit["counts"]["running"]),
             "failed_agents": int(audit["counts"]["failed"]),
         },

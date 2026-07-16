@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -335,6 +336,9 @@ class HooksConfig:
         )
 
 
+MAX_AGENT_RESTARTS = 64
+
+
 @dataclass
 class AgentConfig:
     name: str
@@ -347,6 +351,12 @@ class AgentConfig:
     schedule: str = ""
     module: str = ""
     watch_paths: list[Path] = field(default_factory=list)
+    # Event reactor: fnmatch patterns "<kind>[:<detail>]" against history
+    # event type:op or hivemind:<topic>. Action "spawn" starts the module via
+    # the normal reconcile path; "job" enqueues an agent-job instead.
+    on_event: list[str] = field(default_factory=list)
+    on_event_action: str = "spawn"
+    event_debounce: str = ""
     allowed_mounts: list[str] = field(default_factory=list)
     allowed_tools: list[str] = field(default_factory=list)
     workspace_isolated: bool = False
@@ -354,16 +364,62 @@ class AgentConfig:
     max_restarts: int = 3
     depends_on: list[str] = field(default_factory=list)
     mutex_group: str = ""
+    # Mapping keys AFS does not recognize (extension- or user-defined) are
+    # preserved verbatim so a from_dict/to_dict round trip never silently
+    # strips custom configuration.
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    _KNOWN_FIELDS = frozenset(
+        {
+            "name",
+            "role",
+            "backend",
+            "description",
+            "tags",
+            "auto_start",
+            "triggers",
+            "schedule",
+            "module",
+            "watch_paths",
+            "on_event",
+            "on_event_action",
+            "event_debounce",
+            "allowed_mounts",
+            "allowed_tools",
+            "workspace_isolated",
+            "restart_on_failure",
+            "max_restarts",
+            "depends_on",
+            "mutex_group",
+        }
+    )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AgentConfig:
+        name = str(data.get("name", "")).strip()
+        if not name:
+            raise ValueError("agent config name is required")
+        raw_max_restarts = data.get("max_restarts", 3)
+        if isinstance(raw_max_restarts, bool):
+            raise ValueError("agent config max_restarts must be an integer from 0 to 64")
+        if isinstance(raw_max_restarts, int):
+            max_restarts = raw_max_restarts
+        elif isinstance(raw_max_restarts, str) and re.fullmatch(
+            r"[+-]?\d+", raw_max_restarts.strip()
+        ):
+            max_restarts = int(raw_max_restarts)
+        else:
+            raise ValueError("agent config max_restarts must be an integer from 0 to 64")
+        if max_restarts < 0 or max_restarts > MAX_AGENT_RESTARTS:
+            raise ValueError("agent config max_restarts must be an integer from 0 to 64")
         tags = data.get("tags", [])
         if isinstance(tags, list):
             tags = [tag for tag in tags if isinstance(tag, str)]
         else:
             tags = []
+        extra = {key: value for key, value in data.items() if key not in cls._KNOWN_FIELDS}
         return cls(
-            name=str(data.get("name", "")).strip(),
+            name=name,
             role=str(data.get("role", "general")).strip() or "general",
             backend=str(data.get("backend", "local")).strip() or "local",
             description=str(data.get("description", "")).strip(),
@@ -373,17 +429,25 @@ class AgentConfig:
             schedule=str(data.get("schedule", "")).strip(),
             module=str(data.get("module", "")).strip(),
             watch_paths=_as_path_list(data.get("watch_paths")),
+            on_event=_as_str_list(data.get("on_event")),
+            # Normalized but not coerced: an invalid value survives to the
+            # reactor, which fails closed on it (no spawn, no job) and warns.
+            on_event_action=str(data.get("on_event_action", "spawn")).strip().lower()
+            or "spawn",
+            event_debounce=str(data.get("event_debounce", "")).strip(),
             allowed_mounts=_as_str_list(data.get("allowed_mounts")),
             allowed_tools=_as_str_list(data.get("allowed_tools")),
             workspace_isolated=bool(data.get("workspace_isolated", False)),
             restart_on_failure=bool(data.get("restart_on_failure", False)),
-            max_restarts=int(data.get("max_restarts", 3)),
+            max_restarts=max_restarts,
             depends_on=_as_str_list(data.get("depends_on")),
             mutex_group=str(data.get("mutex_group", "")).strip(),
+            extra=extra,
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            **self.extra,
             "name": self.name,
             "role": self.role,
             "backend": self.backend,
@@ -394,6 +458,9 @@ class AgentConfig:
             "schedule": self.schedule,
             "module": self.module,
             "watch_paths": [str(path) for path in self.watch_paths],
+            "on_event": list(self.on_event),
+            "on_event_action": self.on_event_action,
+            "event_debounce": self.event_debounce,
             "allowed_mounts": list(self.allowed_mounts),
             "allowed_tools": list(self.allowed_tools),
             "workspace_isolated": self.workspace_isolated,
