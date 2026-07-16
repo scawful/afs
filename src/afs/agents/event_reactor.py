@@ -29,6 +29,8 @@ import json
 import logging
 import os
 import re
+import stat
+import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
@@ -58,7 +60,8 @@ STATE_DIR_NAME = "event_reactor"
 CURSOR_FILE_NAME = "cursor.json"
 INITIALIZED_FILE_NAME = "initialized"
 LEGACY_CURSOR_FILE_NAME = "event_reactor_cursor.json"
-STATE_VERSION = 4
+PREVIOUS_STATE_VERSION = 4
+STATE_VERSION = 5
 DEFAULT_EVENT_DEBOUNCE_SECONDS = 300.0
 HIVEMIND_KIND = "hivemind"
 # Per-source per-cycle record bound. Positional checkpoints resume larger
@@ -68,11 +71,11 @@ MAX_HISTORY_SCAN_BYTES = 1024 * 1024
 MAX_HISTORY_RECORD_BYTES = 256 * 1024
 MAX_HIVEMIND_RECORD_BYTES = 256 * 1024
 # Compatibility bound for future-record references written by earlier v4
-# builds. Current v4 readers deliver complete positional records on arrival
+# builds. Current positional readers deliver complete records on arrival
 # regardless of untrusted payload timestamps and create no new references.
 MAX_HISTORY_DEFERRED_RECORDS = MAX_EVENTS_PER_CYCLE
 LOCK_TIMEOUT_SECONDS = 5.0
-# Retained for API compatibility. Version-4 positional/exact-identity
+# Retained for API compatibility. Positional/exact-identity
 # checkpoints deliver complete records on durable arrival, so caller clocks
 # no longer decide whether a visible record is consumed.
 WATERMARK_GRACE_SECONDS = 5.0
@@ -82,6 +85,11 @@ MAX_LAUNCH_FAILURE_COUNT = MAX_AGENT_RESTARTS
 
 _LABEL_SAFE = re.compile(r"[^A-Za-z0-9_.:\-*]")
 _LABEL_MAX = 80
+_ROUTE_REASON_PAYLOAD_MAX = 80
+_SOURCE_ID_SEPARATOR = ":source_id:"
+_SOURCE_ID_HEX_LENGTH = 16
+_AGENT_JOB_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+_WINDOWS_PATHS = os.name == "nt"
 
 
 class ReactorBusyError(RuntimeError):
@@ -141,14 +149,37 @@ class _OversizedHistoryScan:
 
 
 def sanitize_label(label: str) -> str:
-    """Make an event label safe to embed in prompts and launch reasons.
+    """Normalize a legacy event label to the persisted conservative charset.
 
     Event kinds/details come from log and hivemind data an agent may have
     written; anything outside a conservative charset is replaced so event
-    payloads cannot smuggle instructions into job prompts.
+    payloads cannot smuggle arbitrary text into compatibility surfaces.
     """
     cleaned = _LABEL_SAFE.sub("_", label or "")
     return cleaned[:_LABEL_MAX]
+
+
+def event_route_reason(event: ReactorEvent) -> str:
+    """Build a persisted reason with opaque, informational provenance.
+
+    Writer-controlled kind, detail, and source never reach a model-facing
+    string. Stable hexadecimal route/source fingerprints provide post-hoc
+    correlation; source remains self-reported, not authenticated identity.
+    """
+    source_id = hashlib.sha256(
+        event.source.encode("utf-8", errors="surrogatepass")
+    ).hexdigest()[:_SOURCE_ID_HEX_LENGTH]
+    route_id = hashlib.sha256(
+        event.label().encode("utf-8", errors="surrogatepass")
+    ).hexdigest()[:_SOURCE_ID_HEX_LENGTH]
+    # Retain the ``event:`` envelope for the legacy parser grammar. State v5
+    # capability-gates receipt fields so a v4 rollback reader fails closed.
+    return f"event:route_id:{route_id}{_SOURCE_ID_SEPARATOR}{source_id}"
+
+
+def event_route_audit_id(reason: str) -> str:
+    """Return an opaque identifier safe for model-facing job text."""
+    return hashlib.sha256(reason.encode("utf-8")).hexdigest()[:16]
 
 
 def pattern_matches(pattern: str, event: ReactorEvent) -> bool:
@@ -169,7 +200,8 @@ def match_event_rules(
     """Return (config, reason) for each config whose on_event patterns match.
 
     One entry per config, keyed to the first matching event so the launch
-    reason names what actually fired. Reasons carry sanitized labels only.
+    reason identifies what fired through opaque route/source fingerprints.
+    Source provenance is informational, not authenticated.
     """
     matched: list[tuple[AgentConfig, str]] = []
     for config in agent_configs:
@@ -177,7 +209,7 @@ def match_event_rules(
             continue
         for event in events:
             if any(pattern_matches(pattern, event) for pattern in config.on_event):
-                matched.append((config, f"event:{sanitize_label(event.label())}"))
+                matched.append((config, event_route_reason(event)))
                 break
     return matched
 
@@ -231,6 +263,50 @@ def _initialized_path(state_dir: Path) -> Path:
     return state_dir / STATE_DIR_NAME / INITIALIZED_FILE_NAME
 
 
+def _path_is_linklike(path: Path) -> bool:
+    """Detect symlinks and Windows reparse points on every supported Python."""
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if callable(is_junction) and is_junction():
+        return True
+    if _WINDOWS_PATHS:
+        try:
+            attributes = path.lstat().st_file_attributes  # type: ignore[attr-defined]
+        except FileNotFoundError:
+            return False
+        return bool(
+            attributes
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x00000400)
+        )
+    return False
+
+
+def _assert_reactor_state_paths(state_dir: Path) -> None:
+    """Keep reactor files below the configured state root without link hops."""
+    anchor = state_dir.resolve(strict=False)
+    root = state_dir / STATE_DIR_NAME
+    cursor_path = _state_path(state_dir)
+    candidates = (
+        root,
+        cursor_path,
+        cursor_path.with_suffix(cursor_path.suffix + ".lock"),
+        _initialized_path(state_dir),
+        state_dir / LEGACY_CURSOR_FILE_NAME,
+    )
+    for candidate in candidates:
+        if _path_is_linklike(candidate):
+            raise ReactorStateError(
+                f"event reactor state path cannot be a link: {candidate}"
+            )
+        try:
+            candidate.resolve(strict=False).relative_to(anchor)
+        except ValueError as exc:
+            raise ReactorStateError(
+                f"event reactor state path escapes configured root: {candidate}"
+            ) from exc
+
+
 def _read_initialized_version(state_dir: Path) -> int | None:
     path = _initialized_path(state_dir)
     try:
@@ -241,7 +317,12 @@ def _read_initialized_version(state_dir: Path) -> int | None:
         raise ReactorStateError(
             f"could not read event reactor initialized marker from {path}: {exc}"
         ) from exc
-    supported = {"2": 2, "3": 3, str(STATE_VERSION): STATE_VERSION}
+    supported = {
+        "2": 2,
+        "3": 3,
+        str(PREVIOUS_STATE_VERSION): PREVIOUS_STATE_VERSION,
+        str(STATE_VERSION): STATE_VERSION,
+    }
     if raw not in supported:
         raise ReactorStateError(f"event reactor initialized marker is malformed: {path}")
     return supported[raw]
@@ -282,10 +363,11 @@ def _state_version(payload: dict[str, Any], *, path: Path) -> int:
     raw_version = payload["version"]
     if isinstance(raw_version, bool) or not isinstance(raw_version, int):
         raise ReactorStateError(f"event reactor state version must be an integer: {path}")
-    if raw_version not in (1, 2, 3, STATE_VERSION):
+    if raw_version not in (1, 2, 3, PREVIOUS_STATE_VERSION, STATE_VERSION):
         raise ReactorStateError(
             f"event reactor state version {raw_version} is unsupported; "
-            f"supported versions are 1, 2, 3, and {STATE_VERSION}: {path}"
+            "supported versions are 1, 2, 3, "
+            f"{PREVIOUS_STATE_VERSION}, and {STATE_VERSION}: {path}"
         )
     return raw_version
 
@@ -347,16 +429,16 @@ def _normalize_state(payload: dict[str, Any], *, path: Path) -> dict[str, Any]:
                     "event reactor version-3 migration state is partial; "
                     f"{cutoff_key!r} and {watermark_key!r} must appear together: {path}"
                 )
-    elif version == STATE_VERSION:
+    elif version in (PREVIOUS_STATE_VERSION, STATE_VERSION):
         missing_maps = [key for key in ("history_offsets", "hivemind_seen") if key not in state]
         if missing_maps:
             raise ReactorStateError(
-                f"event reactor version-{STATE_VERSION} state is partial; "
+                f"event reactor version-{version} state is partial; "
                 "missing positional map(s): " + ", ".join(missing_maps) + f": {path}"
             )
         if ("history_migration_cutoffs" in state) != ("history_migration_watermark" in state):
             raise ReactorStateError(
-                f"event reactor version-{STATE_VERSION} migration state is partial; "
+                f"event reactor version-{version} migration state is partial; "
                 "'history_migration_cutoffs' and 'history_migration_watermark' "
                 f"must appear together: {path}"
             )
@@ -365,7 +447,7 @@ def _normalize_state(payload: dict[str, Any], *, path: Path) -> dict[str, Any]:
         )
         if has_hivemind_boundary != ("hivemind_migration_watermark" in state):
             raise ReactorStateError(
-                f"event reactor version-{STATE_VERSION} migration state is partial; "
+                f"event reactor version-{version} migration state is partial; "
                 "a hivemind migration boundary and 'hivemind_migration_watermark' "
                 f"must appear together: {path}"
             )
@@ -373,6 +455,7 @@ def _normalize_state(payload: dict[str, Any], *, path: Path) -> dict[str, Any]:
 
 
 def _load_state(state_dir: Path) -> dict[str, Any]:
+    _assert_reactor_state_paths(state_dir)
     state_path = _state_path(state_dir)
     initialized_version = _read_initialized_version(state_dir)
     payload = _read_state_file(state_path)
@@ -401,26 +484,132 @@ def _load_state(state_dir: Path) -> dict[str, Any]:
     return state
 
 
+def _write_text_fsynced(path: Path, content: str) -> None:
+    """Write one replacement file and flush its contents before rename."""
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist a completed rename on platforms that support directory fsync."""
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _replace_durable(source: Path, destination: Path, *, replace: bool = True) -> None:
+    """Rename with write-through semantics on Windows."""
+    if os.name != "nt":
+        os.replace(source, destination)
+        return
+
+    import ctypes
+
+    move_file_ex = ctypes.windll.kernel32.MoveFileExW  # type: ignore[attr-defined]
+    move_file_ex.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32)
+    move_file_ex.restype = ctypes.c_int
+    flags = 0x8  # MOVEFILE_WRITE_THROUGH
+    if replace:
+        flags |= 0x1  # MOVEFILE_REPLACE_EXISTING
+    if not move_file_ex(str(source), str(destination), flags):
+        raise ctypes.WinError()
+
+
+def _mkdir_durable(path: Path, *, durable_base: Path) -> None:
+    """Create ``path`` below a trusted base and re-sync every parent entry."""
+    if not durable_base.is_dir():
+        raise FileNotFoundError(f"durable directory base does not exist: {durable_base}")
+    try:
+        path.relative_to(durable_base)
+    except ValueError as exc:
+        raise ValueError(f"directory {path} is outside durable base {durable_base}") from exc
+    if os.name == "nt":
+        current = durable_base
+        for part in path.relative_to(durable_base).parts:
+            target = current / part
+            if target.is_dir():
+                current = target
+                continue
+            if target.exists():
+                raise NotADirectoryError(f"durable directory path is not a directory: {target}")
+            temporary = current / f".{part}.{uuid.uuid4().hex}.tmpdir"
+            temporary.mkdir()
+            try:
+                _replace_durable(temporary, target, replace=False)
+            except OSError:
+                if not target.is_dir():
+                    raise
+            finally:
+                try:
+                    temporary.rmdir()
+                except FileNotFoundError:
+                    pass
+            current = target
+        return
+
+    path.mkdir(parents=True, exist_ok=True)
+    current = path
+    while current != durable_base:
+        parent = current.parent
+        _fsync_directory(parent)
+        current = parent
+
+
+def ensure_durable_directory(path: Path, *, durable_base: Path) -> None:
+    """Public wrapper for establishing a state hierarchy durably."""
+    _mkdir_durable(path, durable_base=durable_base)
+
+
+def _state_durable_base(context_path: Path, state_dir: Path) -> Path:
+    """Choose an existing common ancestor for the state hierarchy."""
+    resolved_context = context_path.expanduser().resolve()
+    resolved_state = state_dir.expanduser().resolve()
+    try:
+        base = Path(os.path.commonpath((resolved_context, resolved_state)))
+    except ValueError:
+        base = Path(resolved_state.anchor)
+    while not base.is_dir():
+        parent = base.parent
+        if parent == base:
+            raise FileNotFoundError(
+                f"no existing durable base for event reactor state {resolved_state}"
+            )
+        base = parent
+    return base
+
+
 def _save_state(state_dir: Path, state: dict[str, Any]) -> None:
     """Persist reactor state atomically; raise :class:`ReactorStateError` on failure.
 
-    The write goes through a temp file + ``os.replace`` so a crash or full
-    disk mid-write can never leave a truncated state file. The initialized
-    marker is atomically installed first when needed; a marker failure leaves
-    the old state authoritative, while a later first-state failure leaves the
-    marker behind to force an explicit repair instead of a silent re-prime. A
-    failure must propagate: an ack that silently didn't commit is the one way
-    this module can still lose events.
+    The write goes through a flushed temp file + ``os.replace`` and, on POSIX,
+    a parent-directory fsync. The initialized marker is committed first when
+    needed; a marker or pre-replace failure leaves the old state authoritative,
+    while a later first-state failure leaves the marker behind to force an
+    explicit repair instead of a silent re-prime. A directory-sync error after
+    the complete cursor replacement is already visible is logged and treated
+    as committed; reporting a failed ack at that point would falsely promise
+    redelivery from a cursor that has advanced.
     """
+    _assert_reactor_state_paths(state_dir)
     path = _state_path(state_dir)
     marker_path = _initialized_path(state_dir)
-    tmp_path = path.with_suffix(".json.tmp")
-    marker_tmp_path = marker_path.with_suffix(".tmp")
+    tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    marker_tmp_path = marker_path.with_name(
+        f".{marker_path.name}.{uuid.uuid4().hex}.tmp"
+    )
+    state_installed = False
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path.write_text(
+        _mkdir_durable(path.parent, durable_base=state_dir.parent)
+        _write_text_fsynced(
+            tmp_path,
             json.dumps({**state, "version": STATE_VERSION}) + "\n",
-            encoding="utf-8",
         )
         # Establish the durable initialized sentinel before committing cursor
         # offsets. If marker persistence fails, os.replace() below never runs
@@ -428,16 +617,35 @@ def _save_state(state_dir: Path, state: dict[str, Any]) -> None:
         # replace fails during first use, the marker makes the next cycle fail
         # closed instead of silently re-priming.
         if _read_initialized_version(state_dir) != STATE_VERSION:
-            marker_tmp_path.write_text(f"{STATE_VERSION}\n", encoding="utf-8")
-            os.replace(marker_tmp_path, marker_path)
-        os.replace(tmp_path, path)
+            _write_text_fsynced(marker_tmp_path, f"{STATE_VERSION}\n")
+            _replace_durable(marker_tmp_path, marker_path)
+            _fsync_directory(path.parent)
+        _replace_durable(tmp_path, path)
+        state_installed = True
+        _fsync_directory(path.parent)
     except OSError as exc:
+        if state_installed:
+            # The complete replacement is already authoritative in this
+            # process. Reporting a failed ack would be false: a retry reads
+            # the advanced cursor. The durable initialized marker makes a
+            # replacement lost by a later host crash fail closed (or expose
+            # the previous cursor for at-least-once redelivery), never prime
+            # silently as fresh state.
+            _log.warning(
+                "Event reactor cursor was installed but its directory fsync "
+                "failed; treating the visible atomic replacement as committed: %s",
+                exc,
+            )
+        else:
+            raise ReactorStateError(
+                f"could not persist event reactor state to {path}: {exc}"
+            ) from exc
+    finally:
         for candidate in (tmp_path, marker_tmp_path):
             try:
                 candidate.unlink(missing_ok=True)
             except OSError:
                 pass
-        raise ReactorStateError(f"could not persist event reactor state to {path}: {exc}") from exc
     try:
         (state_dir / LEGACY_CURSOR_FILE_NAME).unlink(missing_ok=True)
     except OSError:
@@ -1668,6 +1876,9 @@ class ReactorPendingRoute:
     reason: str
     config_digest: str
     queued_at: str
+    source_id: str = ""
+    job_id: str = ""
+    job_coalesced: bool = False
     launch_failure_count: int = 0
     last_launch_failure_at: str = ""
     launch_circuit_opened_at: str = ""
@@ -1679,6 +1890,12 @@ class ReactorPendingRoute:
             "config_digest": self.config_digest,
             "queued_at": self.queued_at,
         }
+        if self.source_id:
+            payload["source_id"] = self.source_id
+        if self.job_id:
+            payload["job_id"] = self.job_id
+        if self.job_coalesced:
+            payload["job_coalesced"] = True
         if self.launch_failure_count:
             payload["launch_failure_count"] = self.launch_failure_count
             payload["last_launch_failure_at"] = self.last_launch_failure_at
@@ -1694,7 +1911,40 @@ def _valid_pending_route_reason(value: Any) -> bool:
     return bool(label) and sanitize_label(label) == label
 
 
-def _pending_route_map(value: Any) -> dict[str, ReactorPendingRoute]:
+def _reason_source_id(reason: str) -> str:
+    """Extract a valid new source suffix; legacy reasons return empty."""
+    if not _valid_pending_route_reason(reason):
+        return ""
+    payload = reason.removeprefix("event:")
+    label, separator, source_id = payload.rpartition(_SOURCE_ID_SEPARATOR)
+    if (
+        separator == _SOURCE_ID_SEPARATOR
+        and bool(label)
+        and len(payload) <= _ROUTE_REASON_PAYLOAD_MAX
+        and re.fullmatch(rf"[0-9a-f]{{{_SOURCE_ID_HEX_LENGTH}}}", source_id)
+    ):
+        return source_id
+    return ""
+
+
+def _valid_v5_reason_envelope(reason: Any, source_id: Any) -> bool:
+    return bool(
+        isinstance(reason, str)
+        and isinstance(source_id, str)
+        and re.fullmatch(
+            rf"event:route_id:[0-9a-f]{{{_SOURCE_ID_HEX_LENGTH}}}"
+            rf"{_SOURCE_ID_SEPARATOR}[0-9a-f]{{{_SOURCE_ID_HEX_LENGTH}}}",
+            reason,
+        )
+        and _reason_source_id(reason) == source_id
+    )
+
+
+def _pending_route_map(
+    value: Any,
+    *,
+    allow_legacy_reserved_reason: bool = False,
+) -> dict[str, ReactorPendingRoute]:
     if not isinstance(value, dict):
         raise ReactorStateError("event reactor state field 'pending_routes' must be an object")
     routes: dict[str, ReactorPendingRoute] = {}
@@ -1709,9 +1959,16 @@ def _pending_route_map(value: Any) -> dict[str, ReactorPendingRoute]:
         reason = raw.get("reason")
         config_digest = raw.get("config_digest")
         queued_at = raw.get("queued_at")
+        source_id = raw.get("source_id", "")
+        job_id = raw.get("job_id", "")
+        job_coalesced = raw.get("job_coalesced", False)
         launch_failure_count = raw.get("launch_failure_count", 0)
         last_launch_failure_at = raw.get("last_launch_failure_at", "")
         launch_circuit_opened_at = raw.get("launch_circuit_opened_at", "")
+        new_reason_envelope = isinstance(reason, str) and reason.startswith(
+            "event:route_id:"
+        )
+        new_reason_envelope_valid = _valid_v5_reason_envelope(reason, source_id)
         if (
             action not in VALID_EVENT_ACTIONS
             or not _valid_pending_route_reason(reason)
@@ -1719,6 +1976,32 @@ def _pending_route_map(value: Any) -> dict[str, ReactorPendingRoute]:
             or not re.fullmatch(r"[0-9a-f]{64}", config_digest)
             or not isinstance(queued_at, str)
             or _parse_timestamp(queued_at) is None
+            or not isinstance(source_id, str)
+            or (
+                new_reason_envelope
+                and not new_reason_envelope_valid
+                and not allow_legacy_reserved_reason
+            )
+            or (
+                bool(source_id)
+                and (
+                    not re.fullmatch(
+                        rf"[0-9a-f]{{{_SOURCE_ID_HEX_LENGTH}}}",
+                        source_id,
+                    )
+                    or _reason_source_id(reason) != source_id
+                )
+            )
+            or not isinstance(job_id, str)
+            or (
+                bool(job_id)
+                and (
+                    action != "job"
+                    or not _AGENT_JOB_ID_PATTERN.fullmatch(job_id)
+                )
+            )
+            or not isinstance(job_coalesced, bool)
+            or (job_coalesced and not job_id)
             or isinstance(launch_failure_count, bool)
             or not isinstance(launch_failure_count, int)
             or launch_failure_count < 0
@@ -1746,6 +2029,9 @@ def _pending_route_map(value: Any) -> dict[str, ReactorPendingRoute]:
             reason=reason,
             config_digest=config_digest,
             queued_at=queued_at,
+            source_id=source_id,
+            job_id=job_id,
+            job_coalesced=job_coalesced,
             launch_failure_count=launch_failure_count,
             last_launch_failure_at=last_launch_failure_at,
             launch_circuit_opened_at=launch_circuit_opened_at,
@@ -1824,9 +2110,22 @@ class ReactorBatch:
     _pending_hivemind_retry_phase: bool = False
     _pending_routes: dict[str, ReactorPendingRoute] = field(default_factory=dict)
     _active_routes: set[str] = field(default_factory=set)
+    _confirmable_job_receipts: frozenset[tuple[str, str]] = field(
+        default_factory=frozenset,
+        repr=False,
+    )
     acked: bool = False
     dispatch_failures: int = 0
     dispatch_outcomes: dict[str, ReactorDispatchOutcome] = field(default_factory=dict)
+
+    @property
+    def jobs_coalesced(self) -> int:
+        """Count routes suppressed by an already-active job dedupe key."""
+        return sum(
+            1
+            for outcome in self.dispatch_outcomes.values()
+            if outcome.state == "coalesced" and outcome.reason == "active_job"
+        )
 
     def pending_routes(self, *, action: str | None = None) -> list[ReactorPendingRoute]:
         """Return durable routes, oldest first, optionally for one action."""
@@ -1840,6 +2139,10 @@ class ReactorBatch:
     def pending_route(self, agent_name: str) -> ReactorPendingRoute | None:
         """Return one durable route, including its launch retry metadata."""
         return self._pending_routes.get(agent_name)
+
+    def job_receipt_is_confirmable(self, agent_name: str, job_id: str) -> bool:
+        """Return whether a receipt came from the last committed state."""
+        return (agent_name, job_id) in self._confirmable_job_receipts
 
     def prune_pending_routes(
         self,
@@ -1900,6 +2203,7 @@ class ReactorBatch:
                 reason=reason,
                 config_digest=config_digest,
                 queued_at=self._now.isoformat(),
+                source_id=_reason_source_id(reason),
             )
             self._pending_routes[agent_name] = existing
         self._active_routes.add(agent_name)
@@ -1989,6 +2293,43 @@ class ReactorBatch:
         self._pending_routes.pop(agent_name, None)
         self._active_routes.discard(agent_name)
         self._record_dispatch_outcome(agent_name, "dispatched", reason)
+
+    def mark_job_enqueued(
+        self,
+        agent_name: str,
+        *,
+        job_id: str,
+        coalesced: bool = False,
+    ) -> None:
+        """Retain a job route until a later cycle confirms its queue record."""
+        route = self._pending_routes.get(agent_name)
+        if (
+            route is None
+            or route.action != "job"
+            or not _AGENT_JOB_ID_PATTERN.fullmatch(job_id)
+        ):
+            raise ReactorStateError(
+                f"cannot record job delivery for event route {agent_name!r}"
+            )
+        self._pending_routes[agent_name] = replace(
+            route,
+            job_id=job_id,
+            job_coalesced=coalesced,
+        )
+        self._record_dispatch_outcome(agent_name, "pending", "job_confirmation")
+
+    def clear_job_confirmation(self, agent_name: str) -> None:
+        """Clear a missing job receipt before safely retrying its route."""
+        route = self._pending_routes.get(agent_name)
+        if route is None or route.action != "job":
+            raise ReactorStateError(
+                f"cannot clear job delivery for event route {agent_name!r}"
+            )
+        self._pending_routes[agent_name] = replace(
+            route,
+            job_id="",
+            job_coalesced=False,
+        )
 
     def mark_dispatch_deferred(self, agent_name: str, *, reason: str) -> None:
         """Record a retryable gate while retaining its durable pending route."""
@@ -2131,7 +2472,7 @@ def _source_watermark(
 ) -> str:
     """Cursor value a source may advance to after this batch is dispatched.
 
-    Version-4 delivery uses positional/exact-identity checkpoints, not this
+    Version-5 delivery uses positional/exact-identity checkpoints, not this
     diagnostic timestamp. Clamp caller-future stamps so a bad source clock
     does not make legacy metadata jump arbitrarily far ahead.
     """
@@ -2149,7 +2490,7 @@ def _start_positional_migration(
     state_dir: Path,
     state: dict[str, Any],
 ) -> dict[str, Any]:
-    """Persist a fail-safe v4 replay shell for timestamp-only v1/v2 state.
+    """Persist a fail-safe v5 replay shell for timestamp-only v1/v2 state.
 
     A timestamp cursor cannot prove when a backdated record actually landed.
     Filesystem mtimes cannot close that gap either: history files mix many
@@ -2176,12 +2517,12 @@ def _upgrade_v3_state(
     state_dir: Path,
     state: dict[str, Any],
 ) -> dict[str, Any]:
-    """Persist a fail-safe version-4 shell before reading tuple-based v3 state.
+    """Persist a fail-safe version-5 shell before reading tuple-based v3 state.
 
     Version 3 recorded only ``(mtime, filename)`` high-water marks. It cannot
     prove whether any currently extant file at or below a checkpoint is the
     identity previously delivered or a post-snapshot backdated copy. Replay
-    the extant inventory once under v4 exact identities rather than translate
+    the extant inventory once under v5 exact identities rather than translate
     an ambiguous tuple into a silent acknowledgement.
     """
     _string_checkpoint_map(state["hivemind_files"], key="hivemind_files")
@@ -2201,6 +2542,50 @@ def _upgrade_v3_state(
     upgraded.pop("hivemind_migration_cutoffs", None)
     upgraded.pop("hivemind_migration_watermark", None)
     _save_state(state_dir, upgraded)
+    return upgraded
+
+
+def _upgrade_v4_state(
+    state_dir: Path,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize legacy routes before an eventual v5 capability commit.
+
+    Version 4 allowed any sanitized label after ``event:``, including labels
+    beginning with the ``route_id:`` prefix reserved by v5. Normalize under
+    the old grammar in memory. The normal batch reader then validates every
+    other state field, and only ``ack()`` persists v5; malformed legacy state
+    can therefore never commit the one-way marker before validation finishes.
+    """
+    upgraded = dict(state)
+    pending_routes = _pending_route_map(
+        state.get("pending_routes", {}),
+        allow_legacy_reserved_reason=True,
+    )
+    normalized_routes: dict[str, dict[str, Any]] = {}
+    for agent_name, route in pending_routes.items():
+        if not _valid_v5_reason_envelope(route.reason, route.source_id):
+            legacy_reason = route.reason.encode("utf-8", errors="surrogatepass")
+            source_id = hashlib.sha256(b"afs:v4:legacy-source").hexdigest()[
+                :_SOURCE_ID_HEX_LENGTH
+            ]
+            route_id = hashlib.sha256(
+                b"afs:v4:legacy-route\0"
+                + agent_name.encode("utf-8", errors="surrogatepass")
+                + b"\0"
+                + legacy_reason
+            ).hexdigest()[:_SOURCE_ID_HEX_LENGTH]
+            route = replace(
+                route,
+                reason=f"event:route_id:{route_id}{_SOURCE_ID_SEPARATOR}{source_id}",
+                source_id=source_id,
+            )
+        normalized_routes[agent_name] = route.to_dict()
+    if normalized_routes:
+        upgraded["pending_routes"] = normalized_routes
+    else:
+        upgraded.pop("pending_routes", None)
+    upgraded["version"] = STATE_VERSION
     return upgraded
 
 
@@ -2243,7 +2628,7 @@ def open_event_batch(
     the lock is contended — the caller skips event handling for that cycle
     and retries on the next.
 
-    ``grace_seconds`` is retained for call compatibility. Version-4
+    ``grace_seconds`` is retained for call compatibility. Version-5
     positional and exact-identity checkpoints deliver complete records when
     they are durably visible; untrusted payload timestamps do not gate them.
 
@@ -2252,9 +2637,22 @@ def open_event_batch(
     missing, unreadable, malformed, or partial cursor state raises
     :class:`ReactorStateError` instead of silently skipping backlog.
     """
+    context_path = context_path.expanduser().resolve()
+    state_dir = state_dir.expanduser().resolve()
     current = now or datetime.now(timezone.utc)
     del grace_seconds
     with ExitStack() as stack:
+        try:
+            _assert_reactor_state_paths(state_dir)
+            _mkdir_durable(
+                _state_path(state_dir).parent,
+                durable_base=_state_durable_base(context_path, state_dir),
+            )
+            _assert_reactor_state_paths(state_dir)
+        except OSError as exc:
+            raise ReactorStateError(
+                f"could not durably set up event reactor state under {state_dir}: {exc}"
+            ) from exc
         try:
             stack.enter_context(_file_lock(_state_path(state_dir), timeout=lock_timeout))
         except TimeoutError as exc:
@@ -2305,6 +2703,7 @@ def open_event_batch(
             return
         assert history_stored is not None and hivemind_stored is not None
 
+        upgrading_v4 = state["version"] == PREVIOUS_STATE_VERSION
         if state["version"] in (1, 2):
             state = _start_positional_migration(
                 state_dir,
@@ -2315,6 +2714,8 @@ def open_event_batch(
                 state_dir,
                 state,
             )
+        elif state["version"] == PREVIOUS_STATE_VERSION:
+            state = _upgrade_v4_state(state_dir, state)
 
         history_offsets = _offset_map(state["history_offsets"], key="history_offsets")
         history_migration_cutoffs = _offset_map(
@@ -2378,6 +2779,14 @@ def open_event_batch(
             state.get("hivemind_retry_phase")
         )
         pending_routes = _pending_route_map(state.get("pending_routes", {}))
+        if upgrading_v4:
+            # Capability-gate rollback before any event can be exposed for
+            # dispatch. Every persisted field above has now validated, and
+            # this no-progress v5 shell retains the exact v4 checkpoints and
+            # normalized outbox. A crash after a job publish but before the
+            # later batch ack can therefore never leave a v4 reader able to
+            # acknowledge work whose durable receipt contract it lacks.
+            _save_state(state_dir, state)
 
         (
             history_events,
@@ -2463,5 +2872,10 @@ def open_event_batch(
             _pending_hivemind_retry_cursor=pending_hivemind_retry_cursor,
             _pending_hivemind_retry_phase=pending_hivemind_retry_phase,
             _pending_routes=pending_routes,
+            _confirmable_job_receipts=frozenset(
+                (name, route.job_id)
+                for name, route in pending_routes.items()
+                if route.job_id
+            ),
             acked=False,
         )

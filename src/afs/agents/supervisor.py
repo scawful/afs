@@ -39,7 +39,9 @@ from .event_reactor import (
     ReactorBusyError,
     ReactorEvent,
     ReactorStateError,
+    ensure_durable_directory,
     event_config_digest,
+    event_route_audit_id,
     legacy_event_config_digest,
     match_event_rules,
     open_event_batch,
@@ -269,7 +271,15 @@ class AgentSupervisor:
             config_path.expanduser().resolve() if config_path is not None else None
         )
         self._state_dir = self._resolve_state_dir(state_dir, config)
-        self._state_dir.mkdir(parents=True, exist_ok=True)
+        durable_base = self._state_dir
+        while not durable_base.is_dir():
+            parent = durable_base.parent
+            if parent == durable_base:
+                raise FileNotFoundError(
+                    f"no existing durable base for agent state {self._state_dir}"
+                )
+            durable_base = parent
+        ensure_durable_directory(self._state_dir, durable_base=durable_base)
         # Per-agent failure tracking for restart-with-backoff
         self._failure_counts: dict[str, int] = {}
         self._last_failure_at: dict[str, float] = {}
@@ -1511,8 +1521,8 @@ class AgentSupervisor:
         delivery mode, not a bypass. The whole read->enqueue window runs
         inside the reactor batch lock, so the queued/running dedupe check
         cannot race a concurrent supervisor. Prompts are built from operator
-        config plus the sanitized event label only; event payload text never
-        reaches a job prompt.
+        config plus an opaque route audit ID; event kind, detail, source, and
+        payload text never reach a job prompt.
         """
         current = now or _now_utc()
         matches = self._matched_event_records(
@@ -1555,17 +1565,16 @@ class AgentSupervisor:
             ready_matches.append((config, reason))
         if not ready_matches:
             return []
-        from ..agent_jobs import AgentJobQueue
+        from ..agent_jobs import AgentJobPublishError, AgentJobQueue
 
         try:
             resolved_config = self._config or load_config_model(merge_user=True)
             queue = AgentJobQueue(resolved_config.general.context_root)
-            queue.ensure()
-            active_keys = {
-                job.dedupe_key
+            active_jobs = {
+                job.dedupe_key: job
                 for status in ("queue", "running")
                 for job in queue.list(status=status)
-                if job.dedupe_key
+                if job.dedupe_key and queue.is_durably_adoptable(job)
             }
         except Exception:  # noqa: BLE001 - an unusable queue must park the route
             _log.exception("Event job queue is unavailable")
@@ -1575,11 +1584,51 @@ class AgentSupervisor:
         created: list[str] = []
         for config, reason in ready_matches:
             dedupe_key = f"on_event:{config.name}"
-            if dedupe_key in active_keys:
-                batch.mark_coalesced(config.name, reason="active_job")
+            route = batch.pending_route(config.name)
+            if route is not None and route.job_id:
+                if not batch.job_receipt_is_confirmable(config.name, route.job_id):
+                    # A receipt created in this in-memory batch has not yet
+                    # survived the cursor/outbox commit. Never consume it on
+                    # a repeated call before a later batch reloads the state.
+                    continue
+                try:
+                    delivered_job = queue.confirm_durable(route.job_id)
+                except Exception:  # noqa: BLE001 - confirmation must remain retryable
+                    _log.exception(
+                        "Could not confirm event job '%s' for '%s'",
+                        route.job_id,
+                        config.name,
+                    )
+                    batch.mark_dispatch_failed(
+                        config.name,
+                        reason="job_confirmation_failed",
+                    )
+                    continue
+                if delivered_job is not None:
+                    if route.job_coalesced:
+                        batch.mark_coalesced(config.name, reason="active_job")
+                    else:
+                        batch.mark_dispatched(config.name, reason="job")
+                    continue
+                # The cursor receipt survived but the queue record did not.
+                # Clear only the receipt and recreate the still-pending route.
+                batch.clear_job_confirmation(config.name)
+            active_job = active_jobs.get(dedupe_key)
+            if active_job is not None:
+                # Persist a receipt before consuming the route. On platforms
+                # without directory fsync this keeps the outbox authoritative
+                # until a later cycle confirms the queue record survived.
+                batch.mark_job_enqueued(
+                    config.name,
+                    job_id=active_job.id,
+                    coalesced=True,
+                )
                 continue
+            audit_id = event_route_audit_id(reason)
+            source_id = route.source_id if route is not None else ""
             prompt = (
-                f"Agent config '{config.name}' matched {reason}. "
+                f"Agent config '{config.name}' matched configured event route "
+                f"'{audit_id}'. "
                 + (
                     f"Run `python -m {config.module}` and review its result."
                     if config.module
@@ -1588,17 +1637,39 @@ class AgentSupervisor:
             ).strip()
             try:
                 job = queue.create(
-                    title=f"{config.name}: react to {reason}",
+                    title=(
+                        f"{config.name}: react to event {audit_id} "
+                        f"source {source_id or 'unavailable'}"
+                    ),
                     prompt=prompt,
                     created_by=AGENT_NAME,
                     dedupe_key=dedupe_key,
                 )
+            except AgentJobPublishError as exc:
+                if exc.installed and exc.job_id:
+                    # The rename is visible but its directory durability was
+                    # not confirmed. Persist the job receipt in the reactor
+                    # outbox and verify it next cycle instead of dropping or
+                    # immediately coalescing the route.
+                    _log.warning(
+                        "Event job '%s' for '%s' is visible but awaiting "
+                        "durability confirmation: %s",
+                        exc.job_id,
+                        config.name,
+                        exc,
+                    )
+                    batch.mark_job_enqueued(config.name, job_id=exc.job_id)
+                    created.append(exc.job_id)
+                    continue
+                _log.exception("Could not enqueue event job for '%s'", config.name)
+                batch.mark_dispatch_failed(config.name, reason="enqueue_failed")
+                continue
             except Exception:  # noqa: BLE001 - a failed enqueue must park the route
                 _log.exception("Could not enqueue event job for '%s'", config.name)
                 batch.mark_dispatch_failed(config.name, reason="enqueue_failed")
                 continue
-            active_keys.add(dedupe_key)
-            batch.mark_dispatched(config.name, reason="job")
+            active_jobs[dedupe_key] = job
+            batch.mark_job_enqueued(config.name, job_id=job.id)
             created.append(job.id)
         return created
 
@@ -1905,6 +1976,7 @@ def _run_once(
     reactor_truncated = False
     reactor_busy = False
     reactor_dispatch_failures = 0
+    reactor_jobs_coalesced = 0
     reactor_state_error = False
     try:
         with open_event_batch(
@@ -1929,6 +2001,7 @@ def _run_once(
                 now=_now_utc(),
             )
             reactor_dispatch_failures = batch.dispatch_failures
+            reactor_jobs_coalesced = batch.jobs_coalesced
             batch.prune_dispatch(c.name for c in profile.agent_configs)
             try:
                 batch.ack()
@@ -1977,6 +2050,11 @@ def _run_once(
             f"{reactor_dispatch_failures} event dispatch(es) failed or deferred; "
             "routes parked for retry"
         )
+    if reactor_jobs_coalesced:
+        notes.append(
+            f"{reactor_jobs_coalesced} event reaction(s) coalesced into "
+            "already-active jobs"
+        )
     if reactor_state_error:
         notes.append("reactor state not persisted; cursors unchanged")
     if first_run:
@@ -1996,6 +2074,7 @@ def _run_once(
             "reactor_truncated": int(reactor_truncated),
             "reactor_busy": int(reactor_busy),
             "reactor_dispatch_failures": reactor_dispatch_failures,
+            "reactor_jobs_coalesced": reactor_jobs_coalesced,
             "reactor_state_error": int(reactor_state_error),
             "event_jobs": len(event_jobs),
             "running_agents": int(audit["counts"]["running"]),
