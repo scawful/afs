@@ -29,7 +29,7 @@ from ..config import load_config_model
 from ..context_index import INDEX_SCAN_SKIP_NAMES
 from ..context_paths import resolve_agent_output_root
 from ..profiles import resolve_active_profile
-from ..schema import AFSConfig, AgentConfig
+from ..schema import MAX_AGENT_RESTARTS, AFSConfig, AgentConfig
 from .base import AgentResult, build_base_parser, configure_logging, emit_result, now_iso
 from .event_reactor import (
     DEFAULT_EVENT_DEBOUNCE_SECONDS,
@@ -462,8 +462,12 @@ class AgentSupervisor:
 
     def _backoff_delay(self, failure_count: int) -> float:
         """Calculate exponential backoff: min(base * 2^(n-1), max_delay)."""
+        # AgentConfig loading and durable reactor state both cap this count,
+        # but direct API callers can construct AgentConfig instances. Clamp
+        # before exponentiation so malformed/untrusted values stay cheap.
+        exponent = max(0, min(failure_count - 1, MAX_AGENT_RESTARTS - 1))
         return min(
-            self.RESTART_BASE_DELAY * (2 ** (failure_count - 1)),
+            self.RESTART_BASE_DELAY * (2**exponent),
             self.RESTART_MAX_DELAY,
         )
 
@@ -493,11 +497,12 @@ class AgentSupervisor:
             return True
 
         # Budget check
-        if failure_count >= agent_config.max_restarts:
+        restart_limit = max(0, min(agent_config.max_restarts, MAX_AGENT_RESTARTS))
+        if failure_count >= restart_limit:
             _log.warning(
                 "Agent %s: max restarts (%d) exhausted, opening circuit breaker",
                 name,
-                agent_config.max_restarts,
+                restart_limit,
             )
             self._circuit_opened_at[name] = now
             return False
@@ -978,6 +983,7 @@ class AgentSupervisor:
         except Exception as exc:
             agent.state = "failed"
             agent.last_error = str(exc)
+            failure_count = self._record_failure(name)
             self._write_state(agent)
             self._update_registry(
                 agent,
@@ -993,6 +999,7 @@ class AgentSupervisor:
                     "launch_reason": reason,
                     "module": module,
                     "error": str(exc),
+                    "failure_count": failure_count,
                 },
             )
             raise RuntimeError(f"Failed to spawn agent {name}: {exc}") from exc
@@ -1265,7 +1272,11 @@ class AgentSupervisor:
         if batch is not None:
             valid_routes: dict[str, tuple[str, str]] = {}
             for config in agent_configs:
-                if not config.on_event or config.on_event_action not in VALID_EVENT_ACTIONS:
+                if (
+                    not config.name.strip()
+                    or not config.on_event
+                    or config.on_event_action not in VALID_EVENT_ACTIONS
+                ):
                     continue
                 digest = event_config_digest(config)
                 digests[config.name] = digest
@@ -1284,6 +1295,14 @@ class AgentSupervisor:
                 results.append((config, route.reason))
                 result_names.add(config.name)
         for config, reason in match_event_rules(events, agent_configs):
+            if not config.name.strip():
+                should_log = batch is None or batch.mark_rejected(
+                    config.name,
+                    reason="invalid_name",
+                )
+                if should_log:
+                    _log.warning("Rejecting event trigger for agent with an empty name")
+                continue
             if config.on_event_action not in VALID_EVENT_ACTIONS:
                 should_log = batch is None or batch.mark_rejected(
                     config.name,
@@ -1349,6 +1368,65 @@ class AgentSupervisor:
             return "deferred", "awaiting_review"
         if existing.state == "running":
             return "coalesced", "running"
+        return None
+
+    def _event_launch_failure_gate(
+        self,
+        batch: ReactorBatch,
+        existing: RunningAgent | None,
+        config: AgentConfig,
+        *,
+        current: datetime,
+    ) -> tuple[str, str] | None:
+        """Apply durable restart/backoff/circuit policy to one parked route."""
+        route = batch.pending_route(config.name)
+        if route is None:
+            return None
+        if route.launch_failure_count == 0:
+            # Fail closed for a legacy persisted circuit that predates durable
+            # route retry metadata; its cooldown instant cannot be recovered.
+            if existing is not None and existing.state == "circuit_open":
+                return "deferred", "circuit_open"
+            return None
+        if not config.restart_on_failure:
+            return "deferred", "restart_disabled"
+        if route.launch_circuit_opened_at:
+            opened = _parse_timestamp(route.launch_circuit_opened_at)
+            if opened is None:
+                return "deferred", "circuit_open"
+            elapsed = (current - opened).total_seconds()
+            if elapsed < self.CIRCUIT_COOLDOWN:
+                return "deferred", "circuit_open"
+            batch.reset_launch_failures(config.name)
+            if existing is not None and existing.state == "circuit_open":
+                existing.state = "failed"
+                existing.last_event = "circuit_cooldown_elapsed"
+                existing.last_seen_at = now_iso()
+                self._write_state(existing)
+                self._update_registry(existing)
+            return None
+        restart_limit = max(0, min(config.max_restarts, MAX_AGENT_RESTARTS))
+        if route.launch_failure_count >= restart_limit:
+            batch.open_launch_circuit(config.name, at=current)
+            if existing is not None and existing.state != "circuit_open":
+                existing.state = "circuit_open"
+                existing.last_event = "circuit_open"
+                existing.last_seen_at = now_iso()
+                self._write_state(existing)
+                self._update_registry(existing)
+            return "deferred", "circuit_open"
+        failed_at = _parse_timestamp(route.last_launch_failure_at)
+        if failed_at is not None:
+            elapsed = (current - failed_at).total_seconds()
+            required_delay = self._backoff_delay(route.launch_failure_count)
+            if elapsed < required_delay:
+                return "deferred", "restart_backoff"
+        if existing is not None and existing.state == "circuit_open":
+            existing.state = "failed"
+            existing.last_event = "launch_retry"
+            existing.last_seen_at = now_iso()
+            self._write_state(existing)
+            self._update_registry(existing)
         return None
 
     @staticmethod
@@ -1548,8 +1626,30 @@ class AgentSupervisor:
                         reason="missing_module",
                     )
                 continue
+            current = now or _now_utc()
             existing = self.status(config.name)
             if is_event_candidate and event_batch:
+                state_gate = self._event_state_gate(existing)
+                # Manual stop, review, and a manually recovered running agent
+                # take precedence over stale launch-retry metadata. A circuit
+                # is different: its durable route timestamp owns cooldown.
+                if state_gate is not None and state_gate[1] != "circuit_open":
+                    self._record_event_gate(event_batch, config.name, state_gate)
+                    continue
+                failure_gate = self._event_launch_failure_gate(
+                    event_batch,
+                    existing,
+                    config,
+                    current=current,
+                )
+                if failure_gate is not None:
+                    self._record_event_gate(
+                        event_batch,
+                        config.name,
+                        failure_gate,
+                    )
+                    continue
+                # A cooldown reset may have changed circuit_open -> failed.
                 state_gate = self._event_state_gate(existing)
                 if state_gate is not None:
                     self._record_event_gate(event_batch, config.name, state_gate)
@@ -1574,7 +1674,6 @@ class AgentSupervisor:
                         reason="dependency",
                     )
                 continue
-            current = now or _now_utc()
             if (
                 is_event_candidate
                 and event_batch
@@ -1601,6 +1700,10 @@ class AgentSupervisor:
                     # Keep one durable route while source offsets advance.
                     # Failed agent state never supplies fallback debounce, so
                     # recovery can retry; a later open circuit parks it too.
+                    event_batch.record_launch_failure(
+                        config.name,
+                        at=current,
+                    )
                     event_batch.mark_dispatch_failed(
                         config.name,
                         reason="spawn_failed",

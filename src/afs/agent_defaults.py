@@ -79,6 +79,8 @@ def default_agent_configs(config: AFSConfig | None = None) -> list[AgentConfig]:
             # cover mutations that bypass afs watch).
             on_event=["hivemind:context:repair"],
             module="afs.agents.index_rebuild",
+            restart_on_failure=True,
+            max_restarts=3,
         ),
         AgentConfig(
             name="skills-mine",

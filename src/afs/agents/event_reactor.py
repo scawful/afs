@@ -31,10 +31,9 @@ import os
 import re
 from collections.abc import Iterable, Iterator
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
-from heapq import nsmallest
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +45,7 @@ from ..protocols.canonical_json import (
     sha256_canonical_json,
     strict_json_loads,
 )
-from ..schema import AgentConfig
+from ..schema import MAX_AGENT_RESTARTS, AgentConfig
 from .guardrails import _file_lock
 
 _log = logging.getLogger(__name__)
@@ -79,6 +78,7 @@ LOCK_TIMEOUT_SECONDS = 5.0
 WATERMARK_GRACE_SECONDS = 5.0
 
 VALID_EVENT_ACTIONS = ("spawn", "job")
+MAX_LAUNCH_FAILURE_COUNT = MAX_AGENT_RESTARTS
 
 _LABEL_SAFE = re.compile(r"[^A-Za-z0-9_.:\-*]")
 _LABEL_MAX = 80
@@ -190,10 +190,31 @@ def _parse_timestamp(raw: str) -> datetime | None:
         text = text[:-1] + "+00:00"
     try:
         parsed = datetime.fromisoformat(text)
-    except ValueError:
+    except (OverflowError, ValueError):
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
+    # ``fromisoformat`` accepts boundary values whose offset cannot be
+    # normalized (for example year 1 with +14:00).  Later comparisons and
+    # ``astimezone`` calls would raise a raw OverflowError, so reject them at
+    # the parsing boundary like every other malformed source/state stamp.
+    try:
+        parsed.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        return None
+    return parsed
+
+
+def _state_timestamp(value: Any, *, key: str) -> datetime:
+    if not isinstance(value, str):
+        raise ReactorStateError(
+            f"event reactor state field {key!r} must be a timestamp string"
+        )
+    parsed = _parse_timestamp(value)
+    if parsed is None:
+        raise ReactorStateError(
+            f"event reactor state field {key!r} has an invalid timestamp"
+        )
     return parsed
 
 
@@ -299,6 +320,15 @@ def _normalize_state(payload: dict[str, Any], *, path: Path) -> dict[str, Any]:
         raise ReactorStateError(
             f"event reactor state field 'last_dispatch' must be an object: {path}"
         )
+    for agent_name, dispatched_at in last_dispatch.items():
+        if not isinstance(agent_name, str) or not agent_name.strip():
+            raise ReactorStateError(
+                f"event reactor state field 'last_dispatch' has an invalid agent name: {path}"
+            )
+        try:
+            _state_timestamp(dispatched_at, key=f"last_dispatch.{agent_name}")
+        except ReactorStateError as exc:
+            raise ReactorStateError(f"{exc}: {path}") from exc
 
     if version == 3:
         missing_maps = [key for key in ("history_offsets", "hivemind_files") if key not in state]
@@ -459,6 +489,21 @@ def _event_sort_key(event: ReactorEvent) -> datetime:
     return _parse_timestamp(event.timestamp) or datetime.min.replace(tzinfo=timezone.utc)
 
 
+def _utf8_checkpoint_name(value: str) -> bool:
+    """Return whether a filesystem name can round-trip through JSON state.
+
+    POSIX may expose undecodable bytes as surrogateescape code points.  JSON
+    can emit those as ``\\udcXX`` escapes, but the reactor's strict loader
+    correctly rejects unpaired surrogates on the next cycle.  Such names
+    therefore cannot be used as durable checkpoint keys.
+    """
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _history_files(
     context_path: Path,
     *,
@@ -474,7 +519,17 @@ def _history_files(
         history_root = resolve_mount_root(context_path, MountType.HISTORY, config=config)
         if not history_root.is_dir():
             return [], False
-        return sorted(history_root.glob(f"{EVENT_FILE_PREFIX}_*.jsonl")), True
+        paths: list[Path] = []
+        for path in history_root.glob(f"{EVENT_FILE_PREFIX}_*.jsonl"):
+            if not _utf8_checkpoint_name(path.name):
+                raise ReactorStateError(
+                    "history source contains a filename that cannot be represented "
+                    f"safely in reactor state: {os.fsencode(path.name)!r}; rename it as UTF-8"
+                )
+            paths.append(path)
+        return sorted(paths), True
+    except ReactorStateError:
+        raise
     except Exception:  # noqa: BLE001 - provider resolution may fail
         return [], False
 
@@ -538,6 +593,26 @@ def _offset_map(value: Any, *, key: str) -> dict[str, int]:
             )
         result[raw_name] = raw_offset
     return result
+
+
+def _history_round(value: Any) -> list[str]:
+    """Validate the durable finite file round used for history fairness."""
+    if not isinstance(value, list):
+        raise ReactorStateError("event reactor state field 'history_round' must be a list")
+    names: list[str] = []
+    for raw_name in value:
+        if (
+            not isinstance(raw_name, str)
+            or not raw_name
+            or Path(raw_name).name != raw_name
+            or not _utf8_checkpoint_name(raw_name)
+            or raw_name in names
+        ):
+            raise ReactorStateError(
+                "event reactor state field 'history_round' is malformed"
+            )
+        names.append(raw_name)
+    return names
 
 
 def _history_deferred_records(value: Any) -> list[_DeferredHistoryRecord]:
@@ -619,10 +694,16 @@ def _history_record_event(raw: bytes) -> ReactorEvent | None:
     record = strict_json_loads(raw.strip())
     if not isinstance(record, dict):
         raise ValueError("history record is not an object")
-    kind = str(record.get("type", ""))
+    raw_kind = record.get("type")
+    if not isinstance(raw_kind, str) or not raw_kind.strip():
+        raise ValueError("history record type must be a non-empty string")
+    kind = raw_kind
     if kind == HIVEMIND_KIND:
         return None
-    stamp = _parse_timestamp(str(record.get("timestamp", "")))
+    raw_timestamp = record.get("timestamp")
+    if not isinstance(raw_timestamp, str):
+        raise ValueError("history record timestamp must be a string")
+    stamp = _parse_timestamp(raw_timestamp)
     if stamp is None:
         raise ValueError("history record timestamp is invalid")
     metadata = record.get("metadata")
@@ -630,7 +711,7 @@ def _history_record_event(raw: bytes) -> ReactorEvent | None:
         kind=kind,
         detail=str(record.get("op", "") or ""),
         source=str(record.get("source", "")),
-        timestamp=str(record.get("timestamp", "")),
+        timestamp=raw_timestamp,
         metadata=metadata if isinstance(metadata, dict) else {},
     )
 
@@ -670,6 +751,7 @@ def _history_events_since(
     migration_cutoffs: dict[str, int] | None = None,
     deferred: list[_DeferredHistoryRecord] | None = None,
     oversized: dict[str, _OversizedHistoryScan] | None = None,
+    round_files: list[str] | None = None,
     limit: int = MAX_EVENTS_PER_CYCLE,
     max_scan_bytes: int = MAX_HISTORY_SCAN_BYTES,
 ) -> tuple[
@@ -680,6 +762,7 @@ def _history_events_since(
     dict[str, int],
     list[_DeferredHistoryRecord],
     dict[str, _OversizedHistoryScan],
+    list[str],
 ]:
     """Stream one payload-bounded, resumable slice of append-only history files.
 
@@ -700,7 +783,13 @@ def _history_events_since(
     pending_deferred = list(deferred or [])
     pending_oversized = dict(oversized or {})
     if not history_available:
-        if pending_offsets or pending_cutoffs or pending_deferred or pending_oversized:
+        if (
+            pending_offsets
+            or pending_cutoffs
+            or pending_deferred
+            or pending_oversized
+            or round_files
+        ):
             raise ReactorStateError(
                 "history source is unavailable while reactor checkpoints exist; "
                 "preserving state for retry"
@@ -713,12 +802,28 @@ def _history_events_since(
             pending_cutoffs,
             pending_deferred,
             pending_oversized,
+            list(round_files or []),
         )
     existing_names = {path.name for path in paths}
     for name in [name for name in pending_offsets if name not in existing_names]:
         pending_offsets.pop(name, None)
         pending_cutoffs.pop(name, None)
         pending_oversized.pop(name, None)
+    pending_round = [name for name in (round_files or []) if name in existing_names]
+    eligible_names: set[str] = set()
+    for path in paths:
+        try:
+            has_unread_bytes = path.stat().st_size > pending_offsets.get(path.name, 0)
+        except OSError:
+            # Keep a transiently unstatable path in the finite round so later
+            # files still get a turn and this identity is retried next round.
+            has_unread_bytes = True
+        if has_unread_bytes or path.name in pending_oversized:
+            eligible_names.add(path.name)
+    if not pending_round:
+        pending_round = [path.name for path in paths if path.name in eligible_names]
+    round_waiting = bool(eligible_names - set(pending_round))
+    paths = [path_by_name[name] for name in pending_round]
 
     events: list[ReactorEvent] = []
     skipped = 0
@@ -754,8 +859,12 @@ def _history_events_since(
             events.append(event)
     pending_deferred = retained_deferred
 
-    for path_index, path in enumerate(paths):
-        if scanned_records >= record_limit:
+    for path in paths:
+        if (
+            len(events) >= record_limit
+            or scanned_records >= record_limit
+            or scanned_bytes >= byte_limit
+        ):
             truncated = True
             break
         name = path.name
@@ -779,125 +888,137 @@ def _history_events_since(
                     )
         except ReactorStateError:
             raise
-        except OSError:
+        except OSError as exc:
             if handle is not None:
-                handle.close()
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+            _log.debug("Transient history open/checkpoint failure for %s: %s", path, exc)
+            pending_round.remove(name)
             continue
         assert handle is not None
-        with handle:
-            handle.seek(offset)
-            oversized_scan = pending_oversized.get(name)
-            if oversized_scan is not None:
-                if oversized_scan.start != offset or oversized_scan.scan_offset > size:
-                    raise ReactorStateError(
-                        f"history oversized-record checkpoint is inconsistent: {path}"
-                    )
-                handle.seek(oversized_scan.scan_offset)
-                while handle.tell() < size and scanned_bytes < byte_limit:
-                    chunk_start = handle.tell()
-                    chunk = handle.read(min(64 * 1024, byte_limit - scanned_bytes))
-                    if not chunk:
-                        break
-                    newline = chunk.find(b"\n")
-                    consumed = len(chunk) if newline < 0 else newline + 1
-                    scanned_bytes += consumed
-                    if newline >= 0:
-                        record_end = chunk_start + consumed
-                        pending_offsets[name] = record_end
-                        pending_oversized.pop(name, None)
-                        handle.seek(record_end)
-                        scanned_records += 1
-                        skipped += 1
-                        _log.warning(
-                            "Event reactor skipped oversized history record %s at offset %d",
-                            path,
-                            oversized_scan.start,
+        try:
+            with handle:
+                handle.seek(offset)
+                oversized_scan = pending_oversized.get(name)
+                if oversized_scan is not None:
+                    if oversized_scan.start != offset or oversized_scan.scan_offset > size:
+                        raise ReactorStateError(
+                            f"history oversized-record checkpoint is inconsistent: {path}"
                         )
-                        break
-                    pending_oversized[name] = _OversizedHistoryScan(
-                        start=oversized_scan.start,
-                        scan_offset=handle.tell(),
-                    )
-                if name in pending_oversized:
-                    truncated = True
-            while name not in pending_oversized and handle.tell() < size:
-                if len(events) >= record_limit or scanned_records >= record_limit:
-                    truncated = True
-                    break
-                if scanned_bytes >= byte_limit:
-                    truncated = True
-                    break
-                line_start = handle.tell()
-                # The cycle budget controls whether another record starts; a
-                # started record may finish up to the per-record cap. Splitting
-                # it at the cycle boundary would retry the same line forever
-                # whenever its valid size exceeds ``max_scan_bytes``.
-                raw = handle.readline(MAX_HISTORY_RECORD_BYTES + 1)
-                if not raw:
-                    break
-                if len(raw) > MAX_HISTORY_RECORD_BYTES:
-                    scanned_bytes += len(raw)
-                    if raw.endswith(b"\n"):
-                        pending_offsets[name] = handle.tell()
-                        scanned_records += 1
-                        skipped += 1
-                        _log.warning(
-                            "Event reactor skipped oversized history record %s at offset %d",
-                            path,
-                            line_start,
+                    handle.seek(oversized_scan.scan_offset)
+                    while handle.tell() < size and scanned_bytes < byte_limit:
+                        chunk_start = handle.tell()
+                        chunk = handle.read(min(64 * 1024, byte_limit - scanned_bytes))
+                        if not chunk:
+                            break
+                        newline = chunk.find(b"\n")
+                        consumed = len(chunk) if newline < 0 else newline + 1
+                        scanned_bytes += consumed
+                        if newline >= 0:
+                            record_end = chunk_start + consumed
+                            pending_offsets[name] = record_end
+                            pending_oversized.pop(name, None)
+                            handle.seek(record_end)
+                            scanned_records += 1
+                            skipped += 1
+                            _log.warning(
+                                "Event reactor skipped oversized history record %s at offset %d",
+                                path,
+                                oversized_scan.start,
+                            )
+                            break
+                        pending_oversized[name] = _OversizedHistoryScan(
+                            start=oversized_scan.start,
+                            scan_offset=handle.tell(),
                         )
-                        continue
-                    pending_offsets[name] = line_start
-                    pending_oversized[name] = _OversizedHistoryScan(
-                        start=line_start,
-                        scan_offset=handle.tell(),
-                    )
-                    truncated = True
-                    break
-                if not raw.endswith(b"\n"):
-                    # A writer has not published a complete JSONL record yet.
-                    # Leave the offset at its start so completion is retried.
-                    handle.seek(line_start)
-                    truncated = True
-                    break
+                    if name in pending_oversized:
+                        truncated = True
+                while name not in pending_oversized and handle.tell() < size:
+                    if len(events) >= record_limit or scanned_records >= record_limit:
+                        truncated = True
+                        break
+                    if scanned_bytes >= byte_limit:
+                        truncated = True
+                        break
+                    line_start = handle.tell()
+                    # The cycle budget controls whether another record starts; a
+                    # started record may finish up to the per-record cap. Splitting
+                    # it at the cycle boundary would retry the same line forever
+                    # whenever its valid size exceeds ``max_scan_bytes``.
+                    raw = handle.readline(MAX_HISTORY_RECORD_BYTES + 1)
+                    if not raw:
+                        break
+                    if len(raw) > MAX_HISTORY_RECORD_BYTES:
+                        scanned_bytes += len(raw)
+                        if raw.endswith(b"\n"):
+                            pending_offsets[name] = handle.tell()
+                            scanned_records += 1
+                            skipped += 1
+                            _log.warning(
+                                "Event reactor skipped oversized history record %s at offset %d",
+                                path,
+                                line_start,
+                            )
+                            continue
+                        pending_offsets[name] = line_start
+                        pending_oversized[name] = _OversizedHistoryScan(
+                            start=line_start,
+                            scan_offset=handle.tell(),
+                        )
+                        truncated = True
+                        break
+                    if not raw.endswith(b"\n"):
+                        # A writer has not published a complete JSONL record yet.
+                        # Leave the offset at its start so completion is retried,
+                        # but charge the bytes and continue to independent files
+                        # while this cycle still has capacity.
+                        scanned_bytes += len(raw)
+                        handle.seek(line_start)
+                        truncated = True
+                        break
 
-                pending_offsets[name] = handle.tell()
-                scanned_records += 1
-                scanned_bytes += len(raw)
-                if not raw.strip():
-                    continue
-                try:
-                    event = _history_record_event(raw)
-                except (
-                    UnicodeDecodeError,
-                    json.JSONDecodeError,
-                    RecursionError,
-                    ValueError,
-                ):
-                    skipped += 1
-                    continue
-                if event is None:
-                    continue
-                stamp = _parse_timestamp(event.timestamp)
-                if stamp is None:
-                    skipped += 1
-                    continue
-                cutoff = pending_cutoffs.get(name, 0)
-                if (
-                    line_start < cutoff
-                    and migration_watermark is not None
-                    and stamp <= migration_watermark
-                ):
-                    continue
-                events.append(event)
-            if pending_offsets.get(name, offset) < size:
-                truncated = True
-            cutoff = pending_cutoffs.get(name)
-            if cutoff is not None and pending_offsets.get(name, offset) >= cutoff:
-                pending_cutoffs.pop(name, None)
-        if truncated:
-            break
-        if path_index < len(paths) - 1 and (
+                    pending_offsets[name] = handle.tell()
+                    scanned_records += 1
+                    scanned_bytes += len(raw)
+                    if not raw.strip():
+                        continue
+                    try:
+                        event = _history_record_event(raw)
+                    except (
+                        UnicodeDecodeError,
+                        json.JSONDecodeError,
+                        RecursionError,
+                        ValueError,
+                    ):
+                        skipped += 1
+                        continue
+                    if event is None:
+                        continue
+                    stamp = _parse_timestamp(event.timestamp)
+                    if stamp is None:
+                        skipped += 1
+                        continue
+                    cutoff = pending_cutoffs.get(name, 0)
+                    if (
+                        line_start < cutoff
+                        and migration_watermark is not None
+                        and stamp <= migration_watermark
+                    ):
+                        continue
+                    events.append(event)
+                if pending_offsets.get(name, offset) < size:
+                    truncated = True
+                cutoff = pending_cutoffs.get(name)
+                if cutoff is not None and pending_offsets.get(name, offset) >= cutoff:
+                    pending_cutoffs.pop(name, None)
+        except OSError as exc:
+            raise ReactorStateError(
+                f"could not scan history file {path} from offset {offset}: {exc}"
+            ) from exc
+        pending_round.remove(name)
+        if (
             len(events) >= record_limit
             or scanned_records >= record_limit
             or scanned_bytes >= byte_limit
@@ -906,7 +1027,7 @@ def _history_events_since(
             break
 
     events.sort(key=_event_sort_key)
-    truncated = truncated or bool(pending_deferred)
+    truncated = truncated or bool(pending_deferred) or bool(pending_round) or round_waiting
     return (
         events,
         truncated,
@@ -915,6 +1036,7 @@ def _history_events_since(
         pending_cutoffs,
         pending_deferred,
         pending_oversized,
+        pending_round,
     )
 
 
@@ -976,15 +1098,29 @@ def _hivemind_inventory(root: Path) -> dict[str, dict[str, _HivemindFile]]:
     """
     inventory: dict[str, dict[str, _HivemindFile]] = {}
     try:
-        directories = sorted(
-            path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")
-        )
+        directories: list[Path] = []
+        for path in root.iterdir():
+            if not path.is_dir() or path.name.startswith("."):
+                continue
+            if not _utf8_checkpoint_name(path.name):
+                raise ReactorStateError(
+                    "hivemind source contains a directory name that cannot be represented "
+                    f"safely in reactor state: {os.fsencode(path.name)!r}; rename it as UTF-8"
+                )
+            directories.append(path)
+        directories.sort()
         for directory in directories:
             files: dict[str, _HivemindFile] = {}
             with os.scandir(directory) as entries:
                 for entry in entries:
                     if not entry.name.endswith(".json") or not entry.is_file(follow_symlinks=False):
                         continue
+                    if not _utf8_checkpoint_name(entry.name):
+                        raise ReactorStateError(
+                            "hivemind source contains a filename that cannot be represented "
+                            "safely in reactor state: "
+                            f"{os.fsencode(entry.name)!r}; rename it as UTF-8"
+                        )
                     stat = entry.stat(follow_symlinks=False)
                     files[entry.name] = _HivemindFile(
                         directory=directory.name,
@@ -1032,12 +1168,12 @@ def _decode_hivemind_checkpoint(value: str) -> tuple[int, str]:
         raise ReactorStateError("event reactor hivemind checkpoint is malformed") from exc
 
 
-def _hivemind_scan_cursor(value: Any) -> tuple[int, str, str] | None:
-    """Validate the bounded fairness cursor used for candidate rotation."""
+def _hivemind_retry_cursor(value: Any, *, key: str) -> tuple[int, str, str] | None:
+    """Validate the bounded round-robin cursor used for retry candidates."""
     if value is None:
         return None
     if not isinstance(value, dict):
-        raise ReactorStateError("event reactor state field 'hivemind_scan_cursor' is malformed")
+        raise ReactorStateError(f"event reactor state field {key!r} is malformed")
     mtime_ns = value.get("mtime_ns")
     filename = value.get("filename")
     directory = value.get("directory")
@@ -1048,21 +1184,33 @@ def _hivemind_scan_cursor(value: Any) -> tuple[int, str, str] | None:
         or not isinstance(filename, str)
         or not filename
         or Path(filename).name != filename
+        or not _utf8_checkpoint_name(filename)
         or not isinstance(directory, str)
         or not directory
         or Path(directory).name != directory
+        or not _utf8_checkpoint_name(directory)
     ):
-        raise ReactorStateError("event reactor state field 'hivemind_scan_cursor' is malformed")
+        raise ReactorStateError(f"event reactor state field {key!r} is malformed")
     return mtime_ns, filename, directory
 
 
-def _hivemind_scan_cursor_dict(
+def _hivemind_retry_cursor_dict(
     value: tuple[int, str, str] | None,
 ) -> dict[str, Any] | None:
     if value is None:
         return None
     mtime_ns, filename, directory = value
     return {"mtime_ns": mtime_ns, "filename": filename, "directory": directory}
+
+
+def _hivemind_retry_phase(value: Any) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ReactorStateError(
+            "event reactor state field 'hivemind_retry_phase' must be boolean"
+        )
+    return value
 
 
 def _nested_string_map(value: Any, *, key: str) -> dict[str, dict[str, str]]:
@@ -1198,7 +1346,10 @@ def _hivemind_events_since(
     deferred: dict[str, dict[str, dict[str, str]]] | None = None,
     migration_existing: dict[str, dict[str, str]] | None = None,
     legacy_migration_cutoffs: dict[str, str] | None = None,
-    scan_cursor: tuple[int, str, str] | None = None,
+    discovery: dict[str, dict[str, str]] | None = None,
+    retry: dict[str, dict[str, str]] | None = None,
+    retry_cursor: tuple[int, str, str] | None = None,
+    retry_phase: bool = False,
     limit: int = MAX_EVENTS_PER_CYCLE,
 ) -> tuple[
     list[ReactorEvent],
@@ -1209,7 +1360,10 @@ def _hivemind_events_since(
     dict[str, dict[str, dict[str, str]]],
     dict[str, dict[str, str]],
     dict[str, str],
+    dict[str, dict[str, str]],
+    dict[str, dict[str, str]],
     tuple[int, str, str] | None,
+    bool,
 ]:
     """Read bounded candidate payloads from a complete filesystem inventory."""
     from ..hivemind import HivemindMessage
@@ -1225,7 +1379,10 @@ def _hivemind_events_since(
             dict(deferred or {}),
             dict(migration_existing or {}),
             dict(legacy_migration_cutoffs or {}),
-            scan_cursor,
+            dict(discovery or {}),
+            dict(retry or {}),
+            retry_cursor,
+            retry_phase,
         )
 
     inventory = _hivemind_inventory(root)
@@ -1234,6 +1391,8 @@ def _hivemind_events_since(
     pending_deferred = _exact_deferred_subset(deferred or {}, inventory)
     pending_migration = _exact_inventory_subset(migration_existing or {}, inventory)
     pending_legacy_cutoffs = dict(legacy_migration_cutoffs or {})
+    pending_discovery = _exact_inventory_subset(discovery or {}, inventory)
+    pending_retry = _exact_inventory_subset(retry or {}, inventory)
 
     record_limit = limit if limit > 0 else MAX_EVENTS_PER_CYCLE
     candidates, waiting = _hivemind_candidates(inventory, pending_seen, pending_deferred, until)
@@ -1241,33 +1400,105 @@ def _hivemind_events_since(
     def candidate_key(item: _HivemindFile) -> tuple[int, str, str]:
         return item.mtime_ns, item.filename, item.directory
 
-    # Rotate the bounded read window after the last attempted identity. An
-    # unreadable oldest file remains unacknowledged, but cannot permanently
-    # head-of-line block a later valid file when ``limit`` is small.
-    after = (item for item in candidates if scan_cursor is None or candidate_key(item) > scan_cursor)
-    selected = nsmallest(record_limit, after, key=candidate_key)
-    if len(selected) < record_limit and scan_cursor is not None:
-        selected.extend(
-            nsmallest(
-                record_limit - len(selected),
-                (item for item in candidates if candidate_key(item) <= scan_cursor),
-                key=candidate_key,
-            )
+    def is_retry(item: _HivemindFile) -> bool:
+        return (
+            pending_retry.get(item.directory, {}).get(item.filename) == item.signature
+            or pending_malformed.get(item.directory, {}).get(item.filename)
+            == item.signature
+            or pending_deferred.get(item.directory, {})
+            .get(item.filename, {})
+            .get("signature")
+            == item.signature
         )
-    truncated = waiting or len(candidates) > record_limit
-    pending_scan_cursor = scan_cursor
+
+    candidate_identities = {
+        (item.directory, item.filename): item.signature for item in candidates
+    }
+    for directory, files in list(pending_discovery.items()):
+        pending_discovery[directory] = {
+            filename: signature
+            for filename, signature in files.items()
+            if candidate_identities.get((directory, filename)) == signature
+            and not is_retry(inventory[directory][filename])
+        }
+        if not pending_discovery[directory]:
+            pending_discovery.pop(directory, None)
+    if not pending_discovery:
+        for item in candidates:
+            if not is_retry(item):
+                pending_discovery.setdefault(item.directory, {})[
+                    item.filename
+                ] = item.signature
+
+    # Discovery and retry progress are independent.  Exact inventory finds
+    # every identity, while a durable retry set records only identities whose
+    # payload read/parse needs another attempt.  Reserving capacity for both
+    # classes prevents a persistent unreadable oldest file from starving new
+    # input and prevents sustained ingress from starving retries.
+    unattempted = sorted(
+        (
+            item
+            for item in candidates
+            if pending_discovery.get(item.directory, {}).get(item.filename)
+            == item.signature
+        ),
+        key=candidate_key,
+    )
+    retry_candidates = sorted((item for item in candidates if is_retry(item)), key=candidate_key)
+    if retry_cursor is not None:
+        retry_candidates = [
+            *(item for item in retry_candidates if candidate_key(item) > retry_cursor),
+            *(item for item in retry_candidates if candidate_key(item) <= retry_cursor),
+        ]
+
+    pending_retry_phase = retry_phase
+    if record_limit == 1:
+        if unattempted and retry_candidates:
+            selected = [retry_candidates[0] if retry_phase else unattempted[0]]
+            pending_retry_phase = not retry_phase
+        elif unattempted:
+            selected = [unattempted[0]]
+            # A failure creates the retry class after selection.  Keep the
+            # discovery phase once so the next unseen identity gets a chance;
+            # the following mixed cycle then reserves the retry turn.
+            pending_retry_phase = False
+        elif retry_candidates:
+            selected = [retry_candidates[0]]
+            pending_retry_phase = False
+        else:
+            selected = []
+            pending_retry_phase = False
+    elif unattempted and retry_candidates:
+        unattempted_slots = min(len(unattempted), record_limit - 1)
+        selected = unattempted[:unattempted_slots] + retry_candidates[:1]
+        remaining = record_limit - len(selected)
+        if remaining:
+            selected.extend(unattempted[unattempted_slots : unattempted_slots + remaining])
+            remaining = record_limit - len(selected)
+        if remaining:
+            selected.extend(retry_candidates[1 : 1 + remaining])
+    elif unattempted:
+        selected = unattempted[:record_limit]
+    else:
+        selected = retry_candidates[:record_limit]
+
+    truncated = waiting or len(candidates) > len(selected)
+    pending_retry_cursor = retry_cursor
     events: list[ReactorEvent] = []
     skipped = 0
     expiry_now = datetime.now(timezone.utc)
 
     def mark_seen(item: _HivemindFile) -> None:
         pending_seen.setdefault(item.directory, {})[item.filename] = item.signature
+        pending_discovery.get(item.directory, {}).pop(item.filename, None)
+        pending_retry.get(item.directory, {}).pop(item.filename, None)
         pending_malformed.get(item.directory, {}).pop(item.filename, None)
         pending_deferred.get(item.directory, {}).pop(item.filename, None)
         pending_migration.get(item.directory, {}).pop(item.filename, None)
 
     def observe_malformed(item: _HivemindFile, reason: str) -> None:
         nonlocal skipped, truncated
+        pending_discovery.get(item.directory, {}).pop(item.filename, None)
         previous = pending_malformed.get(item.directory, {}).get(item.filename)
         if previous == item.signature:
             skipped += 1
@@ -1282,7 +1513,8 @@ def _hivemind_events_since(
         truncated = True
 
     for item in selected:
-        pending_scan_cursor = candidate_key(item)
+        if is_retry(item):
+            pending_retry_cursor = candidate_key(item)
         try:
             with item.path.open("rb") as handle:
                 raw = handle.read(MAX_HIVEMIND_RECORD_BYTES + 1)
@@ -1291,11 +1523,16 @@ def _hivemind_events_since(
             # The directory inventory raced a copy/rename/permission change.
             # Nothing about this file is acknowledged; retry a later cycle.
             truncated = True
+            pending_discovery.get(item.directory, {}).pop(item.filename, None)
+            pending_retry.setdefault(item.directory, {})[item.filename] = item.signature
             _log.debug("Transient hivemind read failure for %s: %s", item.path, exc)
             continue
         if _hivemind_file_signature(current_stat) != item.signature:
             truncated = True
+            pending_discovery.get(item.directory, {}).pop(item.filename, None)
+            pending_retry.get(item.directory, {}).pop(item.filename, None)
             continue
+        pending_retry.get(item.directory, {}).pop(item.filename, None)
         if len(raw) > MAX_HIVEMIND_RECORD_BYTES:
             observe_malformed(item, f"record exceeds {MAX_HIVEMIND_RECORD_BYTES} bytes")
             continue
@@ -1303,6 +1540,8 @@ def _hivemind_events_since(
             data = strict_json_loads(raw)
             if not isinstance(data, dict):
                 raise ValueError("message is not an object")
+            if not isinstance(data.get("timestamp"), str):
+                raise ValueError("message timestamp must be a string")
             message = HivemindMessage.from_dict(data)
             stamp = _parse_timestamp(message.timestamp)
             if stamp is None:
@@ -1373,11 +1612,22 @@ def _hivemind_events_since(
         if not remaining:
             pending_legacy_cutoffs.pop(directory, None)
 
-    for mapping in (pending_seen, pending_malformed, pending_migration):
+    for mapping in (
+        pending_seen,
+        pending_malformed,
+        pending_migration,
+        pending_discovery,
+        pending_retry,
+    ):
         for directory in [name for name, files in mapping.items() if not files]:
             mapping.pop(directory, None)
     for directory in [name for name, files in pending_deferred.items() if not files]:
         pending_deferred.pop(directory, None)
+
+    has_retry_work = bool(pending_retry or pending_malformed or pending_deferred)
+    if not has_retry_work:
+        pending_retry_cursor = None
+        pending_retry_phase = False
 
     events.sort(key=_event_sort_key)
     return (
@@ -1389,7 +1639,10 @@ def _hivemind_events_since(
         pending_deferred,
         pending_migration,
         pending_legacy_cutoffs,
-        pending_scan_cursor,
+        pending_discovery,
+        pending_retry,
+        pending_retry_cursor,
+        pending_retry_phase,
     )
 
 
@@ -1415,14 +1668,30 @@ class ReactorPendingRoute:
     reason: str
     config_digest: str
     queued_at: str
+    launch_failure_count: int = 0
+    last_launch_failure_at: str = ""
+    launch_circuit_opened_at: str = ""
 
-    def to_dict(self) -> dict[str, str]:
-        return {
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "action": self.action,
             "reason": self.reason,
             "config_digest": self.config_digest,
             "queued_at": self.queued_at,
         }
+        if self.launch_failure_count:
+            payload["launch_failure_count"] = self.launch_failure_count
+            payload["last_launch_failure_at"] = self.last_launch_failure_at
+        if self.launch_circuit_opened_at:
+            payload["launch_circuit_opened_at"] = self.launch_circuit_opened_at
+        return payload
+
+
+def _valid_pending_route_reason(value: Any) -> bool:
+    if not isinstance(value, str) or not value.startswith("event:"):
+        return False
+    label = value.removeprefix("event:")
+    return bool(label) and sanitize_label(label) == label
 
 
 def _pending_route_map(value: Any) -> dict[str, ReactorPendingRoute]:
@@ -1430,23 +1699,45 @@ def _pending_route_map(value: Any) -> dict[str, ReactorPendingRoute]:
         raise ReactorStateError("event reactor state field 'pending_routes' must be an object")
     routes: dict[str, ReactorPendingRoute] = {}
     for agent_name, raw in value.items():
-        if not isinstance(agent_name, str) or not agent_name or not isinstance(raw, dict):
+        if (
+            not isinstance(agent_name, str)
+            or not agent_name.strip()
+            or not isinstance(raw, dict)
+        ):
             raise ReactorStateError("event reactor state field 'pending_routes' is malformed")
         action = raw.get("action")
         reason = raw.get("reason")
         config_digest = raw.get("config_digest")
         queued_at = raw.get("queued_at")
-        label = reason.removeprefix("event:") if isinstance(reason, str) else ""
+        launch_failure_count = raw.get("launch_failure_count", 0)
+        last_launch_failure_at = raw.get("last_launch_failure_at", "")
+        launch_circuit_opened_at = raw.get("launch_circuit_opened_at", "")
         if (
             action not in VALID_EVENT_ACTIONS
-            or not isinstance(reason, str)
-            or not reason.startswith("event:")
-            or not label
-            or sanitize_label(label) != label
+            or not _valid_pending_route_reason(reason)
             or not isinstance(config_digest, str)
             or not re.fullmatch(r"[0-9a-f]{64}", config_digest)
             or not isinstance(queued_at, str)
             or _parse_timestamp(queued_at) is None
+            or isinstance(launch_failure_count, bool)
+            or not isinstance(launch_failure_count, int)
+            or launch_failure_count < 0
+            or launch_failure_count > MAX_LAUNCH_FAILURE_COUNT
+            or not isinstance(last_launch_failure_at, str)
+            or bool(last_launch_failure_at)
+            != bool(launch_failure_count)
+            or (
+                bool(last_launch_failure_at)
+                and _parse_timestamp(last_launch_failure_at) is None
+            )
+            or not isinstance(launch_circuit_opened_at, str)
+            or (
+                bool(launch_circuit_opened_at)
+                and (
+                    launch_failure_count == 0
+                    or _parse_timestamp(launch_circuit_opened_at) is None
+                )
+            )
         ):
             raise ReactorStateError("event reactor state field 'pending_routes' is malformed")
         routes[agent_name] = ReactorPendingRoute(
@@ -1455,6 +1746,9 @@ def _pending_route_map(value: Any) -> dict[str, ReactorPendingRoute]:
             reason=reason,
             config_digest=config_digest,
             queued_at=queued_at,
+            launch_failure_count=launch_failure_count,
+            last_launch_failure_at=last_launch_failure_at,
+            launch_circuit_opened_at=launch_circuit_opened_at,
         )
     return routes
 
@@ -1470,7 +1764,9 @@ def event_config_digest(config: AgentConfig) -> str:
         return sha256_canonical_json(
             {
                 "name": config.name,
-                "on_event": list(config.on_event),
+                "on_event": sorted(
+                    {pattern.strip() for pattern in config.on_event if pattern.strip()}
+                ),
                 "on_event_action": config.on_event_action,
             }
         )
@@ -1496,12 +1792,16 @@ class ReactorBatch:
     _pending_history_migration_cutoffs: dict[str, int] = field(default_factory=dict)
     _pending_history_deferred: list[_DeferredHistoryRecord] = field(default_factory=list)
     _pending_history_oversized: dict[str, _OversizedHistoryScan] = field(default_factory=dict)
+    _pending_history_round: list[str] = field(default_factory=list)
     _pending_hivemind_seen: dict[str, dict[str, str]] = field(default_factory=dict)
     _pending_hivemind_malformed: dict[str, dict[str, str]] = field(default_factory=dict)
     _pending_hivemind_deferred: dict[str, dict[str, dict[str, str]]] = field(default_factory=dict)
     _pending_hivemind_migration_existing: dict[str, dict[str, str]] = field(default_factory=dict)
     _pending_hivemind_legacy_cutoffs: dict[str, str] = field(default_factory=dict)
-    _pending_hivemind_scan_cursor: tuple[int, str, str] | None = None
+    _pending_hivemind_discovery: dict[str, dict[str, str]] = field(default_factory=dict)
+    _pending_hivemind_retry: dict[str, dict[str, str]] = field(default_factory=dict)
+    _pending_hivemind_retry_cursor: tuple[int, str, str] | None = None
+    _pending_hivemind_retry_phase: bool = False
     _pending_routes: dict[str, ReactorPendingRoute] = field(default_factory=dict)
     _active_routes: set[str] = field(default_factory=set)
     acked: bool = False
@@ -1516,6 +1816,10 @@ class ReactorBatch:
             if action is None or route.action == action
         )
         return sorted(routes, key=lambda route: (route.queued_at, route.agent_name))
+
+    def pending_route(self, agent_name: str) -> ReactorPendingRoute | None:
+        """Return one durable route, including its launch retry metadata."""
+        return self._pending_routes.get(agent_name)
 
     def prune_pending_routes(
         self,
@@ -1540,6 +1844,16 @@ class ReactorBatch:
         config_digest: str,
     ) -> ReactorPendingRoute:
         """Coalesce one source match into the agent's durable pending slot."""
+        if (
+            not isinstance(agent_name, str)
+            or not agent_name.strip()
+            or action not in VALID_EVENT_ACTIONS
+            or not _valid_pending_route_reason(reason)
+            or not re.fullmatch(r"[0-9a-f]{64}", config_digest)
+        ):
+            raise ReactorStateError(
+                f"cannot register malformed event route for {agent_name!r}"
+            )
         existing = self._pending_routes.get(agent_name)
         if existing is not None and (
             existing.action != action or existing.config_digest != config_digest
@@ -1558,6 +1872,50 @@ class ReactorBatch:
             self._pending_routes[agent_name] = existing
         self._active_routes.add(agent_name)
         return existing
+
+    def record_launch_failure(self, agent_name: str, *, at: datetime) -> None:
+        """Persist one failed process launch in the route's retry policy state."""
+        route = self._pending_routes.get(agent_name)
+        if route is None:
+            raise ReactorStateError(
+                f"cannot record launch failure for unregistered route {agent_name!r}"
+            )
+        if route.launch_failure_count >= MAX_LAUNCH_FAILURE_COUNT:
+            raise ReactorStateError(
+                f"launch failure count exceeds safe bound for route {agent_name!r}"
+            )
+        self._pending_routes[agent_name] = replace(
+            route,
+            launch_failure_count=route.launch_failure_count + 1,
+            last_launch_failure_at=at.isoformat(),
+            launch_circuit_opened_at="",
+        )
+
+    def open_launch_circuit(self, agent_name: str, *, at: datetime) -> None:
+        """Persist the start of a launch circuit cooldown without dropping work."""
+        route = self._pending_routes.get(agent_name)
+        if route is None or route.launch_failure_count <= 0:
+            raise ReactorStateError(
+                f"cannot open launch circuit for route {agent_name!r} without a failure"
+            )
+        self._pending_routes[agent_name] = replace(
+            route,
+            launch_circuit_opened_at=at.isoformat(),
+        )
+
+    def reset_launch_failures(self, agent_name: str) -> None:
+        """Reset retry metadata after circuit cooldown while retaining the route."""
+        route = self._pending_routes.get(agent_name)
+        if route is None:
+            raise ReactorStateError(
+                f"cannot reset launch failures for unregistered route {agent_name!r}"
+            )
+        self._pending_routes[agent_name] = replace(
+            route,
+            launch_failure_count=0,
+            last_launch_failure_at="",
+            launch_circuit_opened_at="",
+        )
 
     def last_dispatch(self, agent_name: str) -> datetime | None:
         """Persisted time of the last event-triggered dispatch for an agent."""
@@ -1674,6 +2032,11 @@ class ReactorBatch:
             }
         else:
             self._state.pop("history_oversized", None)
+        if self._pending_history_round:
+            self._state["history_round"] = self._pending_history_round
+        else:
+            self._state.pop("history_round", None)
+        self._state.pop("history_scan_cursor", None)
         self._state["hivemind_seen"] = self._pending_hivemind_seen
         if self._pending_hivemind_malformed:
             self._state["hivemind_malformed"] = self._pending_hivemind_malformed
@@ -1696,11 +2059,27 @@ class ReactorBatch:
             and not self._pending_hivemind_legacy_cutoffs
         ):
             self._state.pop("hivemind_migration_watermark", None)
-        scan_cursor = _hivemind_scan_cursor_dict(self._pending_hivemind_scan_cursor)
-        if scan_cursor is not None:
-            self._state["hivemind_scan_cursor"] = scan_cursor
+        if self._pending_hivemind_discovery:
+            self._state["hivemind_discovery"] = self._pending_hivemind_discovery
         else:
-            self._state.pop("hivemind_scan_cursor", None)
+            self._state.pop("hivemind_discovery", None)
+        if self._pending_hivemind_retry:
+            self._state["hivemind_retry"] = self._pending_hivemind_retry
+        else:
+            self._state.pop("hivemind_retry", None)
+        retry_cursor = _hivemind_retry_cursor_dict(self._pending_hivemind_retry_cursor)
+        if retry_cursor is not None:
+            self._state["hivemind_retry_cursor"] = retry_cursor
+        else:
+            self._state.pop("hivemind_retry_cursor", None)
+        if self._pending_hivemind_retry_phase:
+            self._state["hivemind_retry_phase"] = True
+        else:
+            self._state.pop("hivemind_retry_phase", None)
+        # Compatibility with the first v4 fairness cursor.  Exact retry state
+        # supersedes its global candidate rotation on the next successful ack.
+        self._state.pop("hivemind_scan_cursor", None)
+        self._state.pop("hivemind_scan_wrap", None)
         self._state.pop("hivemind_files", None)
         if self._pending_routes:
             self._state["pending_routes"] = {
@@ -1779,11 +2158,10 @@ def _upgrade_v3_state(
             state["hivemind_migration_cutoffs"],
             key="hivemind_migration_cutoffs",
         )
-        if _parse_timestamp(str(state.get("hivemind_migration_watermark", ""))) is None:
-            raise ReactorStateError(
-                "event reactor state has an invalid "
-                "'hivemind_migration_watermark'; repair the migration state explicitly"
-            )
+        _state_timestamp(
+            state.get("hivemind_migration_watermark"),
+            key="hivemind_migration_watermark",
+        )
     upgraded = dict(state)
     upgraded["version"] = STATE_VERSION
     upgraded["hivemind_seen"] = {}
@@ -1808,13 +2186,7 @@ def _migration_watermark(
         has_boundary = f"{source}_migration_cutoffs" in state
     if not has_boundary:
         return None
-    parsed = _parse_timestamp(str(state.get(watermark_key, "")))
-    if parsed is None:
-        raise ReactorStateError(
-            f"event reactor state has an invalid {watermark_key!r}; "
-            "repair the migration state explicitly"
-        )
-    return parsed
+    return _state_timestamp(state.get(watermark_key), key=watermark_key)
 
 
 @contextmanager
@@ -1857,11 +2229,23 @@ def open_event_batch(
             raise ReactorBusyError(
                 f"event reactor lock is held by another process ({exc})"
             ) from exc
+        except OSError as exc:
+            raise ReactorStateError(
+                f"could not set up event reactor lock under {state_dir}: {exc}"
+            ) from exc
 
         state = _load_state(state_dir)
         fresh_state = not state
-        history_stored = _parse_timestamp(str(state.get("history_cursor", "")))
-        hivemind_stored = _parse_timestamp(str(state.get("hivemind_cursor", "")))
+        history_stored = (
+            _state_timestamp(state.get("history_cursor"), key="history_cursor")
+            if state
+            else None
+        )
+        hivemind_stored = (
+            _state_timestamp(state.get("hivemind_cursor"), key="hivemind_cursor")
+            if state
+            else None
+        )
 
         if fresh_state:
             history_stored = current
@@ -1887,17 +2271,7 @@ def open_event_batch(
                 acked=True,
             )
             return
-        if history_stored is None or hivemind_stored is None:
-            invalid = []
-            if history_stored is None:
-                invalid.append("history_cursor")
-            if hivemind_stored is None:
-                invalid.append("hivemind_cursor")
-            raise ReactorStateError(
-                "event reactor state has missing or invalid cursor(s): "
-                + ", ".join(invalid)
-                + "; repair the state explicitly instead of skipping backlog"
-            )
+        assert history_stored is not None and hivemind_stored is not None
 
         if state["version"] in (1, 2):
             state = _start_positional_migration(
@@ -1918,6 +2292,19 @@ def open_event_batch(
         history_migration_watermark = _migration_watermark(state, source="history")
         history_deferred = _history_deferred_records(state.get("history_deferred", []))
         history_oversized = _history_oversized_map(state.get("history_oversized", {}))
+        history_round = _history_round(state.get("history_round", []))
+        # The development-only partial-tail cursor is superseded by finite
+        # file rounds. Validate its type before dropping it on the next ack.
+        legacy_history_cursor = state.get("history_scan_cursor")
+        if legacy_history_cursor is not None and (
+            not isinstance(legacy_history_cursor, str)
+            or not legacy_history_cursor
+            or Path(legacy_history_cursor).name != legacy_history_cursor
+            or not _utf8_checkpoint_name(legacy_history_cursor)
+        ):
+            raise ReactorStateError(
+                "event reactor state field 'history_scan_cursor' is malformed"
+            )
 
         hivemind_seen = _nested_string_map(state["hivemind_seen"], key="hivemind_seen")
         hivemind_migration_existing = _nested_string_map(
@@ -1933,7 +2320,31 @@ def open_event_batch(
             state.get("hivemind_malformed", {}), key="hivemind_malformed"
         )
         hivemind_deferred = _hivemind_deferred_map(state.get("hivemind_deferred", {}))
-        hivemind_scan_cursor = _hivemind_scan_cursor(state.get("hivemind_scan_cursor"))
+        hivemind_discovery = _nested_string_map(
+            state.get("hivemind_discovery", {}), key="hivemind_discovery"
+        )
+        hivemind_retry = _nested_string_map(
+            state.get("hivemind_retry", {}), key="hivemind_retry"
+        )
+        legacy_scan_cursor = _hivemind_retry_cursor(
+            state.get("hivemind_scan_cursor"), key="hivemind_scan_cursor"
+        )
+        hivemind_retry_cursor = _hivemind_retry_cursor(
+            state.get("hivemind_retry_cursor"), key="hivemind_retry_cursor"
+        )
+        if hivemind_retry_cursor is None:
+            hivemind_retry_cursor = legacy_scan_cursor
+        # Validate and discard the development-only global wrap flag if an
+        # intermediate state file contains it.
+        if "hivemind_scan_wrap" in state and not isinstance(
+            state["hivemind_scan_wrap"], bool
+        ):
+            raise ReactorStateError(
+                "event reactor state field 'hivemind_scan_wrap' must be boolean"
+            )
+        hivemind_retry_phase = _hivemind_retry_phase(
+            state.get("hivemind_retry_phase")
+        )
         pending_routes = _pending_route_map(state.get("pending_routes", {}))
 
         (
@@ -1944,6 +2355,7 @@ def open_event_batch(
             pending_history_migration_cutoffs,
             pending_history_deferred,
             pending_history_oversized,
+            pending_history_round,
         ) = _history_events_since(
             context_path,
             history_migration_watermark,
@@ -1953,6 +2365,7 @@ def open_event_batch(
             migration_cutoffs=history_migration_cutoffs,
             deferred=history_deferred,
             oversized=history_oversized,
+            round_files=history_round,
             limit=max_events,
             max_scan_bytes=max_history_scan_bytes,
         )
@@ -1965,7 +2378,10 @@ def open_event_batch(
             pending_hivemind_deferred,
             pending_hivemind_migration_existing,
             pending_hivemind_legacy_cutoffs,
-            pending_hivemind_scan_cursor,
+            pending_hivemind_discovery,
+            pending_hivemind_retry,
+            pending_hivemind_retry_cursor,
+            pending_hivemind_retry_phase,
         ) = _hivemind_events_since(
             context_path,
             hivemind_migration_watermark,
@@ -1976,7 +2392,10 @@ def open_event_batch(
             deferred=hivemind_deferred,
             migration_existing=hivemind_migration_existing,
             legacy_migration_cutoffs=legacy_hivemind_cutoffs,
-            scan_cursor=hivemind_scan_cursor,
+            discovery=hivemind_discovery,
+            retry=hivemind_retry,
+            retry_cursor=hivemind_retry_cursor,
+            retry_phase=hivemind_retry_phase,
             limit=max_events,
         )
         events = sorted(history_events + hivemind_events, key=_event_sort_key)
@@ -2001,12 +2420,16 @@ def open_event_batch(
             _pending_history_migration_cutoffs=(pending_history_migration_cutoffs),
             _pending_history_deferred=pending_history_deferred,
             _pending_history_oversized=pending_history_oversized,
+            _pending_history_round=pending_history_round,
             _pending_hivemind_seen=pending_hivemind_seen,
             _pending_hivemind_malformed=pending_hivemind_malformed,
             _pending_hivemind_deferred=pending_hivemind_deferred,
             _pending_hivemind_migration_existing=(pending_hivemind_migration_existing),
             _pending_hivemind_legacy_cutoffs=pending_hivemind_legacy_cutoffs,
-            _pending_hivemind_scan_cursor=pending_hivemind_scan_cursor,
+            _pending_hivemind_discovery=pending_hivemind_discovery,
+            _pending_hivemind_retry=pending_hivemind_retry,
+            _pending_hivemind_retry_cursor=pending_hivemind_retry_cursor,
+            _pending_hivemind_retry_phase=pending_hivemind_retry_phase,
             _pending_routes=pending_routes,
             acked=False,
         )

@@ -68,8 +68,13 @@ Delivery is transactional, at-least-once:
   hivemind identity map) are proportional to live files, not bounded to 500.
   The exact hivemind inventory is required to find a newly copied file even
   when its filename and mtime are older than every previously delivered file.
-  A persisted rotation cursor prevents one unreadable oldest identity from
-  starving later candidates; the unreadable identity remains retryable.
+  Finite, exact discovery epochs plus an independent round-robin retry cursor
+  reserve capacity for new identities and failed reads, so multiple unreadable
+  oldest files cannot starve later candidates, copied/backdated ingress cannot
+  hide an existing identity, and sustained ingress cannot starve retries.
+  History uses finite file rounds for the same reason. Partial tails remain at
+  their original byte offset while later independent logs still get a turn,
+  even when repeated partial reads consume the cycle byte budget.
   Payload contents remain bounded and larger backlogs resume across cycles.
   History checkpoints are append-position based, so a newly appended event is
   delivered even if its caller supplied a backdated timestamp. Fresh-state
@@ -105,7 +110,10 @@ Delivery is transactional, at-least-once:
   bounded ASCII parsing. Cursor and source JSON reject duplicate members,
   non-finite numbers, overlong integers, invalid UTF-8, and excessive nesting;
   parse failures normalize to `ReactorStateError` or the malformed-record
-  policy instead of escaping the reconcile loop.
+  policy instead of escaping the reconcile loop. State timestamps must be
+  strings that safely normalize to UTC, and source filenames used as durable
+  checkpoint keys must be UTF-8; unrepresentable POSIX names fail closed with
+  state unchanged until they are renamed.
 - If a history mount becomes unavailable after positional checkpoints exist,
   the cycle fails closed with state unchanged rather than pruning offsets and
   replaying a restored mount from zero. An available empty history directory
@@ -116,7 +124,8 @@ Delivery is transactional, at-least-once:
   unchanged identity on the next cycle is classified as durable, warned,
   skipped, and counted
   (`reactor_skipped_malformed`). Transient open/stat failures never mark a file
-  seen.
+  seen. History payload read/seek failures and lock-setup failures normalize to
+  `ReactorStateError`, leaving the previous durable state intact.
 
 ## Actions and Gates
 
@@ -132,6 +141,14 @@ Delivery is transactional, at-least-once:
   its trigger authorization/action terminally rejects the stale route. A currently running agent, an
   active deduped job, or the configured debounce window intentionally
   coalesces the trigger and permits the cursor to advance.
+- A process-launch failure records against the supervisor's existing restart
+  budget. Event routes remain parked during exponential backoff, when restart
+  is disabled, and while the circuit is open; cooldown re-enables a launch
+  attempt. Loaded `max_restarts` values and persisted launch-failure counts are
+  bounded at 64 so corrupt state cannot drive unbounded backoff arithmetic.
+  The shipped `index-rebuild` reaction opts into a bounded failure budget
+  (`max_restarts = 3`). Only a process that actually starts advances event
+  debounce state.
 - Any other `on_event_action` value fails closed: the trigger is skipped with
   a warning and recorded as a terminal rejection; nothing spawns or enqueues.
 - Job prompts are built from operator config plus a sanitized event label;

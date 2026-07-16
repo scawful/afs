@@ -74,16 +74,21 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
   also covers job actions, while failed/future start clocks cannot suppress a
   retry; recovery config edits preserve parked routes; hivemind sends publish
   atomically and exact file identities preserve newly copied/backdated
-  messages; a persisted scan cursor prevents unreadable oldest-file starvation;
+  messages; finite discovery/file rounds plus exact retry identities prevent
+  unreadable files, copied/backdated ingress, or partial history tails from
+  starving one another across bounded scans;
   timestamp-only v1/v2
   state conservatively replays extant source content once when upgrading to
   positional/exact checkpoints, while tuple-based v3 state does the same for
   its unprovable hivemind inventory; stable malformed records, including
-  strict-JSON violations, invalid provided expiries, and oversized complete
+  strict-JSON violations, unsafe timestamp offsets, invalid provided expiries,
+  and oversized complete
   history records are skipped and counted; transient history mount loss fails
   closed without pruning offsets; initialized markers/checkpoints use bounded
-  ASCII parsing; the hivemind bus is canonical (history mirrors of sends are
-  excluded); and
+  ASCII parsing; source checkpoint names must be UTF-8 and lock/source I/O
+  failures preserve durable state; persistent process-launch failures reuse
+  restart backoff and circuit-breaker gates without advancing debounce; the
+  hivemind bus is canonical (history mirrors of sends are excluded); and
   `AgentConfig` round-trips now preserve custom mapping keys.
 
 ### Changed

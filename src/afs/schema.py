@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -335,6 +336,9 @@ class HooksConfig:
         )
 
 
+MAX_AGENT_RESTARTS = 64
+
+
 @dataclass
 class AgentConfig:
     name: str
@@ -392,6 +396,22 @@ class AgentConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AgentConfig:
+        name = str(data.get("name", "")).strip()
+        if not name:
+            raise ValueError("agent config name is required")
+        raw_max_restarts = data.get("max_restarts", 3)
+        if isinstance(raw_max_restarts, bool):
+            raise ValueError("agent config max_restarts must be an integer from 0 to 64")
+        if isinstance(raw_max_restarts, int):
+            max_restarts = raw_max_restarts
+        elif isinstance(raw_max_restarts, str) and re.fullmatch(
+            r"[+-]?\d+", raw_max_restarts.strip()
+        ):
+            max_restarts = int(raw_max_restarts)
+        else:
+            raise ValueError("agent config max_restarts must be an integer from 0 to 64")
+        if max_restarts < 0 or max_restarts > MAX_AGENT_RESTARTS:
+            raise ValueError("agent config max_restarts must be an integer from 0 to 64")
         tags = data.get("tags", [])
         if isinstance(tags, list):
             tags = [tag for tag in tags if isinstance(tag, str)]
@@ -399,7 +419,7 @@ class AgentConfig:
             tags = []
         extra = {key: value for key, value in data.items() if key not in cls._KNOWN_FIELDS}
         return cls(
-            name=str(data.get("name", "")).strip(),
+            name=name,
             role=str(data.get("role", "general")).strip() or "general",
             backend=str(data.get("backend", "local")).strip() or "local",
             description=str(data.get("description", "")).strip(),
@@ -419,7 +439,7 @@ class AgentConfig:
             allowed_tools=_as_str_list(data.get("allowed_tools")),
             workspace_isolated=bool(data.get("workspace_isolated", False)),
             restart_on_failure=bool(data.get("restart_on_failure", False)),
-            max_restarts=int(data.get("max_restarts", 3)),
+            max_restarts=max_restarts,
             depends_on=_as_str_list(data.get("depends_on")),
             mutex_group=str(data.get("mutex_group", "")).strip(),
             extra=extra,

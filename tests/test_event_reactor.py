@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from afs.agents.event_reactor import (
     ReactorStateError,
     _cut_at_timestamp_boundary,
     _load_state,
+    event_config_digest,
     match_event_rules,
     open_event_batch,
     pattern_matches,
@@ -561,6 +563,149 @@ def test_partial_history_survives_fresh_prime_or_v2_replay_shell(
     assert seen == ["inflight"]
 
 
+def test_partial_history_file_does_not_block_later_file_progress(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(days=2))
+    history = context / "history"
+    history.mkdir(parents=True, exist_ok=True)
+    partial_path = history / f"events_{NOW - timedelta(days=1):%Y%m%d}.jsonl"
+    partial_record = json.dumps(
+        {
+            "timestamp": (NOW - timedelta(days=1)).isoformat(),
+            "type": "error",
+            "op": "old-partial",
+        }
+    ) + "\n"
+    split = len(partial_record) // 2
+    partial_path.write_text(partial_record[:split], encoding="utf-8")
+    _write_history_event(context, event_type="error", op="later-valid", timestamp=NOW)
+
+    with open_event_batch(context, state, now=NOW + timedelta(minutes=1)) as first:
+        assert [event.detail for event in first.events] == ["later-valid"]
+        assert first.truncated is True
+        first.ack()
+    saved = _load_state(state)
+    assert saved["history_offsets"].get(partial_path.name, 0) == 0
+
+    with partial_path.open("a", encoding="utf-8") as handle:
+        handle.write(partial_record[split:])
+    with open_event_batch(context, state, now=NOW + timedelta(minutes=2)) as second:
+        assert [event.detail for event in second.events] == ["old-partial"]
+        second.ack()
+
+
+def test_partial_history_rotation_makes_progress_under_tiny_byte_budget(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(days=3))
+    history = context / "history"
+    history.mkdir(parents=True, exist_ok=True)
+    for days_ago in (2, 1):
+        path = history / f"events_{NOW - timedelta(days=days_ago):%Y%m%d}.jsonl"
+        path.write_text('{"timestamp":', encoding="utf-8")
+    _write_history_event(context, event_type="error", op="later-valid", timestamp=NOW)
+
+    details: list[str] = []
+    for cycle in range(3):
+        with open_event_batch(
+            context,
+            state,
+            now=NOW + timedelta(minutes=cycle),
+            max_history_scan_bytes=10,
+        ) as batch:
+            details.extend(event.detail for event in batch.events)
+            batch.ack()
+
+    assert details == ["later-valid"]
+    assert "history_round" not in _load_state(state)
+
+
+def test_history_round_prevents_sustained_backfill_from_starving_existing_file(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    history = context / "history"
+    history.mkdir(parents=True, exist_ok=True)
+
+    def write_file(name: str, detail: str) -> None:
+        (history / f"events_{name}.jsonl").write_text(
+            json.dumps(
+                {
+                    "timestamp": NOW.isoformat(),
+                    "type": "error",
+                    "op": detail,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    write_file("target", "TARGET")
+    details: list[str] = []
+    for cycle in range(3):
+        write_file(f"old{cycle:02d}", f"old{cycle:02d}")
+        with open_event_batch(
+            context,
+            state,
+            now=NOW + timedelta(minutes=cycle),
+            max_events=1,
+        ) as batch:
+            details.extend(event.detail for event in batch.events)
+            batch.ack()
+
+    assert "TARGET" in details
+    assert details.index("TARGET") <= 1
+
+
+def test_history_payload_read_oserror_is_normalized_without_state_advance(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    _write_history_event(context, event_type="error", op="retry-me", timestamp=NOW)
+    log = next((context / "history").glob("events_*.jsonl"))
+    cursor_path = state / "event_reactor" / "cursor.json"
+    before = cursor_path.read_bytes()
+    original_open = Path.open
+
+    class FailingReader:
+        def __init__(self, wrapped) -> None:
+            self.wrapped = wrapped
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> None:
+            self.wrapped.close()
+
+        def __getattr__(self, name: str):
+            return getattr(self.wrapped, name)
+
+        def readline(self, *args, **kwargs):
+            raise OSError("injected payload read failure")
+
+    def failing_open(path: Path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        if path == log and args and args[0] == "rb":
+            return FailingReader(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", failing_open)
+    with pytest.raises(ReactorStateError, match="injected payload read failure"):
+        with open_event_batch(context, state, now=NOW + timedelta(minutes=1)):
+            pass
+    assert cursor_path.read_bytes() == before
+
+
 def test_offset_checkpoint_safely_splits_a_timestamp_group(tmp_path: Path) -> None:
     """A strict batch bound may split one timestamp group without loss.
 
@@ -1044,6 +1189,20 @@ def test_concurrent_reactor_is_locked_out(tmp_path: Path) -> None:
             pass
 
 
+def test_lock_setup_oserror_is_normalized_without_mutating_state_path(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    state.write_text("not-a-directory\n", encoding="utf-8")
+    before = state.read_bytes()
+
+    with pytest.raises(ReactorStateError, match="set up event reactor lock"):
+        with open_event_batch(context, state, now=NOW):
+            pass
+    assert state.read_bytes() == before
+
+
 def test_legacy_v1_cursor_is_migrated(tmp_path: Path) -> None:
     context = tmp_path / "context"
     state = tmp_path / "state"
@@ -1494,6 +1653,140 @@ def test_strict_state_json_failures_are_normalized_and_non_mutating(tmp_path: Pa
         assert cursor_path.read_bytes() == before, label
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("history_cursor", 20260716),
+        ("hivemind_cursor", 20260716),
+        ("last_dispatch", {"reactor": 20260716}),
+    ],
+)
+def test_state_timestamps_require_strings_without_mutation(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW)
+    cursor_path = state / "event_reactor" / "cursor.json"
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+    payload[field] = value
+    cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    before = cursor_path.read_bytes()
+
+    with pytest.raises(ReactorStateError, match="timestamp string"):
+        with open_event_batch(context, state, now=NOW + timedelta(minutes=1)):
+            pass
+    assert cursor_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "raw_timestamp",
+    [
+        "0001-01-01T00:00:00+14:00",
+        "9999-12-31T23:59:59-14:00",
+    ],
+)
+def test_state_timestamp_extreme_offsets_fail_closed_without_mutation(
+    tmp_path: Path,
+    raw_timestamp: str,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW)
+    cursor_path = state / "event_reactor" / "cursor.json"
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+    payload["history_cursor"] = raw_timestamp
+    cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    before = cursor_path.read_bytes()
+
+    with pytest.raises(ReactorStateError, match="invalid timestamp"):
+        with open_event_batch(context, state, now=NOW + timedelta(minutes=1)):
+            pass
+    assert cursor_path.read_bytes() == before
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires POSIX surrogateescape names")
+@pytest.mark.parametrize(
+    "source_case",
+    ["history-file", "hivemind-file", "hivemind-directory"],
+)
+def test_non_utf8_source_names_fail_closed_without_poisoning_state(
+    tmp_path: Path,
+    source_case: str,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW)
+    cursor_path = state / "event_reactor" / "cursor.json"
+    before = cursor_path.read_bytes()
+
+    if source_case == "history-file":
+        root = context / "history"
+        root.mkdir(parents=True, exist_ok=True)
+        raw_path = os.fsencode(root) + b"/events_\xff.jsonl"
+        payload = b'{"timestamp":"2026-07-15T12:00:00+00:00","type":"error"}\n'
+    else:
+        root = context / "hivemind"
+        root.mkdir(parents=True, exist_ok=True)
+        if source_case == "hivemind-directory":
+            raw_directory = os.fsencode(root) + b"/agent-\xff"
+            os.mkdir(raw_directory)
+            raw_path = raw_directory + b"/message.json"
+        else:
+            directory = root / "afs-watch"
+            directory.mkdir()
+            raw_path = os.fsencode(directory) + b"/message-\xff.json"
+        payload = json.dumps(
+            {
+                "id": "message",
+                "from": "afs-watch",
+                "to": None,
+                "type": "status",
+                "payload": {},
+                "timestamp": NOW.isoformat(),
+                "topic": "context:repair",
+            }
+        ).encode()
+    fd = os.open(raw_path, os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        os.write(fd, payload)
+    finally:
+        os.close(fd)
+
+    with pytest.raises(ReactorStateError, match="cannot be represented"):
+        with open_event_batch(context, state, now=NOW + timedelta(minutes=1)):
+            pass
+    assert cursor_path.read_bytes() == before
+
+
+def test_numeric_migration_watermark_cannot_skip_pre_cutoff_history(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    _write_history_event(context, event_type="error", op="must-remain", timestamp=NOW)
+    log = next((context / "history").glob("events_*.jsonl"))
+    cursor_path = state / "event_reactor" / "cursor.json"
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+    payload["history_migration_cutoffs"] = {log.name: log.stat().st_size}
+    payload["history_migration_watermark"] = 20260716
+    cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    before = cursor_path.read_bytes()
+
+    with pytest.raises(ReactorStateError, match="timestamp string"):
+        with open_event_batch(context, state, now=NOW + timedelta(minutes=1)):
+            pass
+    assert cursor_path.read_bytes() == before
+
+    payload["history_migration_watermark"] = (NOW - timedelta(minutes=1)).isoformat()
+    cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    events = _collect(context, state, now=NOW + timedelta(minutes=2))
+    assert [event.detail for event in events] == ["must-remain"]
+
+
 @pytest.mark.parametrize("raw_marker", ["²\n", ("9" * 5_000) + "\n"])
 def test_malformed_initialized_marker_is_bounded_and_non_mutating(
     tmp_path: Path,
@@ -1570,7 +1863,10 @@ def test_initialized_state_never_falls_back_to_stale_legacy_cursor(tmp_path: Pat
     assert legacy.read_bytes() == legacy_before
 
 
-@pytest.mark.parametrize("malformed", ["duplicate", "deep"])
+@pytest.mark.parametrize(
+    "malformed",
+    ["duplicate", "deep", "numeric_timestamp", "extreme_timestamp"],
+)
 def test_malformed_complete_history_records_are_skipped_without_blocking(
     tmp_path: Path,
     malformed: str,
@@ -1587,7 +1883,7 @@ def test_malformed_complete_history_records_are_skipped_without_blocking(
             + NOW.isoformat()
             + '","type":"error","op":"first","op":"second","metadata":{}}\n'
         )
-    else:
+    elif malformed == "deep":
         raw = (
             '{"timestamp":"'
             + NOW.isoformat()
@@ -1596,6 +1892,13 @@ def test_malformed_complete_history_records_are_skipped_without_blocking(
             + "0"
             + ("]" * 1_200)
             + "}\n"
+        )
+    elif malformed == "numeric_timestamp":
+        raw = '{"timestamp":20260716,"type":"error","op":"numeric","metadata":{}}\n'
+    else:
+        raw = (
+            '{"timestamp":"0001-01-01T00:00:00+14:00",'
+            '"type":"error","op":"extreme","metadata":{}}\n'
         )
     with log.open("a", encoding="utf-8") as handle:
         handle.write(raw)
@@ -1612,7 +1915,76 @@ def test_malformed_complete_history_records_are_skipped_without_blocking(
         batch.ack()
 
 
-@pytest.mark.parametrize("malformed", ["duplicate", "deep"])
+def test_empty_history_kind_cannot_persist_unloadable_pending_route(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    supervisor = _supervisor(tmp_path)
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    history = context / "history"
+    history.mkdir(parents=True, exist_ok=True)
+    log = history / f"events_{NOW:%Y%m%d}.jsonl"
+    log.write_text(
+        json.dumps(
+            {
+                "timestamp": NOW.isoformat(),
+                "type": "",
+                "op": "",
+                "source": "test",
+                "metadata": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config = AgentConfig(name="reactor", module="x.y", on_event=["*"])
+    monkeypatch.setattr(
+        supervisor,
+        "status",
+        lambda name: RunningAgent(name=name, manually_stopped=True),
+    )
+
+    with open_event_batch(context, state, now=NOW + timedelta(minutes=1)) as first:
+        assert first.events == []
+        assert first.skipped_malformed == 1
+        assert supervisor.reconcile([config], event_batch=first, now=NOW) == []
+        assert first.pending_routes() == []
+        first.ack()
+
+    with open_event_batch(context, state, now=NOW + timedelta(minutes=2)) as second:
+        assert second.events == []
+        second.ack()
+
+
+def test_empty_agent_name_is_terminally_rejected_without_poisoning_state(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    supervisor = _supervisor(tmp_path)
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    _write_history_event(context, event_type="error", op="boom", timestamp=NOW)
+    invalid = AgentConfig(name="", module="x.y", on_event=["error"])
+
+    with open_event_batch(context, state, now=NOW + timedelta(minutes=1)) as first:
+        assert [event.detail for event in first.events] == ["boom"]
+        assert supervisor.reconcile([invalid], event_batch=first, now=NOW) == []
+        assert first.dispatch_outcomes[""].state == "rejected"
+        assert first.dispatch_outcomes[""].reason == "invalid_name"
+        assert first.pending_routes() == []
+        first.ack()
+
+    with open_event_batch(context, state, now=NOW + timedelta(minutes=2)) as second:
+        assert second.events == []
+        second.ack()
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    ["duplicate", "deep", "numeric_timestamp", "extreme_timestamp"],
+)
 def test_stable_malformed_hivemind_json_is_quarantined(
     tmp_path: Path,
     malformed: str,
@@ -1630,7 +2002,7 @@ def test_stable_malformed_hivemind_json_is_quarantined(
             + NOW.isoformat()
             + '","topic":"one","topic":"two"}'
         )
-    else:
+    elif malformed == "deep":
         raw = (
             '{"id":"bad","from":"afs-watch","to":null,"type":"status",'
             '"payload":'
@@ -1640,6 +2012,17 @@ def test_stable_malformed_hivemind_json_is_quarantined(
             + ',"timestamp":"'
             + NOW.isoformat()
             + '","topic":"deep"}'
+        )
+    elif malformed == "numeric_timestamp":
+        raw = (
+            '{"id":"bad","from":"afs-watch","to":null,"type":"status",'
+            '"payload":{},"timestamp":20260716,"topic":"numeric"}'
+        )
+    else:
+        raw = (
+            '{"id":"bad","from":"afs-watch","to":null,"type":"status",'
+            '"payload":{},"timestamp":"9999-12-31T23:59:59-14:00",'
+            '"topic":"extreme"}'
         )
     path.write_text(raw, encoding="utf-8")
 
@@ -1691,6 +2074,154 @@ def test_unreadable_oldest_hivemind_file_cannot_starve_valid_candidate(
     seen = _load_state(state)["hivemind_seen"]["afs-watch"]
     assert "b-valid.json" in seen
     assert "a-blocked.json" not in seen
+
+
+def test_hivemind_retry_gets_reserved_cycles_under_sustained_ingress(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    blocked = _write_hivemind_message(
+        context,
+        filename="a-retry.json",
+        timestamp=NOW,
+        topic="context:retry",
+        mtime_ns=1_700_000_000_000_000_000,
+    )
+    _write_hivemind_message(
+        context,
+        filename="b-ingress.json",
+        timestamp=NOW,
+        topic="context:ingress-1",
+        mtime_ns=1_700_000_000_000_000_001,
+    )
+    original_open = Path.open
+    failures_remaining = 1
+
+    def fail_once(path: Path, *args, **kwargs):
+        nonlocal failures_remaining
+        if path == blocked and args and args[0] == "rb" and failures_remaining:
+            failures_remaining -= 1
+            raise PermissionError("transient read failure")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail_once)
+    with open_event_batch(context, state, now=NOW, max_events=1) as first:
+        assert first.events == []
+        first.ack()
+
+    _write_hivemind_message(
+        context,
+        filename="c-ingress.json",
+        timestamp=NOW,
+        topic="context:ingress-2",
+        mtime_ns=1_700_000_000_000_000_002,
+    )
+    with open_event_batch(context, state, now=NOW + timedelta(minutes=1), max_events=1) as second:
+        assert [event.detail for event in second.events] == ["context:ingress-1"]
+        second.ack()
+
+    _write_hivemind_message(
+        context,
+        filename="d-ingress.json",
+        timestamp=NOW,
+        topic="context:ingress-3",
+        mtime_ns=1_700_000_000_000_000_003,
+    )
+    with open_event_batch(context, state, now=NOW + timedelta(minutes=2), max_events=1) as third:
+        assert [event.detail for event in third.events] == ["context:retry"]
+        third.ack()
+
+
+def test_multiple_persistent_hivemind_failures_do_not_oscillate_past_discovery(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    blocked = {
+        _write_hivemind_message(
+            context,
+            filename=f"{name}-blocked.json",
+            timestamp=NOW,
+            topic=f"context:{name}",
+            mtime_ns=1_700_000_000_000_000_000 + index,
+        )
+        for index, name in enumerate(("a", "b"))
+    }
+    _write_hivemind_message(
+        context,
+        filename="c-valid.json",
+        timestamp=NOW,
+        topic="context:valid",
+        mtime_ns=1_700_000_000_000_000_002,
+    )
+    original_open = Path.open
+
+    def guarded_open(path: Path, *args, **kwargs):
+        if path in blocked and args and args[0] == "rb":
+            raise PermissionError("persistent test failure")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    details: list[str] = []
+    for cycle in range(4):
+        with open_event_batch(
+            context,
+            state,
+            now=NOW + timedelta(minutes=cycle),
+            max_events=1,
+        ) as batch:
+            details.extend(event.detail for event in batch.events)
+            batch.ack()
+
+    assert details == ["context:valid"]
+    saved = _load_state(state)
+    assert "c-valid.json" in saved["hivemind_seen"]["afs-watch"]
+    assert set(saved["hivemind_retry"]["afs-watch"]) == {
+        "a-blocked.json",
+        "b-blocked.json",
+    }
+
+
+def test_hivemind_discovery_epoch_prevents_backdated_ingress_starvation(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    base_mtime = 1_700_000_000_000_000_000
+    _write_hivemind_message(
+        context,
+        filename="target.json",
+        timestamp=NOW,
+        topic="TARGET",
+        mtime_ns=base_mtime + 1_000,
+    )
+
+    details: list[str] = []
+    for cycle in range(3):
+        _write_hivemind_message(
+            context,
+            filename=f"old{cycle:02d}.json",
+            timestamp=NOW,
+            topic=f"old{cycle:02d}",
+            mtime_ns=base_mtime + cycle,
+        )
+        with open_event_batch(
+            context,
+            state,
+            now=NOW + timedelta(minutes=cycle),
+            max_events=1,
+        ) as batch:
+            details.extend(event.detail for event in batch.events)
+            batch.ack()
+
+    assert "TARGET" in details
+    assert details.index("TARGET") <= 1
 
 
 def test_transient_history_mount_absence_preserves_offsets(tmp_path: Path, monkeypatch) -> None:
@@ -2324,7 +2855,11 @@ def test_missing_module_route_survives_config_fix_and_dispatches(
 ) -> None:
     context = tmp_path / "context"
     supervisor = _supervisor(tmp_path)
-    broken = AgentConfig(name="reactor", module="", on_event=["error"])
+    broken = AgentConfig(
+        name="reactor",
+        module="",
+        on_event=[" error ", "mcp_tool", "error"],
+    )
     _collect(context, supervisor._state_dir, now=NOW - timedelta(minutes=1))
     _write_history_event(context, event_type="error", op="boom", timestamp=NOW)
 
@@ -2334,7 +2869,11 @@ def test_missing_module_route_survives_config_fix_and_dispatches(
         assert first.dispatch_outcomes["reactor"].reason == "missing_module"
         first.ack()
 
-    fixed = AgentConfig(name="reactor", module="x.y", on_event=["error"])
+    fixed = AgentConfig(
+        name="reactor",
+        module="x.y",
+        on_event=["mcp_tool", "error"],
+    )
     spawned: list[str] = []
     monkeypatch.setattr(
         supervisor,
@@ -2350,7 +2889,10 @@ def test_missing_module_route_survives_config_fix_and_dispatches(
     assert "pending_routes" not in _load_state(supervisor._state_dir)
 
 
-def test_failed_spawn_route_retries_without_failed_start_debounce(tmp_path: Path) -> None:
+def test_failed_spawn_route_parks_until_manual_recovery_when_restarts_disabled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     context = tmp_path / "context"
     config_model = AFSConfig(
         general=GeneralConfig(
@@ -2376,9 +2918,256 @@ def test_failed_spawn_route_retries_without_failed_start_debounce(tmp_path: Path
         assert "error:boom" not in [event.label() for event in second.events]
         supervisor.reconcile([config], event_batch=second, now=NOW + timedelta(minutes=2))
         assert second.dispatch_outcomes["reactor"].state == "deferred"
-        assert second.dispatch_outcomes["reactor"].reason == "spawn_failed"
+        assert second.dispatch_outcomes["reactor"].reason == "restart_disabled"
         second.ack()
+    assert supervisor.status("reactor").launch_count == 1  # type: ignore[union-attr]
+
+    # An operator can still recover the agent manually. The running state
+    # must coalesce and clear the old route instead of being masked by its
+    # durable restart-disabled metadata.
+    mock_proc = type("MockProc", (), {"pid": 424240})()
+    monkeypatch.setattr(
+        "afs.agents.supervisor.subprocess.Popen",
+        lambda *args, **kwargs: mock_proc,
+    )
+    monkeypatch.setattr(AgentSupervisor, "_pid_alive", lambda self, pid: True)
+    manual = AgentSupervisor(state_dir=supervisor._state_dir, config=config_model)
+    assert manual.spawn("reactor", "x.y", reason="manual_recovery").state == "running"
+
+    recovered = AgentSupervisor(state_dir=supervisor._state_dir, config=config_model)
+    with open_event_batch(
+        context,
+        supervisor._state_dir,
+        now=NOW + timedelta(minutes=3),
+    ) as third:
+        assert recovered.reconcile(
+            [config], event_batch=third, now=NOW + timedelta(minutes=3)
+        ) == []
+        assert third.dispatch_outcomes["reactor"].state == "coalesced"
+        assert third.dispatch_outcomes["reactor"].reason == "running"
+        third.ack()
+    assert "pending_routes" not in _load_state(supervisor._state_dir)
+
+
+@pytest.mark.parametrize(
+    ("existing", "expected_state", "expected_reason", "route_remains"),
+    [
+        (RunningAgent(name="reactor", state="running"), "coalesced", "running", False),
+        (
+            RunningAgent(name="reactor", state="stopped", manually_stopped=True),
+            "deferred",
+            "manual_stop",
+            True,
+        ),
+        (
+            RunningAgent(name="reactor", state="awaiting_review"),
+            "deferred",
+            "awaiting_review",
+            True,
+        ),
+    ],
+)
+def test_agent_state_precedes_stale_launch_failure_policy(
+    tmp_path: Path,
+    monkeypatch,
+    existing: RunningAgent,
+    expected_state: str,
+    expected_reason: str,
+    route_remains: bool,
+) -> None:
+    supervisor = _supervisor(tmp_path)
+    config = AgentConfig(name="reactor", module="x.y", on_event=["error"])
+    batch = _make_batch(tmp_path / "state", [_event("error", "boom")])
+    batch.register_route(
+        config.name,
+        action="spawn",
+        reason="event:error:boom",
+        config_digest=event_config_digest(config),
+    )
+    batch.record_launch_failure(config.name, at=NOW)
+    monkeypatch.setattr(supervisor, "status", lambda name: existing)
+
+    assert supervisor.reconcile([config], event_batch=batch, now=NOW) == []
+    outcome = batch.dispatch_outcomes[config.name]
+    assert (outcome.state, outcome.reason) == (expected_state, expected_reason)
+    assert bool(batch.pending_routes()) is route_remains
+
+
+def test_failed_event_spawn_uses_backoff_circuit_and_cooldown(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context = tmp_path / "context"
+    state_dir = tmp_path / "supervisor-state"
+    config_model = AFSConfig(
+        general=GeneralConfig(
+            context_root=context,
+            python_executable=tmp_path / "does-not-exist" / "python",
+        )
+    )
+
+    def fresh_supervisor() -> AgentSupervisor:
+        supervisor = AgentSupervisor(state_dir=state_dir, config=config_model)
+        supervisor.RESTART_BASE_DELAY = 60.0
+        return supervisor
+
+    config = AgentConfig(
+        name="reactor",
+        module="x.y",
+        on_event=["error"],
+        restart_on_failure=True,
+        max_restarts=2,
+    )
+    _collect(context, state_dir, now=NOW - timedelta(minutes=1))
+    _write_history_event(context, event_type="error", op="boom", timestamp=NOW)
+
+    supervisor = fresh_supervisor()
+    with open_event_batch(context, state_dir, now=NOW) as first:
+        assert supervisor.reconcile([config], event_batch=first, now=NOW) == []
+        assert first.dispatch_outcomes["reactor"].reason == "spawn_failed"
+        assert first.last_dispatch("reactor") is None
+        first.ack()
+    assert supervisor.status("reactor").launch_count == 1  # type: ignore[union-attr]
+
+    supervisor = fresh_supervisor()
+    with open_event_batch(
+        context,
+        state_dir,
+        now=NOW - timedelta(minutes=1),
+    ) as clock_regressed:
+        assert (
+            supervisor.reconcile(
+                [config], event_batch=clock_regressed, now=NOW - timedelta(minutes=1)
+            )
+            == []
+        )
+        assert clock_regressed.dispatch_outcomes["reactor"].reason == "restart_backoff"
+        clock_regressed.ack()
+
+    supervisor = fresh_supervisor()
+    with open_event_batch(
+        context,
+        state_dir,
+        now=NOW + timedelta(seconds=1),
+    ) as backoff:
+        assert (
+            supervisor.reconcile(
+                [config], event_batch=backoff, now=NOW + timedelta(seconds=1)
+            )
+            == []
+        )
+        assert backoff.dispatch_outcomes["reactor"].reason == "restart_backoff"
+        assert backoff.last_dispatch("reactor") is None
+        backoff.ack()
+    assert supervisor.status("reactor").launch_count == 1  # type: ignore[union-attr]
+
+    supervisor = fresh_supervisor()
+    with open_event_batch(
+        context,
+        state_dir,
+        now=NOW + timedelta(minutes=2),
+    ) as retry:
+        assert (
+            supervisor.reconcile(
+                [config], event_batch=retry, now=NOW + timedelta(minutes=2)
+            )
+            == []
+        )
+        assert retry.dispatch_outcomes["reactor"].reason == "spawn_failed"
+        retry.ack()
     assert supervisor.status("reactor").launch_count == 2  # type: ignore[union-attr]
+
+    supervisor = fresh_supervisor()
+    with open_event_batch(
+        context,
+        state_dir,
+        now=NOW + timedelta(minutes=3),
+    ) as circuit:
+        assert (
+            supervisor.reconcile(
+                [config], event_batch=circuit, now=NOW + timedelta(minutes=3)
+            )
+            == []
+        )
+        assert circuit.dispatch_outcomes["reactor"].reason == "circuit_open"
+        assert circuit.last_dispatch("reactor") is None
+        circuit.ack()
+    assert supervisor.status("reactor").state == "circuit_open"  # type: ignore[union-attr]
+    assert supervisor.status("reactor").launch_count == 2  # type: ignore[union-attr]
+
+    supervisor = fresh_supervisor()
+    with open_event_batch(context, state_dir, now=NOW) as clock_regressed_circuit:
+        assert supervisor.reconcile(
+            [config], event_batch=clock_regressed_circuit, now=NOW
+        ) == []
+        assert (
+            clock_regressed_circuit.dispatch_outcomes["reactor"].reason
+            == "circuit_open"
+        )
+        clock_regressed_circuit.ack()
+
+    supervisor = fresh_supervisor()
+    with open_event_batch(
+        context,
+        state_dir,
+        now=NOW + timedelta(minutes=4),
+    ) as still_open:
+        assert (
+            supervisor.reconcile(
+                [config], event_batch=still_open, now=NOW + timedelta(minutes=4)
+            )
+            == []
+        )
+        assert still_open.dispatch_outcomes["reactor"].reason == "circuit_open"
+        still_open.ack()
+
+    mock_proc = type("MockProc", (), {"pid": 424242})()
+    monkeypatch.setattr("afs.agents.supervisor.subprocess.Popen", lambda *args, **kwargs: mock_proc)
+    supervisor = fresh_supervisor()
+    with open_event_batch(
+        context,
+        state_dir,
+        now=NOW + timedelta(hours=2),
+    ) as recovered:
+        started = supervisor.reconcile(
+            [config], event_batch=recovered, now=NOW + timedelta(hours=2)
+        )
+        assert [agent.name for agent in started] == ["reactor"]
+        assert recovered.dispatch_outcomes["reactor"].reason == "spawn"
+        assert recovered.last_dispatch("reactor") is not None
+        recovered.ack()
+
+
+def test_oversized_persisted_launch_failure_count_fails_closed(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    state_dir = tmp_path / "supervisor-state"
+    config_model = AFSConfig(
+        general=GeneralConfig(
+            context_root=context,
+            python_executable=tmp_path / "missing-python",
+        )
+    )
+    config = AgentConfig(name="reactor", module="x.y", on_event=["error"])
+    _collect(context, state_dir, now=NOW - timedelta(minutes=1))
+    _write_history_event(context, event_type="error", op="boom", timestamp=NOW)
+    supervisor = AgentSupervisor(state_dir=state_dir, config=config_model)
+    with open_event_batch(context, state_dir, now=NOW) as first:
+        supervisor.reconcile([config], event_batch=first, now=NOW)
+        first.ack()
+
+    cursor_path = state_dir / "event_reactor" / "cursor.json"
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+    payload["pending_routes"]["reactor"]["launch_failure_count"] = 10**10
+    cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    before = cursor_path.read_bytes()
+
+    with pytest.raises(ReactorStateError, match="pending_routes.*malformed"):
+        with open_event_batch(context, state_dir, now=NOW + timedelta(minutes=1)):
+            pass
+    assert cursor_path.read_bytes() == before
+    assert supervisor._backoff_delay(10**10) == supervisor.RESTART_MAX_DELAY
 
 
 def test_event_job_prompt_sanitizes_event_label(tmp_path: Path) -> None:
@@ -2411,6 +3200,63 @@ def test_default_index_rebuild_reacts_to_watch_topic(tmp_path: Path) -> None:
     assert [cfg.name for cfg, _ in matched] == ["index-rebuild"]
 
 
+def test_default_index_rebuild_recovers_transient_event_launch_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context = tmp_path / "context"
+    state_dir = tmp_path / "supervisor-state"
+    config_model = AFSConfig(
+        general=GeneralConfig(
+            context_root=context,
+            python_executable=tmp_path / "missing-python",
+        )
+    )
+    config = {
+        agent.name: agent for agent in default_agent_configs(config_model)
+    }["index-rebuild"]
+    assert config.restart_on_failure is True
+    _collect(context, state_dir, now=NOW - timedelta(minutes=1))
+    _write_hivemind_message(
+        context,
+        timestamp=NOW,
+        topic="context:repair",
+        name="repair",
+    )
+
+    first_supervisor = AgentSupervisor(state_dir=state_dir, config=config_model)
+    with open_event_batch(context, state_dir, now=NOW) as first:
+        assert first_supervisor.reconcile([config], event_batch=first, now=NOW) == []
+        assert first.dispatch_outcomes[config.name].reason == "spawn_failed"
+        first.ack()
+
+    backoff_supervisor = AgentSupervisor(state_dir=state_dir, config=config_model)
+    with open_event_batch(
+        context, state_dir, now=NOW + timedelta(seconds=1)
+    ) as backoff:
+        assert backoff_supervisor.reconcile(
+            [config], event_batch=backoff, now=NOW + timedelta(seconds=1)
+        ) == []
+        assert backoff.dispatch_outcomes[config.name].reason == "restart_backoff"
+        backoff.ack()
+
+    mock_proc = type("MockProc", (), {"pid": 424243})()
+    monkeypatch.setattr(
+        "afs.agents.supervisor.subprocess.Popen",
+        lambda *args, **kwargs: mock_proc,
+    )
+    recovered_supervisor = AgentSupervisor(state_dir=state_dir, config=config_model)
+    with open_event_batch(
+        context, state_dir, now=NOW + timedelta(minutes=1)
+    ) as recovered:
+        started = recovered_supervisor.reconcile(
+            [config], event_batch=recovered, now=NOW + timedelta(minutes=1)
+        )
+        assert [agent.name for agent in started] == [config.name]
+        assert recovered.dispatch_outcomes[config.name].reason == "spawn"
+        recovered.ack()
+
+
 def test_agent_config_round_trip_preserves_custom_mappings() -> None:
     """Unknown keys in an agent mapping survive from_dict -> to_dict."""
     data = {
@@ -2427,3 +3273,20 @@ def test_agent_config_round_trip_preserves_custom_mappings() -> None:
     assert round_tripped["name"] == "custom"
     # A second round trip is stable.
     assert AgentConfig.from_dict(round_tripped).to_dict() == round_tripped
+
+
+@pytest.mark.parametrize("raw_name", ["", "   "])
+def test_agent_config_from_dict_rejects_empty_name(raw_name: str) -> None:
+    with pytest.raises(ValueError, match="name is required"):
+        AgentConfig.from_dict({"name": raw_name})
+
+
+@pytest.mark.parametrize("raw_count", [-1, 65, True, 1.5, "many"])
+def test_agent_config_from_dict_rejects_invalid_max_restarts(raw_count: object) -> None:
+    with pytest.raises(ValueError, match="max_restarts"):
+        AgentConfig.from_dict({"name": "reactor", "max_restarts": raw_count})
+
+
+def test_agent_config_from_dict_accepts_bounded_max_restarts() -> None:
+    assert AgentConfig.from_dict({"name": "reactor", "max_restarts": 0}).max_restarts == 0
+    assert AgentConfig.from_dict({"name": "reactor", "max_restarts": "64"}).max_restarts == 64
