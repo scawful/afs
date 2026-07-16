@@ -69,7 +69,7 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
   neither side. Complete positional/exact-identity records are delivered on
   durable arrival regardless of untrusted future or skewed timestamps.
   Unknown `on_event_action` values fail closed; the `job` action passes the
-  same supervisor gates as spawns and embeds only sanitized event labels in
+  same supervisor gates as spawns and embeds only opaque route audit IDs in
   prompts; debounce (`event_debounce`, default 5m) is persisted at ack so it
   also covers job actions, while failed/future start clocks cannot suppress a
   retry; recovery config edits preserve parked routes; hivemind sends publish
@@ -89,7 +89,12 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
   failures preserve durable state; persistent process-launch failures reuse
   restart backoff and circuit-breaker gates without advancing debounce; the
   hivemind bus is canonical (history mirrors of sends are excluded); and
-  `AgentConfig` round-trips now preserve custom mapping keys.
+  `AgentConfig` round-trips now preserve custom mapping keys. Version-5 cursor
+  and job-queue replacements are flushed before publication (including Windows
+  write-through moves), job receipts require a later durable confirmation,
+  event reasons carry only opaque route/source fingerprints, active-job
+  coalesces are exported as the per-cycle `reactor_jobs_coalesced` metric, and
+  the cooperative trust boundary is documented.
 
 ### Changed
 
