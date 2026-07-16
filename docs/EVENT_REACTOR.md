@@ -77,9 +77,11 @@ Delivery is transactional, at-least-once:
   unacked retry cannot move the boundary, later out-of-order legacy records
   are still evaluated against the original cursor, and post-snapshot
   backdated appends remain new. Version-3 tuple checkpoints are upgraded to
-  version 4 before reading; ambiguous same-mtime lower filenames replay rather
-  than risk silent loss. Strict bounds may split a same-timestamp group, which
-  is safe because byte/exact-identity checkpoints resume the remainder. One
+  version 4 before reading. Because tuple state cannot prove the identity of
+  any extant file, that inventory is conservatively replayed once rather than
+  risk silently consuming a backdated or same-mtime post-snapshot copy. Strict
+  bounds may split a same-timestamp group, which is safe because
+  byte/exact-identity checkpoints resume the remainder. One
   caveat: hivemind messages carry an optional TTL enforced at read time, so a
   message that expires while waiting out a long drain or an unacked crash
   window is gone when its redelivery cycle arrives.
@@ -98,9 +100,10 @@ Delivery is transactional, at-least-once:
   deletion. The marker is committed before cursor offsets, so failure to
   persist it cannot consume a batch.
 - Complete malformed history records are skipped and counted. A malformed
-  hivemind identity is retried for one acked cycle in case an external writer
-  was still copying it; only the same unchanged identity on the next cycle is
-  classified as durable, warned, skipped, and counted
+  hivemind identity (including an invalid provided expiry) is retried for one
+  acked cycle in case an external writer was still copying it; only the same
+  unchanged identity on the next cycle is classified as durable, warned,
+  skipped, and counted
   (`reactor_skipped_malformed`). Transient open/stat failures never mark a file
   seen.
 

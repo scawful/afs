@@ -728,6 +728,37 @@ def test_stable_malformed_hivemind_json_is_skipped_explicitly(
     assert "permanently skipped stable malformed" in caplog.text
 
 
+@pytest.mark.parametrize("expires_at", [123, "not-a-timestamp"])
+def test_invalid_hivemind_expiry_uses_stable_malformed_path(
+    tmp_path: Path,
+    expires_at: object,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(minutes=1))
+    path = _write_hivemind_message(
+        context,
+        filename="invalid-expiry.json",
+        timestamp=NOW - timedelta(seconds=30),
+        topic="context:invalid-expiry",
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["expires_at"] = expires_at
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with open_event_batch(context, state, now=NOW) as first:
+        assert first.events == []
+        assert first.skipped_malformed == 0
+        first.ack()
+    assert path.name in _load_state(state)["hivemind_malformed"]["afs-watch"]
+
+    with open_event_batch(context, state, now=NOW + timedelta(seconds=30)) as second:
+        assert second.events == []
+        assert second.skipped_malformed == 1
+        second.ack()
+    assert path.name in _load_state(state)["hivemind_seen"]["afs-watch"]
+
+
 def test_new_hivemind_file_with_backdated_mtime_is_delivered(tmp_path: Path) -> None:
     context = tmp_path / "context"
     state = tmp_path / "state"
@@ -817,8 +848,68 @@ def test_v3_upgrade_replays_ambiguous_same_mtime_lower_filename(
     (reactor_state / "initialized").write_text("3\n", encoding="utf-8")
 
     events = _collect(context, state, now=NOW + timedelta(minutes=1))
-    assert [event.detail for event in events] == ["context:must-replay"]
+    assert [event.detail for event in events] == [
+        "context:already-seen",
+        "context:must-replay",
+    ]
     assert _load_state(state)["version"] == 4
+
+
+def test_v3_migration_cutoff_replays_post_snapshot_same_mtime_file(
+    tmp_path: Path,
+) -> None:
+    """A tuple cutoff cannot prove a lower filename predates the snapshot."""
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    shared_mtime = 1_700_000_000_000_000_000
+    timestamp = NOW - timedelta(minutes=1)
+    for filename, topic in (
+        ("a-checkpoint.json", "old-checkpoint"),
+        ("z-legacy.json", "old-legacy"),
+        ("b-new-after-snapshot.json", "must-deliver"),
+    ):
+        _write_hivemind_message(
+            context,
+            filename=filename,
+            timestamp=timestamp,
+            topic=topic,
+            mtime_ns=shared_mtime,
+        )
+
+    reactor_state = state / "event_reactor"
+    reactor_state.mkdir(parents=True)
+    (reactor_state / "cursor.json").write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "history_cursor": NOW.isoformat(),
+                "hivemind_cursor": NOW.isoformat(),
+                "last_dispatch": {},
+                "history_offsets": {},
+                "hivemind_files": {"afs-watch": f"{shared_mtime}:a-checkpoint.json"},
+                "hivemind_migration_cutoffs": {"afs-watch": f"{shared_mtime}:z-legacy.json"},
+                "hivemind_migration_watermark": NOW.isoformat(),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (reactor_state / "initialized").write_text("3\n", encoding="utf-8")
+
+    events = _collect(
+        context,
+        state,
+        now=NOW + timedelta(minutes=2),
+    )
+    assert [event.detail for event in events] == [
+        "old-checkpoint",
+        "must-deliver",
+        "old-legacy",
+    ]
+    migrated = _load_state(state)
+    assert "hivemind_migration_cutoffs" not in migrated
+    assert "hivemind_migration_watermark" not in migrated
+    assert "b-new-after-snapshot.json" in migrated["hivemind_seen"]["afs-watch"]
 
 
 def test_future_hivemind_file_does_not_block_ripe_candidate(tmp_path: Path) -> None:

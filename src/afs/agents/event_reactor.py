@@ -1016,31 +1016,6 @@ def _exact_deferred_subset(
     return result
 
 
-def _seen_from_legacy_checkpoints(
-    inventory: dict[str, dict[str, _HivemindFile]],
-    checkpoints: dict[str, str],
-) -> dict[str, dict[str, str]]:
-    """Translate version-3 checkpoints without preserving their tuple-loss bug.
-
-    The old ``(mtime, filename)`` high-water mark cannot distinguish a newly
-    copied lower filename from one already delivered at the same mtime. Replay
-    the ambiguous same-mtime group (except the checkpoint file itself): an
-    at-least-once duplicate is safer than silently consuming a new message.
-    """
-    seen: dict[str, dict[str, str]] = {}
-    for directory, files in inventory.items():
-        checkpoint = _decode_hivemind_checkpoint(checkpoints.get(directory, ""))
-        migrated = {}
-        for filename, item in files.items():
-            if item.mtime_ns < checkpoint[0] or (
-                item.mtime_ns == checkpoint[0] and filename == checkpoint[1]
-            ):
-                migrated[filename] = item.signature
-        if migrated:
-            seen[directory] = migrated
-    return seen
-
-
 def _hivemind_candidates(
     inventory: dict[str, dict[str, _HivemindFile]],
     seen: dict[str, dict[str, str]],
@@ -1166,6 +1141,15 @@ def _hivemind_events_since(
             stamp = _parse_timestamp(message.timestamp)
             if stamp is None:
                 raise ValueError("message timestamp is invalid")
+            raw_expires = message.expires_at
+            if raw_expires is None or raw_expires == "":
+                expires = None
+            else:
+                if not isinstance(raw_expires, str):
+                    raise ValueError("message expires_at must be a timestamp string")
+                expires = _parse_timestamp(raw_expires)
+                if expires is None:
+                    raise ValueError("message expires_at is invalid")
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
             # A non-atomic external writer may have exposed a partial final
             # file. Require the exact malformed identity to survive one acked
@@ -1182,7 +1166,6 @@ def _hivemind_events_since(
             truncated = True
             continue
 
-        expires = _parse_timestamp(message.expires_at or "")
         legacy_cutoff = pending_legacy_cutoffs.get(item.directory, "")
         predates_legacy_cursor = bool(
             legacy_cutoff
@@ -1471,20 +1454,34 @@ def _start_positional_migration(
 
 
 def _upgrade_v3_state(
-    context_path: Path,
     state_dir: Path,
     state: dict[str, Any],
-    *,
-    config: Any = None,
 ) -> dict[str, Any]:
-    """Persist a version-4 exact-identity shell before reading v3 state."""
-    checkpoints = _string_checkpoint_map(state["hivemind_files"], key="hivemind_files")
-    root = _hivemind_root(context_path, config=config)
-    inventory = _hivemind_inventory(root) if root is not None else {}
+    """Persist a fail-safe version-4 shell before reading tuple-based v3 state.
+
+    Version 3 recorded only ``(mtime, filename)`` high-water marks. It cannot
+    prove whether any currently extant file at or below a checkpoint is the
+    identity previously delivered or a post-snapshot backdated copy. Replay
+    the extant inventory once under v4 exact identities rather than translate
+    an ambiguous tuple into a silent acknowledgement.
+    """
+    _string_checkpoint_map(state["hivemind_files"], key="hivemind_files")
+    if "hivemind_migration_cutoffs" in state:
+        _string_checkpoint_map(
+            state["hivemind_migration_cutoffs"],
+            key="hivemind_migration_cutoffs",
+        )
+        if _parse_timestamp(str(state.get("hivemind_migration_watermark", ""))) is None:
+            raise ReactorStateError(
+                "event reactor state has an invalid "
+                "'hivemind_migration_watermark'; repair the migration state explicitly"
+            )
     upgraded = dict(state)
     upgraded["version"] = STATE_VERSION
-    upgraded["hivemind_seen"] = _seen_from_legacy_checkpoints(inventory, checkpoints)
+    upgraded["hivemind_seen"] = {}
     upgraded.pop("hivemind_files", None)
+    upgraded.pop("hivemind_migration_cutoffs", None)
+    upgraded.pop("hivemind_migration_watermark", None)
     _save_state(state_dir, upgraded)
     return upgraded
 
@@ -1605,10 +1602,8 @@ def open_event_batch(
             )
         elif state["version"] == 3:
             state = _upgrade_v3_state(
-                context_path,
                 state_dir,
                 state,
-                config=config,
             )
 
         history_offsets = _offset_map(state["history_offsets"], key="history_offsets")
