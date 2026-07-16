@@ -280,7 +280,7 @@ def test_work_approval_external_write_refused_without_tty(tmp_path: Path, capsys
     assert approvals_approve_command(
         _args(context_root, approval_id=approval_id, by="human", because="email content verified")
     ) == 2
-    assert "interactive human confirmation" in capsys.readouterr().out
+    assert "interactive human confirmation" in capsys.readouterr().err
     # The approval must remain pending — the agent could not self-approve.
     assert store.get_approval(approval_id)["status"] == "pending"  # type: ignore[index]
 
@@ -304,6 +304,51 @@ def test_work_approval_internal_action_skips_confirmation(tmp_path: Path, capsys
     assert approved["rationale"] == "internal note is safe"  # type: ignore[index]
 
 
+def test_by_flag_is_not_honored_without_confirmation(tmp_path: Path, capsys) -> None:
+    """--by is a claimable string: without the terminal confirmation vouching
+    for a person, the recorded identity is the non-claimable OS user."""
+    from afs.human_provenance import os_reviewer
+
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    approval_id = store.create_approval(
+        target_system="local",
+        target_id="note-3",
+        action="internal_note",
+        summary="Record an internal note",
+    )
+    assert approvals_approve_command(
+        _args(context_root, approval_id=approval_id, by="alleged-human", because="safe")
+    ) == 0
+    captured = capsys.readouterr()
+    assert "only honored with an interactive confirmation" in captured.err
+    approved = store.get_approval(approval_id)
+    assert approved["approved_by"] == os_reviewer()  # type: ignore[index]
+
+
+def test_reject_always_records_os_user(tmp_path: Path, capsys) -> None:
+    from afs.cli.work import approvals_reject_command
+    from afs.human_provenance import os_reviewer
+
+    context_root = tmp_path / ".context"
+    context_root.mkdir()
+    store = WorkAssistantStore(context_root)
+    approval_id = store.create_approval(
+        target_system="local",
+        target_id="note-4",
+        action="internal_note",
+        summary="Record an internal note",
+    )
+    assert approvals_reject_command(
+        _args(context_root, approval_id=approval_id, by="alleged-human", because="not needed")
+    ) == 0
+    rejected = store.get_approval(approval_id)
+    assert rejected["status"] == "rejected"  # type: ignore[index]
+    # The store records the decider in approved_by regardless of direction.
+    assert rejected["approved_by"] == os_reviewer()  # type: ignore[index]
+
+
 def test_work_approval_requires_rationale(tmp_path: Path, capsys) -> None:
     context_root = tmp_path / ".context"
     context_root.mkdir()
@@ -317,7 +362,7 @@ def test_work_approval_requires_rationale(tmp_path: Path, capsys) -> None:
     assert approvals_approve_command(
         _args(context_root, approval_id=approval_id, by="human", because="  ")
     ) == 2
-    assert "--because" in capsys.readouterr().out
+    assert "--because" in capsys.readouterr().err
     assert store.get_approval(approval_id)["status"] == "pending"  # type: ignore[index]
 
 

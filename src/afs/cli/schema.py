@@ -12,6 +12,7 @@ import json
 import sys
 from pathlib import Path
 
+from ..protocols.canonical_json import strict_json_loads
 from ..response_schemas import (
     build_schema_correction,
     get_response_schema,
@@ -107,12 +108,13 @@ def schema_validate_command(args: argparse.Namespace) -> int:
         except OSError as exc:
             print(f"cannot read skeleton: {exc}", file=sys.stderr)
             return 2
-        # The skeleton is a trust anchor: parse it strictly rather than through
-        # the lenient response coercion (fence extraction, repairs) so that
-        # what is verified is exactly what the human wrote.
+        # The skeleton is a trust anchor: parse it at least as strictly as the
+        # response it verifies — no fence extraction or repairs, no duplicate
+        # object keys (first key shown, last key verified), no NaN/Infinity —
+        # so that what is verified is exactly what the human wrote.
         try:
-            skeleton = json.loads(skeleton_text)
-        except json.JSONDecodeError as exc:
+            skeleton = strict_json_loads(skeleton_text)
+        except ValueError as exc:
             print(f"invalid skeleton: {exc}", file=sys.stderr)
             return 2
         if not isinstance(skeleton, dict):

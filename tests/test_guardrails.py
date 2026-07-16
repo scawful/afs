@@ -335,6 +335,24 @@ class TestApprovalGate:
         assert ("agent1", "approved") in statuses
         assert ("agent2", "pending") in statuses
 
+    def test_clear_does_not_clobber_concurrent_queue(self, tmp_path: Path) -> None:
+        """clear_completed re-reads under the lock, so a request queued by
+        another process after this gate loaded survives the clear."""
+        path = tmp_path / "approvals.json"
+        gate_a = ApprovalGate(path=path)
+        gate_a.check("agent1", "git_push")
+        gate_a.approve("agent1", "git_push", rationale="reviewed")
+
+        # Another process queues a new request after gate_a's last read.
+        gate_b = ApprovalGate(path=path)
+        gate_b.check("agent2", "deploy")
+
+        removed, remaining = gate_a.clear_completed()
+        assert removed == 1
+        assert remaining == 1
+        final = ApprovalGate(path=path)
+        assert [(r.agent, r.status) for r in final._pending] == [("agent2", "pending")]
+
     def test_one_malformed_record_does_not_drop_the_rest(self, tmp_path: Path) -> None:
         import json as json_module
 

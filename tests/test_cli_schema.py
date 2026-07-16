@@ -191,3 +191,51 @@ def test_validate_skeleton_must_be_object(tmp_path, capsys) -> None:
     )
     assert rc == 2
     assert "must be a JSON object" in capsys.readouterr().err
+
+
+def test_validate_skeleton_rejects_duplicate_members(tmp_path, capsys) -> None:
+    """A duplicate-key skeleton shows the human one anchor (first key) while
+    verifying another (last key); the strict parser rejects it outright."""
+    skeleton_path = tmp_path / "skeleton.json"
+    skeleton_path.write_text(
+        '{"human_intent": {"goal": "what the human saw"}, '
+        '"human_intent": {"goal": "what gets verified"}}',
+        encoding="utf-8",
+    )
+
+    plan = {
+        "summary": "expanded",
+        "steps": ["do it"],
+        "verification": ["pytest"],
+        "risks": ["none"],
+    }
+    rc = schema_validate_command(
+        _args(
+            schema="implementation-plan",
+            text=json.dumps(plan),
+            skeleton=str(skeleton_path),
+        )
+    )
+    assert rc == 2
+    assert "invalid skeleton" in capsys.readouterr().err
+
+
+def test_validate_skeleton_rejects_nonfinite_numbers(tmp_path, capsys) -> None:
+    skeleton_path = tmp_path / "skeleton.json"
+    skeleton_path.write_text('{"weight": NaN}', encoding="utf-8")
+
+    plan = {
+        "summary": "expanded",
+        "steps": ["do it"],
+        "verification": ["pytest"],
+        "risks": ["none"],
+    }
+    rc = schema_validate_command(
+        _args(
+            schema="implementation-plan",
+            text=json.dumps(plan),
+            skeleton=str(skeleton_path),
+        )
+    )
+    assert rc == 2
+    assert "invalid skeleton" in capsys.readouterr().err

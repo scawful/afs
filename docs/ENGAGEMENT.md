@@ -52,6 +52,13 @@ weekly review document. `score` records outcomes to an append-only JSONL
 trail under `scratchpad/calibration/` and rejects refs that no known store
 contains — a typo'd ref cannot silently poison the trail.
 
+The score is itself a judgment: recording one requires re-typing the outcome
+on the terminal (headless callers are refused, exit 2), and each entry
+carries `scored_by`/`scored_via` provenance. Agent-gate decisions (`gate_…`
+refs) are global rather than per-context, so their outcomes land in a global
+`approval_outcomes.jsonl` next to the gate store — a decision scored in one
+context never resurfaces as unscored in another.
+
 ## Predict-Before-Reveal
 
 ```bash

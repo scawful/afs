@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from ..agents.guardrails import ApprovalGate, ApprovalRequest
@@ -51,7 +52,8 @@ def _require_rationale(args: argparse.Namespace, decision: str) -> str | None:
     print(
         f"A rationale is required to {decision}: pass --because "
         '"<why this is the right call>".\n'
-        "It is stored in approvals history and resurfaced during calibration review."
+        "It is stored in approvals history and resurfaced during calibration review.",
+        file=sys.stderr,
     )
     return None
 
@@ -106,7 +108,8 @@ def approvals_approve_command(args: argparse.Namespace) -> int:
         print(
             "approve requires an interactive human confirmation on a terminal; "
             "refusing in a non-interactive context. Re-run `afs approvals approve` "
-            "from an interactive terminal."
+            "from an interactive terminal.",
+            file=sys.stderr,
         )
         return 2
     ok = gate.approve(
@@ -151,16 +154,13 @@ def approvals_reject_command(args: argparse.Namespace) -> int:
 def approvals_clear_command(args: argparse.Namespace) -> int:
     """Clear all completed (approved/rejected) requests."""
     gate = _load_gate(args)
-    before = len(gate._pending)
-    gate._pending = [r for r in gate._pending if r.status == "pending"]
-    removed = before - len(gate._pending)
-    gate._save()
+    removed, remaining = gate.clear_completed()
 
     if getattr(args, "json", False):
-        print(json.dumps({"cleared": removed, "remaining": len(gate._pending)}))
+        print(json.dumps({"cleared": removed, "remaining": remaining}))
         return 0
 
-    print(f"Cleared {removed} completed request(s), {len(gate._pending)} pending remain.")
+    print(f"Cleared {removed} completed request(s), {remaining} pending remain.")
     return 0
 
 

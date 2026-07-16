@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from ..calibration import (
@@ -18,7 +19,11 @@ from ..calibration import (
     collect_decisions,
     record_outcome,
 )
+from ..human_provenance import confirm_typed_token
 from ._utils import load_manager, resolve_context_paths
+
+# Test seam: tests inject a fake terminal reader; production uses /dev/tty.
+_TTY_READER = None
 
 
 def _context_path(args: argparse.Namespace):
@@ -113,18 +118,51 @@ def _print_markdown(report: dict) -> int:
     return 0
 
 
+def _confirm_outcome_score(ref: str, outcome: str) -> str | None:
+    """Interactive human confirmation for recording an outcome score.
+
+    The outcome score is the judgment the whole calibration trail exists to
+    capture — an agent recording one headlessly would be grading its own
+    work, the exact offload the trail is meant to counter. The operator must
+    re-type the outcome on the controlling tty, which piped stdin cannot
+    satisfy. Returns the OS-level reviewer identity, or ``None`` to refuse.
+    """
+    prompt = "\n".join(
+        [
+            "",
+            "=== HUMAN CONFIRMATION REQUIRED (calibration score) ===",
+            f"  ref:     {ref}",
+            f"  outcome: {outcome}",
+            "Outcome scores are the human half of the calibration trail.",
+            f"Type '{outcome}' to confirm, anything else aborts: ",
+        ]
+    )
+    return confirm_typed_token(outcome, prompt, reader=_TTY_READER)
+
+
 def calibration_score_command(args: argparse.Namespace) -> int:
     context_path, config = _context_path(args)
+    reviewer = _confirm_outcome_score(args.ref, args.outcome)
+    if reviewer is None:
+        print(
+            "score requires an interactive human confirmation on a terminal; "
+            "refusing in a non-interactive context. Re-run `afs calibration "
+            "score` from an interactive terminal.",
+            file=sys.stderr,
+        )
+        return 2
     try:
         entry = record_outcome(
             context_path,
             ref=args.ref,
             outcome=args.outcome,
             note=getattr(args, "note", "") or "",
+            scored_by=reviewer,
+            scored_via="tty",
             config=config,
         )
     except ValueError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 2
     if getattr(args, "json", False):
         print(json.dumps(entry, indent=2))

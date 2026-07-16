@@ -526,6 +526,24 @@ class ApprovalGate:
         with _file_lock(self._path):
             self._write_unlocked(self._pending)
 
+    def clear_completed(self) -> tuple[int, int]:
+        """Drop approved/rejected records; returns (removed, remaining).
+
+        Read-modify-write under one file lock: clearing from the in-memory
+        snapshot and saving would clobber any request another process queued
+        after this gate loaded.
+        """
+        with _file_lock(self._path):
+            requests = (
+                self._read_unlocked() if self._path.exists() else list(self._pending)
+            )
+            kept = [r for r in requests if r.status == "pending"]
+            removed = len(requests) - len(kept)
+            if removed:
+                self._write_unlocked(kept)
+            self._pending = kept
+        return removed, len(kept)
+
     def check(self, agent: str, action: str, detail: str = "") -> bool:
         """Check if an action is allowed. Returns True if auto-approved or pre-approved."""
         if action in AUTO_APPROVE:

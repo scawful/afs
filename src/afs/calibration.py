@@ -12,6 +12,12 @@ Storage is append-only JSONL under ``scratchpad/calibration/``:
   bootstrap ``--engage``), each with the prediction and the revealed actual.
 - ``outcomes.jsonl`` — human outcome scores (``hit``/``miss``/``unclear``)
   keyed by the decision ref (approval id, mission id, or prediction id).
+
+Agent-gate decisions are the one exception: the approval gate store is
+global, not per-context, so their outcome scores live in a global
+``approval_outcomes.jsonl`` next to the gate store. Scoring a global
+decision per context would resurface it as unscored in every other
+context and let it be scored once per context.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from .models import MountType
 CALIBRATION_DIR_NAME = "calibration"
 PREDICTIONS_FILE_NAME = "predictions.jsonl"
 OUTCOMES_FILE_NAME = "outcomes.jsonl"
+GATE_OUTCOMES_FILE_NAME = "approval_outcomes.jsonl"
 VALID_OUTCOMES = ("hit", "miss", "unclear")
 
 
@@ -120,6 +127,8 @@ def record_outcome(
     ref: str,
     outcome: str,
     note: str = "",
+    scored_by: str = "",
+    scored_via: str = "",
     config: Any = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -129,6 +138,11 @@ def record_outcome(
     silently poison the trail. Raises :class:`UnknownDecisionRefError` for
     refs that no known store contains; ``force=True`` is the explicit
     escape hatch for scoring a decision whose store is unavailable.
+
+    ``scored_by``/``scored_via`` record who made the judgment and through
+    which surface. The CLI stamps the OS user and ``tty`` after its
+    interactive confirmation; entries without ``scored_via="tty"`` are
+    distinguishable as not human-confirmed.
     """
     if outcome not in VALID_OUTCOMES:
         raise ValueError(
@@ -137,6 +151,7 @@ def record_outcome(
     ref = ref.strip()
     if not ref:
         raise ValueError("a decision ref is required")
+    kind = _ref_kind(ref)
     if not force and not ref_is_known(context_path, ref, config=config):
         raise UnknownDecisionRefError(
             f"unknown decision ref {ref!r}; run `afs calibration review` to see "
@@ -144,14 +159,14 @@ def record_outcome(
         )
     entry = {
         "ref": ref,
-        "kind": _ref_kind(ref),
+        "kind": kind,
         "outcome": outcome,
         "note": note.strip(),
+        "scored_by": scored_by.strip(),
+        "scored_via": scored_via.strip(),
         "timestamp": _now().isoformat(),
     }
-    _append_jsonl(
-        calibration_root(context_path, config=config) / OUTCOMES_FILE_NAME, entry
-    )
+    _append_jsonl(_outcomes_path_for_kind(context_path, kind, config=config), entry)
     return entry
 
 
@@ -160,7 +175,26 @@ def _ref_kind(ref: str) -> str:
         return "mission"
     if ref.startswith("pred_"):
         return "prediction"
+    if ref.startswith("gate_"):
+        return "gate"
     return "approval"
+
+
+def _gate_outcomes_path() -> Path:
+    """Global trail for agent-gate outcomes, co-located with the gate store."""
+    from .agents.guardrails import _prefer_writable_state_path
+
+    return _prefer_writable_state_path(
+        GATE_OUTCOMES_FILE_NAME, env_var="AFS_AGENT_APPROVAL_OUTCOMES_PATH"
+    )
+
+
+def _outcomes_path_for_kind(
+    context_path: Path, kind: str, *, config: Any = None
+) -> Path:
+    if kind == "gate":
+        return _gate_outcomes_path()
+    return calibration_root(context_path, config=config) / OUTCOMES_FILE_NAME
 
 
 def ref_is_known(context_path: Path, ref: str, *, config: Any = None) -> bool:
@@ -178,13 +212,15 @@ def ref_is_known(context_path: Path, ref: str, *, config: Any = None) -> bool:
             return MissionStore(context_path, config=config).get(ref) is not None
         except Exception:
             return False
-    try:
-        from .agents.guardrails import ApprovalGate
+    if kind == "gate":
+        try:
+            from .agents.guardrails import ApprovalGate
 
-        if any(request.request_id == ref for request in ApprovalGate()._pending):
-            return True
-    except Exception:
-        pass
+            return any(
+                request.request_id == ref for request in ApprovalGate()._pending
+            )
+        except Exception:
+            return False
     try:
         from .work_assistant import WorkAssistantStore
 
@@ -198,9 +234,20 @@ def ref_is_known(context_path: Path, ref: str, *, config: Any = None) -> bool:
 
 
 def load_outcomes(context_path: Path, *, config: Any = None) -> list[dict[str, Any]]:
-    return _load_jsonl(
+    """Context outcomes plus the global gate-outcome trail.
+
+    Merging the global trail means a gate decision scored while reviewing one
+    context shows as scored in every context, instead of resurfacing as
+    unscored elsewhere.
+    """
+    entries = _load_jsonl(
         calibration_root(context_path, config=config) / OUTCOMES_FILE_NAME
     )
+    try:
+        entries += _load_jsonl(_gate_outcomes_path())
+    except Exception:
+        pass
+    return entries
 
 
 def load_predictions(

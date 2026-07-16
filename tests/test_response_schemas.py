@@ -250,3 +250,27 @@ def test_canonical_json_distinguishes_python_equality_quirks() -> None:
     # Key order is irrelevant — same document either way.
     assert _canonical_json({"a": "1", "b": "2"}) == _canonical_json({"b": "2", "a": "1"})
     assert _canonical_json(object()) is None
+    # Non-finite floats have no canonical JSON form.
+    assert _canonical_json({"x": float("nan")}) is None
+
+
+def test_unserializable_intent_is_never_preserved() -> None:
+    """An intent carrying NaN must never verify as preserved.
+
+    With jsonschema installed the subschema (additionalProperties: false,
+    string-typed items) rejects it; without jsonschema the laxer builtin
+    fallback may let it through to the canonical comparison, where two
+    ``None`` canonical forms must read as modified, not equal.
+    """
+    from afs.response_schemas import verify_human_intent_preserved
+
+    intent = {
+        "goal": "g",
+        "non_goals": [],
+        "done_when": [],
+        "weight": float("nan"),
+    }
+    skeleton = {"human_intent": dict(intent)}
+    expanded = {"human_intent": dict(intent)}
+    violations = verify_human_intent_preserved(skeleton, expanded)
+    assert violations  # never silently preserved

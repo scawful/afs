@@ -11,9 +11,11 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
   interactive human confirmation (headless approval fails closed), with
   reviewer provenance recorded in history; missions carry a human-authored
   `acceptance` field with recorded provenance; `afs calibration review`
-  resurfaces the window's decisions with their rationales for outcome scoring
-  against context-scoped decision refs (`afs calibration score` rejects
-  unknown refs; `--markdown` emits a weekly-review digest);
+  resurfaces the window's decisions with their rationales for outcome
+  scoring (`afs calibration score` is itself confirmation-gated with
+  scored-by provenance, rejects unknown refs, and stores global gate-
+  decision outcomes globally so they never resurface unscored in another
+  context; `--markdown` emits a weekly-review digest);
   `afs session bootstrap --engage` asks for a top-priority prediction before
   revealing the queue (never in `--json` mode) and logs it to the calibration
   trail; and the `implementation-plan` schema gains a `human_intent` section

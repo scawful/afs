@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from ..work_assistant import WorkAssistantStore
 from ..work_execution import (
     HumanApprovalRequiredError,
     WorkApprovalExecutionError,
+    approval_requires_human_ack,
     confirm_human_approval,
     execute_approved_action,
 )
@@ -210,7 +212,8 @@ def _require_decision_rationale(args: argparse.Namespace, decision: str) -> str 
     print(
         f"A rationale is required to {decision}: pass --because "
         '"<why this is the right call>".\n'
-        "It is stored in approvals history and resurfaced during calibration review."
+        "It is stored in approvals history and resurfaced during calibration review.",
+        file=sys.stderr,
     )
     return None
 
@@ -227,12 +230,23 @@ def approvals_approve_command(args: argparse.Namespace) -> int:
     # External/communication writes require an interactive human confirmation that a
     # headless agent cannot satisfy. This is the single chokepoint: execute() only
     # runs on already-approved actions, so gating approve gates the outward action.
+    ack_required = approval_requires_human_ack(approval)
     try:
         confirm_human_approval(approval)
     except HumanApprovalRequiredError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 2
-    if store.approve(args.approval_id, approved_by=args.by, rationale=rationale):
+    # --by is a free-form claim; without the terminal confirmation vouching
+    # for a person, the recorded identity stays the non-claimable OS user.
+    requested_by = (args.by or "").strip()
+    approved_by = requested_by if (requested_by and ack_required) else os_reviewer()
+    if requested_by and approved_by != requested_by:
+        print(
+            f"--by {requested_by!r} is only honored with an interactive "
+            f"confirmation; recording {approved_by!r}.",
+            file=sys.stderr,
+        )
+    if store.approve(args.approval_id, approved_by=approved_by, rationale=rationale):
         print(f"Approved: {args.approval_id}")
         return 0
     print(f"No pending approval found: {args.approval_id}")
@@ -244,7 +258,17 @@ def approvals_reject_command(args: argparse.Namespace) -> int:
     if rationale is None:
         return 2
     store, _context_path = _store_from_args(args)
-    if store.reject(args.approval_id, rejected_by=args.by, rationale=rationale):
+    # Rejection is the fail-safe direction and stays headless-capable, so the
+    # identity is never taken from a claimable flag.
+    rejected_by = os_reviewer()
+    requested_by = (args.by or "").strip()
+    if requested_by and requested_by != rejected_by:
+        print(
+            f"--by {requested_by!r} is a claimable identity; recording "
+            f"{rejected_by!r}.",
+            file=sys.stderr,
+        )
+    if store.reject(args.approval_id, rejected_by=rejected_by, rationale=rationale):
         print(f"Rejected: {args.approval_id}")
         return 0
     print(f"No pending approval found: {args.approval_id}")
@@ -527,10 +551,16 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     approvals_approve = approvals_sub.add_parser("approve", help="Approve one request.")
     _add_context_args(approvals_approve)
     approvals_approve.add_argument("approval_id", help="Approval id.")
-    # Defaulting to the OS user keeps history honest: "human" is a claim any
-    # process can make, the login name at least identifies the account.
+    # "human" (or any name) is a claim every process can make. The flag is
+    # honored only when the terminal confirmation actually ran; otherwise the
+    # recorded identity is the OS user.
     approvals_approve.add_argument(
-        "--by", default=os_reviewer(), help="Approver identity (default: OS user)."
+        "--by",
+        default=None,
+        help=(
+            "Approver identity; honored only alongside an interactive "
+            "confirmation (default: OS user)."
+        ),
     )
     approvals_approve.add_argument(
         "--because",
@@ -542,7 +572,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     _add_context_args(approvals_reject)
     approvals_reject.add_argument("approval_id", help="Approval id.")
     approvals_reject.add_argument(
-        "--by", default=os_reviewer(), help="Reviewer identity (default: OS user)."
+        "--by",
+        default=None,
+        help="Reviewer identity; the OS user is always recorded when omitted.",
     )
     approvals_reject.add_argument(
         "--because",

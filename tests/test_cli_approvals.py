@@ -138,7 +138,7 @@ def test_approve_refused_headless(tmp_path: Path, capsys, monkeypatch) -> None:
         _ns(approvals_file, agent="scout", action="git_push", because="looks fine")
     )
     assert exit_code == 2
-    assert "interactive human confirmation" in capsys.readouterr().out
+    assert "interactive human confirmation" in capsys.readouterr().err
     gate = ApprovalGate(path=approvals_file)
     assert len(gate.pending_requests()) == 1
 
@@ -176,8 +176,7 @@ def test_approve_requires_rationale(tmp_path: Path, capsys) -> None:
             _ns(approvals_file, agent="scout", action="git_push", because=because)
         )
         assert exit_code == 2
-        out = capsys.readouterr().out
-        assert "--because" in out
+        assert "--because" in capsys.readouterr().err
 
     # The request must remain pending — no rubber-stamp path.
     gate = ApprovalGate(path=approvals_file)
@@ -229,7 +228,7 @@ def test_reject_requires_rationale(tmp_path: Path, capsys) -> None:
         _ns(approvals_file, agent="scout", action="git_push", because="  ")
     )
     assert exit_code == 2
-    assert "--because" in capsys.readouterr().out
+    assert "--because" in capsys.readouterr().err
 
     gate = ApprovalGate(path=approvals_file)
     assert len(gate.pending_requests()) == 1

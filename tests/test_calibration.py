@@ -10,6 +10,7 @@ import pytest
 
 from afs.calibration import (
     UnknownDecisionRefError,
+    calibration_root,
     collect_decisions,
     load_outcomes,
     load_predictions,
@@ -20,9 +21,21 @@ from afs.missions import MissionStore
 from afs.work_assistant import WorkAssistantStore
 
 
+@pytest.fixture(autouse=True)
+def _isolated_gate_outcomes(monkeypatch, tmp_path: Path):
+    """Every test gets an isolated global gate-outcome trail.
+
+    load_outcomes merges the global trail, so without this a test could read
+    (or a gate-ref score could write) the developer's real state file.
+    """
+    monkeypatch.setenv(
+        "AFS_AGENT_APPROVAL_OUTCOMES_PATH", str(tmp_path / "gate_outcomes.jsonl")
+    )
+
+
 def _context(tmp_path: Path) -> Path:
     context_root = tmp_path / ".context"
-    context_root.mkdir()
+    context_root.mkdir(parents=True)
     return context_root
 
 
@@ -115,6 +128,9 @@ def test_known_refs_are_accepted(tmp_path: Path, monkeypatch) -> None:
 
 def _isolate_gate(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AFS_AGENT_APPROVALS_PATH", str(tmp_path / "gate.json"))
+    monkeypatch.setenv(
+        "AFS_AGENT_APPROVAL_OUTCOMES_PATH", str(tmp_path / "gate_outcomes.jsonl")
+    )
 
 
 def test_collect_decisions_surfaces_rationales_and_acceptance(
@@ -317,6 +333,7 @@ def _wire_cli(tmp_path: Path, monkeypatch) -> Path:
 
 def test_cli_review_and_score(tmp_path: Path, monkeypatch, capsys) -> None:
     _isolate_gate(monkeypatch, tmp_path)
+    import afs.cli.calibration as calibration_cli
     from afs.cli.calibration import calibration_review_command, calibration_score_command
 
     context_root = _wire_cli(tmp_path, monkeypatch)
@@ -331,6 +348,8 @@ def test_cli_review_and_score(tmp_path: Path, monkeypatch, capsys) -> None:
     assert "acceptance was: lands with tests" in out
     assert f"afs calibration score {mission.mission_id}" in out
 
+    # Scoring is a human judgment: it requires the tty confirmation.
+    monkeypatch.setattr(calibration_cli, "_TTY_READER", lambda prompt: "hit")
     assert (
         calibration_score_command(
             _cli_args(context_root, ref=mission.mission_id, outcome="hit", note="shipped")
@@ -431,3 +450,87 @@ def test_run_engage_prediction_skips_when_headless_or_empty(
         is None
     )
     assert load_predictions(context) == []
+
+
+def test_cli_score_refused_headless(tmp_path: Path, monkeypatch, capsys) -> None:
+    """An agent cannot record an outcome score: that would be grading its
+    own work — the exact offload the calibration trail exists to counter."""
+    _isolate_gate(monkeypatch, tmp_path)
+    import afs.cli.calibration as calibration_cli
+    from afs.cli.calibration import calibration_score_command
+
+    context_root = _wire_cli(tmp_path, monkeypatch)
+    mission = MissionStore(context_root).create(title="Ship it")
+    monkeypatch.setattr(calibration_cli, "_TTY_READER", lambda prompt: None)
+
+    exit_code = calibration_score_command(
+        _cli_args(context_root, ref=mission.mission_id, outcome="hit", note="")
+    )
+    assert exit_code == 2
+    assert "interactive human confirmation" in capsys.readouterr().err
+    assert load_outcomes(context_root) == []
+
+
+def test_cli_score_wrong_token_refused(tmp_path: Path, monkeypatch, capsys) -> None:
+    _isolate_gate(monkeypatch, tmp_path)
+    import afs.cli.calibration as calibration_cli
+    from afs.cli.calibration import calibration_score_command
+
+    context_root = _wire_cli(tmp_path, monkeypatch)
+    mission = MissionStore(context_root).create(title="Ship it")
+    monkeypatch.setattr(calibration_cli, "_TTY_READER", lambda prompt: "yes")
+
+    exit_code = calibration_score_command(
+        _cli_args(context_root, ref=mission.mission_id, outcome="hit", note="")
+    )
+    assert exit_code == 2
+    assert load_outcomes(context_root) == []
+
+
+def test_cli_score_records_provenance(tmp_path: Path, monkeypatch, capsys) -> None:
+    _isolate_gate(monkeypatch, tmp_path)
+    import afs.cli.calibration as calibration_cli
+    from afs.cli.calibration import calibration_score_command
+
+    context_root = _wire_cli(tmp_path, monkeypatch)
+    mission = MissionStore(context_root).create(title="Ship it")
+    monkeypatch.setattr(calibration_cli, "_TTY_READER", lambda prompt: "miss")
+
+    exit_code = calibration_score_command(
+        _cli_args(context_root, ref=mission.mission_id, outcome="miss", note="slipped")
+    )
+    assert exit_code == 0
+    (entry,) = load_outcomes(context_root)
+    assert entry["scored_via"] == "tty"
+    assert entry["scored_by"]
+
+
+def test_gate_outcomes_are_global_across_contexts(tmp_path: Path, monkeypatch) -> None:
+    """Gate decisions live in a global store, so their scores must too: a
+    decision scored while reviewing one context must not resurface as
+    unscored (and scorable again) in another."""
+    _isolate_gate(monkeypatch, tmp_path)
+    from afs.agents.guardrails import ApprovalGate
+
+    context_a = _context(tmp_path / "a")
+    context_b = _context(tmp_path / "b")
+
+    gate = ApprovalGate()
+    gate._queue("scout", "git_push", "push to origin")
+    gate.approve("scout", "git_push", rationale="diff reviewed")
+    ref = ApprovalGate()._pending[0].request_id
+
+    entry = record_outcome(
+        context_a, ref=ref, outcome="hit", scored_by="tester", scored_via="tty"
+    )
+    assert entry["kind"] == "gate"
+    # The score landed in the global trail, not context A's outcomes file.
+    assert (tmp_path / "gate_outcomes.jsonl").exists()
+    context_a_file = calibration_root(context_a) / "outcomes.jsonl"
+    assert not context_a_file.exists()
+
+    # Both contexts see the decision as scored.
+    for context in (context_a, context_b):
+        report = collect_decisions(context, days=7)
+        assert ref in report["scored"]
+        assert report["scored"][ref]["outcome"] == "hit"

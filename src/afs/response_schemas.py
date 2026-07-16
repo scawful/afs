@@ -414,10 +414,17 @@ def _canonical_json(value: Any) -> str | None:
     Comparison happens on the serialized form, not Python equality: ``True``
     and ``1`` (or ``1`` and ``1.0``) compare equal as Python objects but are
     different JSON documents, and a preservation check that conflates them
-    can be gamed.
+    can be gamed. ``allow_nan=False`` keeps non-finite floats out of the
+    canonical form — ``NaN`` on both sides must not read as "preserved".
     """
     try:
-        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
     except (TypeError, ValueError):
         return None
 
@@ -454,7 +461,14 @@ def verify_human_intent_preserved(skeleton: Any, expanded: Any) -> list[str]:
             ]
         if expanded_intent is None:
             return ["human_intent was removed by the expansion; restore it verbatim"]
-        if _canonical_json(expanded_intent) != _canonical_json(skeleton_intent):
+        skeleton_canonical = _canonical_json(skeleton_intent)
+        expanded_canonical = _canonical_json(expanded_intent)
+        # None means unserializable; two failures must never compare equal.
+        if (
+            skeleton_canonical is None
+            or expanded_canonical is None
+            or expanded_canonical != skeleton_canonical
+        ):
             return [
                 "human_intent was modified by the expansion; agents must "
                 "reproduce it exactly as the human wrote it"
