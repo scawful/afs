@@ -6,6 +6,7 @@ import argparse
 import importlib
 import json
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -56,6 +57,7 @@ WatchSignature = tuple[bool, int, int, int, bool]
 # both detects completion and reaps short-lived one-shot children.
 _OWNED_PROCESSES: dict[int, subprocess.Popen[Any]] = {}
 _INCOMPLETE_WATCH_WARNED: set[Path] = set()
+DEFAULT_FAILURE_HISTORY_SECONDS = 7 * 86400
 
 AGENT_NAME = "agent-supervisor"
 AGENT_DESCRIPTION = (
@@ -1747,15 +1749,32 @@ class AgentSupervisor:
 
     def audit(self) -> dict[str, object]:
         agents = self.list_agents()
+        try:
+            configured_history_seconds = float(
+                os.environ.get(
+                    "AFS_AGENT_FAILURE_HISTORY_SECONDS",
+                    str(DEFAULT_FAILURE_HISTORY_SECONDS),
+                )
+            )
+        except ValueError:
+            configured_history_seconds = float(DEFAULT_FAILURE_HISTORY_SECONDS)
+        if not math.isfinite(configured_history_seconds):
+            configured_history_seconds = float(DEFAULT_FAILURE_HISTORY_SECONDS)
+        failure_history_seconds = max(0.0, configured_history_seconds)
+        now = _now_utc()
         counts: dict[str, int] = {
             "running": 0,
             "failed": 0,
+            "recent_failed": 0,
+            "historical_failed": 0,
             "stopped": 0,
             "manual_stop": 0,
             "circuit_open": 0,
             "configured": len(agents),
         }
         stale_pid_files: list[str] = []
+        active_issues: list[str] = []
+        historical_failures: list[str] = []
         for agent in agents:
             counts.setdefault(agent.state, 0)
             if agent.state == "running":
@@ -1763,9 +1782,25 @@ class AgentSupervisor:
             elif agent.state == "failed":
                 counts["failed"] += 1
                 stale_pid_files.append(agent.name)
+                failed_at = (
+                    _parse_timestamp(agent.stopped_at)
+                    or _parse_timestamp(agent.last_seen_at)
+                    or _parse_timestamp(agent.started_at)
+                )
+                is_historical = bool(
+                    failed_at
+                    and (now - failed_at).total_seconds() > failure_history_seconds
+                )
+                if is_historical:
+                    counts["historical_failed"] += 1
+                    historical_failures.append(agent.name)
+                else:
+                    counts["recent_failed"] += 1
+                    active_issues.append(agent.name)
             elif agent.state == "circuit_open":
                 counts["circuit_open"] += 1
                 stale_pid_files.append(agent.name)
+                active_issues.append(agent.name)
             else:
                 counts["stopped"] += 1
             if agent.manually_stopped:
@@ -1774,6 +1809,9 @@ class AgentSupervisor:
             "state_dir": str(self._state_dir),
             "counts": counts,
             "stale_pid_files": stale_pid_files,
+            "active_issues": active_issues,
+            "historical_failures": historical_failures,
+            "failure_history_seconds": failure_history_seconds,
             "agents": [agent.to_dict() for agent in agents],
         }
 

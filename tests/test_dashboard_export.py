@@ -109,6 +109,7 @@ def test_dashboard_json_format(tmp_path: Path) -> None:
     agents = dashboard["agents"]
     assert agents["running"] == 6
     assert agents["failed"] == 1
+    assert agents["historical_failed"] == 0
     assert agents["total"] == 8
 
     # Workspace section
@@ -139,6 +140,37 @@ def test_dashboard_json_format(tmp_path: Path) -> None:
     assert any("approval" in a for a in dashboard["alerts"])
 
 
+def test_dashboard_separates_historical_agent_failures(tmp_path: Path) -> None:
+    agent_root, scratchpad, missions = _populate_sources(tmp_path)
+    supervisor_path = scratchpad / "agent_supervisor.json"
+    supervisor = json.loads(supervisor_path.read_text(encoding="utf-8"))
+    supervisor["payload"]["audit"]["counts"].update(
+        failed=4,
+        recent_failed=1,
+        historical_failed=3,
+        configured=10,
+    )
+    supervisor["payload"]["audit"]["active_issues"] = ["fresh-failure"]
+    supervisor["payload"]["audit"]["historical_failures"] = [
+        "old-one",
+        "old-two",
+        "old-three",
+    ]
+    supervisor_path.write_text(json.dumps(supervisor), encoding="utf-8")
+
+    dashboard = agent.build_dashboard(
+        agent_output_root=agent_root,
+        scratchpad_root=scratchpad,
+        missions_root=missions,
+    )
+
+    assert dashboard["agents"]["failed"] == 1
+    assert dashboard["agents"]["historical_failed"] == 3
+    assert dashboard["agents"]["active_total"] == 7
+    assert "agents:6/7" in agent.format_status_line(dashboard)
+    assert any("1 agent(s) in failed state" in alert for alert in dashboard["alerts"])
+
+
 # ---------------------------------------------------------------------------
 # Status line format
 # ---------------------------------------------------------------------------
@@ -159,6 +191,23 @@ def test_status_line_format(tmp_path: Path) -> None:
     assert "quota:ok" in status
     assert "approvals:1" in status
     assert " | " in status
+
+
+def test_status_line_excludes_historical_failures_from_active_total() -> None:
+    dashboard = {
+        "agents": {
+            "running": 6,
+            "failed": 0,
+            "historical_failed": 3,
+            "total": 9,
+            "active_total": 6,
+        },
+        "workspace": {"dirty": 0},
+        "quota": {},
+        "approvals_pending": 0,
+    }
+
+    assert "agents:6/6" in agent.format_status_line(dashboard)
 
 
 def test_status_line_quota_warn() -> None:
