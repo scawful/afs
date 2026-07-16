@@ -165,3 +165,47 @@ Harness wrappers:
 - `scripts/afs-claude`
 - `scripts/afs-gemini`
 - `scripts/afs-hcode`
+
+## Supervised Agents
+
+The `agent-supervisor` service reconciles profile-defined background agents:
+
+```bash
+afs services start agent-supervisor
+afs agents ps --all
+```
+
+State lives under `.context/scratchpad/afs_agents/supervisor/`.
+
+### Start Conditions
+
+Each `AgentConfig` can declare any combination of:
+
+| Field | Behavior |
+| ----- | -------- |
+| `auto_start` | Keep the agent running; restart it (with backoff) when it exits. |
+| `schedule` | Run as a one-shot on an interval: `hourly`/`daily`/`weekly` (`@`-prefixed forms accepted) or `<number><s\|m\|h\|d>` such as `30m`. |
+| `watch_paths` | Run when a watched file or directory changes. |
+| `triggers` | Named lifecycle triggers; the supervisor loop fires `on_boot`. |
+
+Scheduled and watched agents that are not `auto_start` run as one-shots. All
+start paths share the same circuit breaker, backoff, and dependency checks.
+
+### Default Agent Set
+
+A fresh supervisor is useful without any profile configuration: a profile
+with an *empty* agent list receives a conservative shipped set, tagged
+`afs-default`. A profile that configures any agents at all is never augmented
+implicitly.
+
+| Agent | Starts | Does |
+| ----- | ------ | ---- |
+| `context-warm` | `daily` | Audit workspace contexts, without repair or network calls. |
+| `index-rebuild` | `watch_paths` on the knowledge + memory mounts | Rebuild the context SQLite index. |
+| `skills-mine` | `weekly` | Mine repeated session traces into reviewable skill candidates. |
+| `morning-briefing` | `daily` | Write a briefing digest under `scratchpad/briefings/`. |
+
+Disable the set with `[agents] default_set = false` in `afs.toml`, or
+per-environment with `AFS_DEFAULT_AGENTS=off` (`on` force-enables; an
+unrecognized value disables with a warning). Starting the supervisor itself
+is always an explicit operator action.
