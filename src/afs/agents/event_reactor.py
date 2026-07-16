@@ -27,12 +27,13 @@ import json
 import logging
 import os
 import re
+from collections.abc import Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any
 
 from ..context_paths import resolve_mount_root
 from ..history import EVENT_FILE_PREFIX
