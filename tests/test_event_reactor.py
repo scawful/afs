@@ -3081,11 +3081,11 @@ def test_failed_event_spawn_uses_backoff_circuit_and_cooldown(
     with open_event_batch(
         context,
         state_dir,
-        now=NOW + timedelta(minutes=3),
+        now=NOW - timedelta(hours=10),
     ) as circuit:
         assert (
             supervisor.reconcile(
-                [config], event_batch=circuit, now=NOW + timedelta(minutes=3)
+                [config], event_batch=circuit, now=NOW - timedelta(hours=10)
             )
             == []
         )
@@ -3094,6 +3094,24 @@ def test_failed_event_spawn_uses_backoff_circuit_and_cooldown(
         circuit.ack()
     assert supervisor.status("reactor").state == "circuit_open"  # type: ignore[union-attr]
     assert supervisor.status("reactor").launch_count == 2  # type: ignore[union-attr]
+    route_state = _load_state(state_dir)["pending_routes"]["reactor"]
+    assert route_state["launch_circuit_opened_at"] == (
+        NOW + timedelta(minutes=2)
+    ).isoformat()
+
+    # Correcting the wall clock shortly after the failure must not consume a
+    # circuit that was opened during the rollback.
+    supervisor = fresh_supervisor()
+    with open_event_batch(
+        context,
+        state_dir,
+        now=NOW + timedelta(minutes=3),
+    ) as corrected_clock:
+        assert supervisor.reconcile(
+            [config], event_batch=corrected_clock, now=NOW + timedelta(minutes=3)
+        ) == []
+        assert corrected_clock.dispatch_outcomes["reactor"].reason == "circuit_open"
+        corrected_clock.ack()
 
     supervisor = fresh_supervisor()
     with open_event_batch(context, state_dir, now=NOW) as clock_regressed_circuit:

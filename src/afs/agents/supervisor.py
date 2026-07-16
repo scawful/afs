@@ -1405,9 +1405,18 @@ class AgentSupervisor:
                 self._write_state(existing)
                 self._update_registry(existing)
             return None
+        failed_at = _parse_timestamp(route.last_launch_failure_at)
         restart_limit = max(0, min(config.max_restarts, MAX_AGENT_RESTARTS))
         if route.launch_failure_count >= restart_limit:
-            batch.open_launch_circuit(config.name, at=current)
+            # A wall-clock rollback must not backdate the circuit before the
+            # failure that opened it; correction would otherwise consume the
+            # cooldown instantly. Persist the later trusted route instant.
+            opened_at = (
+                failed_at
+                if failed_at is not None and failed_at > current
+                else current
+            )
+            batch.open_launch_circuit(config.name, at=opened_at)
             if existing is not None and existing.state != "circuit_open":
                 existing.state = "circuit_open"
                 existing.last_event = "circuit_open"
@@ -1415,7 +1424,6 @@ class AgentSupervisor:
                 self._write_state(existing)
                 self._update_registry(existing)
             return "deferred", "circuit_open"
-        failed_at = _parse_timestamp(route.last_launch_failure_at)
         if failed_at is not None:
             elapsed = (current - failed_at).total_seconds()
             required_delay = self._backoff_delay(route.launch_failure_count)
