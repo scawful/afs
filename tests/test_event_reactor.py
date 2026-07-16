@@ -3188,6 +3188,55 @@ def test_oversized_persisted_launch_failure_count_fails_closed(
     assert supervisor._backoff_delay(10**10) == supervisor.RESTART_MAX_DELAY
 
 
+def test_backdated_persisted_circuit_is_repaired_without_early_retry(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    state_dir = tmp_path / "supervisor-state"
+    config_model = AFSConfig(
+        general=GeneralConfig(
+            context_root=context,
+            python_executable=tmp_path / "missing-python",
+        )
+    )
+    config = AgentConfig(
+        name="reactor",
+        module="x.y",
+        on_event=["error"],
+        restart_on_failure=True,
+        max_restarts=1,
+    )
+    _collect(context, state_dir, now=NOW - timedelta(minutes=1))
+    _write_history_event(context, event_type="error", op="boom", timestamp=NOW)
+    supervisor = AgentSupervisor(state_dir=state_dir, config=config_model)
+    with open_event_batch(context, state_dir, now=NOW) as first:
+        supervisor.reconcile([config], event_batch=first, now=NOW)
+        assert first.dispatch_outcomes[config.name].reason == "spawn_failed"
+        first.ack()
+
+    # Simulate state emitted by the rollback-vulnerable implementation: the
+    # circuit appears to open ten hours before its recorded launch failure.
+    cursor_path = state_dir / "event_reactor" / "cursor.json"
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+    payload["pending_routes"][config.name]["launch_circuit_opened_at"] = (
+        NOW - timedelta(hours=10)
+    ).isoformat()
+    cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    corrected = AgentSupervisor(state_dir=state_dir, config=config_model)
+    with open_event_batch(
+        context, state_dir, now=NOW + timedelta(minutes=1)
+    ) as batch:
+        assert corrected.reconcile(
+            [config], event_batch=batch, now=NOW + timedelta(minutes=1)
+        ) == []
+        assert batch.dispatch_outcomes[config.name].reason == "circuit_open"
+        batch.ack()
+
+    repaired = _load_state(state_dir)["pending_routes"][config.name]
+    assert repaired["launch_circuit_opened_at"] == NOW.isoformat()
+
+
 def test_event_job_prompt_sanitizes_event_label(tmp_path: Path) -> None:
     from afs.agent_jobs import AgentJobQueue
 

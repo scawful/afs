@@ -1390,10 +1390,16 @@ class AgentSupervisor:
             return None
         if not config.restart_on_failure:
             return "deferred", "restart_disabled"
+        failed_at = _parse_timestamp(route.last_launch_failure_at)
         if route.launch_circuit_opened_at:
             opened = _parse_timestamp(route.launch_circuit_opened_at)
             if opened is None:
                 return "deferred", "circuit_open"
+            if failed_at is not None and opened < failed_at:
+                # Repair state written by an older rollback-vulnerable gate:
+                # a circuit cannot predate the failure that exhausted it.
+                opened = failed_at
+                batch.open_launch_circuit(config.name, at=opened)
             elapsed = (current - opened).total_seconds()
             if elapsed < self.CIRCUIT_COOLDOWN:
                 return "deferred", "circuit_open"
@@ -1405,7 +1411,6 @@ class AgentSupervisor:
                 self._write_state(existing)
                 self._update_registry(existing)
             return None
-        failed_at = _parse_timestamp(route.last_launch_failure_at)
         restart_limit = max(0, min(config.max_restarts, MAX_AGENT_RESTARTS))
         if route.launch_failure_count >= restart_limit:
             # A wall-clock rollback must not backdate the circuit before the
