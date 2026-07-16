@@ -442,6 +442,14 @@ def _wait_for_child_exit(pid_file: Path, deadline_seconds: float = 3.0) -> bool:
             # AccessDenied does not prove that the child exited. Keep polling
             # and fail closed if its identity cannot be established.
             pass
+        except SystemError as error:
+            # psutil 7.2 can leak a chained PermissionError from proc_cmdline
+            # on macOS instead of translating it to AccessDenied. Treat only
+            # that permission-shaped native failure as ambiguous; unexpected
+            # SystemErrors must still fail the test loudly.
+            cause = error.__cause__ or error.__context__
+            if not isinstance(cause, PermissionError):
+                raise
         time.sleep(0.05)
     return False
 
@@ -459,6 +467,45 @@ def test_wait_for_child_exit_fails_closed_on_access_denied(
     monkeypatch.setattr(psutil, "Process", deny_process_access)
 
     assert not _wait_for_child_exit(pid_file, deadline_seconds=0.01)
+
+
+def test_wait_for_child_exit_fails_closed_on_chained_permission_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pid_file = tmp_path / "child-pid"
+    pid_file.write_text(str(os.getpid()))
+
+    class PermissionProcess:
+        def status(self) -> str:
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self) -> list[str]:
+            try:
+                raise PermissionError("permission denied")
+            except PermissionError as error:
+                raise SystemError("proc_cmdline failed") from error
+
+    monkeypatch.setattr(psutil, "Process", lambda _pid: PermissionProcess())
+
+    assert not _wait_for_child_exit(pid_file, deadline_seconds=0.01)
+
+
+def test_wait_for_child_exit_reraises_unrelated_system_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pid_file = tmp_path / "child-pid"
+    pid_file.write_text(str(os.getpid()))
+
+    class BrokenProcess:
+        def status(self) -> str:
+            raise SystemError("unexpected native failure")
+
+    monkeypatch.setattr(psutil, "Process", lambda _pid: BrokenProcess())
+
+    with pytest.raises(SystemError, match="unexpected native failure"):
+        _wait_for_child_exit(pid_file, deadline_seconds=0.01)
 
 
 def test_timeout_terminates_descendant_process(tmp_path: Path, monkeypatch) -> None:
