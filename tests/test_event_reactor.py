@@ -23,6 +23,7 @@ from afs.agents.event_reactor import (
     _cut_at_timestamp_boundary,
     _load_state,
     event_config_digest,
+    legacy_event_config_digest,
     match_event_rules,
     open_event_batch,
     pattern_matches,
@@ -2887,6 +2888,84 @@ def test_missing_module_route_survives_config_fix_and_dispatches(
         assert spawned == ["reactor"]
         second.ack()
     assert "pending_routes" not in _load_state(supervisor._state_dir)
+
+
+def test_exact_legacy_route_digest_is_migrated_without_losing_delivery(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context = tmp_path / "context"
+    supervisor = _supervisor(tmp_path)
+    patterns = [" mcp_tool ", "error", "mcp_tool"]
+    broken = AgentConfig(
+        name="reactor",
+        module="",
+        on_event=patterns,
+    )
+    semantic_digest = event_config_digest(broken)
+    legacy_digest = legacy_event_config_digest(broken)
+    assert legacy_digest != semantic_digest
+    _collect(context, supervisor._state_dir, now=NOW - timedelta(minutes=1))
+    _write_history_event(context, event_type="error", op="boom", timestamp=NOW)
+
+    with open_event_batch(context, supervisor._state_dir, now=NOW) as first:
+        supervisor.reconcile([broken], event_batch=first, now=NOW)
+        assert first.dispatch_outcomes[broken.name].reason == "missing_module"
+        first.ack()
+
+    # Recreate the exact digest emitted before trigger normalization shipped.
+    cursor_path = supervisor._state_dir / "event_reactor" / "cursor.json"
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+    payload["pending_routes"][broken.name]["config_digest"] = legacy_digest
+    cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    fixed = AgentConfig(name=broken.name, module="x.y", on_event=patterns)
+    monkeypatch.setattr(
+        supervisor,
+        "status",
+        lambda name: RunningAgent(name=name, manually_stopped=True),
+    )
+    with open_event_batch(
+        context,
+        supervisor._state_dir,
+        now=NOW + timedelta(minutes=1),
+    ) as migrated:
+        assert migrated.events == []
+        assert supervisor.reconcile(
+            [fixed], event_batch=migrated, now=NOW + timedelta(minutes=1)
+        ) == []
+        assert migrated.dispatch_outcomes[fixed.name].reason == "manual_stop"
+        migrated.ack()
+
+    saved_route = _load_state(supervisor._state_dir)["pending_routes"][fixed.name]
+    assert saved_route["config_digest"] == semantic_digest
+
+
+def test_arbitrary_route_digest_is_still_terminally_rejected(tmp_path: Path) -> None:
+    config = AgentConfig(name="reactor", module="x.y", on_event=["error"])
+    batch = _make_batch(tmp_path / "state", [])
+    batch.register_route(
+        config.name,
+        action="spawn",
+        reason="event:error",
+        config_digest="0" * 64,
+    )
+
+    batch.prune_pending_routes(
+        {
+            config.name: (
+                "spawn",
+                event_config_digest(config),
+                legacy_event_config_digest(config),
+            )
+        }
+    )
+
+    assert batch.pending_routes() == []
+    assert batch.dispatch_outcomes[config.name] == event_reactor_module.ReactorDispatchOutcome(
+        state="rejected",
+        reason="config_changed",
+    )
 
 
 def test_failed_spawn_route_parks_until_manual_recovery_when_restarts_disabled(

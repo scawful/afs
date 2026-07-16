@@ -39,6 +39,7 @@ from .event_reactor import (
     ReactorEvent,
     ReactorStateError,
     event_config_digest,
+    legacy_event_config_digest,
     match_event_rules,
     open_event_batch,
 )
@@ -1270,7 +1271,7 @@ class AgentSupervisor:
         config_by_name = {config.name: config for config in agent_configs}
         digests: dict[str, str] = {}
         if batch is not None:
-            valid_routes: dict[str, tuple[str, str]] = {}
+            valid_routes: dict[str, tuple[str, str, str]] = {}
             for config in agent_configs:
                 if (
                     not config.name.strip()
@@ -1280,7 +1281,11 @@ class AgentSupervisor:
                     continue
                 digest = event_config_digest(config)
                 digests[config.name] = digest
-                valid_routes[config.name] = (config.on_event_action, digest)
+                valid_routes[config.name] = (
+                    config.on_event_action,
+                    digest,
+                    legacy_event_config_digest(config),
+                )
             batch.prune_pending_routes(valid_routes)
             for route in batch.pending_routes(action=action):
                 config = config_by_name.get(route.agent_name)

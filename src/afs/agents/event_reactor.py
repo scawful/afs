@@ -1776,6 +1776,26 @@ def event_config_digest(config: AgentConfig) -> str:
         ) from exc
 
 
+def legacy_event_config_digest(config: AgentConfig) -> str:
+    """Hash the exact pre-normalization v4 route authorization.
+
+    This is accepted only while loading a parked route written by the earlier
+    v4 implementation. New routes always use :func:`event_config_digest`.
+    """
+    try:
+        return sha256_canonical_json(
+            {
+                "name": config.name,
+                "on_event": list(config.on_event),
+                "on_event_action": config.on_event_action,
+            }
+        )
+    except (CanonicalJSONError, TypeError, ValueError) as exc:
+        raise ReactorStateError(
+            f"agent config {config.name!r} cannot be hashed for event delivery: {exc}"
+        ) from exc
+
+
 @dataclass
 class ReactorBatch:
     """One cycle's events plus the cursor advance that ack() will commit."""
@@ -1823,12 +1843,24 @@ class ReactorBatch:
 
     def prune_pending_routes(
         self,
-        valid_routes: dict[str, tuple[str, str]],
+        valid_routes: dict[str, tuple[str, str, str]],
     ) -> None:
-        """Terminally reject routes whose config disappeared or changed."""
+        """Reject changed routes and migrate an exact legacy config digest."""
         for name, route in list(self._pending_routes.items()):
             valid = valid_routes.get(name)
-            if valid == (route.action, route.config_digest):
+            if valid is not None:
+                action, config_digest, legacy_digest = valid
+            else:
+                action = config_digest = legacy_digest = ""
+            if route.action == action and route.config_digest in {
+                config_digest,
+                legacy_digest,
+            }:
+                if route.config_digest != config_digest:
+                    self._pending_routes[name] = replace(
+                        route,
+                        config_digest=config_digest,
+                    )
                 continue
             self._pending_routes.pop(name, None)
             self._active_routes.discard(name)
