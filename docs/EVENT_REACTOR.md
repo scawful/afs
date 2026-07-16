@@ -53,15 +53,22 @@ Delivery is transactional, at-least-once:
   metrics). The lock is advisory and host-local: supervisors pointed at
   different `AFS_AGENT_STATE_DIR`s, or hosts sharing a synced filesystem,
   are outside its reach.
-- Reads are bounded to 500 events per source per cycle. A larger backlog
-  drains across cycles in order — never dropped, never read unbounded.
-  History scans skip daily files more than one day older than the cursor
-  date (the day of grace absorbs writer-local filename skew). One caveat:
-  hivemind messages carry an optional TTL enforced at read time, so a
-  message that expires while waiting out a long drain or an unacked crash
-  window is gone when its redelivery cycle arrives.
-- The cursor state (`supervisor/event_reactor/cursor.json`) keeps
-  independent per-source cursors and is primed to "now" only for a genuinely
+- Reads retain at most 500 records per source per cycle. History JSONL is
+  streamed from durable byte offsets with a 1 MiB scan budget and a 256 KiB
+  per-record ceiling; hivemind directories are streamed into a bounded
+  oldest-candidate heap and each message has the same 256 KiB ceiling. Larger
+  backlogs resume from positional checkpoints across cycles instead of
+  materializing the whole source. History checkpoints are append-position
+  based, so a newly appended event is delivered even if its caller supplied a
+  backdated timestamp; timestamp-only v2 state migrates in bounded slices.
+  Strict bounds may split a same-timestamp group, which is safe because the
+  next byte/file checkpoint resumes the exact remainder. One caveat: hivemind
+  messages carry an optional TTL enforced at read time, so a message that
+  expires while waiting out a long drain or an unacked crash window is gone
+  when its redelivery cycle arrives.
+- The version-3 cursor state (`supervisor/event_reactor/cursor.json`) keeps
+  independent per-source watermarks plus positional checkpoints and is
+  primed to "now" only for a genuinely
   new state, so enabling the reactor never replays historical events as a
   spawn storm. Once initialized, a missing, unreadable, malformed, or partial
   cursor fails closed with `reactor_state_error`; repair is explicit and no

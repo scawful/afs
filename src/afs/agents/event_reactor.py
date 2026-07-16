@@ -32,6 +32,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
+from heapq import nsmallest
 from pathlib import Path
 from typing import Any
 
@@ -51,12 +52,15 @@ STATE_DIR_NAME = "event_reactor"
 CURSOR_FILE_NAME = "cursor.json"
 INITIALIZED_FILE_NAME = "initialized"
 LEGACY_CURSOR_FILE_NAME = "event_reactor_cursor.json"
-STATE_VERSION = 2
+STATE_VERSION = 3
 DEFAULT_EVENT_DEBOUNCE_SECONDS = 300.0
 HIVEMIND_KIND = "hivemind"
-# Per-source per-cycle read bound. A backlog larger than this is drained
-# across cycles (oldest first) instead of being dropped or read unbounded.
+# Per-source per-cycle record bound. Positional checkpoints resume larger
+# backlogs without materializing an entire daily log or message collection.
 MAX_EVENTS_PER_CYCLE = 500
+MAX_HISTORY_SCAN_BYTES = 1024 * 1024
+MAX_HISTORY_RECORD_BYTES = 256 * 1024
+MAX_HIVEMIND_RECORD_BYTES = 256 * 1024
 LOCK_TIMEOUT_SECONDS = 5.0
 # Writers stamp events before the write lands (history hashes and may write a
 # payload file first). Events younger than this are deferred one cycle so the
@@ -295,78 +299,294 @@ def _event_sort_key(event: ReactorEvent) -> datetime:
     return _parse_timestamp(event.timestamp) or datetime.min.replace(tzinfo=timezone.utc)
 
 
+def _history_files(
+    context_path: Path,
+    *,
+    config: Any = None,
+) -> list[Path]:
+    try:
+        history_root = resolve_mount_root(context_path, MountType.HISTORY, config=config)
+    except Exception:  # noqa: BLE001 - missing mounts must not break reconcile
+        return []
+    if not history_root.exists():
+        return []
+    return sorted(history_root.glob(f"{EVENT_FILE_PREFIX}_*.jsonl"))
+
+
+def _history_offset_snapshot(
+    context_path: Path,
+    *,
+    config: Any = None,
+) -> dict[str, int]:
+    """Current append offsets used when priming or migrating state."""
+    snapshot: dict[str, int] = {}
+    for path in _history_files(context_path, config=config):
+        try:
+            snapshot[path.name] = path.stat().st_size
+        except OSError:
+            continue
+    return snapshot
+
+
+def _offset_map(value: Any, *, key: str) -> dict[str, int]:
+    if not isinstance(value, dict):
+        raise ReactorStateError(f"event reactor state field {key!r} must be an object")
+    result: dict[str, int] = {}
+    for raw_name, raw_offset in value.items():
+        if (
+            not isinstance(raw_name, str)
+            or not raw_name
+            or isinstance(raw_offset, bool)
+            or not isinstance(raw_offset, int)
+            or raw_offset < 0
+        ):
+            raise ReactorStateError(
+                f"event reactor state field {key!r} contains an invalid file offset"
+            )
+        result[raw_name] = raw_offset
+    return result
+
+
 def _history_events_since(
     context_path: Path,
     cursor: datetime,
     until: datetime,
     *,
     config: Any = None,
+    offsets: dict[str, int] | None = None,
+    migration_cutoffs: dict[str, int] | None = None,
     limit: int = MAX_EVENTS_PER_CYCLE,
-) -> tuple[list[ReactorEvent], bool, int]:
-    """Oldest-first history events in ``(cursor, until]``: (events, truncated, skipped)."""
-    try:
-        history_root = resolve_mount_root(context_path, MountType.HISTORY, config=config)
-    except Exception:  # noqa: BLE001 - missing mounts must not break reconcile
-        return [], False, 0
-    if not history_root.exists():
-        return [], False, 0
+    max_scan_bytes: int = MAX_HISTORY_SCAN_BYTES,
+) -> tuple[list[ReactorEvent], bool, int, dict[str, int], dict[str, int]]:
+    """Stream one bounded, resumable slice of append-only history files.
 
-    # History files are daily (events_YYYYMMDD.jsonl); files dated before the
-    # cursor's day cannot contain newer events, so the scan is bounded by the
-    # cursor instead of the full history. One day of grace covers filenames
-    # stamped in a writer's local day that differs from the cursor's UTC day.
-    cursor_stamp = (
-        cursor.astimezone(timezone.utc) - timedelta(days=1)
-    ).strftime("%Y%m%d")
+    File offsets, not timestamps, are the delivery checkpoint. That keeps the
+    scan bounded without assuming callers append timestamp-monotonic records.
+    ``migration_cutoffs`` marks bytes that predate an older timestamp-only
+    cursor; those records are filtered once while offsets catch up. Offsets are
+    returned separately and persist only when the enclosing batch is acked.
+    """
+    paths = _history_files(context_path, config=config)
+    pending_offsets = dict(offsets or {})
+    pending_cutoffs = dict(migration_cutoffs or {})
+    existing_names = {path.name for path in paths}
+    for name in [name for name in pending_offsets if name not in existing_names]:
+        pending_offsets.pop(name, None)
+        pending_cutoffs.pop(name, None)
+
     events: list[ReactorEvent] = []
     skipped = 0
-    for path in sorted(history_root.glob(f"{EVENT_FILE_PREFIX}_*.jsonl")):
-        file_stamp = path.stem.rpartition("_")[2]
-        if file_stamp.isdigit() and len(file_stamp) == 8 and file_stamp < cursor_stamp:
-            continue
+    scanned_records = 0
+    scanned_bytes = 0
+    record_limit = limit if limit > 0 else MAX_EVENTS_PER_CYCLE
+    byte_limit = max(max_scan_bytes, 1)
+    truncated = False
+
+    for path_index, path in enumerate(paths):
+        name = path.name
+        offset = pending_offsets.get(name, 0)
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            size = path.stat().st_size
+            if size < offset:
+                raise ReactorStateError(
+                    f"history file shrank below its reactor checkpoint: {path} "
+                    f"({size} < {offset})"
+                )
+            handle = path.open("rb")
+        except ReactorStateError:
+            raise
         except OSError:
             continue
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                skipped += 1
-                continue
-            if not isinstance(record, dict):
-                skipped += 1
-                continue
-            try:
-                kind = str(record.get("type", ""))
-                if kind == HIVEMIND_KIND:
-                    # The bus is the canonical hivemind source; its history
-                    # mirror (op "send") would double-deliver every message
-                    # under a bare "hivemind" pattern with an op, not a
-                    # topic, in the detail slot.
+        with handle:
+            handle.seek(offset)
+            while handle.tell() < size:
+                if len(events) >= record_limit or scanned_records >= record_limit:
+                    truncated = True
+                    break
+                remaining = byte_limit - scanned_bytes
+                if remaining <= 0:
+                    truncated = True
+                    break
+                line_start = handle.tell()
+                read_cap = min(MAX_HISTORY_RECORD_BYTES + 1, remaining + 1)
+                raw = handle.readline(read_cap)
+                if not raw:
+                    break
+                if not raw.endswith(b"\n"):
+                    if len(raw) > MAX_HISTORY_RECORD_BYTES:
+                        raise ReactorStateError(
+                            f"history record exceeds {MAX_HISTORY_RECORD_BYTES} bytes: "
+                            f"{path} at offset {line_start}"
+                        )
+                    # The cycle byte budget ended inside a valid line. Leave
+                    # the offset at its start so the next cycle reads it whole.
+                    handle.seek(line_start)
+                    truncated = True
+                    break
+
+                pending_offsets[name] = handle.tell()
+                scanned_records += 1
+                scanned_bytes += len(raw)
+                line = raw.strip()
+                if not line:
                     continue
-                stamp = _parse_timestamp(str(record.get("timestamp", "")))
-                if stamp is None or stamp <= cursor or stamp > until:
+                try:
+                    record = json.loads(line)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    skipped += 1
                     continue
-                metadata = record.get("metadata")
-                events.append(
-                    ReactorEvent(
-                        kind=kind,
-                        detail=str(record.get("op", "") or ""),
-                        source=str(record.get("source", "")),
-                        timestamp=str(record.get("timestamp", "")),
-                        metadata=metadata if isinstance(metadata, dict) else {},
+                if not isinstance(record, dict):
+                    skipped += 1
+                    continue
+                try:
+                    kind = str(record.get("type", ""))
+                    if kind == HIVEMIND_KIND:
+                        # The bus is the canonical hivemind source; its history
+                        # mirror would double-deliver each message.
+                        continue
+                    stamp = _parse_timestamp(str(record.get("timestamp", "")))
+                    if stamp is None:
+                        continue
+                    if stamp > until:
+                        # Do not checkpoint past a grace-window event. Writers
+                        # stamp before append; advancing the file offset here
+                        # would make the event disappear permanently.
+                        pending_offsets[name] = line_start
+                        handle.seek(line_start)
+                        truncated = True
+                        break
+                    cutoff = pending_cutoffs.get(name, 0)
+                    if line_start < cutoff and stamp <= cursor:
+                        continue
+                    metadata = record.get("metadata")
+                    events.append(
+                        ReactorEvent(
+                            kind=kind,
+                            detail=str(record.get("op", "") or ""),
+                            source=str(record.get("source", "")),
+                            timestamp=str(record.get("timestamp", "")),
+                            metadata=metadata if isinstance(metadata, dict) else {},
+                        )
                     )
-                )
-            except Exception:  # noqa: BLE001 - one bad record never stops ingestion
-                skipped += 1
-                continue
+                except Exception:  # noqa: BLE001 - one bad record never stops ingestion
+                    skipped += 1
+                    continue
+            if pending_offsets.get(name, offset) < size:
+                truncated = True
+            cutoff = pending_cutoffs.get(name)
+            if cutoff is not None and pending_offsets.get(name, offset) >= cutoff:
+                pending_cutoffs.pop(name, None)
+        if truncated:
+            break
+        if path_index < len(paths) - 1 and (
+            len(events) >= record_limit
+            or scanned_records >= record_limit
+            or scanned_bytes >= byte_limit
+        ):
+            truncated = True
+            break
+
     events.sort(key=_event_sort_key)
-    events, truncated = _cut_at_timestamp_boundary(events, limit)
-    return events, truncated, skipped
+    return events, truncated, skipped, pending_offsets, pending_cutoffs
+
+
+def _string_checkpoint_map(value: Any, *, key: str) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ReactorStateError(f"event reactor state field {key!r} must be an object")
+    result: dict[str, str] = {}
+    for raw_name, raw_checkpoint in value.items():
+        if (
+            not isinstance(raw_name, str)
+            or not raw_name
+            or not isinstance(raw_checkpoint, str)
+        ):
+            raise ReactorStateError(
+                f"event reactor state field {key!r} contains an invalid checkpoint"
+            )
+        _decode_hivemind_checkpoint(raw_checkpoint)
+        result[raw_name] = raw_checkpoint
+    return result
+
+
+def _hivemind_root(context_path: Path, *, config: Any = None) -> Path | None:
+    try:
+        root = resolve_mount_root(context_path, MountType.HIVEMIND, config=config)
+    except Exception:  # noqa: BLE001 - hivemind is an optional signal source
+        return None
+    return root if root.exists() else None
+
+
+def _hivemind_checkpoint_snapshot(
+    context_path: Path,
+    *,
+    config: Any = None,
+) -> dict[str, str]:
+    root = _hivemind_root(context_path, config=config)
+    if root is None:
+        return {}
+    snapshot: dict[str, str] = {}
+    try:
+        directories = sorted(
+            path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")
+        )
+    except OSError:
+        return {}
+    for directory in directories:
+        try:
+            with os.scandir(directory) as entries:
+                latest = max(
+                    (
+                        (entry.stat().st_mtime_ns, entry.name)
+                        for entry in entries
+                        if entry.is_file() and entry.name.endswith(".json")
+                    ),
+                    default=None,
+                )
+        except OSError:
+            continue
+        if latest is not None:
+            snapshot[directory.name] = _encode_hivemind_checkpoint(*latest)
+    return snapshot
+
+
+def _encode_hivemind_checkpoint(mtime_ns: int, filename: str) -> str:
+    return f"{mtime_ns}:{filename}"
+
+
+def _decode_hivemind_checkpoint(value: str) -> tuple[int, str]:
+    if not value:
+        return -1, ""
+    raw_mtime, separator, filename = value.partition(":")
+    if not separator or not raw_mtime.isdigit() or not filename:
+        raise ReactorStateError("event reactor hivemind checkpoint is malformed")
+    return int(raw_mtime), filename
+
+
+def _hivemind_candidates(
+    root: Path,
+    checkpoints: dict[str, str],
+) -> Iterator[tuple[int, str, str, Path]]:
+    """Yield uncheckpointed message paths without retaining directory contents."""
+    try:
+        directories = sorted(
+            path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")
+        )
+    except OSError:
+        return
+    for directory in directories:
+        checkpoint = _decode_hivemind_checkpoint(
+            checkpoints.get(directory.name, "")
+        )
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if not entry.is_file() or not entry.name.endswith(".json"):
+                        continue
+                    candidate = (entry.stat().st_mtime_ns, entry.name)
+                    if candidate > checkpoint:
+                        yield candidate[0], candidate[1], directory.name, Path(entry.path)
+        except OSError:
+            continue
 
 
 def _hivemind_events_since(
@@ -375,24 +595,70 @@ def _hivemind_events_since(
     until: datetime,
     *,
     config: Any = None,
+    checkpoints: dict[str, str] | None = None,
+    migration_cutoffs: dict[str, str] | None = None,
     limit: int = MAX_EVENTS_PER_CYCLE,
-) -> tuple[list[ReactorEvent], bool, int]:
-    """Oldest-first hivemind events in ``(cursor, until]``: (events, truncated, skipped)."""
-    try:
-        from ..hivemind import HivemindBus
+) -> tuple[list[ReactorEvent], bool, int, dict[str, str], dict[str, str]]:
+    """Read a bounded oldest-first slice of immutable hivemind message files."""
+    from ..hivemind import HivemindMessage
 
-        # limit=0 disables the bus's newest-N slice: the backlog must be
-        # drained oldest-first, so the bound is applied here at a timestamp
-        # boundary instead of dropping the oldest messages.
-        messages = HivemindBus(context_path, config=config).read(since=cursor, limit=0)
-    except Exception:  # noqa: BLE001 - hivemind is optional signal, not a dependency
-        return [], False, 0
+    root = _hivemind_root(context_path, config=config)
+    pending_checkpoints = dict(checkpoints or {})
+    pending_cutoffs = dict(migration_cutoffs or {})
+    if root is None:
+        return [], False, 0, pending_checkpoints, pending_cutoffs
+
+    try:
+        active_directories = {
+            path.name
+            for path in root.iterdir()
+            if path.is_dir() and not path.name.startswith(".")
+        }
+    except OSError:
+        active_directories = set()
+    for name in [name for name in pending_checkpoints if name not in active_directories]:
+        pending_checkpoints.pop(name, None)
+        pending_cutoffs.pop(name, None)
+
+    record_limit = limit if limit > 0 else MAX_EVENTS_PER_CYCLE
+    selected = nsmallest(
+        record_limit + 1,
+        _hivemind_candidates(root, pending_checkpoints),
+        key=lambda item: (item[0], item[1], item[2]),
+    )
+    truncated = len(selected) > record_limit
     events: list[ReactorEvent] = []
     skipped = 0
-    for message in messages:
+    expiry_now = datetime.now(timezone.utc)
+    for mtime_ns, filename, directory_name, path in selected[:record_limit]:
+        checkpoint = _encode_hivemind_checkpoint(mtime_ns, filename)
         try:
+            with path.open("rb") as handle:
+                raw = handle.read(MAX_HIVEMIND_RECORD_BYTES + 1)
+            if len(raw) > MAX_HIVEMIND_RECORD_BYTES:
+                skipped += 1
+                pending_checkpoints[directory_name] = checkpoint
+                continue
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError("message is not an object")
+            message = HivemindMessage.from_dict(data)
             stamp = _parse_timestamp(message.timestamp)
-            if stamp is None or stamp <= cursor or stamp > until:
+            if stamp is None:
+                skipped += 1
+                pending_checkpoints[directory_name] = checkpoint
+                continue
+            if stamp > until:
+                # Filename ordering follows the send timestamp. Leave this and
+                # later files uncheckpointed until the grace window elapses.
+                truncated = True
+                break
+            expires = _parse_timestamp(message.expires_at or "")
+            pending_checkpoints[directory_name] = checkpoint
+            if expires is not None and expires <= expiry_now:
+                continue
+            cutoff = pending_cutoffs.get(directory_name, "")
+            if cutoff and (mtime_ns, filename) <= _decode_hivemind_checkpoint(cutoff) and stamp <= cursor:
                 continue
             events.append(
                 ReactorEvent(
@@ -405,10 +671,14 @@ def _hivemind_events_since(
             )
         except Exception:  # noqa: BLE001 - one bad message never stops ingestion
             skipped += 1
+            pending_checkpoints[directory_name] = checkpoint
             continue
+    for directory_name, cutoff in list(pending_cutoffs.items()):
+        checkpoint = pending_checkpoints.get(directory_name, "")
+        if checkpoint and _decode_hivemind_checkpoint(checkpoint) >= _decode_hivemind_checkpoint(cutoff):
+            pending_cutoffs.pop(directory_name, None)
     events.sort(key=_event_sort_key)
-    events, truncated = _cut_at_timestamp_boundary(events, limit)
-    return events, truncated, skipped
+    return events, truncated, skipped, pending_checkpoints, pending_cutoffs
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +698,10 @@ class ReactorBatch:
     _pending_history_cursor: str
     _pending_hivemind_cursor: str
     _now: datetime
+    _pending_history_offsets: dict[str, int] = field(default_factory=dict)
+    _pending_history_migration_cutoffs: dict[str, int] = field(default_factory=dict)
+    _pending_hivemind_files: dict[str, str] = field(default_factory=dict)
+    _pending_hivemind_migration_cutoffs: dict[str, str] = field(default_factory=dict)
     acked: bool = False
     dispatch_failures: int = 0
 
@@ -474,6 +748,20 @@ class ReactorBatch:
         """
         self._state["history_cursor"] = self._pending_history_cursor
         self._state["hivemind_cursor"] = self._pending_hivemind_cursor
+        self._state["history_offsets"] = self._pending_history_offsets
+        if self._pending_history_migration_cutoffs:
+            self._state["history_migration_cutoffs"] = (
+                self._pending_history_migration_cutoffs
+            )
+        else:
+            self._state.pop("history_migration_cutoffs", None)
+        self._state["hivemind_files"] = self._pending_hivemind_files
+        if self._pending_hivemind_migration_cutoffs:
+            self._state["hivemind_migration_cutoffs"] = (
+                self._pending_hivemind_migration_cutoffs
+            )
+        else:
+            self._state.pop("hivemind_migration_cutoffs", None)
         _save_state(self._state_dir, self._state)
         self.acked = True
 
@@ -505,6 +793,7 @@ def open_event_batch(
     config: Any = None,
     now: datetime | None = None,
     max_events: int = MAX_EVENTS_PER_CYCLE,
+    max_history_scan_bytes: int = MAX_HISTORY_SCAN_BYTES,
     lock_timeout: float = LOCK_TIMEOUT_SECONDS,
     grace_seconds: float = WATERMARK_GRACE_SECONDS,
 ) -> Iterator[ReactorBatch]:
@@ -547,6 +836,12 @@ def open_event_batch(
             state["history_cursor"] = current.isoformat()
             hivemind_stored = current
             state["hivemind_cursor"] = current.isoformat()
+            state["history_offsets"] = _history_offset_snapshot(
+                context_path, config=config
+            )
+            state["hivemind_files"] = _hivemind_checkpoint_snapshot(
+                context_path, config=config
+            )
             _save_state(state_dir, state)
             yield ReactorBatch(
                 events=[],
@@ -557,6 +852,8 @@ def open_event_batch(
                 _pending_history_cursor=state["history_cursor"],
                 _pending_hivemind_cursor=state["hivemind_cursor"],
                 _now=current,
+                _pending_history_offsets=dict(state["history_offsets"]),
+                _pending_hivemind_files=dict(state["hivemind_files"]),
                 acked=True,
             )
             return
@@ -572,11 +869,68 @@ def open_event_batch(
                 + "; repair the state explicitly instead of skipping backlog"
             )
 
-        history_events, history_truncated, history_skipped = _history_events_since(
-            context_path, history_stored, ripe_until, config=config, limit=max_events
+        if "history_offsets" in state:
+            history_offsets = _offset_map(
+                state["history_offsets"], key="history_offsets"
+            )
+            history_migration_cutoffs = _offset_map(
+                state.get("history_migration_cutoffs", {}),
+                key="history_migration_cutoffs",
+            )
+        else:
+            # Upgrade timestamp-only state without an unbounded catch-up read.
+            # Existing bytes are scanned in bounded slices and filtered against
+            # the old timestamp cursor; bytes appended after this snapshot are
+            # always delivered, even if their caller supplied an older stamp.
+            history_offsets = {}
+            history_migration_cutoffs = _history_offset_snapshot(
+                context_path, config=config
+            )
+
+        if "hivemind_files" in state:
+            hivemind_files = _string_checkpoint_map(
+                state["hivemind_files"], key="hivemind_files"
+            )
+            hivemind_migration_cutoffs = _string_checkpoint_map(
+                state.get("hivemind_migration_cutoffs", {}),
+                key="hivemind_migration_cutoffs",
+            )
+        else:
+            hivemind_files = {}
+            hivemind_migration_cutoffs = _hivemind_checkpoint_snapshot(
+                context_path, config=config
+            )
+
+        (
+            history_events,
+            history_truncated,
+            history_skipped,
+            pending_history_offsets,
+            pending_history_migration_cutoffs,
+        ) = _history_events_since(
+            context_path,
+            history_stored,
+            ripe_until,
+            config=config,
+            offsets=history_offsets,
+            migration_cutoffs=history_migration_cutoffs,
+            limit=max_events,
+            max_scan_bytes=max_history_scan_bytes,
         )
-        hivemind_events, hivemind_truncated, hivemind_skipped = _hivemind_events_since(
-            context_path, hivemind_stored, ripe_until, config=config, limit=max_events
+        (
+            hivemind_events,
+            hivemind_truncated,
+            hivemind_skipped,
+            pending_hivemind_files,
+            pending_hivemind_migration_cutoffs,
+        ) = _hivemind_events_since(
+            context_path,
+            hivemind_stored,
+            ripe_until,
+            config=config,
+            checkpoints=hivemind_files,
+            migration_cutoffs=hivemind_migration_cutoffs,
+            limit=max_events,
         )
         events = sorted(history_events + hivemind_events, key=_event_sort_key)
         skipped = history_skipped + hivemind_skipped
@@ -592,5 +946,13 @@ def open_event_batch(
             _pending_history_cursor=_source_watermark(history_events, history_stored),
             _pending_hivemind_cursor=_source_watermark(hivemind_events, hivemind_stored),
             _now=current,
+            _pending_history_offsets=pending_history_offsets,
+            _pending_history_migration_cutoffs=(
+                pending_history_migration_cutoffs
+            ),
+            _pending_hivemind_files=pending_hivemind_files,
+            _pending_hivemind_migration_cutoffs=(
+                pending_hivemind_migration_cutoffs
+            ),
             acked=False,
         )

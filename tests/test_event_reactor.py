@@ -204,9 +204,121 @@ def test_backlog_drains_oldest_first_across_cycles(tmp_path: Path) -> None:
     assert seen == [f"boom{index}" for index in range(7)]
 
 
-def test_truncation_never_splits_a_timestamp_group(tmp_path: Path) -> None:
-    """Events sharing the boundary timestamp stay in one batch, because the
-    next cycle reads strictly after the cursor."""
+def test_history_offsets_deliver_backdated_appends(tmp_path: Path) -> None:
+    """Append position is authoritative after initialization, not timestamp."""
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW)
+
+    _write_history_event(
+        context,
+        event_type="error",
+        op="backdated",
+        timestamp=NOW - timedelta(days=2),
+    )
+    events = _collect(context, state, now=NOW + timedelta(seconds=30))
+    assert [event.label() for event in events] == ["error:backdated"]
+
+
+def test_history_scan_resumes_from_bounded_byte_checkpoint(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(seconds=60))
+    for index in range(3):
+        _write_history_event(
+            context,
+            event_type="error",
+            op=f"wide{index}-" + ("x" * 300),
+            timestamp=NOW + timedelta(seconds=index),
+        )
+
+    seen: list[str] = []
+    offsets: list[int] = []
+    for cycle in range(1, 8):
+        with open_event_batch(
+            context,
+            state,
+            now=NOW + timedelta(minutes=cycle),
+            max_events=10,
+            max_history_scan_bytes=600,
+        ) as batch:
+            seen.extend(event.detail for event in batch.events)
+            batch.ack()
+        payload = _load_state(state)
+        offsets.append(next(iter(payload["history_offsets"].values())))
+        if len(seen) == 3:
+            break
+
+    assert [detail.split("-", 1)[0] for detail in seen] == [
+        "wide0",
+        "wide1",
+        "wide2",
+    ]
+    assert offsets == sorted(offsets)
+    assert len(set(offsets)) == len(offsets)
+
+
+def test_history_scan_does_not_materialize_daily_file(tmp_path: Path, monkeypatch) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(seconds=60))
+    _write_history_event(
+        context, event_type="error", op="streamed", timestamp=NOW
+    )
+    history_file = next((context / "history").glob("events_*.jsonl"))
+    original = Path.read_text
+
+    def _poison(path: Path, *args, **kwargs):
+        if path == history_file:
+            raise AssertionError("history file was materialized with read_text")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _poison)
+    events = _collect(context, state, now=NOW + timedelta(seconds=30))
+    assert [event.label() for event in events] == ["error:streamed"]
+
+
+def test_timestamp_only_state_migrates_without_replay_or_backdated_loss(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW)
+    _write_history_event(
+        context,
+        event_type="error",
+        op="legacy-old",
+        timestamp=NOW - timedelta(minutes=10),
+    )
+
+    cursor_path = state / "event_reactor" / "cursor.json"
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+    payload.pop("history_offsets", None)
+    cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    assert _collect(context, state, now=NOW + timedelta(seconds=30)) == []
+    migrated = _load_state(state)
+    assert migrated["history_offsets"]
+    assert "history_migration_cutoffs" not in migrated
+
+    # Once positional migration is complete, an append is new regardless of
+    # a caller-supplied timestamp older than the legacy watermark.
+    _write_history_event(
+        context,
+        event_type="error",
+        op="new-backdated",
+        timestamp=NOW - timedelta(minutes=20),
+    )
+    events = _collect(context, state, now=NOW + timedelta(minutes=1))
+    assert [event.label() for event in events] == ["error:new-backdated"]
+
+
+def test_offset_checkpoint_safely_splits_a_timestamp_group(tmp_path: Path) -> None:
+    """A strict batch bound may split one timestamp group without loss.
+
+    History delivery now checkpoints byte offsets rather than only a timestamp,
+    so the remainder is still readable on the next cycle.
+    """
     context = tmp_path / "context"
     state = tmp_path / "state"
     _collect(context, state, now=NOW - timedelta(seconds=60))
@@ -228,8 +340,8 @@ def test_truncation_never_splits_a_timestamp_group(tmp_path: Path) -> None:
         second = [event.detail for event in batch.events]
         batch.ack()
 
-    assert first == ["early"]  # cut lands before the shared-timestamp group
-    assert sorted(second) == ["shared0", "shared1", "shared2"]
+    assert first == ["early", "shared0"]
+    assert sorted(second) == ["shared1", "shared2"]
 
 
 def test_malformed_records_are_skipped_and_counted(tmp_path: Path) -> None:
@@ -287,6 +399,30 @@ def test_hivemind_backlog_is_not_sliced_to_newest(tmp_path: Path) -> None:
     # type "hivemind" record with op "send") is excluded from the history
     # source, so one send never yields two events.
     assert drained == [f"context:repair{index}" for index in range(5)]
+
+
+def test_hivemind_scan_does_not_materialize_bus_backlog(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from afs.hivemind import HivemindBus
+
+    context = tmp_path / "context"
+    (context / "hivemind").mkdir(parents=True)
+    state = tmp_path / "state"
+    base = datetime.now(timezone.utc)
+    _collect(context, state, now=base - timedelta(seconds=60))
+    HivemindBus(context).send(
+        "afs-watch", "status", {}, topic="context:repair"
+    )
+
+    def _poison(*args, **kwargs):
+        raise AssertionError("reactor delegated to unbounded HivemindBus.read")
+
+    monkeypatch.setattr(HivemindBus, "read", _poison)
+    events = _collect(context, state, now=base + timedelta(minutes=1))
+    assert [event.label() for event in events] == ["hivemind:context:repair"]
+    assert _load_state(state)["hivemind_files"]
 
 
 def test_concurrent_reactor_is_locked_out(tmp_path: Path) -> None:
@@ -463,6 +599,27 @@ def test_corrupt_state_files_fail_closed(tmp_path: Path) -> None:
         try:
             with open_event_batch(context, state, now=NOW):
                 raise AssertionError(f"corrupt state was accepted: {raw!r}")
+        except ReactorStateError:
+            pass
+
+
+def test_corrupt_positional_checkpoints_fail_closed(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(seconds=60))
+    cursor_path = state / "event_reactor" / "cursor.json"
+    valid = json.loads(cursor_path.read_text(encoding="utf-8"))
+
+    for key, value in (
+        ("history_offsets", {"events.jsonl": -1}),
+        ("hivemind_files", {"agent": "not-a-checkpoint"}),
+    ):
+        payload = dict(valid)
+        payload[key] = value
+        cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        try:
+            with open_event_batch(context, state, now=NOW):
+                raise AssertionError(f"invalid {key} was accepted")
         except ReactorStateError:
             pass
 
