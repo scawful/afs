@@ -19,7 +19,10 @@ This reports:
 - extension/hook status
 - MCP status
 - maintenance status for `context-warm`, `context-watch`, `agent-supervisor`, and `gemini-workspace-brief`
-- supervisor state: running, failed, manually stopped, and stale agent state files
+- supervisor state: running, recent failures, manually stopped, and historical
+  failed records. Failures older than seven days stay available through
+  `afs agents ps --all` but no longer dominate the primary status summary;
+  override the window with `AFS_AGENT_FAILURE_HISTORY_SECONDS`.
 
 ## JSON Output
 

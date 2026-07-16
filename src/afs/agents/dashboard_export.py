@@ -174,12 +174,12 @@ def _build_alerts(
 
     # Agent failures
     counts = audit.get("counts", {})
-    failed = int(counts.get("failed", 0))
+    failed = int(counts.get("recent_failed", counts.get("failed", 0)))
     if failed > 0:
         alerts.append(f"{failed} agent(s) in failed state")
 
     # Stale PIDs
-    stale = audit.get("stale_pid_files", [])
+    stale = audit.get("active_issues", audit.get("stale_pid_files", []))
     if stale:
         alerts.append(f"Stale PID files: {', '.join(stale)}")
 
@@ -231,8 +231,10 @@ def build_dashboard(
 
     counts = audit.get("counts", {})
     running = int(counts.get("running", 0))
-    failed = int(counts.get("failed", 0))
+    failed = int(counts.get("recent_failed", counts.get("failed", 0)))
+    historical_failed = int(counts.get("historical_failed", 0))
     configured = int(counts.get("configured", 0))
+    active_total = max(configured - historical_failed, 0)
 
     total_repos = int(workspace_raw.get("total_repos", 0))
     dirty_repos = int(workspace_raw.get("dirty", 0))
@@ -258,7 +260,9 @@ def build_dashboard(
         "agents": {
             "running": running,
             "failed": failed,
+            "historical_failed": historical_failed,
             "total": configured,
+            "active_total": active_total,
         },
         "workspace": {
             "repos": total_repos,
@@ -280,7 +284,7 @@ def format_status_line(dashboard: dict[str, Any]) -> str:
     """
     agents = dashboard.get("agents", {})
     running = agents.get("running", 0)
-    total = agents.get("total", 0)
+    total = agents.get("active_total", agents.get("total", 0))
 
     workspace = dashboard.get("workspace", {})
     dirty = workspace.get("dirty", 0)

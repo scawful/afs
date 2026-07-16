@@ -219,7 +219,8 @@ def render_afs_health(snapshot: dict[str, Any]) -> str:
     lines.append(
         "agents: "
         f"running={supervisor_audit['counts']['running']} "
-        f"failed={supervisor_audit['counts']['failed']} "
+        f"failed={supervisor_audit['counts'].get('recent_failed', supervisor_audit['counts']['failed'])} "
+        f"historical_failed={supervisor_audit['counts'].get('historical_failed', 0)} "
         f"stopped={supervisor_audit['counts']['stopped']} "
         f"manual_stop={supervisor_audit['counts']['manual_stop']}"
     )
@@ -437,11 +438,15 @@ def _maintenance_health(config, context_root: Path) -> dict[str, Any]:
             "counts": {
                 "running": 0,
                 "failed": 0,
+                "recent_failed": 0,
+                "historical_failed": 0,
                 "stopped": 0,
                 "manual_stop": 0,
                 "configured": 0,
             },
             "stale_pid_files": [],
+            "active_issues": [],
+            "historical_failures": [],
             "agents": [],
         }
 
