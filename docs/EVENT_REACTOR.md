@@ -61,9 +61,12 @@ Delivery is transactional, at-least-once:
   message that expires while waiting out a long drain or an unacked crash
   window is gone when its redelivery cycle arrives.
 - The cursor state (`supervisor/event_reactor/cursor.json`) keeps
-  independent per-source cursors and is primed to "now" per source on first
-  run, so enabling the reactor never replays historical events as a spawn
-  storm and one corrupt cursor never drops the other source's backlog.
+  independent per-source cursors and is primed to "now" only for a genuinely
+  new state, so enabling the reactor never replays historical events as a
+  spawn storm. Once initialized, a missing, unreadable, malformed, or partial
+  cursor fails closed with `reactor_state_error`; repair is explicit and no
+  backlog is silently skipped. An adjacent `initialized` marker distinguishes
+  first use from accidental cursor deletion.
 - Malformed log or hivemind records are skipped and counted
   (`reactor_skipped_malformed`), never crash ingestion.
 

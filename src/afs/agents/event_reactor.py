@@ -49,6 +49,7 @@ _log = logging.getLogger(__name__)
 # name would clobber the cursors).
 STATE_DIR_NAME = "event_reactor"
 CURSOR_FILE_NAME = "cursor.json"
+INITIALIZED_FILE_NAME = "initialized"
 LEGACY_CURSOR_FILE_NAME = "event_reactor_cursor.json"
 STATE_VERSION = 2
 DEFAULT_EVENT_DEBOUNCE_SECONDS = 300.0
@@ -159,22 +160,44 @@ def _state_path(state_dir: Path) -> Path:
     return state_dir / STATE_DIR_NAME / CURSOR_FILE_NAME
 
 
+def _initialized_path(state_dir: Path) -> Path:
+    return state_dir / STATE_DIR_NAME / INITIALIZED_FILE_NAME
+
+
 def _read_state_file(path: Path) -> dict[str, Any] | None:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return None
-    return payload if isinstance(payload, dict) else None
+    except OSError as exc:
+        raise ReactorStateError(f"could not read event reactor state from {path}: {exc}") from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ReactorStateError(f"event reactor state is invalid JSON: {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ReactorStateError(
+            f"event reactor state must be a JSON object, got {type(payload).__name__}: {path}"
+        )
+    return payload
 
 
 def _load_state(state_dir: Path) -> dict[str, Any]:
-    payload = _read_state_file(_state_path(state_dir))
+    state_path = _state_path(state_dir)
+    payload = _read_state_file(state_path)
     if payload is None:
         # Migrate state written by earlier versions directly into the state
         # dir. The legacy file is removed on the next successful save, never
         # before, so a crash mid-migration cannot lose the cursors.
-        payload = _read_state_file(state_dir / LEGACY_CURSOR_FILE_NAME)
+        legacy_path = state_dir / LEGACY_CURSOR_FILE_NAME
+        payload = _read_state_file(legacy_path)
     if payload is None:
+        if _initialized_path(state_dir).exists():
+            raise ReactorStateError(
+                f"event reactor cursor is missing after initialization: {state_path}; "
+                "restore the cursor or remove the initialized marker only when an "
+                "explicit re-prime is intended"
+            )
         return {}
     if "version" not in payload and "cursor" in payload:
         # v1 state kept a single shared cursor; both sources start from it.
@@ -186,6 +209,8 @@ def _load_state(state_dir: Path) -> dict[str, Any]:
             "hivemind_cursor": legacy,
             "last_dispatch": {},
         }
+    if not payload:
+        raise ReactorStateError(f"event reactor state is empty: {state_path}")
     payload.setdefault("last_dispatch", {})
     if not isinstance(payload.get("last_dispatch"), dict):
         payload["last_dispatch"] = {}
@@ -210,6 +235,7 @@ def _save_state(state_dir: Path, state: dict[str, Any]) -> None:
             encoding="utf-8",
         )
         os.replace(tmp_path, path)
+        _initialized_path(state_dir).write_text(f"{STATE_VERSION}\n", encoding="utf-8")
     except OSError as exc:
         try:
             tmp_path.unlink(missing_ok=True)
@@ -496,9 +522,10 @@ def open_event_batch(
     writers stamp before their write lands, so consuming right up to *now*
     could advance the watermark past a stamped-but-in-flight event.
 
-    A missing or unreadable cursor is primed to *now* per source, so first
-    enabling the reactor never replays weeks of history as a spawn storm and
-    one corrupt cursor never drops the other source's backlog.
+    A genuinely absent state is primed to *now* once, so first enabling the
+    reactor never replays weeks of history as a spawn storm. Once initialized,
+    missing, unreadable, malformed, or partial cursor state raises
+    :class:`ReactorStateError` instead of silently skipping backlog.
     """
     current = now or datetime.now(timezone.utc)
     ripe_until = current - timedelta(seconds=max(grace_seconds, 0.0))
@@ -511,29 +538,16 @@ def open_event_batch(
             ) from exc
 
         state = _load_state(state_dir)
+        fresh_state = not state
         history_stored = _parse_timestamp(str(state.get("history_cursor", "")))
         hivemind_stored = _parse_timestamp(str(state.get("hivemind_cursor", "")))
 
-        primed_sources: list[str] = []
-        if history_stored is None:
+        if fresh_state:
             history_stored = current
             state["history_cursor"] = current.isoformat()
-            primed_sources.append("history")
-        if hivemind_stored is None:
             hivemind_stored = current
             state["hivemind_cursor"] = current.isoformat()
-            primed_sources.append("hivemind")
-        if primed_sources:
-            if len(primed_sources) < 2:
-                # A fresh install primes both; one missing cursor on an
-                # initialized state means corruption or manual edits.
-                _log.warning(
-                    "Event reactor cursor for %s was missing or unreadable; "
-                    "primed to now, its pre-cursor backlog is skipped",
-                    ", ".join(primed_sources),
-                )
             _save_state(state_dir, state)
-        if len(primed_sources) == 2:
             yield ReactorBatch(
                 events=[],
                 truncated=False,
@@ -546,6 +560,17 @@ def open_event_batch(
                 acked=True,
             )
             return
+        if history_stored is None or hivemind_stored is None:
+            invalid = []
+            if history_stored is None:
+                invalid.append("history_cursor")
+            if hivemind_stored is None:
+                invalid.append("hivemind_cursor")
+            raise ReactorStateError(
+                "event reactor state has missing or invalid cursor(s): "
+                + ", ".join(invalid)
+                + "; repair the state explicitly instead of skipping backlog"
+            )
 
         history_events, history_truncated, history_skipped = _history_events_since(
             context_path, history_stored, ripe_until, config=config, limit=max_events

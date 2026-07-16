@@ -425,8 +425,7 @@ def test_ack_failure_raises_and_batch_redelivers(tmp_path: Path) -> None:
     assert [event.label() for event in events] == ["error:boom"]
 
 
-def test_one_corrupt_cursor_reprimes_only_that_source(tmp_path: Path) -> None:
-    """A mangled hivemind cursor must not drop the history backlog too."""
+def test_invalid_cursor_fails_closed_without_skipping_backlog(tmp_path: Path) -> None:
     context = tmp_path / "context"
     state = tmp_path / "state"
     _collect(context, state, now=NOW - timedelta(seconds=60))
@@ -438,11 +437,68 @@ def test_one_corrupt_cursor_reprimes_only_that_source(tmp_path: Path) -> None:
         context, event_type="error", op="boom", timestamp=NOW - timedelta(seconds=30)
     )
 
-    with open_event_batch(context, state, now=NOW) as batch:
-        assert [event.label() for event in batch.events] == ["error:boom"]
-        batch.ack()
-    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
-    assert payload["hivemind_cursor"] == NOW.isoformat()
+    try:
+        with open_event_batch(context, state, now=NOW):
+            raise AssertionError("invalid cursor was accepted")
+    except ReactorStateError as exc:
+        assert "hivemind_cursor" in str(exc)
+
+    # Failure is non-mutating. After an explicit repair, the backlog remains
+    # available instead of having been skipped by a re-prime-to-now.
+    assert json.loads(cursor_path.read_text(encoding="utf-8"))["hivemind_cursor"] == "not a timestamp"
+    payload["hivemind_cursor"] = (NOW - timedelta(seconds=60)).isoformat()
+    cursor_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    events = _collect(context, state, now=NOW)
+    assert [event.label() for event in events] == ["error:boom"]
+
+
+def test_corrupt_state_files_fail_closed(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(seconds=60))
+    cursor_path = state / "event_reactor" / "cursor.json"
+
+    for raw in ("not json\n", "[]\n", "{}\n"):
+        cursor_path.write_text(raw, encoding="utf-8")
+        try:
+            with open_event_batch(context, state, now=NOW):
+                raise AssertionError(f"corrupt state was accepted: {raw!r}")
+        except ReactorStateError:
+            pass
+
+
+def test_missing_initialized_cursor_requires_explicit_reprime(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(seconds=60))
+    cursor_path = state / "event_reactor" / "cursor.json"
+    cursor_path.unlink()
+
+    try:
+        with open_event_batch(context, state, now=NOW):
+            raise AssertionError("missing initialized cursor was re-primed")
+    except ReactorStateError as exc:
+        assert "missing after initialization" in str(exc)
+
+
+def test_unreadable_state_file_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    context = tmp_path / "context"
+    state = tmp_path / "state"
+    _collect(context, state, now=NOW - timedelta(seconds=60))
+    cursor_path = state / "event_reactor" / "cursor.json"
+    original = Path.read_text
+
+    def _deny(path: Path, *args, **kwargs):
+        if path == cursor_path:
+            raise PermissionError("denied")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _deny)
+    try:
+        with open_event_batch(context, state, now=NOW):
+            raise AssertionError("unreadable cursor was accepted")
+    except ReactorStateError as exc:
+        assert "could not read" in str(exc)
 
 
 def test_day_grace_reads_files_named_for_the_previous_day(tmp_path: Path) -> None:
