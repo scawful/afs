@@ -6,6 +6,7 @@ import fnmatch
 import hashlib
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -14,10 +15,12 @@ from .agent_scope import assert_mount_allowed
 from .grounding_hooks import run_grounding_hooks
 from .history import log_event
 from .manager import AFSManager
-from .models import MountType
+from .models import ContextCategory, MountType
 from .policy import PolicyEnforcer
 
 logger = logging.getLogger(__name__)
+
+FileMountType = MountType | ContextCategory
 
 
 @dataclass
@@ -64,36 +67,81 @@ class ContextEntry:
 class ContextFileSystem:
     """Read/write and listing operations scoped to a context root."""
 
-    def __init__(self, manager: AFSManager, context_path: Path) -> None:
+    def __init__(
+        self,
+        manager: AFSManager,
+        context_path: Path,
+        *,
+        scoped_mount_roots: Mapping[FileMountType, Path] | None = None,
+    ) -> None:
         self._manager = manager
         self._context_path = context_path.resolve()
         if not self._context_path.exists():
             raise FileNotFoundError(f"No AFS context at {self._context_path}")
+        self._scoped_mount_roots = {
+            mount_type: root.expanduser().absolute()
+            for mount_type, root in (scoped_mount_roots or {}).items()
+        }
+        for mount_type, root in self._scoped_mount_roots.items():
+            canonical_root = self._manager.resolve_mount_root(
+                self._context_path, mount_type
+            ).resolve(strict=False)
+            if root == canonical_root or not root.is_relative_to(canonical_root):
+                raise ValueError(
+                    f"Scoped {mount_type.value} root must be inside its context category"
+                )
+            cursor = canonical_root
+            for part in root.relative_to(canonical_root).parts:
+                cursor /= part
+                if cursor.is_symlink():
+                    raise ValueError(
+                        f"Scoped {mount_type.value} root must not contain symlinks"
+                    )
         self._policy = PolicyEnforcer(manager.config.directories)
 
     @property
     def context_path(self) -> Path:
         return self._context_path
 
-    def resolve_mount_root(self, mount_type: MountType) -> Path:
+    def resolve_mount_root(self, mount_type: FileMountType) -> Path:
+        scoped_root = self._scoped_mount_roots.get(mount_type)
+        if scoped_root is not None:
+            return scoped_root
         return self._manager.resolve_mount_root(self._context_path, mount_type)
 
+    def canonical_relative_path(
+        self, mount_type: FileMountType, relative_path: str | None
+    ) -> str:
+        """Return the index path relative to the canonical category root."""
+
+        target, _scope_root = self.resolve_path(mount_type, relative_path)
+        canonical_root = self._manager.resolve_mount_root(
+            self._context_path, mount_type
+        ).resolve()
+        try:
+            return target.relative_to(canonical_root).as_posix()
+        except ValueError as exc:
+            raise ValueError("Path escapes canonical mount root") from exc
+
     def resolve_path(
-        self, mount_type: MountType, relative_path: str | None
+        self, mount_type: FileMountType, relative_path: str | None
     ) -> tuple[Path, Path]:
         mount_root = self.resolve_mount_root(mount_type)
-        if not mount_root.exists():
+        is_scoped = mount_type in self._scoped_mount_roots
+        if not mount_root.exists() and not is_scoped:
             raise FileNotFoundError(f"Mount root not found: {mount_root}")
         target = mount_root if not relative_path else mount_root / relative_path
-        root_resolved = mount_root.resolve()
-        target_resolved = target.resolve()
+        root_resolved = mount_root.resolve(strict=False)
+        target_resolved = target.resolve(strict=False)
         if target_resolved == root_resolved or target_resolved.is_relative_to(
             root_resolved
         ):
             return target_resolved, root_resolved
         raise ValueError("Path escapes mount root")
 
-    def _ensure_mount_access(self, mount_type: MountType, *, operation: str) -> None:
+    def _ensure_mount_access(
+        self, mount_type: FileMountType, *, operation: str
+    ) -> None:
         allowed, message = self._policy.validate_operation(mount_type, operation)
         if not allowed:
             raise PermissionError(message)
@@ -108,7 +156,7 @@ class ContextFileSystem:
 
     def read_text(
         self,
-        mount_type: MountType,
+        mount_type: FileMountType,
         relative_path: str,
         *,
         encoding: str = "utf-8",
@@ -148,7 +196,7 @@ class ContextFileSystem:
 
     def write_text(
         self,
-        mount_type: MountType,
+        mount_type: FileMountType,
         relative_path: str,
         content: str,
         *,
@@ -159,7 +207,9 @@ class ContextFileSystem:
         self._ensure_mount_access(mount_type, operation="write")
         target, root = self.resolve_path(mount_type, relative_path)
         if not root.exists():
-            raise FileNotFoundError(f"Mount root not found: {root}")
+            if mount_type not in self._scoped_mount_roots:
+                raise FileNotFoundError(f"Mount root not found: {root}")
+            root.mkdir(parents=True, exist_ok=True)
         if not target.parent.exists():
             if not mkdirs:
                 raise FileNotFoundError(f"Parent directory missing: {target.parent}")
@@ -194,10 +244,15 @@ class ContextFileSystem:
             },
             include_payloads=False,
         )
-        self._sync_index_for_write(mount_type, relative_path)
+        self._sync_index_for_write(
+            mount_type,
+            self.canonical_relative_path(mount_type, relative_path),
+        )
         return target
 
-    def _sync_index_for_write(self, mount_type: MountType, relative_path: str) -> None:
+    def _sync_index_for_write(
+        self, mount_type: FileMountType, relative_path: str
+    ) -> None:
         try:
             settings = self._manager.config.context_index
             if not settings.enabled:
@@ -218,7 +273,7 @@ class ContextFileSystem:
 
     def stat_entry(
         self,
-        mount_type: MountType,
+        mount_type: FileMountType,
         relative_path: str,
     ) -> ContextEntry:
         self._ensure_mount_access(mount_type, operation="read")
@@ -230,7 +285,7 @@ class ContextFileSystem:
 
     def list_entries(
         self,
-        mount_type: MountType,
+        mount_type: FileMountType,
         *,
         relative_path: str | None = None,
         max_depth: int | None = 1,
