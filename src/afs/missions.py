@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .atomic_io import atomic_write_text
 from .context_paths import resolve_mount_root
 from .models import MountType
 
@@ -173,14 +174,6 @@ class MissionStore:
     def _mission_path(self, mission_id: str) -> Path:
         return self._root / f"{mission_id}.json"
 
-    @staticmethod
-    def _atomic_write(path: Path, text: str) -> None:
-        """Write via a temp file + atomic rename so a concurrent reader/writer never
-        observes a partially written file."""
-        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
-        tmp.write_text(text, encoding="utf-8")
-        tmp.replace(path)
-
     def _load_manifest(self) -> list[str]:
         if not self._manifest_path.exists():
             return []
@@ -218,13 +211,13 @@ class MissionStore:
             manifest = self._load_manifest()
             if mission_id not in manifest:
                 manifest.append(mission_id)
-                self._atomic_write(
+                atomic_write_text(
                     self._manifest_path, json.dumps(manifest, indent=2) + "\n"
                 )
 
     def _write(self, mission: Mission) -> None:
         self._ensure_root()
-        self._atomic_write(
+        atomic_write_text(
             self._mission_path(mission.mission_id),
             json.dumps(mission.to_dict(), indent=2) + "\n",
         )
