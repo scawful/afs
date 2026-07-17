@@ -331,6 +331,53 @@ durable memory with provenance and leaves the draft in place; `notes archive`
 explicitly moves it out of the active scratchpad. `handoff revise` appends a
 superseding revision, while `ack` and `close` record lifecycle state separately.
 
+## Insights
+
+`insights` provides scoped research and deterministic reflection:
+
+```bash
+./scripts/afs insights research "retry policy" --path "$PWD"
+./scripts/afs insights research "similar failure" --path "$PWD" \
+  --semantic --provider ollama
+./scripts/afs insights reflect --path "$PWD"
+./scripts/afs insights list --path "$PWD"
+./scripts/afs insights show <candidate-id> --path "$PWD"
+./scripts/afs insights accept <candidate-id> --path "$PWD" \
+  --because "The attributed evidence supports this pattern."
+./scripts/afs insights reject <candidate-id> --path "$PWD" \
+  --because "The sample is too small."
+```
+
+Research searches only the current registered project plus `common` and
+refreshes its local index unless `--reuse-index` is set. `--semantic` is
+explicit: Ollama keeps embedding input local, while Gemini transmits content
+and the query to Gemini. Internet research separately requires an enabled
+extension selected with `--internet-provider` and one or more
+`--allow-domain` values.
+
+The internet provider is trusted extension code responsible for DNS,
+redirect, private-IP, rebinding, and transport-timeout enforcement. Core AFS
+only bounds the subprocess and validates returned HTTPS URLs, record count,
+and bytes; it does not mediate provider sockets. API-key environment variables
+are scrubbed. Providers should read only a credential file explicitly named by
+trusted configuration, never inherit the full parent environment.
+
+Reflection uses no model or network. It consumes only exactly attributed,
+payload-free failure metadata and creates deterministic pending candidates in
+the current project, or in common with `--common`. Successful completions and
+general activity are ignored to avoid rolling candidate spam. Accept/reject
+require a rationale and human confirmation; there is no automatic promotion.
+The `insights-reflect` and `insights-research` scheduled agents are opt-in,
+not shipped defaults. Scheduled reflection reads only the newest 1,000 raw
+JSONL history records before attribution/filtering and the evidence limit, so
+its recurring scan stays bounded; interactive `insights reflect` retains
+complete-history behavior. Research-agent internet access additionally requires
+the literal profile setting `network_allowed = true`, a selected provider,
+and an explicit domain allowlist. Reports remain in scratchpad and are never
+promoted automatically.
+
+See [Insights](INSIGHTS.md) for storage, trust boundaries, and configuration.
+
 ## Review
 
 `review` now operates on the active context instead of a separate
