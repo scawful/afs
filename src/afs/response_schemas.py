@@ -112,6 +112,62 @@ _SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
         },
         "additionalProperties": False,
     },
+    "insight-candidate": {
+        "$schema": _BASE_SCHEMA,
+        "$id": f"{SCHEMA_URI_PREFIX}insight-candidate",
+        "title": "AFS Insight Candidate",
+        "description": ("A reviewable insight grounded in a deterministic local evidence packet."),
+        "type": "object",
+        "required": [
+            "title",
+            "insight",
+            "evidence_ids",
+            "evidence_digest",
+            "confidence",
+        ],
+        "properties": {
+            "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240,
+                "description": "Short human-readable candidate title.",
+            },
+            "insight": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32768,
+                "description": "The reusable observation supported by the evidence.",
+            },
+            "evidence_ids": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "minItems": 1,
+                "maxItems": 200,
+                "uniqueItems": True,
+                "description": "History event IDs from the supplied evidence packet.",
+            },
+            "evidence_digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "SHA-256 digest of the complete evidence packet.",
+            },
+            "confidence": {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+            },
+            "limitations": {
+                "type": "array",
+                "items": {"type": "string", "maxLength": 2048},
+                "maxItems": 8,
+            },
+            "next_step": {
+                "type": "string",
+                "maxLength": 8192,
+                "description": "Optional bounded follow-up for a human reviewer.",
+            },
+        },
+        "additionalProperties": False,
+    },
     "edit-intent": {
         "$schema": _BASE_SCHEMA,
         "$id": f"{SCHEMA_URI_PREFIX}edit-intent",
@@ -633,6 +689,9 @@ def _validate_schema_node(
         min_length = schema.get("minLength")
         if isinstance(min_length, int) and len(instance) < min_length:
             errors.append(f"{location}: expected length >= {min_length}")
+        max_length = schema.get("maxLength")
+        if isinstance(max_length, int) and len(instance) > max_length:
+            errors.append(f"{location}: expected length <= {max_length}")
         pattern = schema.get("pattern")
         if isinstance(pattern, str) and re.search(pattern, instance) is None:
             errors.append(f"{location}: does not match {pattern!r}")

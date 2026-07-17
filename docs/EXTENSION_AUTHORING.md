@@ -117,10 +117,68 @@ fails closed before provider invocation until scoped ingestion exists.
 
 ```toml
 [[context_sources]]
-name = "tickets"
+name = "docs-research"
 module = "afs_example.sources"
-factory = "register_ticket_source"
+factory = "register_docs_research"
+kinds = ["doc"]
 ```
+
+A minimal opt-in research provider implements `research(request)`. Importing
+the module and calling its factory must only define/construct the provider:
+do not connect to the network, read credentials, or perform other side effects
+until AFS invokes `research` with an explicitly authorized request.
+
+```python
+from afs.sources import ContextSourceRecord, ResearchRequest
+
+from .transport import search_docs_with_policy
+
+
+class DocsResearchProvider:
+    name = "docs-research"
+
+    def research(self, request: ResearchRequest) -> list[ContextSourceRecord]:
+        if not request.network_allowed:
+            raise PermissionError("network research was not authorized")
+
+        # This extension-owned transport must enforce allowed_domains on the
+        # initial URL and every redirect, resolve DNS itself, reject private or
+        # rebound addresses, and honor request.timeout_seconds and size limits.
+        pages = search_docs_with_policy(
+            request.query,
+            allowed_domains=request.allowed_domains,
+            timeout_seconds=request.timeout_seconds,
+            limit=request.max_results,
+            max_bytes=request.max_bytes,
+        )
+        return [
+            ContextSourceRecord(
+                id=page.id,
+                kind="doc",
+                title=page.title,
+                body=page.excerpt,
+                source="example-docs",
+                uri=page.final_url,
+            )
+            for page in pages
+        ]
+
+
+def register_docs_research() -> DocsResearchProvider:
+    return DocsResearchProvider()
+```
+
+The CLI still requires an enabled selected provider and an explicit domain
+allowlist. The provider is trusted/cooperative extension code and owns DNS,
+redirect, DNS-rebinding, private-IP, and transport-timeout enforcement. Core
+AFS runs only the selected provider in a time/output-bounded subprocess, then
+validates returned HTTPS URIs, record count, and total bytes. Core does not
+mediate the provider's sockets.
+
+The broker does not inherit API-key environment variables into this
+subprocess. For now, put a credential-file path in trusted configuration and
+have `research()` read that explicit file; never copy or inherit the full
+parent environment. A future contract may add a narrow secret-name allowlist.
 
 Providers should normalize remote records before writing into AFS. Keep the
 original external system as provenance, not as a required runtime dependency

@@ -16,6 +16,13 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 - Local-first scoped hybrid search with explicit semantic opt-in, atomic index
   publication, consent-aware project coverage, and stable
   `gemini-embedding-2` defaults at 768 dimensions.
+- Scoped Insights workflows: locally refreshed `research`, explicit semantic
+  and allowlisted internet extensions, deterministic payload-free reflection
+  of repeated failures (routine completion/activity is ignored), and
+  human-reviewed candidates with no automatic promotion. The optional
+  scheduled research and reflection agents are not enabled by default;
+  research writes scratchpad-only reports and requires literal network
+  consent plus a provider and domains before using the internet.
 - Session packs and prepared-client packs now require explicit `--semantic`
   (or MCP `semantic=true`) before creating or invoking a remote query embedder.
 - Engagement primitives that keep human judgment in the loop: approvals

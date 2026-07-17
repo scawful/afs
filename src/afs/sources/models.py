@@ -7,7 +7,9 @@ manifest without baking a vendor adapter into core.
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +25,48 @@ CONTEXT_SOURCE_KINDS = (
     "hook",
     "trace",
 )
+
+MAX_RESEARCH_RESULTS = 50
+MAX_RESEARCH_TIMEOUT_SECONDS = 120.0
+MAX_RESEARCH_BYTES = 10 * 1024 * 1024
+MAX_RESEARCH_QUERY_CHARS = 2_000
+_RESEARCH_DOMAIN = re.compile(
+    r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z"
+)
+_NON_PUBLIC_RESEARCH_SUFFIXES = frozenset(
+    {
+        "home",
+        "internal",
+        "invalid",
+        "lan",
+        "local",
+        "localdomain",
+        "localhost",
+        "test",
+    }
+)
+
+
+def _is_public_research_domain(domain: str) -> bool:
+    """Reject literal/private-style hosts before a provider receives consent.
+
+    This is deliberately a syntax-level guard. Selected providers remain
+    responsible for resolving DNS and rejecting private destinations after
+    redirects or rebinding.
+    """
+
+    try:
+        ipaddress.ip_address(domain)
+    except ValueError:
+        pass
+    else:
+        return False
+    labels = domain.split(".")
+    return not (
+        all(label.isdigit() for label in labels)
+        or labels[-1] in _NON_PUBLIC_RESEARCH_SUFFIXES
+    )
 
 
 def normalize_source_kind(value: str) -> str:
@@ -162,6 +206,130 @@ class SourceSyncResult:
         }
 
 
+@dataclass(frozen=True)
+class ResearchRequest:
+    """Bounded request passed to an extension-owned research provider.
+
+    Core AFS does not silently enable network access. A caller must opt in and
+    name at least one allowed domain before a provider may browse. Providers
+    remain responsible for enforcing transport-level timeout, redirect, and
+    private-address protections; the bounds here form the portable contract.
+    """
+
+    query: str
+    network_allowed: bool = False
+    allowed_domains: tuple[str, ...] = ()
+    max_results: int = 10
+    timeout_seconds: float = 20.0
+    max_bytes: int = 1_000_000
+
+    def __post_init__(self) -> None:
+        query = self.query.strip()
+        if not query:
+            raise ValueError("research query must be non-empty")
+        if len(query) > MAX_RESEARCH_QUERY_CHARS:
+            raise ValueError(
+                f"research query must be no more than {MAX_RESEARCH_QUERY_CHARS} characters"
+            )
+        if not isinstance(self.network_allowed, bool):
+            raise ValueError("research network_allowed must be a boolean")
+        if (
+            not isinstance(self.max_results, int)
+            or isinstance(self.max_results, bool)
+            or not 1 <= self.max_results <= MAX_RESEARCH_RESULTS
+        ):
+            raise ValueError(
+                f"research max_results must be between 1 and {MAX_RESEARCH_RESULTS}"
+            )
+        if (
+            not isinstance(self.timeout_seconds, (int, float))
+            or isinstance(self.timeout_seconds, bool)
+            or not math.isfinite(self.timeout_seconds)
+            or not 0 < self.timeout_seconds <= MAX_RESEARCH_TIMEOUT_SECONDS
+        ):
+            raise ValueError(
+                "research timeout_seconds must be greater than 0 and no more than "
+                f"{MAX_RESEARCH_TIMEOUT_SECONDS:g}"
+            )
+        if (
+            not isinstance(self.max_bytes, int)
+            or isinstance(self.max_bytes, bool)
+            or not 1 <= self.max_bytes <= MAX_RESEARCH_BYTES
+        ):
+            raise ValueError(
+                f"research max_bytes must be between 1 and {MAX_RESEARCH_BYTES}"
+            )
+
+        domains: list[str] = []
+        for raw_domain in self.allowed_domains:
+            if not isinstance(raw_domain, str):
+                raise ValueError("research allowed_domains must contain host names")
+            domain = raw_domain.strip().lower().rstrip(".")
+            if (
+                not domain
+                or "://" in domain
+                or "/" in domain
+                or domain.startswith(".")
+                or "*" in domain
+                or not _RESEARCH_DOMAIN.fullmatch(domain)
+                or not _is_public_research_domain(domain)
+            ):
+                raise ValueError(
+                    "research allowed_domains must contain public plain host names "
+                    "without IP literals, private-style suffixes, schemes, paths, "
+                    "or wildcards"
+                )
+            if domain not in domains:
+                domains.append(domain)
+        if self.network_allowed and not domains:
+            raise ValueError(
+                "network research requires at least one explicitly allowed domain"
+            )
+
+        object.__setattr__(self, "query", query)
+        object.__setattr__(self, "allowed_domains", tuple(domains))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "query": self.query,
+            "network_allowed": self.network_allowed,
+            "allowed_domains": list(self.allowed_domains),
+            "max_results": self.max_results,
+            "timeout_seconds": self.timeout_seconds,
+            "max_bytes": self.max_bytes,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> ResearchRequest:
+        allowed = {
+            "query",
+            "network_allowed",
+            "allowed_domains",
+            "max_results",
+            "timeout_seconds",
+            "max_bytes",
+        }
+        unknown = sorted(set(payload) - allowed)
+        if unknown:
+            raise ValueError(
+                "research request contains unknown fields: " + ", ".join(unknown)
+            )
+        domains = payload.get("allowed_domains", [])
+        if not isinstance(domains, list):
+            raise ValueError("research allowed_domains must be an array")
+        query = payload.get("query")
+        if not isinstance(query, str):
+            raise ValueError("research query must be a string")
+        return cls(
+            query=query,
+            network_allowed=payload.get("network_allowed", False),
+            allowed_domains=tuple(domains),
+            max_results=payload.get("max_results", 10),
+            timeout_seconds=payload.get("timeout_seconds", 20.0),
+            max_bytes=payload.get("max_bytes", 1_000_000),
+        )
+
+
 @runtime_checkable
 class ContextSourceProvider(Protocol):
     """Minimal provider interface implemented by extension adapters."""
@@ -175,4 +343,23 @@ class ContextSourceProvider(Protocol):
 
     def sync(self, *, query: str = "", limit: int = 50) -> list[ContextSourceRecord] | list[dict[str, Any]]:
         """Return records to materialize into AFS context items."""
+        ...
+
+
+@runtime_checkable
+class ResearchSourceProvider(Protocol):
+    """Opt-in bounded research interface implemented by extensions.
+
+    Merely discovering a provider must not perform network I/O. AFS passes a
+    ``ResearchRequest`` only after an explicit caller grants network access
+    and domain scope.
+    """
+
+    name: str
+
+    def research(
+        self,
+        request: ResearchRequest,
+    ) -> list[ContextSourceRecord] | list[dict[str, Any]]:
+        """Return normalized evidence records within the request bounds."""
         ...

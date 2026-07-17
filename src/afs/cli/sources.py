@@ -9,9 +9,11 @@ from typing import Any
 
 from ..manager import AFSManager
 from ..sources import (
+    ContextSourceProvider,
+    ResearchSourceProvider,
     assert_source_materialization_supported,
     discover_source_provider_specs,
-    load_source_providers,
+    load_source_provider_by_name,
     materialize_source_records,
 )
 from ._utils import load_runtime_config_from_args, resolve_context_paths
@@ -46,17 +48,40 @@ def _sources_list(args: argparse.Namespace) -> int:
 
 def _sources_status(args: argparse.Namespace) -> int:
     config, _manager, _context_path = _load_manager_and_context(args)
-    providers = load_source_providers(config=config)
     payload: dict[str, Any] = {"providers": []}
-    for name, provider in providers.items():
+    for spec in discover_source_provider_specs(config=config):
+        name = spec.name
         try:
-            status = provider.status()
+            provider = load_source_provider_by_name(name, config=config)
         except Exception as exc:
             status = {"ok": False, "error": str(exc)}
+            capabilities = {"sync": False, "research": False}
+            kinds = list(spec.kinds)
+        else:
+            supports_sync = isinstance(provider, ContextSourceProvider)
+            supports_research = isinstance(provider, ResearchSourceProvider)
+            capabilities = {
+                "sync": supports_sync,
+                "research": supports_research,
+            }
+            kinds = list(getattr(provider, "kinds", spec.kinds) or [])
+            if isinstance(provider, ContextSourceProvider):
+                try:
+                    status = provider.status()
+                except Exception as exc:
+                    status = {"ok": False, "error": str(exc)}
+            elif supports_research:
+                status = {"ok": True, "detail": "research-only provider"}
+            else:
+                status = {
+                    "ok": False,
+                    "error": "provider implements neither sync nor research",
+                }
         payload["providers"].append(
             {
                 "name": name,
-                "kinds": list(getattr(provider, "kinds", []) or []),
+                "kinds": kinds,
+                "capabilities": capabilities,
                 "status": status,
             }
         )
@@ -70,7 +95,10 @@ def _sources_status(args: argparse.Namespace) -> int:
         status = entry["status"]
         ok = status.get("ok") if isinstance(status, dict) else None
         marker = "ok" if ok is not False else "error"
-        print(f"{entry['name']}: {marker}")
+        capability_label = ", ".join(
+            name for name, enabled in entry["capabilities"].items() if enabled
+        ) or "no supported capability"
+        print(f"{entry['name']}: {marker} [{capability_label}]")
     return 0
 
 
@@ -81,11 +109,20 @@ def _sources_sync(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(str(exc))
         return 2
-    providers = load_source_providers(config=config)
-    provider = providers.get(args.provider)
-    if provider is None:
+    try:
+        provider = load_source_provider_by_name(args.provider, config=config)
+    except KeyError:
         print(f"unknown context source provider: {args.provider}")
         return 1
+    except Exception as exc:
+        print(f"failed to load context source provider {args.provider}: {exc}")
+        return 2
+    if not isinstance(provider, ContextSourceProvider):
+        print(
+            f"context source provider {args.provider} does not support sync; "
+            "use it through the bounded research workflow instead"
+        )
+        return 2
     try:
         records = provider.sync(query=args.query or "", limit=max(1, int(args.limit)))
     except TypeError:

@@ -6,6 +6,7 @@ triggers:
   - afs event analytics
   - mcp tool errors
   - afs session timeline
+  - afs insights reflect
 profiles:
   - general
 requires:
@@ -26,6 +27,7 @@ timelines.
 | `afs events analytics` | Event volume, MCP tool usage, error rates |
 | `afs events replay --session-id <id>` | Replay one recorded session timeline |
 | `afs session event` | Record prompt/turn/task lifecycle activity |
+| `afs insights reflect --path <ws>` | Create deterministic review candidates from repeated attributed failures |
 
 ## Filters
 
@@ -44,6 +46,11 @@ dumping the full log.
 - The supervisor's event reactor consumes it: `AgentConfig.on_event` patterns
   (e.g. `error`, `hivemind:context:repair`) start agents or enqueue jobs when
   matching entries appear (see the agent-ops skill)
+- Insights reflection reads only exactly attributed, payload-free failure
+  metadata. Successful completions and general activity are ignored to avoid
+  rolling candidate spam. Reflection creates deterministic pending candidates;
+  a human must inspect and explicitly accept or reject them, and agents never
+  promote them automatically
 
 Events are recorded automatically by MCP tools, session hooks, and CLI flows;
 `afs session event` is for client wrappers that need to record activity
