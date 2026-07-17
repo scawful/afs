@@ -98,6 +98,7 @@ security sandbox.
 
 - [Executive Summary](docs/EXECUTIVE_SUMMARY.md)
 - [Lineage](docs/LINEAGE.md)
+- [Central Context Layout v2](docs/CONTEXT_LAYOUT_V2.md)
 - [Setup Guide](docs/SETUP_GUIDE.md)
 - [Extension Authoring](docs/EXTENSION_AUTHORING.md)
 - [Autonomous Optimization Protocol](docs/OPTIMIZATION_PROTOCOL.md)

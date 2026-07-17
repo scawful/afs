@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_config_model
+from .context_layout import (
+    LAYOUT_VERSION,
+    V2_COMPAT_MOUNT_PATHS,
+    detect_layout_version,
+    scaffold_v2,
+    v2_directory_map,
+)
 from .history import log_event
 from .mapping import resolve_directory_map, resolve_directory_name
 from .models import (
@@ -23,6 +30,7 @@ from .profiles import (
     list_profile_mount_specs,
     resolve_active_profile,
 )
+from .project_registry import ProjectRegistry
 from .schema import AFSConfig, DirectoryConfig
 
 
@@ -82,18 +90,34 @@ class AFSManager:
         context_dir: str | None = None,
         link_context: bool = False,
         profile: str | None = None,
+        layout_version: int = 1,
     ) -> ContextRoot:
         project_path = path.resolve()
+        if layout_version not in {1, LAYOUT_VERSION}:
+            raise ValueError(f"unsupported context layout version: {layout_version}")
+        if layout_version == LAYOUT_VERSION and context_root is None:
+            context_root = self.config.general.context_root
         context_path = self.resolve_context_path(
             project_path,
             context_root=context_root,
             context_dir=context_dir,
         )
+        if context_path.exists() and detect_layout_version(context_path) == LAYOUT_VERSION:
+            layout_version = LAYOUT_VERSION
 
-        self._ensure_context_dirs(context_path)
+        if layout_version == LAYOUT_VERSION:
+            if not context_path.exists() or not any(context_path.iterdir()):
+                scaffold_v2(context_path)
+            elif detect_layout_version(context_path) != LAYOUT_VERSION:
+                raise FileExistsError(
+                    f"refusing to initialize v2 over an existing v1 context: {context_path}"
+                )
+        self._ensure_context_dirs(context_path, layout_version=layout_version)
         metadata = self._ensure_metadata(context_path, project_path)
         self._ensure_cognitive_scaffold(context_path)
         self._apply_profile_mounts(context_path, profile)
+        if layout_version == LAYOUT_VERSION:
+            ProjectRegistry(context_path).register(project_path)
         if link_context and context_root:
             link_path = project_path / (context_dir or self.CONTEXT_DIR_DEFAULT)
             self._ensure_link(link_path, context_path, force=False)
@@ -108,13 +132,32 @@ class AFSManager:
         link_context: bool = False,
         force: bool = False,
         profile: str | None = None,
+        layout_version: int = 1,
     ) -> ContextRoot:
         project_path = path.resolve()
+        if layout_version not in {1, LAYOUT_VERSION}:
+            raise ValueError(f"unsupported context layout version: {layout_version}")
+        if layout_version == LAYOUT_VERSION and context_root is None:
+            context_root = self.config.general.context_root
         context_path = self.resolve_context_path(
             project_path,
             context_root=context_root,
             context_dir=context_dir,
         )
+
+        if layout_version == LAYOUT_VERSION:
+            if context_path.exists() and any(context_path.iterdir()):
+                raise FileExistsError(f"AFS already exists at {context_path}")
+            scaffold_v2(context_path)
+            self._ensure_context_dirs(context_path, layout_version=layout_version)
+            metadata = self._ensure_metadata(context_path, project_path)
+            self._ensure_cognitive_scaffold(context_path)
+            self._apply_profile_mounts(context_path, profile)
+            ProjectRegistry(context_path).register(project_path)
+            if link_context:
+                link_path = project_path / (context_dir or self.CONTEXT_DIR_DEFAULT)
+                self._ensure_link(link_path, context_path, force=force)
+            return self.list_context(context_path=context_path, metadata=metadata)
 
         if link_context and context_root:
             link_path = project_path / (context_dir or self.CONTEXT_DIR_DEFAULT)
@@ -307,6 +350,7 @@ class AFSManager:
             project_name=context_path.parent.name,
             metadata=metadata,
             mounts=mounts,
+            layout_version=detect_layout_version(context_path),
         )
 
     def clean(self, context_path: Path | None = None) -> None:
@@ -679,7 +723,7 @@ class AFSManager:
         if context_path is None:
             context_path = Path(".") / self.CONTEXT_DIR_DEFAULT
 
-        metadata_path = context_path / self.METADATA_FILE
+        metadata_path = self._metadata_path(context_path)
         if not metadata_path.exists():
             raise FileNotFoundError("No AFS initialized")
 
@@ -702,7 +746,7 @@ class AFSManager:
         if context_path is None:
             context_path = Path(".") / self.CONTEXT_DIR_DEFAULT
 
-        metadata_path = context_path / self.METADATA_FILE
+        metadata_path = self._metadata_path(context_path)
         if not metadata_path.exists():
             return ProjectMetadata()
 
@@ -720,7 +764,7 @@ class AFSManager:
         if context_path is None:
             context_path = Path(".") / self.CONTEXT_DIR_DEFAULT
 
-        metadata_path = context_path / self.METADATA_FILE
+        metadata_path = self._metadata_path(context_path)
         if not metadata_path.exists():
             raise FileNotFoundError("No AFS initialized")
 
@@ -738,7 +782,7 @@ class AFSManager:
         if context_path is None:
             context_path = Path(".") / self.CONTEXT_DIR_DEFAULT
 
-        metadata_path = context_path / self.METADATA_FILE
+        metadata_path = self._metadata_path(context_path)
         if not metadata_path.exists():
             raise FileNotFoundError("No AFS initialized")
 
@@ -748,8 +792,13 @@ class AFSManager:
             self._write_metadata(metadata_path, metadata)
         return metadata
 
-    def _ensure_context_dirs(self, context_path: Path) -> None:
+    def _ensure_context_dirs(self, context_path: Path, *, layout_version: int = 1) -> None:
         context_path.mkdir(parents=True, exist_ok=True)
+        if layout_version == LAYOUT_VERSION:
+            for relative_path in V2_COMPAT_MOUNT_PATHS.values():
+                (context_path / relative_path).mkdir(parents=True, exist_ok=True)
+            (context_path / "human").mkdir(parents=True, exist_ok=True)
+            return
         for dir_config in self._directories:
             subdir = context_path / dir_config.name
             subdir.mkdir(parents=True, exist_ok=True)
@@ -774,10 +823,12 @@ class AFSManager:
             return
 
     def _ensure_metadata(self, context_path: Path, project_path: Path) -> ProjectMetadata:
-        metadata_path = context_path / self.METADATA_FILE
-        directory_map = {
-            mount_type.value: name for mount_type, name in self._directory_map.items()
-        }
+        metadata_path = self._metadata_path(context_path)
+        directory_map = (
+            v2_directory_map()
+            if detect_layout_version(context_path) == LAYOUT_VERSION
+            else {mount_type.value: name for mount_type, name in self._directory_map.items()}
+        )
         if not metadata_path.exists():
             metadata = ProjectMetadata(
                 created_at=datetime.now().isoformat(),
@@ -864,7 +915,7 @@ class AFSManager:
         context_path: Path,
         provenance: MountProvenance,
     ) -> None:
-        metadata_path = context_path / self.METADATA_FILE
+        metadata_path = self._metadata_path(context_path)
         metadata = self._load_metadata(context_path) or ProjectMetadata()
         metadata.set_mount_provenance(provenance)
         self._write_metadata(metadata_path, metadata)
@@ -875,7 +926,7 @@ class AFSManager:
         mount_type: MountType,
         alias: str,
     ) -> None:
-        metadata_path = context_path / self.METADATA_FILE
+        metadata_path = self._metadata_path(context_path)
         metadata = self._load_metadata(context_path)
         if metadata is None:
             return
@@ -924,7 +975,7 @@ class AFSManager:
                 seeded += 1
 
         if seeded and not dry_run:
-            self._write_metadata(context_path / self.METADATA_FILE, metadata)
+            self._write_metadata(self._metadata_path(context_path), metadata)
         return seeded
 
     def _prune_stale_mount_provenance(
@@ -949,7 +1000,7 @@ class AFSManager:
             removed += 1
 
         if removed and not dry_run:
-            self._write_metadata(context_path / self.METADATA_FILE, metadata)
+            self._write_metadata(self._metadata_path(context_path), metadata)
         return removed
 
     def _repair_mount_sources(
@@ -1150,7 +1201,7 @@ class AFSManager:
             shutil.rmtree(context_path)
 
     def _load_metadata(self, context_path: Path) -> ProjectMetadata | None:
-        metadata_path = context_path / self.METADATA_FILE
+        metadata_path = self._metadata_path(context_path)
         if not metadata_path.exists():
             return None
         try:
@@ -1159,7 +1210,13 @@ class AFSManager:
             return None
         return ProjectMetadata.from_dict(payload)
 
+    def _metadata_path(self, context_path: Path) -> Path:
+        if detect_layout_version(context_path) == LAYOUT_VERSION:
+            return context_path / ".afs" / "compat" / self.METADATA_FILE
+        return context_path / self.METADATA_FILE
+
     def _write_metadata(self, path: Path, metadata: ProjectMetadata) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(metadata.to_dict(), indent=2, default=str) + "\n",
             encoding="utf-8",
