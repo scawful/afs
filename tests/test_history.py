@@ -16,6 +16,7 @@ from afs.history import (
     log_event,
     log_session_event,
     prepare_history_reactor_root,
+    read_recent_history_events,
 )
 from afs.manager import AFSManager
 from afs.models import MountType
@@ -515,6 +516,80 @@ def test_v2_iterator_reads_legacy_root_and_common_once(tmp_path) -> None:
     ]
     assert events[1]["source"] == "canonical"
     assert events[1]["metadata"] == {"version": "current"}
+
+
+def test_recent_history_reader_opens_only_files_needed_for_bounded_tail(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    common = context_root / "history" / "common"
+    common.mkdir()
+    for day, event_ids in (
+        ("20260715", ("old-1", "old-2")),
+        ("20260716", ("middle-1",)),
+        ("20260717", ("recent-1", "recent-2", "recent-3")),
+    ):
+        lines = [
+            json.dumps(
+                {
+                    "id": event_id,
+                    "timestamp": f"2026-07-{day[-2:]}T00:00:00+00:00",
+                    "type": "session",
+                    "source": "test",
+                    "metadata": {},
+                    "payload": {"secret": event_id},
+                    "payload_ref": f"payloads/{event_id}.json",
+                }
+            )
+            for event_id in event_ids
+        ]
+        (common / f"events_{day}.jsonl").write_text(
+            "\n".join(lines) + "\n",
+            encoding="utf-8",
+        )
+
+    opened: list[str] = []
+    original_open = history_module._open_binary_reader
+
+    def recording_open(path: Path, *, routing):
+        opened.append(path.name)
+        return original_open(path, routing=routing)
+
+    monkeypatch.setattr(history_module, "_open_binary_reader", recording_open)
+    first = read_recent_history_events(common, limit=2)
+    opened_after_first = list(opened)
+    second = read_recent_history_events(common, limit=2)
+
+    assert [event["id"] for event in first] == ["recent-2", "recent-3"]
+    assert all("payload" not in event and "payload_ref" not in event for event in first)
+    assert second == first
+    assert opened_after_first == ["events_20260717.jsonl"]
+    assert opened == ["events_20260717.jsonl", "events_20260717.jsonl"]
+
+
+def test_recent_history_reader_stops_at_oversized_record(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    common = context_root / "history" / "common"
+    common.mkdir()
+    old_event = json.dumps(
+        {
+            "id": "must-not-cross-barrier",
+            "timestamp": "2026-07-17T00:00:00+00:00",
+            "type": "session",
+            "source": "test",
+            "metadata": {},
+        }
+    )
+    oversized = "x" * (history_module.MAX_RECENT_HISTORY_RECORD_BYTES + 1)
+    (common / "events_20260717.jsonl").write_text(
+        f"{old_event}\n{oversized}\n",
+        encoding="utf-8",
+    )
+
+    assert read_recent_history_events(common, limit=2) == []
 
 
 def test_seeded_v2_legacy_event_reads_only_hash_matching_legacy_payload(

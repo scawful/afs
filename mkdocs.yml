@@ -56,6 +56,7 @@ nav:
   - Migration:
     - Extension Migration: EXTENSION_MIGRATION.md
   - Research:
+    - Insights: INSIGHTS.md
     - Lineage: LINEAGE.md
 
 extra:

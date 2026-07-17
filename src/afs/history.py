@@ -24,6 +24,7 @@ from .path_safety import assert_no_linklike_components, lexical_absolute
 SENSITIVE_MARKERS = ("key", "token", "secret", "password")
 EVENT_FILE_PREFIX = "events"
 DEFAULT_MAX_INLINE_CHARS = 4000
+MAX_RECENT_HISTORY_RECORD_BYTES = 256 * 1024
 SAFE_HISTORY_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 # Structured event type constants
@@ -886,6 +887,172 @@ def iter_history_events(
                     yield event
         except (OSError, ValueError):
             continue
+
+
+def _open_binary_reader(path: Path, *, routing: _HistoryRouting):
+    if not routing.is_v2:
+        return path.open("rb")
+    _safe_v2_leaf(path, routing, allow_missing=False)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    return os.fdopen(descriptor, "rb")
+
+
+def _iter_reverse_lines(
+    path: Path,
+    *,
+    routing: _HistoryRouting,
+) -> Iterable[bytes | None]:
+    """Yield physical lines newest-first without reading the whole log file."""
+
+    chunk_size = 64 * 1024
+    with _open_binary_reader(path, routing=routing) as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        if position == 0:
+            return
+        handle.seek(position - 1)
+        if handle.read(1) == b"\n":
+            position -= 1
+        pending = b""
+        while position > 0:
+            read_size = min(chunk_size, position)
+            position -= read_size
+            handle.seek(position)
+            data = handle.read(read_size)
+            pending = data + pending
+            parts = pending.split(b"\n")
+            pending = parts[0]
+            for raw_line in reversed(parts[1:]):
+                if len(raw_line) > MAX_RECENT_HISTORY_RECORD_BYTES:
+                    yield None
+                    return
+                yield raw_line
+            if len(pending) > MAX_RECENT_HISTORY_RECORD_BYTES:
+                # Count the oversized physical record, then stop at this
+                # conservative barrier rather than scanning unbounded bytes
+                # to find older records.
+                yield None
+                return
+        if pending:
+            yield pending
+
+
+def _recent_history_paths(routing: _HistoryRouting) -> list[tuple[Path, Path]]:
+    """Return safe event logs in the same source order as the full iterator."""
+
+    if not routing.is_v2:
+        if not routing.write_root.exists():
+            return []
+        return [
+            (path, routing.write_root)
+            for path in sorted(routing.write_root.glob(f"{EVENT_FILE_PREFIX}_*.jsonl"))
+            if path.is_file()
+        ]
+
+    assert routing.context_root is not None
+    roots = tuple(
+        dict.fromkeys(
+            root
+            for root in (routing.legacy_root, routing.write_root)
+            if root is not None
+        )
+    )
+    safe_roots: list[Path] = []
+    for root in roots:
+        try:
+            safe_root = _safe_v2_leaf(root, routing, allow_missing=True)
+        except (OSError, ValueError):
+            continue
+        if safe_root.is_dir():
+            safe_roots.append(safe_root)
+
+    candidates: list[tuple[str, int, Path, Path]] = []
+    for priority, root in enumerate(safe_roots):
+        for path in root.glob(f"{EVENT_FILE_PREFIX}_*.jsonl"):
+            try:
+                safe_path = _safe_v2_leaf(
+                    path,
+                    routing,
+                    allow_missing=False,
+                    boundary=root,
+                )
+            except (OSError, ValueError):
+                continue
+            if not safe_path.is_file():
+                continue
+            candidates.append((safe_path.name, priority, safe_path, root))
+    return [
+        (path, root)
+        for _, _, path, root in sorted(candidates, key=lambda item: (item[0], item[1]))
+    ]
+
+
+def read_recent_history_events(
+    history_root: Path,
+    *,
+    limit: int,
+    event_types: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Read a bounded append-order window of recent payload-free events.
+
+    ``limit`` counts physical JSONL records before parsing and filtering, so a
+    corrupt or irrelevant tail cannot cause an unbounded backward scan.  The
+    returned events use the same deterministic source order and v2 duplicate
+    handling as :func:`iter_history_events` within that bounded window.
+    """
+
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise ValueError("recent history limit must be a positive integer")
+    routing = _routing_for_history_root(history_root)
+    newest_first: list[tuple[dict[str, Any], Path]] = []
+    records_read = 0
+    oversized_barrier = False
+    for path, source_root in reversed(_recent_history_paths(routing)):
+        try:
+            for raw_line in _iter_reverse_lines(path, routing=routing):
+                records_read += 1
+                if raw_line is None:
+                    oversized_barrier = True
+                elif raw_line.strip():
+                    try:
+                        event = json.loads(raw_line)
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        event = None
+                    if isinstance(event, dict):
+                        for payload_key in (
+                            "payload",
+                            "payload_preview",
+                            "payload_ref",
+                            "payload_sha256",
+                        ):
+                            event.pop(payload_key, None)
+                        event_type = str(event.get("type", ""))
+                        if not event_types or event_type in event_types:
+                            newest_first.append((event, source_root))
+                if records_read >= limit:
+                    break
+        except (OSError, ValueError):
+            continue
+        if records_read >= limit or oversized_barrier:
+            break
+
+    events: list[dict[str, Any]] = []
+    seen_event_ids: set[str] = set()
+    canonical_event_ids = {
+        str(event.get("id", "")).strip()
+        for event, source_root in newest_first
+        if routing.is_v2 and source_root == routing.write_root
+    }
+    for event, source_root in reversed(newest_first):
+        event_id = str(event.get("id", "")).strip()
+        if routing.is_v2 and event_id:
+            if source_root == routing.legacy_root and event_id in canonical_event_ids:
+                continue
+            if event_id in seen_event_ids:
+                continue
+            seen_event_ids.add(event_id)
+        events.append(event)
+    return events
 
 
 def query_events(

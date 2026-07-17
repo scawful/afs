@@ -358,17 +358,64 @@ class AgentSupervisor:
         *,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        event_metadata = dict(metadata or {})
+        for key in ("scope_id", "project_id", "scope_attribution"):
+            event_metadata.pop(key, None)
+        event_metadata.update(self._lifecycle_scope_metadata(agent_name))
         try:
             from ..history import log_agent_lifecycle
 
             log_agent_lifecycle(
                 agent_name,
                 op,
-                metadata=metadata or {},
+                metadata=event_metadata,
                 context_root=self._context_root_path(),
             )
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - lifecycle telemetry cannot break supervision
+            _log.debug(
+                "Could not log lifecycle event for %s",
+                agent_name,
+                exc_info=True,
+            )
+
+    def _lifecycle_scope_metadata(self, agent_name: str) -> dict[str, str]:
+        """Resolve only an explicitly configured lifecycle-event scope."""
+
+        agent_config = self._get_agent_config(agent_name)
+        if agent_config is None:
+            return {"scope_attribution": "unregistered"}
+        common = agent_config.extra.get("common") is True
+        raw_project = agent_config.extra.get("project_path")
+        if not common and (
+            not isinstance(raw_project, str) or not raw_project.strip()
+        ):
+            return {"scope_attribution": "unregistered"}
+        try:
+            from ..scopes import resolve_scope
+
+            context_root = self._context_root_path()
+            if common:
+                requester = context_root
+            else:
+                project = Path(raw_project).expanduser()
+                if not project.is_absolute() and self._config_path is not None:
+                    project = self._config_path.parent / project
+                requester = project.resolve()
+            scoped = resolve_scope(
+                context_root,
+                requester_path=requester,
+                common=common,
+            )
+        except (OSError, PermissionError, TypeError, ValueError):
+            return {"scope_attribution": "unregistered"}
+
+        result = {
+            "scope_id": scoped.scope_id,
+            "scope_attribution": "registry" if scoped.project_id else "common",
+        }
+        if scoped.project_id:
+            result["project_id"] = scoped.project_id
+        return result
 
     def _resolve_task(self, name: str, module: str, agent_config: AgentConfig | None) -> str:
         from ..agent_registry import resolve_agent_task

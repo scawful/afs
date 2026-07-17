@@ -14,10 +14,13 @@ from ..plugins import load_enabled_extensions
 from .models import (
     ContextSourceProvider,
     ContextSourceRecord,
+    ResearchSourceProvider,
     SourceProviderSpec,
     SourceSyncResult,
     safe_source_id,
 )
+
+SourceProvider = ContextSourceProvider | ResearchSourceProvider
 
 V2_SOURCE_SYNC_UNAVAILABLE = (
     "context source sync is unavailable for layout v2 because scoped ingestion "
@@ -89,7 +92,11 @@ def _import_roots(roots: Iterable[Path]):
         sys.path = original
 
 
-def load_source_provider(spec: SourceProviderSpec, *, manifest: Any | None = None) -> ContextSourceProvider:
+def load_source_provider(
+    spec: SourceProviderSpec,
+    *,
+    manifest: Any | None = None,
+) -> SourceProvider:
     """Import and instantiate one provider spec."""
     roots = list(getattr(manifest, "import_roots", []) or [])
     with _import_roots(roots):
@@ -105,7 +112,12 @@ def load_source_provider(spec: SourceProviderSpec, *, manifest: Any | None = Non
 
 
 def load_source_providers(config: Any = None) -> dict[str, ContextSourceProvider]:
-    """Load all enabled extension source providers, keyed by provider name."""
+    """Load enabled providers that support status and sync, keyed by name.
+
+    Research-only providers are intentionally excluded. Callers that need an
+    explicitly selected research provider should use
+    :func:`load_source_provider_by_name` and check ``ResearchSourceProvider``.
+    """
     manifests = load_enabled_extensions(config=config)
     providers: dict[str, ContextSourceProvider] = {}
     for manifest in manifests.values():
@@ -114,8 +126,42 @@ def load_source_providers(config: Any = None) -> dict[str, ContextSourceProvider
                 provider = load_source_provider(spec, manifest=manifest)
             except Exception:
                 continue
+            if not isinstance(provider, ContextSourceProvider):
+                continue
             providers[str(getattr(provider, "name", spec.name))] = provider
     return dict(sorted(providers.items()))
+
+
+def load_source_provider_by_name(
+    name: str,
+    *,
+    config: Any = None,
+) -> SourceProvider:
+    """Load exactly one explicitly selected provider.
+
+    Discovery reads manifests only. Non-selected provider modules are never
+    imported, which keeps provider selection useful as a network-consent
+    boundary for research callers.
+    """
+
+    requested = name.strip()
+    if not requested:
+        raise ValueError("source provider name must be non-empty")
+    matches: list[tuple[SourceProviderSpec, Any]] = []
+    for manifest in load_enabled_extensions(config=config).values():
+        for spec in _iter_manifest_source_specs(manifest):
+            if spec.name == requested:
+                matches.append((spec, manifest))
+    if not matches:
+        raise KeyError(f"unknown enabled source provider: {requested}")
+    if len(matches) > 1:
+        extensions = sorted(spec.extension for spec, _manifest in matches)
+        raise ValueError(
+            f"source provider {requested!r} is declared by multiple extensions: "
+            + ", ".join(extensions)
+        )
+    spec, manifest = matches[0]
+    return load_source_provider(spec, manifest=manifest)
 
 
 def materialize_source_records(

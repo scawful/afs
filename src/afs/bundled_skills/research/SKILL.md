@@ -9,6 +9,7 @@ triggers:
   - prior art
   - compare options
   - find out why
+  - afs insights research
 profiles:
   - general
 requires:
@@ -17,6 +18,7 @@ enforcement:
   - Every claim carries its evidence — path:line, commit, URL, or command output; label anything else as unverified.
   - Distinguish confirmed (you reproduced or read the primary source) from plausible (inferred) from unknown.
   - State what evidence is missing rather than papering over it; a labeled gap beats a guess.
+  - Internet research requires explicit user direction, an enabled selected provider, and an explicit domain allowlist; never infer network permission.
 verification:
   - Re-check that each conclusion in the final report links to at least one cited source.
 ---
@@ -31,7 +33,8 @@ prior art, design comparisons, "why is it like this".
 1. **Write the question down**, plus what evidence would settle it. If
    you cannot name the settling evidence, the question is too vague.
 2. **Search what the team already knows** before the world:
-   `afs search` / `context.query` (memory, scratchpad, handoffs),
+   `afs insights research` / `afs search` / `context.query` (memory,
+   scratchpad, handoffs),
    `git log -S`/`git blame` for why code changed, tickets and PR
    discussions, then external docs/web.
 3. **Sweep from multiple angles** — by symptom, by component, by author,
@@ -40,6 +43,20 @@ prior art, design comparisons, "why is it like this".
    confirmed. A docstring is plausible; the code path is confirmed.
 5. **Timebox.** Report at the box even if unresolved: findings so far,
    confidence, next cheapest probe.
+
+## AFS Insights
+
+Use `afs insights research "<question>" --path <ws>` for a locally refreshed,
+current-project-plus-common search. Semantic retrieval is explicit: Ollama is
+local, while Gemini transmits content and the query. Internet research is a
+separate opt-in requiring an enabled selected extension and a domain
+allowlist; see `docs/INSIGHTS.md` for the provider trust boundary.
+
+The scheduled `insights-research` agent is opt-in and requires explicit
+`project_path` and singular `query` profile settings. It writes a readable
+scratchpad report only. Internet access additionally requires literal
+`network_allowed = true`, `internet_provider`, and `allowed_domains`; the
+agent never writes durable memory or promotes its report automatically.
 
 ## Report Shape
 

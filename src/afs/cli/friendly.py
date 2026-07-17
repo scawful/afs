@@ -8,14 +8,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ..context_layout import LAYOUT_VERSION, detect_layout_version, resolve_system_path
+from ..context_layout import LAYOUT_VERSION, detect_layout_version
 from ..messages import MessageBus
-from ..models import ContextCategory
 from ..project_registry import (
     COMMON_SCOPE_ID,
     ProjectRecord,
     ProjectRegistry,
-    assert_no_linklike_components,
 )
 from ._utils import load_manager, resolve_context_paths
 
@@ -63,289 +61,44 @@ def _search_sources(
     never_index: tuple[str, ...] = (),
     never_embed: tuple[str, ...] = (),
 ) -> tuple[list[Any], str, str]:
-    from ..hybrid_search import HybridSource, SourcePolicy
+    """Compatibility wrapper for callers that imported the former CLI helper."""
 
-    def policy(*prefixes: str) -> SourcePolicy:
-        return SourcePolicy(
-            never_index=never_index,
-            never_embed=never_embed,
-            sensitivity_prefixes=tuple(prefixes),
-        )
+    from ..search_service import build_scoped_sources
 
-    version = detect_layout_version(context)
-    sources: list[HybridSource] = []
-    current_scope = COMMON_SCOPE_ID
-    current_project_id = ""
-    if version == LAYOUT_VERSION:
-        registry = ProjectRegistry(context)
-        current = registry.resolve(project)
-        if current is None:
-            raise PermissionError(f"project is not registered in central context: {project}")
-        current_scope = current.scope_id
-        current_project_id = current.project_id
-        all_records = registry.all_records()
-        records = all_records if all_projects else [current]
-        for record in records:
-            active = record.project_id == current.project_id
-            source_path = Path(record.path).expanduser().resolve()
-            excluded_roots = registry.codebase_excluded_roots(
-                source_path,
-                project_id=record.project_id,
-            )
-            sources.append(
-                HybridSource(
-                    source_path,
-                    scope_id=record.scope_id,
-                    project_id=record.project_id,
-                    project_terms=(record.name,),
-                    active=active,
-                    excluded_roots=excluded_roots,
-                    policy=policy(),
-                    embed_allowed=semantic
-                    and (active or all_projects or record.scope_id in previously_consented_scopes),
-                )
-            )
-            for category in ContextCategory:
-                scoped_root = context / category.value / "projects" / record.project_id
-                try:
-                    scoped_root = assert_no_linklike_components(
-                        scoped_root,
-                        boundary=context,
-                    )
-                except ValueError:
-                    if active or all_projects:
-                        raise
-                    continue
-                if scoped_root.is_dir():
-                    sources.append(
-                        HybridSource(
-                            scoped_root,
-                            scope_id=record.scope_id,
-                            project_id=record.project_id,
-                            project_terms=(record.name, category.value),
-                            active=active,
-                            policy=policy(
-                                category.value,
-                                f"{category.value}/projects/{record.project_id}",
-                            ),
-                            embed_allowed=semantic
-                            and (
-                                active
-                                or all_projects
-                                or record.scope_id in previously_consented_scopes
-                            ),
-                        )
-                    )
-        for category in ContextCategory:
-            common_root = context / category.value / "common"
-            common_root = assert_no_linklike_components(
-                common_root,
-                boundary=context,
-            )
-            if common_root.is_dir():
-                sources.append(
-                    HybridSource(
-                        common_root,
-                        scope_id=COMMON_SCOPE_ID,
-                        project_terms=("common", category.value),
-                        embed_allowed=semantic,
-                        policy=policy(
-                            category.value,
-                            f"{category.value}/common",
-                        ),
-                    )
-                )
-    else:
-        sources.append(
-            HybridSource(
-                project,
-                scope_id=COMMON_SCOPE_ID,
-                project_terms=(project.name,),
-                embed_allowed=semantic,
-                policy=policy(),
-            )
-        )
-        for category in ContextCategory:
-            category_root = context / category.value
-            if category_root.is_dir():
-                sources.append(
-                    HybridSource(
-                        category_root,
-                        scope_id=COMMON_SCOPE_ID,
-                        project_terms=(category.value,),
-                        embed_allowed=semantic,
-                        policy=policy(category.value),
-                    )
-                )
-    return sources, current_scope, current_project_id
-
-
-def _scope_coverage(metadata: dict[str, Any], field: str) -> frozenset[str]:
-    coverage = metadata.get("scope_coverage", {})
-    if not isinstance(coverage, dict):
-        return frozenset()
-    values = coverage.get(field, [])
-    if not isinstance(values, list):
-        return frozenset()
-    return frozenset(value for value in values if isinstance(value, str) and value.strip())
-
-
-def _required_semantic_scopes(
-    sources: list[Any],
-    *,
-    current_scope: str,
-    all_projects: bool,
-) -> frozenset[str]:
-    if all_projects:
-        return frozenset(source.scope_id for source in sources if source.path.exists())
-    required = {current_scope}
-    if any(source.scope_id == COMMON_SCOPE_ID and source.path.exists() for source in sources):
-        required.add(COMMON_SCOPE_ID)
-    return frozenset(required)
+    scoped = build_scoped_sources(
+        context,
+        project,
+        semantic=semantic,
+        all_projects=all_projects,
+        previously_consented_scopes=previously_consented_scopes,
+        never_index=never_index,
+        never_embed=never_embed,
+    )
+    return list(scoped.sources), scoped.scope_id, scoped.project_id
 
 
 def search_command(args: argparse.Namespace) -> int:
     """Run local-first scoped retrieval with explicit semantic opt-in."""
-    from ..embeddings import DEFAULT_GEMINI_MODEL, create_embed_fn
-    from ..hybrid_search import (
-        HybridSearchEngine,
-        hybrid_hit_blocked,
-        source_policy_digest,
-    )
+    from ..search_service import ScopedSearchRequest, search_scoped
 
     manager, project, context = _manager_context(args)
-    index_root = resolve_system_path(context, "search")
-    engine = HybridSearchEngine(index_root)
-    has_index = engine.current_path.is_file() or engine.metadata_path.is_file()
-    build_payload: dict[str, Any] | None = None
-    embed_fn = None
-    requested_model = args.model or (
-        DEFAULT_GEMINI_MODEL if args.provider == "gemini" else "nomic-embed-text"
-    )
-    previous_metadata: dict[str, Any] = {}
-    previously_consented_scopes: frozenset[str] = frozenset()
-    if has_index:
-        try:
-            previous_metadata = json.loads(engine.metadata_path.read_text(encoding="utf-8"))
-            collection = previous_metadata.get("collection", {})
-            if args.semantic and (
-                isinstance(collection, dict)
-                and collection.get("provider") == args.provider
-                and collection.get("model") == requested_model
-            ):
-                previously_consented_scopes = _scope_coverage(
-                    previous_metadata, "intended_scope_ids"
-                )
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
-            previous_metadata = {}
-    sources, scope_id, project_id = _search_sources(
-        context,
-        project,
-        semantic=bool(args.semantic),
-        all_projects=bool(args.all_projects),
-        previously_consented_scopes=previously_consented_scopes,
-        never_index=tuple(manager.config.sensitivity.never_index),
-        never_embed=(
-            *manager.config.sensitivity.never_embed,
-            *manager.config.sensitivity.never_export,
-        ),
-    )
-    required_semantic_scopes = _required_semantic_scopes(
-        sources,
-        current_scope=scope_id,
-        all_projects=bool(args.all_projects),
-    )
-    policy_digest = source_policy_digest(sources)
-    policy_index_ready = (
-        bool(previous_metadata)
-        and previous_metadata.get("sensitivity_policy_digest") == policy_digest
-    )
-    semantic_index_ready = False
-    if args.semantic and has_index:
-        try:
-            metadata = previous_metadata or json.loads(
-                engine.metadata_path.read_text(encoding="utf-8")
-            )
-            collection = metadata.get("collection", {})
-            stats = metadata.get("stats", {})
-            semantic_index_ready = (
-                collection.get("health") == "healthy"
-                and collection.get("provider") == args.provider
-                and collection.get("model") == requested_model
-                and int(stats.get("vectors", 0) or 0) > 0
-                and required_semantic_scopes.issubset(
-                    _scope_coverage(metadata, "intended_scope_ids")
-                )
-            )
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
-            semantic_index_ready = False
-    if args.semantic:
-        embed_fn = create_embed_fn(
-            args.provider,
-            model=requested_model,
-        )
-    if (
-        args.rebuild
-        or not has_index
-        or not policy_index_ready
-        or (args.semantic and not semantic_index_ready)
-    ):
-        build = engine.build(sources, embed_fn=embed_fn)
-        build_payload = {
-            "total_files": build.total_files,
-            "indexed_files": build.indexed_files,
-            "chunks_written": build.chunks_written,
-            "skipped": build.skipped,
-            "vector_count": build.vector_count,
-            "vector_dimension": build.vector_dimension,
-            "semantic_status": build.semantic_status,
-            "source_scope_ids": build.source_scope_ids,
-            "intended_scope_ids": build.intended_scope_ids,
-            "embedded_scope_ids": build.embedded_scope_ids,
-            "capped_sources": build.capped_sources,
-            "denied": build.denied,
-            "errors": build.errors,
-        }
-    response = engine.search(
-        args.query,
-        scope_ids=[scope_id] if scope_id != COMMON_SCOPE_ID else [],
-        include_common=True,
-        all_projects=bool(args.all_projects),
-        mode="hybrid" if args.semantic else args.mode,
-        top_k=args.limit,
-        recreate_query_embedder=bool(args.semantic),
-        required_scope_ids=sorted(
-            {
-                source.scope_id
-                for source in sources
-                if source.path.exists()
-            }
-        ),
-    )
-    export_patterns = [
-        *manager.config.sensitivity.never_index,
-        *manager.config.sensitivity.never_export,
-    ]
-    response.results = [
-        hit
-        for hit in response.results
-        if not hybrid_hit_blocked(
-            hit,
+    result = search_scoped(
+        ScopedSearchRequest(
             context_root=context,
-            patterns=export_patterns,
-        )
-    ]
-    payload = response.to_dict()
-    payload.update(
-        {
-            "context_root": str(context),
-            "project_path": str(project),
-            "project_id": project_id,
-            "index_root": str(index_root),
-            "rebuilt": build_payload is not None,
-            "build": build_payload,
-        }
+            project_path=project,
+            query=args.query,
+            mode=args.mode,
+            limit=args.limit,
+            rebuild=bool(args.rebuild),
+            semantic=bool(args.semantic),
+            embedding_provider=args.provider,
+            embedding_model=args.model,
+            all_projects=bool(args.all_projects),
+        ),
+        config=manager.config,
     )
+    response = result.response
+    payload = result.to_dict()
     if args.json:
         print(json.dumps(payload, indent=2))
         return 0

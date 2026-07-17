@@ -41,6 +41,7 @@ from . import (
     gemini,
     guide,
     gws_cli,
+    insights,
     layout,
     manager_gui,
     mcp,
@@ -232,6 +233,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
     manager_gui.register_parsers(subparsers)
     next_action.register_parsers(subparsers)
     friendly.register_parsers(subparsers)
+
+    # Register scoped local research and human-reviewed insight lifecycles.
+    insights.register_parsers(subparsers)
 
     # Register approvals commands
     approvals.register_parsers(subparsers)

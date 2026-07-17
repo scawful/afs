@@ -912,6 +912,128 @@ def test_session_hook_command_uses_payload_file(
     assert calls["log"]["payload"]["reason"] == "client_exit"
 
 
+def test_session_events_record_registered_v2_scope_without_guessing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from afs.context_layout import scaffold_v2
+    from afs.project_registry import ProjectRegistry
+
+    context_root = tmp_path / ".context"
+    project = tmp_path / "project"
+    unknown = tmp_path / "unknown"
+    project.mkdir()
+    unknown.mkdir()
+    scaffold_v2(context_root)
+    record = ProjectRegistry(context_root).register(project)
+    project_context_path = (
+        context_root / "knowledge" / "projects" / record.project_id / "reference"
+    )
+    common_context_path = context_root / "knowledge" / "common" / "reference"
+    internal_context_path = context_root / ".afs" / "search"
+    project_context_path.mkdir(parents=True)
+    common_context_path.mkdir(parents=True)
+    internal_context_path.mkdir(parents=True, exist_ok=True)
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+    logged: list[dict[str, object]] = []
+
+    def fake_log_session_event(
+        op,
+        session_id=None,
+        metadata=None,
+        payload=None,
+        context_root=None,
+    ):
+        logged.append(dict(metadata or {}))
+        return "evt-1"
+
+    monkeypatch.setattr(
+        "afs.grounding_hooks.run_grounding_hooks",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr("afs.history.log_session_event", fake_log_session_event)
+
+    for cwd in (
+        project,
+        unknown,
+        context_root,
+        project_context_path,
+        common_context_path,
+        internal_context_path,
+    ):
+        cli_core_module._emit_session_event(
+            manager=manager,
+            context_path=context_root,
+            config_path=None,
+            event_name="turn_completed",
+            client="codex",
+            session_id="scope-test",
+            cwd=cwd,
+            payload_file=None,
+            update_activity=False,
+        )
+
+    assert logged[0]["scope_attribution"] == "registry"
+    assert logged[0]["scope_id"] == record.scope_id
+    assert logged[0]["project_id"] == record.project_id
+    assert logged[1]["scope_attribution"] == "unregistered"
+    assert "scope_id" not in logged[1]
+    assert logged[2]["scope_attribution"] == "common"
+    assert logged[2]["scope_id"] == "common"
+    assert logged[3]["scope_attribution"] == "registry"
+    assert logged[3]["scope_id"] == record.scope_id
+    assert logged[3]["project_id"] == record.project_id
+    assert logged[4]["scope_attribution"] == "common"
+    assert logged[4]["scope_id"] == "common"
+    assert logged[5]["scope_attribution"] == "unregistered"
+    assert "scope_id" not in logged[5]
+
+
+def test_session_event_inside_nested_context_is_common_not_parent_project(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from afs.context_layout import scaffold_v2
+    from afs.project_registry import ProjectRegistry
+
+    project = tmp_path / "project"
+    project.mkdir()
+    context_root = project / ".context"
+    scaffold_v2(context_root)
+    ProjectRegistry(context_root).register(project)
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+    logged: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        "afs.grounding_hooks.run_grounding_hooks",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "afs.history.log_session_event",
+        lambda _op, **kwargs: logged.append(dict(kwargs.get("metadata") or {})),
+    )
+
+    cli_core_module._emit_session_event(
+        manager=manager,
+        context_path=context_root,
+        config_path=None,
+        event_name="turn_completed",
+        client="codex",
+        session_id="nested-context",
+        cwd=context_root,
+        payload_file=None,
+        update_activity=False,
+    )
+
+    assert logged[0]["scope_attribution"] == "common"
+    assert logged[0]["scope_id"] == "common"
+    assert "project_id" not in logged[0]
+
+
 def test_session_event_command_updates_activity_payload(
     tmp_path: Path,
     monkeypatch,
