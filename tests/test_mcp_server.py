@@ -1004,6 +1004,49 @@ def test_context_unmount_tool_removes_alias(tmp_path: Path) -> None:
     assert not (context_root / "knowledge" / "docs").exists()
 
 
+def test_context_mount_tool_fails_closed_for_v2_and_removes_legacy_alias(
+    tmp_path: Path,
+) -> None:
+    manager, context_root, alpha, _beta, _alpha_id, _beta_id = _make_v2_manager(
+        tmp_path
+    )
+    source_docs = tmp_path / "docs_source"
+    source_docs.mkdir()
+
+    response = _call_tool(
+        manager,
+        "context.mount",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "source": str(source_docs),
+            "mount_type": "knowledge",
+            "alias": "docs",
+        },
+    )
+
+    assert "error" in response
+    assert "manual filesystem mounts are not supported for layout v2" in response[
+        "error"
+    ]["message"]
+    assert not (context_root / "knowledge" / "docs").exists()
+
+    legacy_alias = context_root / "knowledge" / "legacy-docs"
+    legacy_alias.symlink_to(source_docs)
+    cleanup = _call_tool(
+        manager,
+        "context.unmount",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "mount_type": "knowledge",
+            "alias": "legacy-docs",
+        },
+    )
+    assert cleanup["result"]["structuredContent"]["removed"] is True
+    assert not legacy_alias.exists()
+
+
 def test_context_index_rebuild_tool(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     context_root = manager.config.general.context_root
