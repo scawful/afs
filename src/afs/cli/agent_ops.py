@@ -633,7 +633,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     finish.add_argument("--json", action="store_true")
     finish.set_defaults(func=runs_finish_command)
 
-    jobs = subparsers.add_parser("agent-jobs", help="Manage markdown background agent jobs.")
+    jobs = subparsers.add_parser(
+        "agent-jobs",
+        aliases=["jobs"],
+        help="Manage markdown background jobs (friendly alias: jobs).",
+    )
     jobs_sub = jobs.add_subparsers(dest="agent_jobs_command")
 
     create = jobs_sub.add_parser("create", help="Create a queued markdown job.")

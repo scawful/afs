@@ -312,7 +312,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register filesystem command parsers."""
     from ..models import MountType
 
-    fs_parser = subparsers.add_parser("fs", help="Agentic filesystem operations.")
+    fs_parser = subparsers.add_parser(
+        "fs",
+        aliases=["files"],
+        help="Read and manage context files (friendly alias: files).",
+    )
     fs_sub = fs_parser.add_subparsers(dest="fs_command")
     mount_choices = [mount.value for mount in MountType]
 

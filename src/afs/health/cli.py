@@ -18,7 +18,11 @@ logger = get_logger(__name__)
 
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register health check commands."""
-    health_parser = subparsers.add_parser("health", help="System health checks and monitoring")
+    health_parser = subparsers.add_parser(
+        "health",
+        aliases=["check"],
+        help="Check system health (friendly alias: check)",
+    )
     health_parser.add_argument("--config", help="Config path for AFS health summary.")
     health_parser.add_argument("--json", action="store_true", help="Output summary as JSON.")
     health_subparsers = health_parser.add_subparsers(dest="health_command")
