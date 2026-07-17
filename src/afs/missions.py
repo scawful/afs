@@ -426,6 +426,7 @@ class MissionStore:
         self,
         mission_id: str,
         *,
+        title: str | None = None,
         status: str | None = None,
         summary: str | None = None,
         owner: str | None = None,
@@ -454,6 +455,11 @@ class MissionStore:
             if mission is None:
                 raise MissionNotFoundError(mission_id)
 
+            if title is not None:
+                title = title.strip()
+                if not title:
+                    raise ValueError("mission title is required")
+                mission.title = title
             if status is not None:
                 if status not in VALID_MISSION_STATUSES:
                     raise ValueError(

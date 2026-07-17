@@ -72,6 +72,24 @@ def test_update_transitions_status_and_appends_log(tmp_path: Path) -> None:
     assert updated.log[0]["actor"] == "claude"
 
 
+def test_update_replaces_title_and_rejects_blank_title(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    mission = store.create(title="Implementation support")
+
+    updated = store.update(mission.mission_id, title="  Migration and cutover  ")
+
+    assert updated.mission_id == mission.mission_id
+    assert updated.title == "Migration and cutover"
+    loaded = store.get(mission.mission_id)
+    assert loaded is not None
+    assert loaded.title == "Migration and cutover"
+    with pytest.raises(ValueError, match="mission title is required"):
+        store.update(mission.mission_id, title="   ")
+    unchanged = store.get(mission.mission_id)
+    assert unchanged is not None
+    assert unchanged.title == "Migration and cutover"
+
+
 def test_update_rejects_invalid_status(tmp_path: Path) -> None:
     store = _store(tmp_path)
     mission = store.create(title="X")

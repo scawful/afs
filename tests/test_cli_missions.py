@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from argparse import Namespace
 from pathlib import Path
@@ -10,6 +11,7 @@ from afs.cli.missions import (
     mission_list_command,
     mission_show_command,
     mission_update_command,
+    register_parsers,
 )
 from afs.manager import AFSManager
 from afs.missions import MissionStore
@@ -65,22 +67,55 @@ def test_cli_update_and_show(tmp_path, monkeypatch, capsys) -> None:
     mission = MissionStore(context_root).create(title="Ship fusion")
 
     rc = mission_update_command(
-        _args(mission_id=mission.mission_id, status="blocked", blocker=["waiting"], note="pinged", actor="claude")
+        _args(
+            mission_id=mission.mission_id,
+            title="Ship fusion v2",
+            status="blocked",
+            blocker=["waiting"],
+            note="pinged",
+            actor="claude",
+        )
     )
     assert rc == 0
     capsys.readouterr()  # discard the update's human-readable output before show's JSON
 
     assert mission_show_command(_args(mission_id=mission.mission_id)) == 0
     shown = json.loads(capsys.readouterr().out)
+    assert shown["title"] == "Ship fusion v2"
     assert shown["status"] == "blocked"
     assert shown["blockers"] == ["waiting"]
     assert shown["log"][0]["note"] == "pinged"
+
+
+def test_cli_parser_accepts_title_on_update() -> None:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    register_parsers(subparsers)
+
+    args = parser.parse_args(
+        ["mission", "update", "mission_example", "--title", "New title"]
+    )
+
+    assert args.title == "New title"
 
 
 def test_cli_update_invalid_status_returns_2(tmp_path, monkeypatch, capsys) -> None:
     _, context_root = _wire(tmp_path, monkeypatch)
     mission = MissionStore(context_root).create(title="X")
     assert mission_update_command(_args(mission_id=mission.mission_id, status="bogus")) == 2
+
+
+def test_cli_update_blank_title_returns_2_without_mutation(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    _, context_root = _wire(tmp_path, monkeypatch)
+    mission = MissionStore(context_root).create(title="Keep this title")
+
+    assert mission_update_command(_update_args(mission.mission_id, title="  ")) == 2
+    assert "mission title is required" in capsys.readouterr().out
+    loaded = MissionStore(context_root).get(mission.mission_id)
+    assert loaded is not None
+    assert loaded.title == "Keep this title"
 
 
 def test_cli_show_missing_returns_1(tmp_path, monkeypatch, capsys) -> None:
@@ -161,6 +196,7 @@ def test_cli_create_interactive_prompt_records_provenance(
 def _update_args(mid: str, **overrides):
     base = {
         "mission_id": mid,
+        "title": None,
         "status": None,
         "summary": None,
         "owner": None,
