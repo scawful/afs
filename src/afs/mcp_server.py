@@ -30,6 +30,7 @@ from .context_index import (
     DEFAULT_MAX_FILE_SIZE_BYTES,
     ContextSQLiteIndex,
 )
+from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_pack import build_context_pack, render_context_pack
 from .context_paths import resolve_mount_root
 from .core import find_existing_root
@@ -68,10 +69,11 @@ from .mcp.transport import (
 from .mcp.transport import (
     write_message as _write_message_fn,
 )
-from .models import MountType
+from .models import ContextCategory, MountType
 from .operator_digests import KIND_CHOICES, digest_operator_output
 from .plugins import load_enabled_extensions
 from .profiles import resolve_active_profile
+from .project_registry import COMMON_SCOPE_ID, ProjectRegistry
 from .repo_policy import evaluate_repo_policy, load_repo_policy
 from .response_schemas import (
     SCHEMA_MIME_TYPE,
@@ -81,6 +83,7 @@ from .response_schemas import (
     list_response_schema_specs,
 )
 from .schema import ContextIndexConfig
+from .scopes import ResolvedScope, resolve_scope
 from .sensitivity import SensitivityRuleSet
 from .session_bootstrap import (
     build_session_bootstrap,
@@ -207,6 +210,247 @@ def _resolve_project_path(arguments: dict[str, Any]) -> Path:
     if isinstance(raw, str) and raw.strip():
         return Path(raw).expanduser().resolve()
     return Path.cwd().resolve()
+
+
+def _resolve_mcp_scope(
+    arguments: dict[str, Any],
+    manager: AFSManager,
+) -> tuple[Path, ResolvedScope]:
+    """Resolve the current/common scope without treating context_path as access."""
+
+    context_path: Path
+    raw_context = arguments.get("context_path")
+    raw_file_path = next(
+        (
+            arguments.get(name)
+            for name in ("path", "source", "destination")
+            if isinstance(arguments.get(name), str) and str(arguments.get(name)).strip()
+        ),
+        None,
+    )
+    configured_root = manager.config.general.context_root.expanduser().resolve()
+    if (
+        not (isinstance(raw_context, str) and raw_context.strip())
+        and not (
+            isinstance(arguments.get("project_path"), str) and arguments["project_path"].strip()
+        )
+        and isinstance(raw_file_path, str)
+        and raw_file_path.strip()
+        and Path(raw_file_path).expanduser().is_absolute()
+        and Path(raw_file_path).expanduser().resolve(strict=False).is_relative_to(configured_root)
+    ):
+        context_path = _assert_allowed(configured_root, manager)
+    else:
+        context_path = _resolve_context_path(arguments, manager)
+    project_raw = arguments.get("project_path")
+    project_path = (
+        Path(project_raw).expanduser().resolve()
+        if isinstance(project_raw, str) and project_raw.strip()
+        else None
+    )
+    requested_scope = arguments.get("scope_id")
+    if requested_scope is not None and not isinstance(requested_scope, str):
+        raise ValueError("scope_id must be a string")
+    common = isinstance(requested_scope, str) and requested_scope.strip() == COMMON_SCOPE_ID
+    resolved = resolve_scope(
+        context_path,
+        requester_path=project_path,
+        common=common,
+    )
+    if (
+        detect_layout_version(context_path) == LAYOUT_VERSION
+        and isinstance(requested_scope, str)
+        and requested_scope.strip()
+        and requested_scope.strip() != resolved.scope_id
+    ):
+        if project_path is None:
+            raise PermissionError("project_path is required to authorize a project scope")
+        registry = ProjectRegistry(context_path)
+        registry.assert_scope_authorized(
+            requested_scope.strip(),
+            requester_path=project_path,
+        )
+        record = registry.resolve(project_path)
+        resolved = ResolvedScope(
+            context_root=context_path,
+            requester_path=project_path,
+            layout_version=LAYOUT_VERSION,
+            scope_id=requested_scope.strip(),
+            project_id=(
+                requested_scope.strip().removeprefix("project:")
+                if requested_scope.strip().startswith("project:")
+                else ""
+            ),
+            project_name=record.name if record is not None else project_path.name,
+        )
+    return context_path, resolved
+
+
+_CATEGORY_NAMES = {category.value: category for category in ContextCategory}
+
+
+def _mcp_scope_properties(*, include_all_projects: bool = False) -> dict[str, Any]:
+    properties: dict[str, Any] = {
+        "context_path": {
+            "type": "string",
+            "description": "Central AFS context root; does not grant project access by itself.",
+        },
+        "project_path": {
+            "type": "string",
+            "description": "Current project path used to authorize its registered scope.",
+        },
+        "scope_id": {
+            "type": "string",
+            "description": "Optional authorized scope: common or project:<id>.",
+        },
+    }
+    if include_all_projects:
+        properties["all_projects"] = {
+            "type": "boolean",
+            "default": False,
+            "description": "Explicitly search or operate across every registered project.",
+        }
+    return properties
+
+
+def _resolve_context_file_path(
+    arguments: dict[str, Any],
+    manager: AFSManager,
+    value: Any,
+    *,
+    operation: str,
+) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("path must be a non-empty string")
+    raw_path = Path(value.strip()).expanduser()
+    configured_root = manager.config.general.context_root.expanduser().resolve()
+    has_scope_anchor = any(
+        isinstance(arguments.get(name), str) and str(arguments.get(name)).strip()
+        for name in ("context_path", "project_path", "scope_id")
+    )
+    if detect_layout_version(configured_root) != LAYOUT_VERSION and not has_scope_anchor:
+        return _assert_allowed(raw_path, manager)
+
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    if detect_layout_version(context_path) != LAYOUT_VERSION:
+        candidate = raw_path if raw_path.is_absolute() else context_path / raw_path
+        return _assert_allowed(candidate, manager)
+
+    registry = ProjectRegistry(context_path)
+    if raw_path.is_absolute():
+        candidate = raw_path.resolve(strict=False)
+        allowed_roots: list[Path] = []
+        if scoped.scope_id == COMMON_SCOPE_ID:
+            for category in ContextCategory:
+                _scope, root = registry.resolve_scope_root(
+                    category,
+                    requester_path=scoped.requester_path or context_path,
+                    scope_id=COMMON_SCOPE_ID,
+                )
+                allowed_roots.append(root)
+        elif scoped.requester_path is not None:
+            record = registry.resolve(scoped.requester_path)
+            if record is not None:
+                allowed_roots.extend(root.resolve() for root in record.roots())
+            for category in ContextCategory:
+                _scope, root = registry.resolve_scope_root(
+                    category,
+                    requester_path=scoped.requester_path,
+                    scope_id=scoped.scope_id,
+                )
+                allowed_roots.append(root)
+        if not any(candidate == root or candidate.is_relative_to(root) for root in allowed_roots):
+            raise PermissionError(
+                f"absolute path is outside the authorized {scoped.scope_id} scope "
+                f"for {operation}: {candidate}"
+            )
+        return candidate
+
+    parts = list(raw_path.parts)
+    if parts and parts[0] == ".context":
+        parts = parts[1:]
+    category = _CATEGORY_NAMES.get(parts[0]) if parts else None
+    if category is not None:
+        parts = parts[1:]
+    else:
+        category = ContextCategory.SCRATCHPAD
+    requester = scoped.requester_path or context_path
+    if not parts:
+        _scope, root = registry.resolve_scope_root(
+            category,
+            requester_path=requester,
+            scope_id=scoped.scope_id,
+        )
+        return root
+    return registry.resolve_scoped_path(
+        category,
+        Path(*parts),
+        requester_path=requester,
+        scope_id=scoped.scope_id,
+    )
+
+
+def _scoped_relative_prefixes(
+    scoped: ResolvedScope,
+    relative_prefix: str | None,
+) -> list[str]:
+    """Build contained index prefixes for the current project and common data."""
+
+    suffix = ""
+    if relative_prefix:
+        raw = Path(relative_prefix.strip())
+        if raw.is_absolute() or any(part in {"", ".", ".."} for part in raw.parts):
+            raise ValueError("relative_prefix must be a contained relative path")
+        suffix = raw.as_posix().strip("/")
+
+    scope_roots = ["common"]
+    if scoped.project_id:
+        scope_roots.insert(0, f"projects/{scoped.project_id}")
+    return [f"{root}/{suffix}" if suffix else f"{root}/" for root in scope_roots]
+
+
+def _merge_scoped_query_payloads(
+    payloads: list[dict[str, Any]],
+    *,
+    scoped: ResolvedScope,
+    limit: int,
+) -> dict[str, Any]:
+    """Merge independently scoped query legs without admitting another scope."""
+
+    if not payloads:
+        raise ValueError("at least one query payload is required")
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for payload in payloads:
+        for entry in payload.get("entries", []):
+            key = (str(entry.get("mount_type", "")), str(entry.get("relative_path", "")))
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(entry)
+
+    def _rank(entry: dict[str, Any]) -> tuple[int, float, str, str]:
+        score = entry.get("relevance_score")
+        return (
+            0 if isinstance(score, (int, float)) else 1,
+            float(score) if isinstance(score, (int, float)) else 0.0,
+            str(entry.get("mount_type", "")),
+            str(entry.get("relative_path", "")),
+        )
+
+    entries.sort(key=_rank)
+    merged = dict(payloads[0])
+    merged["scope_id"] = scoped.scope_id
+    merged["project_id"] = scoped.project_id
+    merged["relative_prefix"] = ""
+    merged["scope_prefixes"] = [str(payload.get("relative_prefix", "")) for payload in payloads]
+    merged["entries"] = entries[:limit]
+    merged["count"] = len(merged["entries"])
+    merged["limit"] = limit
+    rebuilds = [payload["index_rebuild"] for payload in payloads if "index_rebuild" in payload]
+    if rebuilds:
+        merged["index_rebuild"] = rebuilds[0]
+    return merged
 
 
 def _resolve_explicit_allowed_context_path(raw: Any, manager: AFSManager) -> Path:
@@ -347,9 +591,7 @@ def _context_candidates_for_path(path: Path, manager: AFSManager) -> list[Path]:
 
 def _sensitivity_export_rules(manager: AFSManager) -> SensitivityRuleSet:
     sensitivity = manager.config.sensitivity
-    return SensitivityRuleSet.from_patterns(
-        [*sensitivity.never_index, *sensitivity.never_export]
-    )
+    return SensitivityRuleSet.from_patterns([*sensitivity.never_index, *sensitivity.never_export])
 
 
 def _sensitivity_relative_paths(path: Path, manager: AFSManager) -> list[str]:
@@ -407,11 +649,9 @@ def _entry_blocked_by_sensitivity(entry: dict[str, Any], manager: AFSManager) ->
     if not rules.enabled:
         return False
     absolute_path = Path(str(entry.get("absolute_path", "")))
-    relative_path = (
-        f"{entry.get('mount_type', '')}/{entry.get('relative_path', '')}"
-        .replace("\\", "/")
-        .strip("/")
-    )
+    relative_path = f"{entry.get('mount_type', '')}/{entry.get('relative_path', '')}".replace(
+        "\\", "/"
+    ).strip("/")
     return rules.blocked(absolute_path, relative_paths=(relative_path,))
 
 
@@ -464,9 +704,13 @@ def _query_context_index(
 
     index = ContextSQLiteIndex(manager, context_path)
     rebuild_summary: dict[str, Any] | None = None
-    should_auto_refresh = settings.enabled and effective_auto_index and (
-        not index.has_entries(mount_types=mount_types)
-        or (effective_auto_refresh and index.needs_refresh(mount_types=mount_types))
+    should_auto_refresh = (
+        settings.enabled
+        and effective_auto_index
+        and (
+            not index.has_entries(mount_types=mount_types)
+            or (effective_auto_refresh and index.needs_refresh(mount_types=mount_types))
+        )
     )
     if refresh or should_auto_refresh:
         summary = index.rebuild(
@@ -485,11 +729,9 @@ def _query_context_index(
         limit=query_limit,
         include_content=include_content,
     )
-    entries = [
-        entry
-        for entry in entries
-        if not _entry_blocked_by_sensitivity(entry, manager)
-    ][:limit_value]
+    entries = [entry for entry in entries if not _entry_blocked_by_sensitivity(entry, manager)][
+        :limit_value
+    ]
     payload: dict[str, Any] = {
         "context_path": str(context_path),
         "db_path": str(index.db_path),
@@ -550,14 +792,18 @@ def _tool_work_communication_add(arguments: dict[str, Any], manager: AFSManager)
         channel=str(arguments.get("channel") or ""),
         purpose=str(arguments.get("purpose") or "work_communication"),
         style_notes=style_notes if isinstance(style_notes, list) else [],
-        provenance=provenance if isinstance(provenance, list) else ([provenance] if provenance else []),
+        provenance=provenance
+        if isinstance(provenance, list)
+        else ([provenance] if provenance else []),
         confidence=float(arguments.get("confidence") or 0.5),
         dedupe_key=str(arguments.get("dedupe_key") or "") or None,
     )
     return {"context_path": str(context_path), "sample_id": sample_id}
 
 
-def _tool_work_communication_guide(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+def _tool_work_communication_guide(
+    arguments: dict[str, Any], manager: AFSManager
+) -> dict[str, Any]:
     store, context_path = _work_store(arguments, manager)
     limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
     person_id = arguments.get("person_id")
@@ -580,14 +826,20 @@ def _load_personal_context_for_work(arguments: dict[str, Any]) -> Any | None:
     raw_root = arguments.get("personal_context_root")
     return load_personal_context(
         personal_mode.strip(),
-        context_root=Path(raw_root).expanduser() if isinstance(raw_root, str) and raw_root.strip() else None,
+        context_root=Path(raw_root).expanduser()
+        if isinstance(raw_root, str) and raw_root.strip()
+        else None,
     )
 
 
-def _tool_work_communication_preflight(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+def _tool_work_communication_preflight(
+    arguments: dict[str, Any], manager: AFSManager
+) -> dict[str, Any]:
     store, context_path = _work_store(arguments, manager)
     limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
-    approval_limit = _coerce_int(arguments.get("approval_limit"), default=10, minimum=1, maximum=100)
+    approval_limit = _coerce_int(
+        arguments.get("approval_limit"), default=10, minimum=1, maximum=100
+    )
     person_id = arguments.get("person_id")
     purpose = arguments.get("purpose")
     return store.communication_preflight(
@@ -635,7 +887,9 @@ def _tool_work_approvals_request(arguments: dict[str, Any], manager: AFSManager)
         action=str(arguments.get("action") or ""),
         summary=str(arguments.get("summary") or ""),
         preview=preview if preview is not None else {},
-        affected_people=arguments.get("affected_people") if isinstance(arguments.get("affected_people"), list) else [],
+        affected_people=arguments.get("affected_people")
+        if isinstance(arguments.get("affected_people"), list)
+        else [],
         risk_level=str(arguments.get("risk_level") or "medium"),
         permission_required=str(arguments.get("permission_required") or "human approval"),
         requested_by=str(arguments.get("requested_by") or "agent"),
@@ -647,9 +901,12 @@ def _tool_work_approvals_request(arguments: dict[str, Any], manager: AFSManager)
 
 def _tool_fs_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     path_value = arguments.get("path")
-    if not isinstance(path_value, str):
-        raise ValueError("path must be a string")
-    path = _assert_allowed(Path(path_value), manager)
+    path = _resolve_context_file_path(
+        arguments,
+        manager,
+        path_value,
+        operation="read",
+    )
     _assert_sensitivity_allowed(path, manager, operation="read")
     if not path.exists():
         raise FileNotFoundError(f"Path not found: {path}")
@@ -669,7 +926,12 @@ def _tool_fs_write(arguments: dict[str, Any], manager: AFSManager) -> dict[str, 
     if not isinstance(path_value, str) or not isinstance(content, str):
         raise ValueError("path and content must be strings")
 
-    path = _assert_allowed(Path(path_value), manager)
+    path = _resolve_context_file_path(
+        arguments,
+        manager,
+        path_value,
+        operation="write",
+    )
     _assert_sensitivity_allowed(path, manager, operation="write")
     if not path.parent.exists():
         if not mkdirs:
@@ -691,10 +953,12 @@ def _tool_fs_write(arguments: dict[str, Any], manager: AFSManager) -> dict[str, 
 def _tool_fs_delete(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     path_value = arguments.get("path")
     recursive = bool(arguments.get("recursive", False))
-    if not isinstance(path_value, str):
-        raise ValueError("path must be a string")
-
-    path = _assert_allowed(Path(path_value), manager)
+    path = _resolve_context_file_path(
+        arguments,
+        manager,
+        path_value,
+        operation="delete",
+    )
     _assert_sensitivity_allowed(path, manager, operation="delete")
     if not path.exists() and not path.is_symlink():
         raise FileNotFoundError(f"Path not found: {path}")
@@ -730,8 +994,18 @@ def _tool_fs_move(arguments: dict[str, Any], manager: AFSManager) -> dict[str, A
     if not isinstance(source_value, str) or not isinstance(destination_value, str):
         raise ValueError("source and destination must be strings")
 
-    source = _assert_allowed(Path(source_value), manager)
-    destination = _assert_allowed(Path(destination_value), manager)
+    source = _resolve_context_file_path(
+        arguments,
+        manager,
+        source_value,
+        operation="move",
+    )
+    destination = _resolve_context_file_path(
+        arguments,
+        manager,
+        destination_value,
+        operation="move",
+    )
     _assert_sensitivity_allowed(source, manager, operation="move")
     _assert_sensitivity_allowed(destination, manager, operation="move")
 
@@ -767,14 +1041,19 @@ def _tool_fs_move(arguments: dict[str, Any], manager: AFSManager) -> dict[str, A
 def _tool_fs_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     path_value = arguments.get("path")
     max_depth = arguments.get("max_depth", 1)
-    if not isinstance(path_value, str):
-        raise ValueError("path must be a string")
     if not isinstance(max_depth, int):
         max_depth = 1
 
-    root = _assert_allowed(Path(path_value), manager)
+    root = _resolve_context_file_path(
+        arguments,
+        manager,
+        path_value,
+        operation="list",
+    )
     _assert_sensitivity_allowed(root, manager, operation="list")
     if not root.exists():
+        if detect_layout_version(_resolve_context_path(arguments, manager)) == LAYOUT_VERSION:
+            return {"path": str(root), "entries": []}
         raise FileNotFoundError(f"Path not found: {root}")
 
     entries: list[dict[str, Any]] = []
@@ -810,7 +1089,9 @@ def _tool_context_discover(arguments: dict[str, Any], manager: AFSManager) -> di
     if not isinstance(max_depth, int):
         max_depth = 3
 
-    contexts = discover_contexts(search_paths=search_paths, max_depth=max_depth, config=manager.config)
+    contexts = discover_contexts(
+        search_paths=search_paths, max_depth=max_depth, config=manager.config
+    )
     return {
         "contexts": [
             {
@@ -911,7 +1192,7 @@ def _tool_context_unmount(arguments: dict[str, Any], manager: AFSManager) -> dic
 
 
 def _tool_context_index_rebuild(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
-    context_path = _resolve_context_path(arguments, manager)
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
     mount_types = _parse_mount_types(arguments.get("mount_types"))
     settings = _context_index_settings(manager)
     include_content = bool(arguments.get("include_content", settings.include_content))
@@ -934,11 +1215,13 @@ def _tool_context_index_rebuild(arguments: dict[str, Any], manager: AFSManager) 
     )
     payload = summary.to_dict()
     payload["mount_types"] = [mount.value for mount in (mount_types or list(MountType))]
+    payload["scope_id"] = scoped.scope_id
+    payload["project_id"] = scoped.project_id
     return payload
 
 
 def _tool_context_query(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
-    context_path = _resolve_context_path(arguments, manager)
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
     mount_types = _parse_mount_types(arguments.get("mount_types"))
     query_value = arguments.get("query", "")
     if query_value is None:
@@ -958,20 +1241,40 @@ def _tool_context_query(arguments: dict[str, Any], manager: AFSManager) -> dict[
     if auto_refresh is not None:
         auto_refresh = bool(auto_refresh)
     refresh = bool(arguments.get("refresh", False))
-    return _query_context_index(
-        context_path=context_path,
-        manager=manager,
-        query=query_value,
-        mount_types=mount_types,
-        relative_prefix=relative_prefix,
-        limit=_coerce_int(arguments.get("limit"), default=25, minimum=1, maximum=500),
-        include_content=include_content,
-        auto_index=auto_index,
-        auto_refresh=auto_refresh,
-        refresh=refresh,
-        max_file_size_bytes=arguments.get("max_file_size_bytes"),
-        max_content_chars=arguments.get("max_content_chars"),
-    )
+    limit = _coerce_int(arguments.get("limit"), default=25, minimum=1, maximum=500)
+    common_arguments = {
+        "context_path": context_path,
+        "manager": manager,
+        "query": query_value,
+        "mount_types": mount_types,
+        "limit": limit,
+        "include_content": include_content,
+        "auto_index": auto_index,
+        "auto_refresh": auto_refresh,
+        "max_file_size_bytes": arguments.get("max_file_size_bytes"),
+        "max_content_chars": arguments.get("max_content_chars"),
+    }
+    if detect_layout_version(context_path) != LAYOUT_VERSION or bool(
+        arguments.get("all_projects", False)
+    ):
+        payload = _query_context_index(
+            **common_arguments,
+            relative_prefix=relative_prefix,
+            refresh=refresh,
+        )
+        payload["scope_id"] = "all-projects" if arguments.get("all_projects") else scoped.scope_id
+        payload["project_id"] = scoped.project_id
+        return payload
+
+    payloads = [
+        _query_context_index(
+            **common_arguments,
+            relative_prefix=prefix,
+            refresh=refresh if index == 0 else False,
+        )
+        for index, prefix in enumerate(_scoped_relative_prefixes(scoped, relative_prefix))
+    ]
+    return _merge_scoped_query_payloads(payloads, scoped=scoped, limit=limit)
 
 
 def _tool_context_diff(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
@@ -983,8 +1286,12 @@ def _tool_context_diff(arguments: dict[str, Any], manager: AFSManager) -> dict[s
 
 def _tool_context_status(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     """Return a summary of the context: mounts, index health, profile."""
-    context_path = _resolve_context_path(arguments, manager)
-    return collect_context_status(manager, context_path)
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    payload = collect_context_status(manager, context_path)
+    payload["scope_id"] = scoped.scope_id
+    payload["project_id"] = scoped.project_id
+    payload["project_name"] = scoped.project_name
+    return payload
 
 
 def _tool_session_pack(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
@@ -1084,16 +1391,10 @@ def _invoke_extension_callable(
         return handler()
 
     if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params):
-        kwargs = {
-            role: value
-            for role, value in named_values.items()
-            if value is not None
-        }
+        kwargs = {role: value for role, value in named_values.items() if value is not None}
         return handler(**kwargs)
 
-    fallback = [
-        role for role in fallback_roles if named_values.get(role) is not None
-    ]
+    fallback = [role for role in fallback_roles if named_values.get(role) is not None]
     fallback_index = 0
     positional_args: list[Any] = []
     keyword_args: dict[str, Any] = {}
@@ -1182,7 +1483,7 @@ def _tool_agent_stop(arguments: dict[str, Any], manager: AFSManager) -> dict[str
 
 
 def _tool_hivemind_send(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
-    from .hivemind import HivemindBus
+    from .messages import MessageBus
 
     from_agent = arguments.get("from", "")
     if not isinstance(from_agent, str) or not from_agent.strip():
@@ -1199,8 +1500,14 @@ def _tool_hivemind_send(arguments: dict[str, Any], manager: AFSManager) -> dict[
     if ttl_hours is not None:
         ttl_hours = _coerce_int(ttl_hours, default=24, minimum=1, maximum=24 * 30)
 
-    context_path = _resolve_context_path(arguments, manager)
-    bus = HivemindBus(context_path, config=manager.config)
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    bus = MessageBus(
+        context_path,
+        scope_id=scoped.scope_id,
+        config=manager.config,
+        all_projects=bool(arguments.get("all_projects", False)),
+        include_legacy=scoped.layout_version != LAYOUT_VERSION,
+    )
     msg = bus.send(
         from_agent.strip(),
         msg_type,
@@ -1213,7 +1520,7 @@ def _tool_hivemind_send(arguments: dict[str, Any], manager: AFSManager) -> dict[
 
 
 def _tool_hivemind_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
-    from .hivemind import HivemindBus
+    from .messages import MessageBus
 
     agent_name = arguments.get("agent")
     if isinstance(agent_name, str):
@@ -1226,10 +1533,20 @@ def _tool_hivemind_read(arguments: dict[str, Any], manager: AFSManager) -> dict[
         topic = topic.strip() or None
     limit = _coerce_int(arguments.get("limit"), default=50, minimum=1, maximum=500)
 
-    context_path = _resolve_context_path(arguments, manager)
-    bus = HivemindBus(context_path, config=manager.config)
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    bus = MessageBus(
+        context_path,
+        scope_id=scoped.scope_id,
+        config=manager.config,
+        all_projects=bool(arguments.get("all_projects", False)),
+        include_legacy=bool(arguments.get("include_legacy", False))
+        or scoped.layout_version != LAYOUT_VERSION,
+    )
     messages = bus.read(agent_name=agent_name, msg_type=msg_type, topic=topic, limit=limit)
-    return {"messages": [m.to_dict() for m in messages]}
+    return {
+        "scope_id": "all-projects" if arguments.get("all_projects") else scoped.scope_id,
+        "messages": [m.to_dict() for m in messages],
+    }
 
 
 def _tool_task_create(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
@@ -1386,7 +1703,9 @@ def _tool_agent_run_finish(arguments: dict[str, Any], manager: AFSManager) -> di
         run_id,
         status=str(arguments.get("status", "") or "done"),
         summary=str(arguments.get("summary", "") or ""),
-        files_changed=[str(item) for item in files_changed] if isinstance(files_changed, list) else [],
+        files_changed=[str(item) for item in files_changed]
+        if isinstance(files_changed, list)
+        else [],
         commands=[str(item) for item in commands] if isinstance(commands, list) else [],
         verification=[item for item in verification if isinstance(item, dict)]
         if isinstance(verification, list)
@@ -1422,11 +1741,7 @@ def _tool_agent_job_status(arguments: dict[str, Any], manager: AFSManager) -> di
 
     context_path = _resolve_context_path(arguments, manager)
     stale_after_raw = arguments.get("stale_after_seconds", 3600.0)
-    stale_after = (
-        float(stale_after_raw)
-        if isinstance(stale_after_raw, (int, float))
-        else 3600.0
-    )
+    stale_after = float(stale_after_raw) if isinstance(stale_after_raw, (int, float)) else 3600.0
     recent_runs = _coerce_int(arguments.get("recent_runs"), default=5, minimum=0, maximum=50)
     label = str(arguments.get("label", "") or "").strip() or "com.afs.agent-jobs"
     return build_agent_job_status(
@@ -1442,11 +1757,7 @@ def _tool_agent_job_inbox(arguments: dict[str, Any], manager: AFSManager) -> dic
 
     context_path = _resolve_context_path(arguments, manager)
     stale_after_raw = arguments.get("stale_after_seconds", 3600.0)
-    stale_after = (
-        float(stale_after_raw)
-        if isinstance(stale_after_raw, (int, float))
-        else 3600.0
-    )
+    stale_after = float(stale_after_raw) if isinstance(stale_after_raw, (int, float)) else 3600.0
     limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
     return build_agent_job_inbox(
         context_path,
@@ -1583,10 +1894,7 @@ def _tool_review_list(arguments: dict[str, Any], manager: AFSManager) -> dict[st
     agents = supervisor.list_agents()
     awaiting = [a for a in agents if a.state == "awaiting_review"]
     return {
-        "agents": [
-            {"name": a.name, "state": a.state, "last_event": a.last_event}
-            for a in awaiting
-        ]
+        "agents": [{"name": a.name, "state": a.state, "last_event": a.last_event} for a in awaiting]
     }
 
 
@@ -1611,6 +1919,7 @@ def _tool_review_reject(arguments: dict[str, Any], manager: AFSManager) -> dict[
 def _tool_briefing(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     """Run morning briefing and return structured data."""
     from .cli.briefing import _build_briefing
+
     days = arguments.get("days", 7)
     return _build_briefing(days=days)
 
@@ -1687,7 +1996,7 @@ def _tool_events_replay(arguments: dict[str, Any], manager: AFSManager) -> dict[
 
 
 def _tool_hivemind_subscribe(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
-    from .hivemind import HivemindBus
+    from .messages import MessageBus
 
     agent_name = arguments.get("agent_name", "")
     if not isinstance(agent_name, str) or not agent_name.strip():
@@ -1696,8 +2005,8 @@ def _tool_hivemind_subscribe(arguments: dict[str, Any], manager: AFSManager) -> 
     if not isinstance(topics, list) or not topics:
         raise ValueError("topics must be a non-empty list")
 
-    context_path = _resolve_context_path(arguments, manager)
-    bus = HivemindBus(context_path, config=manager.config)
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    bus = MessageBus(context_path, scope_id=scoped.scope_id, config=manager.config)
     ttl_hours = arguments.get("ttl_hours")
     if ttl_hours is not None:
         ttl_hours = _coerce_int(ttl_hours, default=24, minimum=1, maximum=24 * 30)
@@ -1710,7 +2019,7 @@ def _tool_hivemind_subscribe(arguments: dict[str, Any], manager: AFSManager) -> 
 
 
 def _tool_hivemind_unsubscribe(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
-    from .hivemind import HivemindBus
+    from .messages import MessageBus
 
     agent_name = arguments.get("agent_name", "")
     if not isinstance(agent_name, str) or not agent_name.strip():
@@ -1719,17 +2028,23 @@ def _tool_hivemind_unsubscribe(arguments: dict[str, Any], manager: AFSManager) -
     if not isinstance(topics, list) or not topics:
         raise ValueError("topics must be a non-empty list")
 
-    context_path = _resolve_context_path(arguments, manager)
-    bus = HivemindBus(context_path, config=manager.config)
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    bus = MessageBus(context_path, scope_id=scoped.scope_id, config=manager.config)
     sub = bus.unsubscribe(agent_name.strip(), [str(t).strip() for t in topics if str(t).strip()])
     return sub.to_dict()
 
 
 def _tool_hivemind_reap(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
-    from .hivemind import HivemindBus
+    from .messages import MessageBus
 
-    context_path = _resolve_context_path(arguments, manager)
-    bus = HivemindBus(context_path, config=manager.config)
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    bus = MessageBus(
+        context_path,
+        scope_id=scoped.scope_id,
+        config=manager.config,
+        all_projects=True,
+        include_legacy=True,
+    )
     max_age_hours = arguments.get("max_age_hours")
     if max_age_hours is not None:
         max_age_hours = _coerce_int(max_age_hours, default=24, minimum=1, maximum=24 * 30)
@@ -1737,6 +2052,16 @@ def _tool_hivemind_reap(arguments: dict[str, Any], manager: AFSManager) -> dict[
         max_age_hours=max_age_hours,
         dry_run=bool(arguments.get("dry_run", False)),
     )
+
+
+def _tool_messages_clean(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    if not bool(arguments.get("all_projects", False)):
+        raise PermissionError("message cleanup is queue-wide; set all_projects=true")
+    forwarded = dict(arguments)
+    forwarded["dry_run"] = not bool(arguments.get("apply", False))
+    result = _tool_hivemind_reap(forwarded, manager)
+    result["applied"] = bool(arguments.get("apply", False))
+    return result
 
 
 def _tool_embeddings_index(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
@@ -1782,10 +2107,18 @@ def _tool_handoff_create(arguments: dict[str, Any], manager: AFSManager) -> dict
     if not isinstance(agent_name, str) or not agent_name.strip():
         raise ValueError("agent_name is required")
 
-    context_path = _resolve_context_path(arguments, manager)
-    store = HandoffStore(context_path, config=manager.config)
-    packet = store.create(
-        session_id=arguments.get("session_id"),
+    title = arguments.get("title")
+    if not isinstance(title, str) or not title.strip():
+        title = f"Handoff from {agent_name.strip()}"
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    store = HandoffStore(
+        context_path,
+        scope_id=scoped.scope_id,
+        config=manager.config,
+    )
+    packet = store.create_revision(
+        title=title,
+        revision_id=arguments.get("session_id"),
         agent_name=agent_name.strip(),
         accomplished=arguments.get("accomplished", []),
         blocked=arguments.get("blocked", []),
@@ -1793,37 +2126,170 @@ def _tool_handoff_create(arguments: dict[str, Any], manager: AFSManager) -> dict
         context_snapshot=arguments.get("context_snapshot", {}),
         open_tasks=arguments.get("open_tasks", []),
         metadata=arguments.get("metadata", {}),
+        target_agent=arguments.get("target_agent"),
+        priority=str(arguments.get("priority", "normal") or "normal"),
+        project_id=scoped.project_id,
     )
-    return packet.to_dict()
+    payload = packet.to_dict()
+    payload["scope_id"] = scoped.scope_id
+    return payload
 
 
 def _tool_handoff_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     from .handoff import HandoffStore
 
-    context_path = _resolve_context_path(arguments, manager)
-    store = HandoffStore(context_path, config=manager.config)
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    store = HandoffStore(context_path, scope_id=scoped.scope_id, config=manager.config)
     session_id = arguments.get("session_id")
     packet = store.read(session_id=session_id)
     if packet is None:
         return {"error": "no handoff packet found"}
-    return packet.to_dict()
+    payload = packet.to_dict()
+    payload["scope_id"] = scoped.scope_id
+    return payload
 
 
 def _tool_handoff_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     from .handoff import HandoffStore
 
-    context_path = _resolve_context_path(arguments, manager)
-    store = HandoffStore(context_path, config=manager.config)
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    store = HandoffStore(context_path, scope_id=scoped.scope_id, config=manager.config)
     limit = _coerce_int(arguments.get("limit"), default=10, minimum=1, maximum=100)
     packets = store.list(limit=limit)
-    return {"packets": [p.to_dict() for p in packets], "count": len(packets)}
+    return {
+        "scope_id": scoped.scope_id,
+        "packets": [p.to_dict() for p in packets],
+        "count": len(packets),
+    }
+
+
+def _tool_handoff_revise(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .handoff import HandoffStore
+
+    revision_id = str(arguments.get("revision_id", "")).strip()
+    title = str(arguments.get("title", "")).strip()
+    agent_name = str(arguments.get("agent_name", "")).strip()
+    if not revision_id or not title or not agent_name:
+        raise ValueError("revision_id, title, and agent_name are required")
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    store = HandoffStore(context_path, scope_id=scoped.scope_id, config=manager.config)
+    parent = store.read(session_id=revision_id)
+    if parent is None:
+        raise FileNotFoundError(f"handoff revision not found: {revision_id}")
+    packet = store.create_revision(
+        title=title,
+        agent_name=agent_name,
+        stream_id=parent.stream_id,
+        supersedes=parent.revision_id,
+        accomplished=arguments.get("accomplished", []),
+        blocked=arguments.get("blocked", []),
+        next_steps=arguments.get("next_steps", []),
+        context_snapshot=arguments.get("context_snapshot", {}),
+        open_tasks=arguments.get("open_tasks", []),
+        metadata=arguments.get("metadata", {}),
+        target_agent=arguments.get("target_agent"),
+        priority=str(arguments.get("priority", "normal") or "normal"),
+        project_id=scoped.project_id,
+    )
+    payload = packet.to_dict()
+    payload["scope_id"] = scoped.scope_id
+    return payload
+
+
+def _tool_handoff_threads(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .handoff import HandoffStore
+
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    store = HandoffStore(context_path, scope_id=scoped.scope_id, config=manager.config)
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    streams = store.list_streams(limit=limit)
+    return {"threads": [stream.to_dict() for stream in streams], "count": len(streams)}
+
+
+def _tool_handoff_ack(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .handoff import HandoffStore
+
+    revision_id = str(arguments.get("revision_id", "")).strip()
+    actor = str(arguments.get("by", "")).strip()
+    if not revision_id or not actor:
+        raise ValueError("revision_id and by are required")
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    store = HandoffStore(context_path, scope_id=scoped.scope_id, config=manager.config)
+    if not store.acknowledge(revision_id, actor):
+        raise FileNotFoundError(f"handoff revision not found: {revision_id}")
+    return {"revision_id": revision_id, "acknowledged_by": actor}
+
+
+def _tool_handoff_close(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .handoff import HandoffStore
+
+    identifier = str(arguments.get("identifier", "")).strip()
+    actor = str(arguments.get("by", "")).strip()
+    if not identifier or not actor:
+        raise ValueError("identifier and by are required")
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    store = HandoffStore(context_path, scope_id=scoped.scope_id, config=manager.config)
+    if not store.close(identifier, actor=actor, reason=str(arguments.get("reason", "") or "")):
+        raise FileNotFoundError(f"handoff thread or revision not found: {identifier}")
+    return {"identifier": identifier, "closed_by": actor}
+
+
+def _tool_note_create(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .artifacts import NoteStore
+
+    title = arguments.get("title")
+    body = arguments.get("body")
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("title is required")
+    if not isinstance(body, str):
+        raise ValueError("body must be a string")
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    note = NoteStore(context_path, scope_id=scoped.scope_id, config=manager.config).create(
+        title=title,
+        body=body,
+        project_id=scoped.project_id,
+        task_id=str(arguments.get("task_id", "") or ""),
+        agent_name=str(arguments.get("agent_name", "") or ""),
+        author_kind=str(arguments.get("author_kind", "agent") or "agent"),
+        sensitivity=str(arguments.get("sensitivity", "internal") or "internal"),
+    )
+    return note.to_dict()
+
+
+def _tool_note_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .artifacts import NoteStore
+
+    identifier = str(arguments.get("identifier", "")).strip()
+    if not identifier:
+        raise ValueError("identifier is required")
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    note = NoteStore(context_path, scope_id=scoped.scope_id, config=manager.config).read(identifier)
+    if note is None:
+        raise FileNotFoundError(f"note not found: {identifier}")
+    return note.to_dict()
+
+
+def _tool_note_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .artifacts import NoteStore
+
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    notes = NoteStore(context_path, scope_id=scoped.scope_id, config=manager.config).list(
+        limit=limit
+    )
+    return {"notes": [note.to_dict() for note in notes], "count": len(notes)}
 
 
 def _tool_hivemind_cleanup(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     from .hivemind import HivemindBus
 
     context_path = _resolve_context_path(arguments, manager)
-    max_age_hours = _coerce_int(arguments.get("max_age_hours"), default=manager.config.hivemind.default_ttl_hours, minimum=1, maximum=8760)
+    max_age_hours = _coerce_int(
+        arguments.get("max_age_hours"),
+        default=manager.config.hivemind.default_ttl_hours,
+        minimum=1,
+        maximum=8760,
+    )
     dry_run = bool(arguments.get("dry_run", False))
     bus = HivemindBus(context_path)
     return bus.cleanup_stats(max_age_hours=max_age_hours, dry_run=dry_run)
@@ -1883,7 +2349,9 @@ def _tool_context_freshness(arguments: dict[str, Any], manager: AFSManager) -> d
             return {"error": f"unknown mount type: {mount_type_str}"}
     decay_hours = float(arguments.get("decay_hours", manager.config.context_index.decay_hours))
     threshold = float(arguments.get("threshold", 0.0))
-    return index.freshness_scores(mount_types=mount_types, decay_hours=decay_hours, threshold=threshold)
+    return index.freshness_scores(
+        mount_types=mount_types, decay_hours=decay_hours, threshold=threshold
+    )
 
 
 def _tool_training_antigravity_status(
@@ -1936,12 +2404,15 @@ def _tool_session_replay(arguments: dict[str, Any], manager: AFSManager) -> dict
     session_id = arguments.get("session_id")
     since = arguments.get("since")
     limit = _coerce_int(arguments.get("limit"), default=100, minimum=1, maximum=1000)
-    return build_session_timeline(context_path, session_id=session_id, since=since, limit=limit, config=manager.config)
+    return build_session_timeline(
+        context_path, session_id=session_id, since=since, limit=limit, config=manager.config
+    )
 
 
 def _resolve_codebase_index_dir(context_path: Path, manager: AFSManager) -> Path:
     """Return the codebase symbol index directory for *context_path*."""
     from .codebase_index import codebase_index_dir
+
     return codebase_index_dir(context_path)
 
 
@@ -1949,6 +2420,7 @@ def _resolve_embedding_index_dir(context_path: Path, manager: AFSManager) -> Pat
     """Return the embedding index dir if it exists, else None."""
     from .context_paths import resolve_mount_root
     from .models import MountType
+
     try:
         knowledge = resolve_mount_root(context_path, MountType.KNOWLEDGE)
         candidate = knowledge / "embeddings"
@@ -2004,8 +2476,12 @@ def _fuse_search_results(
                 "symbol_kind": entry.get("kind"),
                 "line_start": entry.get("line_start"),
                 "chunk_index": entry.get("chunk_index"),
-                "chunk_line_start": entry.get("line_start") if entry.get("chunk_index") is not None else None,
-                "chunk_line_end": entry.get("line_end") if entry.get("chunk_index") is not None else None,
+                "chunk_line_start": entry.get("line_start")
+                if entry.get("chunk_index") is not None
+                else None,
+                "chunk_line_end": entry.get("line_end")
+                if entry.get("chunk_index") is not None
+                else None,
             }
         else:
             existing = merged[path]
@@ -2025,20 +2501,32 @@ def _fuse_search_results(
     for i, entry in enumerate(emb):
         raw = emb_scores[i]
         norm = raw / emb_max if emb_max else (1.0 / (i + 1))
-        _update({"source_path": entry.get("source_path", ""),
-                  "text_preview": entry.get("text_preview", ""),
-                  "score": raw,
-                  "chunk_index": entry.get("chunk_index"),
-                  "line_start": entry.get("line_start"),
-                  "line_end": entry.get("line_end")}, norm, "embedding")
+        _update(
+            {
+                "source_path": entry.get("source_path", ""),
+                "text_preview": entry.get("text_preview", ""),
+                "score": raw,
+                "chunk_index": entry.get("chunk_index"),
+                "line_start": entry.get("line_start"),
+                "line_end": entry.get("line_end"),
+            },
+            norm,
+            "embedding",
+        )
 
     for i, entry in enumerate(sym):
         raw = sym_scores[i]
         norm = raw / sym_max if sym_max else (1.0 / (i + 1))
-        _update({"source_path": entry.get("source_path", ""),
-                  "symbol_name": entry.get("symbol_name"),
-                  "kind": entry.get("kind"),
-                  "line_start": entry.get("line_start")}, norm * 0.9, "symbol")
+        _update(
+            {
+                "source_path": entry.get("source_path", ""),
+                "symbol_name": entry.get("symbol_name"),
+                "kind": entry.get("kind"),
+                "line_start": entry.get("line_start"),
+            },
+            norm * 0.9,
+            "symbol",
+        )
 
     ranked = sorted(merged.values(), key=lambda r: r["fused_score"], reverse=True)
     return ranked[:limit]
@@ -2091,6 +2579,7 @@ def _tool_afs_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str
             model = arguments.get("model")
             try:
                 from .embeddings import create_embed_fn, search_embedding_index
+
                 embed_fn = None
                 if isinstance(provider, str) and provider.strip():
                     kwargs: dict[str, Any] = {}
@@ -2112,6 +2601,7 @@ def _tool_afs_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str
         if (idx_dir / "index.json").exists():
             try:
                 from .codebase_index import search_codebase_index
+
                 sym_results = search_codebase_index(idx_dir, query, limit=min(limit, 15))
                 sym_entries = [r.to_dict() for r in sym_results]
                 if sym_entries:
@@ -2189,6 +2679,7 @@ def _tool_afs_codebase_index(arguments: dict[str, Any], manager: AFSManager) -> 
         project_root = Path(project_root_raw).expanduser().resolve()
     else:
         from .codebase_explorer import infer_project_root as _infer
+
         project_root = _infer(context_path)
 
     output_dir = codebase_index_dir(context_path)
@@ -2301,8 +2792,7 @@ def _tool_skill_match(arguments: dict[str, Any], manager: AFSManager) -> dict[st
         _reject_skill_arguments(arguments, "prompt must be a non-empty string")
     if len(raw_prompt) > MAX_SKILL_MATCH_PROMPT_CHARS:
         _reject_skill_arguments(
-            arguments,
-            f"prompt must be at most {MAX_SKILL_MATCH_PROMPT_CHARS} characters"
+            arguments, f"prompt must be at most {MAX_SKILL_MATCH_PROMPT_CHARS} characters"
         )
     prompt = raw_prompt.strip()
     if not prompt:
@@ -2400,13 +2890,9 @@ def _tool_skill_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str
     if len(preview) > MAX_SKILL_KNOWN_PREVIEW_CHARS:
         preview = preview[: MAX_SKILL_KNOWN_PREVIEW_CHARS - 3].rstrip() + "..."
     suffix = (
-        f" (and {len(known) - MAX_SKILL_MATCHES} more)"
-        if len(known) > MAX_SKILL_MATCHES
-        else ""
+        f" (and {len(known) - MAX_SKILL_MATCHES} more)" if len(known) > MAX_SKILL_MATCHES else ""
     )
-    raise ValueError(
-        f"Unknown skill '{name}'. Known skills: {preview}{suffix}"
-    )
+    raise ValueError(f"Unknown skill '{name}'. Known skills: {preview}{suffix}")
 
 
 def _tool_alias_definition(
@@ -2429,6 +2915,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
         input_schema={
             "type": "object",
             "properties": {
+                **_mcp_scope_properties(),
                 "path": {"type": "string", "description": "Absolute or relative file path."},
             },
             "required": ["path"],
@@ -2442,6 +2929,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
         input_schema={
             "type": "object",
             "properties": {
+                **_mcp_scope_properties(),
                 "path": {"type": "string"},
                 "content": {"type": "string"},
                 "append": {"type": "boolean", "default": False},
@@ -2458,6 +2946,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
         input_schema={
             "type": "object",
             "properties": {
+                **_mcp_scope_properties(),
                 "path": {"type": "string"},
                 "recursive": {"type": "boolean", "default": False},
             },
@@ -2472,6 +2961,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
         input_schema={
             "type": "object",
             "properties": {
+                **_mcp_scope_properties(),
                 "source": {"type": "string"},
                 "destination": {"type": "string"},
                 "mkdirs": {"type": "boolean", "default": False},
@@ -2487,6 +2977,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
         input_schema={
             "type": "object",
             "properties": {
+                **_mcp_scope_properties(),
                 "path": {"type": "string"},
                 "max_depth": {"type": "integer", "default": 1},
             },
@@ -2497,6 +2988,147 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
     )
 
     return [
+        MCPToolDefinition(
+            name="messages.send",
+            description="Send a scoped inter-agent message to the current project or common scope.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    **_mcp_scope_properties(),
+                    "from": {"type": "string", "description": "Sending agent name."},
+                    "type": {"type": "string", "default": "status"},
+                    "payload": {"type": "object"},
+                    "to": {"type": "string"},
+                    "topic": {"type": "string"},
+                    "ttl_hours": {"type": "integer"},
+                },
+                "required": ["from"],
+                "additionalProperties": False,
+            },
+            handler=_tool_hivemind_send,
+            catalog="slim",
+        ),
+        MCPToolDefinition(
+            name="messages.read",
+            description="Read messages visible to the current project plus common messages.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    **_mcp_scope_properties(include_all_projects=True),
+                    "agent": {"type": "string"},
+                    "type": {"type": "string"},
+                    "topic": {"type": "string"},
+                    "limit": {"type": "integer", "default": 50},
+                    "include_legacy": {"type": "boolean", "default": False},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_hivemind_read,
+            catalog="slim",
+        ),
+        MCPToolDefinition(
+            name="messages.subscribe",
+            description="Subscribe an agent to message topics.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    **_mcp_scope_properties(),
+                    "agent_name": {"type": "string"},
+                    "topics": {"type": "array", "items": {"type": "string"}},
+                    "ttl_hours": {"type": "integer"},
+                },
+                "required": ["agent_name", "topics"],
+                "additionalProperties": False,
+            },
+            handler=_tool_hivemind_subscribe,
+        ),
+        MCPToolDefinition(
+            name="messages.unsubscribe",
+            description="Unsubscribe an agent from message topics.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    **_mcp_scope_properties(),
+                    "agent_name": {"type": "string"},
+                    "topics": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["agent_name", "topics"],
+                "additionalProperties": False,
+            },
+            handler=_tool_hivemind_unsubscribe,
+        ),
+        MCPToolDefinition(
+            name="messages.clean",
+            description="Preview or apply queue-wide expired-message cleanup; all_projects is required.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    **_mcp_scope_properties(include_all_projects=True),
+                    "max_age_hours": {"type": "integer"},
+                    "apply": {"type": "boolean", "default": False},
+                },
+                "required": ["all_projects"],
+                "additionalProperties": False,
+            },
+            handler=_tool_messages_clean,
+        ),
+        MCPToolDefinition(
+            name="note.create",
+            description="Create an immutable readable Markdown note in the current project scope.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    **_mcp_scope_properties(),
+                    "title": {"type": "string"},
+                    "body": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "agent_name": {"type": "string"},
+                    "author_kind": {
+                        "type": "string",
+                        "enum": ["agent", "human", "import", "system"],
+                        "default": "agent",
+                    },
+                    "sensitivity": {
+                        "type": "string",
+                        "enum": ["internal", "private", "public", "restricted"],
+                        "default": "internal",
+                    },
+                },
+                "required": ["title", "body"],
+                "additionalProperties": False,
+            },
+            handler=_tool_note_create,
+            catalog="slim",
+        ),
+        MCPToolDefinition(
+            name="note.read",
+            description="Read one immutable note from the authorized scope.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    **_mcp_scope_properties(),
+                    "identifier": {"type": "string"},
+                },
+                "required": ["identifier"],
+                "additionalProperties": False,
+            },
+            handler=_tool_note_read,
+            catalog="slim",
+        ),
+        MCPToolDefinition(
+            name="note.list",
+            description="List recent immutable notes from the authorized scope.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    **_mcp_scope_properties(),
+                    "limit": {"type": "integer", "default": 20},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_note_list,
+            catalog="slim",
+        ),
         MCPToolDefinition(
             name="skill.match",
             description=(
@@ -2555,7 +3187,11 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "days": {"type": "integer", "default": 7, "description": "Lookback window in days."},
+                    "days": {
+                        "type": "integer",
+                        "default": 7,
+                        "description": "Lookback window in days.",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -2658,7 +3294,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "context_path": {"type": "string"},
+                    **_mcp_scope_properties(),
                     "mount_types": {
                         "type": "array",
                         "items": {"type": "string", "enum": [mount.value for mount in MountType]},
@@ -2683,7 +3319,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "context_path": {"type": "string"},
+                    **_mcp_scope_properties(include_all_projects=True),
                     "query": {"type": "string"},
                     "relative_prefix": {"type": "string"},
                     "mount_types": {
@@ -2730,7 +3366,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "context_path": {"type": "string"},
+                    **_mcp_scope_properties(),
                 },
                 "additionalProperties": False,
             },
@@ -3015,7 +3651,11 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "properties": {
                     "context_path": {"type": "string"},
                     "name": {"type": "string", "description": "Agent name."},
-                    "limit": {"type": "integer", "description": "Max events to return.", "default": 20},
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max events to return.",
+                        "default": 20,
+                    },
                 },
                 "required": ["name"],
                 "additionalProperties": False,
@@ -3030,11 +3670,20 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "properties": {
                     "context_path": {"type": "string"},
                     "from": {"type": "string", "description": "Sender agent name."},
-                    "type": {"type": "string", "description": "Message type: finding, request, or status."},
+                    "type": {
+                        "type": "string",
+                        "description": "Message type: finding, request, or status.",
+                    },
                     "payload": {"type": "object", "description": "Message payload."},
                     "to": {"type": "string", "description": "Optional recipient agent name."},
-                    "topic": {"type": "string", "description": "Optional topic for pub/sub routing (e.g. context:repair, agent:lifecycle)."},
-                    "ttl_hours": {"type": "integer", "description": "Optional per-message retention window in hours."},
+                    "topic": {
+                        "type": "string",
+                        "description": "Optional topic for pub/sub routing (e.g. context:repair, agent:lifecycle).",
+                    },
+                    "ttl_hours": {
+                        "type": "integer",
+                        "description": "Optional per-message retention window in hours.",
+                    },
                 },
                 "required": ["from", "type"],
                 "additionalProperties": False,
@@ -3051,7 +3700,11 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                     "agent": {"type": "string", "description": "Filter by sender agent name."},
                     "type": {"type": "string", "description": "Filter by message type."},
                     "topic": {"type": "string", "description": "Filter by topic."},
-                    "limit": {"type": "integer", "description": "Max messages to return.", "default": 50},
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max messages to return.",
+                        "default": 50,
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -3066,8 +3719,15 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                     "context_path": {"type": "string"},
                     "title": {"type": "string", "description": "Task title."},
                     "created_by": {"type": "string", "description": "Creator agent name."},
-                    "priority": {"type": "integer", "description": "Priority (1=highest, 10=lowest).", "default": 5},
-                    "context": {"type": "object", "description": "Task context (files, issue, etc)."},
+                    "priority": {
+                        "type": "integer",
+                        "description": "Priority (1=highest, 10=lowest).",
+                        "default": 5,
+                    },
+                    "context": {
+                        "type": "object",
+                        "description": "Task context (files, issue, etc).",
+                    },
                 },
                 "required": ["title"],
                 "additionalProperties": False,
@@ -3081,7 +3741,10 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "type": "object",
                 "properties": {
                     "context_path": {"type": "string"},
-                    "status": {"type": "string", "description": "Filter by status: pending, claimed, in_progress, done, failed."},
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by status: pending, claimed, in_progress, done, failed.",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -3124,7 +3787,10 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "type": "object",
                 "properties": {
                     "file": {"type": "string", "description": "Optional manifest TOML path."},
-                    "harness": {"type": "string", "description": "Optional harness name to export."},
+                    "harness": {
+                        "type": "string",
+                        "description": "Optional harness name to export.",
+                    },
                     "validate": {"type": "boolean", "default": False},
                     "check_paths": {"type": "boolean", "default": False},
                 },
@@ -3287,7 +3953,10 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "type": "object",
                 "properties": {
                     "context_path": {"type": "string"},
-                    "status": {"type": "string", "description": "queue, running, done, failed, or archived."},
+                    "status": {
+                        "type": "string",
+                        "description": "queue, running, done, failed, or archived.",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -3425,11 +4094,21 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "event_type": {"type": "string", "description": "Filter by event type (mcp_tool, hivemind, embedding, agent_lifecycle, session)."},
+                    "event_type": {
+                        "type": "string",
+                        "description": "Filter by event type (mcp_tool, hivemind, embedding, agent_lifecycle, session).",
+                    },
                     "since": {"type": "string", "description": "ISO 8601 datetime cutoff."},
-                    "limit": {"type": "integer", "default": 50, "description": "Max events to return."},
+                    "limit": {
+                        "type": "integer",
+                        "default": 50,
+                        "description": "Max events to return.",
+                    },
                     "source": {"type": "string", "description": "Filter by event source."},
-                    "session_id": {"type": "string", "description": "Filter by recorded AFS session ID."},
+                    "session_id": {
+                        "type": "string",
+                        "description": "Filter by recorded AFS session ID.",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -3441,7 +4120,11 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "default": 20, "description": "Max events to return."},
+                    "limit": {
+                        "type": "integer",
+                        "default": 20,
+                        "description": "Max events to return.",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -3454,8 +4137,15 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "type": "object",
                 "properties": {
                     "context_path": {"type": "string"},
-                    "hours": {"type": "integer", "default": 24, "description": "Lookback window in hours."},
-                    "event_type": {"type": "string", "description": "Optional single event type filter."},
+                    "hours": {
+                        "type": "integer",
+                        "default": 24,
+                        "description": "Lookback window in hours.",
+                    },
+                    "event_type": {
+                        "type": "string",
+                        "description": "Optional single event type filter.",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -3469,8 +4159,16 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "properties": {
                     "context_path": {"type": "string"},
                     "session_id": {"type": "string", "description": "Recorded AFS session ID."},
-                    "limit": {"type": "integer", "default": 200, "description": "Max events to return (0 for all)."},
-                    "include_payloads": {"type": "boolean", "default": False, "description": "Include event payloads when available."},
+                    "limit": {
+                        "type": "integer",
+                        "default": 200,
+                        "description": "Max events to return (0 for all).",
+                    },
+                    "include_payloads": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Include event payloads when available.",
+                    },
                 },
                 "required": ["session_id"],
                 "additionalProperties": False,
@@ -3485,8 +4183,15 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "properties": {
                     "context_path": {"type": "string"},
                     "agent_name": {"type": "string", "description": "Agent name."},
-                    "topics": {"type": "array", "items": {"type": "string"}, "description": "Topics to subscribe to."},
-                    "ttl_hours": {"type": "integer", "description": "Optional subscription TTL window in hours."},
+                    "topics": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Topics to subscribe to.",
+                    },
+                    "ttl_hours": {
+                        "type": "integer",
+                        "description": "Optional subscription TTL window in hours.",
+                    },
                 },
                 "required": ["agent_name", "topics"],
                 "additionalProperties": False,
@@ -3501,7 +4206,11 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "properties": {
                     "context_path": {"type": "string"},
                     "agent_name": {"type": "string", "description": "Agent name."},
-                    "topics": {"type": "array", "items": {"type": "string"}, "description": "Topics to unsubscribe from."},
+                    "topics": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Topics to unsubscribe from.",
+                    },
                 },
                 "required": ["agent_name", "topics"],
                 "additionalProperties": False,
@@ -3515,8 +4224,15 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "type": "object",
                 "properties": {
                     "context_path": {"type": "string"},
-                    "max_age_hours": {"type": "integer", "description": "Override retention window in hours."},
-                    "dry_run": {"type": "boolean", "default": False, "description": "Report removals without deleting files."},
+                    "max_age_hours": {
+                        "type": "integer",
+                        "description": "Override retention window in hours.",
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Report removals without deleting files.",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -3528,11 +4244,30 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "sources": {"type": "array", "items": {"type": "string"}, "description": "Source paths to index."},
-                    "output_dir": {"type": "string", "description": "Output directory for the index."},
-                    "include_patterns": {"type": "array", "items": {"type": "string"}, "description": "Glob patterns to include."},
-                    "exclude_patterns": {"type": "array", "items": {"type": "string"}, "description": "Glob patterns to exclude."},
-                    "incremental": {"type": "boolean", "default": False, "description": "Skip unchanged files using size+mtime comparison."},
+                    "sources": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Source paths to index.",
+                    },
+                    "output_dir": {
+                        "type": "string",
+                        "description": "Output directory for the index.",
+                    },
+                    "include_patterns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Glob patterns to include.",
+                    },
+                    "exclude_patterns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Glob patterns to exclude.",
+                    },
+                    "incremental": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Skip unchanged files using size+mtime comparison.",
+                    },
                 },
                 "required": ["sources", "output_dir"],
                 "additionalProperties": False,
@@ -3550,7 +4285,10 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query."},
-                    "context_path": {"type": "string", "description": "Context path (uses default if omitted)."},
+                    "context_path": {
+                        "type": "string",
+                        "description": "Context path (uses default if omitted).",
+                    },
                     "mount_types": {
                         "type": "string",
                         "description": "Comma-separated mount types for the FTS leg (e.g. 'scratchpad,knowledge').",
@@ -3560,10 +4298,26 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                         "description": "Embedding provider (ollama, openai, gemini, hf). Omit to skip embedding leg.",
                     },
                     "model": {"type": "string", "description": "Embedding model name."},
-                    "limit": {"type": "integer", "default": 20, "description": "Max results to return."},
-                    "include_symbols": {"type": "boolean", "default": True, "description": "Include AST symbol index results."},
-                    "include_embeddings": {"type": "boolean", "default": True, "description": "Include embedding index results."},
-                    "include_fts": {"type": "boolean", "default": True, "description": "Include FTS context index results."},
+                    "limit": {
+                        "type": "integer",
+                        "default": 20,
+                        "description": "Max results to return.",
+                    },
+                    "include_symbols": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Include AST symbol index results.",
+                    },
+                    "include_embeddings": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Include embedding index results.",
+                    },
+                    "include_fts": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Include FTS context index results.",
+                    },
                 },
                 "required": ["query"],
                 "additionalProperties": False,
@@ -3579,8 +4333,14 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Symbol name or substring to search."},
-                    "context_path": {"type": "string", "description": "Context path (uses default if omitted)."},
+                    "query": {
+                        "type": "string",
+                        "description": "Symbol name or substring to search.",
+                    },
+                    "context_path": {
+                        "type": "string",
+                        "description": "Context path (uses default if omitted).",
+                    },
                     "kind": {
                         "type": "string",
                         "enum": ["functions", "classes", "imports", "exports"],
@@ -3591,7 +4351,11 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                         "description": "Filter by language (python, typescript, javascript, rust, go).",
                     },
                     "limit": {"type": "integer", "default": 20},
-                    "exact": {"type": "boolean", "default": False, "description": "Require exact (case-insensitive) name match."},
+                    "exact": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Require exact (case-insensitive) name match.",
+                    },
                 },
                 "required": ["query"],
                 "additionalProperties": False,
@@ -3608,10 +4372,24 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "context_path": {"type": "string", "description": "Context path (uses default if omitted)."},
-                    "path": {"type": "string", "description": "Project root to index (inferred from context if omitted)."},
-                    "max_files": {"type": "integer", "default": 5000, "description": "Max files to index."},
-                    "incremental": {"type": "boolean", "default": True, "description": "Skip unchanged files."},
+                    "context_path": {
+                        "type": "string",
+                        "description": "Context path (uses default if omitted).",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Project root to index (inferred from context if omitted).",
+                    },
+                    "max_files": {
+                        "type": "integer",
+                        "default": 5000,
+                        "description": "Max files to index.",
+                    },
+                    "incremental": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Skip unchanged files.",
+                    },
                     "languages": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -3624,24 +4402,82 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
         ),
         MCPToolDefinition(
             name="handoff.create",
-            description="Create a conversation handoff packet for the next session.",
+            description="Create an immutable, readable handoff revision in the current scope.",
             input_schema={
                 "type": "object",
                 "properties": {
-                    "context_path": {"type": "string"},
+                    **_mcp_scope_properties(),
+                    "title": {"type": "string", "description": "Readable handoff title."},
                     "agent_name": {"type": "string", "description": "Agent creating the handoff."},
-                    "accomplished": {"type": "array", "items": {"type": "string"}, "description": "What got done."},
-                    "blocked": {"type": "array", "items": {"type": "string"}, "description": "What's stuck."},
-                    "next_steps": {"type": "array", "items": {"type": "string"}, "description": "Recommended actions."},
-                    "context_snapshot": {"type": "object", "description": "Scratchpad state, open files, etc."},
-                    "open_tasks": {"type": "array", "items": {"type": "object"}, "description": "Open task dicts."},
+                    "accomplished": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "What got done.",
+                    },
+                    "blocked": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "What's stuck.",
+                    },
+                    "next_steps": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Recommended actions.",
+                    },
+                    "context_snapshot": {
+                        "type": "object",
+                        "description": "Scratchpad state, open files, etc.",
+                    },
+                    "open_tasks": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "Open task dicts.",
+                    },
                     "metadata": {"type": "object", "description": "Freeform metadata."},
-                    "session_id": {"type": "string", "description": "Optional session ID (auto-generated if omitted)."},
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional session ID (auto-generated if omitted).",
+                    },
+                    "target_agent": {"type": "string"},
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "normal", "high", "critical"],
+                        "default": "normal",
+                    },
                 },
                 "required": ["agent_name"],
                 "additionalProperties": False,
             },
             handler=_tool_handoff_create,
+            catalog="slim",
+        ),
+        MCPToolDefinition(
+            name="handoff.revise",
+            description="Create a new immutable revision that supersedes an earlier handoff revision.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    **_mcp_scope_properties(),
+                    "revision_id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "agent_name": {"type": "string"},
+                    "accomplished": {"type": "array", "items": {"type": "string"}},
+                    "blocked": {"type": "array", "items": {"type": "string"}},
+                    "next_steps": {"type": "array", "items": {"type": "string"}},
+                    "context_snapshot": {"type": "object"},
+                    "open_tasks": {"type": "array", "items": {"type": "object"}},
+                    "metadata": {"type": "object"},
+                    "target_agent": {"type": "string"},
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "normal", "high", "critical"],
+                        "default": "normal",
+                    },
+                },
+                "required": ["revision_id", "title", "agent_name"],
+                "additionalProperties": False,
+            },
+            handler=_tool_handoff_revise,
         ),
         MCPToolDefinition(
             name="handoff.read",
@@ -3649,12 +4485,16 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "context_path": {"type": "string"},
-                    "session_id": {"type": "string", "description": "Session ID to read (latest if omitted)."},
+                    **_mcp_scope_properties(),
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID to read (latest if omitted).",
+                    },
                 },
                 "additionalProperties": False,
             },
             handler=_tool_handoff_read,
+            catalog="slim",
         ),
         MCPToolDefinition(
             name="handoff.list",
@@ -3662,12 +4502,61 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "context_path": {"type": "string"},
-                    "limit": {"type": "integer", "default": 10, "description": "Max packets to return."},
+                    **_mcp_scope_properties(),
+                    "limit": {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "Max packets to return.",
+                    },
                 },
                 "additionalProperties": False,
             },
             handler=_tool_handoff_list,
+            catalog="slim",
+        ),
+        MCPToolDefinition(
+            name="handoff.threads",
+            description="List readable handoff threads and their latest revision state.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    **_mcp_scope_properties(),
+                    "limit": {"type": "integer", "default": 20},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_handoff_threads,
+        ),
+        MCPToolDefinition(
+            name="handoff.ack",
+            description="Acknowledge a handoff revision without modifying its immutable content.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    **_mcp_scope_properties(),
+                    "revision_id": {"type": "string"},
+                    "by": {"type": "string"},
+                },
+                "required": ["revision_id", "by"],
+                "additionalProperties": False,
+            },
+            handler=_tool_handoff_ack,
+        ),
+        MCPToolDefinition(
+            name="handoff.close",
+            description="Close a handoff thread via separate lifecycle state.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    **_mcp_scope_properties(),
+                    "identifier": {"type": "string"},
+                    "by": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["identifier", "by"],
+                "additionalProperties": False,
+            },
+            handler=_tool_handoff_close,
         ),
         MCPToolDefinition(
             name="hivemind.cleanup",
@@ -3676,8 +4565,16 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "type": "object",
                 "properties": {
                     "context_path": {"type": "string", "description": "Context path."},
-                    "max_age_hours": {"type": "integer", "default": 24, "description": "Max message age in hours."},
-                    "dry_run": {"type": "boolean", "default": False, "description": "Preview without deleting."},
+                    "max_age_hours": {
+                        "type": "integer",
+                        "default": 24,
+                        "description": "Max message age in hours.",
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Preview without deleting.",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -3730,8 +4627,16 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "properties": {
                     "context_path": {"type": "string", "description": "Context path."},
                     "mount_type": {"type": "string", "description": "Filter by mount type."},
-                    "decay_hours": {"type": "number", "default": 168.0, "description": "Decay window in hours."},
-                    "threshold": {"type": "number", "default": 0.0, "description": "Min score threshold."},
+                    "decay_hours": {
+                        "type": "number",
+                        "default": 168.0,
+                        "description": "Decay window in hours.",
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "default": 0.0,
+                        "description": "Min score threshold.",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -3765,7 +4670,10 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "properties": {
                     "context_path": {"type": "string", "description": "Context path."},
                     "session_id": {"type": "string", "description": "Session ID (date) to filter."},
-                    "since": {"type": "string", "description": "Filter events after this datetime."},
+                    "since": {
+                        "type": "string",
+                        "description": "Filter events after this datetime.",
+                    },
                     "limit": {"type": "integer", "default": 100, "description": "Max events."},
                 },
                 "additionalProperties": False,
@@ -3802,8 +4710,7 @@ def _purge_extension_module_cache(module_name: str, search_roots: list[Path]) ->
     related_names = {
         ".".join(parts)
         for parts in (
-            module_name.split(".")[:index]
-            for index in range(1, len(module_name.split(".")) + 1)
+            module_name.split(".")[:index] for index in range(1, len(module_name.split(".")) + 1)
         )
     }
     prefixes = tuple(f"{name}." for name in related_names)
@@ -3892,9 +4799,7 @@ def _normalize_extension_tools(
     elif isinstance(definitions, (list, tuple)):
         payloads = list(definitions)
     else:
-        raise TypeError(
-            f"Extension {extension_name} must return list[dict] from mcp tool factory"
-        )
+        raise TypeError(f"Extension {extension_name} must return list[dict] from mcp tool factory")
 
     tools: list[MCPToolDefinition] = []
     for payload in payloads:
@@ -3924,9 +4829,7 @@ def _normalize_extension_tools(
             continue
 
         if not isinstance(payload, dict):
-            raise TypeError(
-                f"Extension {extension_name} returned non-dict MCP tool payload"
-            )
+            raise TypeError(f"Extension {extension_name} returned non-dict MCP tool payload")
         name = payload.get("name")
         description = payload.get("description")
         input_schema = payload.get("inputSchema", payload.get("input_schema"))
@@ -3952,9 +4855,7 @@ def _normalize_extension_tools(
                 "additionalProperties": True,
             }
         if not callable(handler):
-            raise ValueError(
-                f"Extension {extension_name} tool '{name}' missing callable handler"
-            )
+            raise ValueError(f"Extension {extension_name} tool '{name}' missing callable handler")
 
         def _wrapped(
             arguments: dict[str, Any],
@@ -4025,9 +4926,7 @@ def _normalize_extension_resources(
             continue
 
         if not isinstance(payload, dict):
-            raise TypeError(
-                f"Extension {extension_name} returned non-dict MCP resource payload"
-            )
+            raise TypeError(f"Extension {extension_name} returned non-dict MCP resource payload")
 
         uri = payload.get("uri")
         name = payload.get("name")
@@ -4157,9 +5056,7 @@ def _normalize_extension_prompts(
             continue
 
         if not isinstance(payload, dict):
-            raise TypeError(
-                f"Extension {extension_name} returned non-dict MCP prompt payload"
-            )
+            raise TypeError(f"Extension {extension_name} returned non-dict MCP prompt payload")
 
         name = payload.get("name")
         description = payload.get("description")
@@ -4171,9 +5068,7 @@ def _normalize_extension_prompts(
         if not isinstance(description, str):
             description = ""
         if not callable(handler):
-            raise ValueError(
-                f"Extension {extension_name} prompt '{name}' missing callable handler"
-            )
+            raise ValueError(f"Extension {extension_name} prompt '{name}' missing callable handler")
 
         def _wrapped(
             prompt_arguments: dict[str, Any],
@@ -4512,9 +5407,7 @@ def _tool_specs(registry: MCPToolRegistry | None = None) -> list[dict[str, Any]]
             name for name, tool in registry.tools.items() if tool.catalog == "slim"
         )
     filtered = [
-        spec
-        for spec in specs
-        if _should_list_tool(str(spec["name"]), slim_names=slim_names)
+        spec for spec in specs if _should_list_tool(str(spec["name"]), slim_names=slim_names)
     ]
     return _client_tool_specs(filtered, tool_names, core_names=core_names)
 
@@ -4596,9 +5489,7 @@ def _client_tool_specs(
 def _server_tool_name(client_name: str, registry: MCPToolRegistry) -> str:
     if not _safe_mcp_tool_names_enabled():
         return client_name
-    core_names = frozenset(
-        name for name, tool in registry.tools.items() if tool.source == "core"
-    )
+    core_names = frozenset(name for name, tool in registry.tools.items() if tool.source == "core")
     _, client_to_original = _tool_name_alias_maps(
         registry.tools,
         core_names=core_names,
@@ -4667,30 +5558,38 @@ def _list_resources(
     resources.extend(list_response_schema_specs())
     for ctx in _discover_allowed_contexts(manager):
         ctx_uri = f"afs://context/{ctx.path}"
-        resources.append({
-            "uri": f"{ctx_uri}/bootstrap",
-            "name": f"{ctx.project_name} bootstrap",
-            "description": f"Session bootstrap packet for {ctx.project_name}",
-            "mimeType": "application/json",
-        })
-        resources.append({
-            "uri": f"{ctx_uri}/metadata",
-            "name": f"{ctx.project_name} metadata",
-            "description": f"Project metadata for {ctx.project_name}",
-            "mimeType": "application/json",
-        })
-        resources.append({
-            "uri": f"{ctx_uri}/mounts",
-            "name": f"{ctx.project_name} mounts",
-            "description": f"Mount listing for {ctx.project_name}",
-            "mimeType": "application/json",
-        })
-        resources.append({
-            "uri": f"{ctx_uri}/index",
-            "name": f"{ctx.project_name} index",
-            "description": f"Index summary for {ctx.project_name}",
-            "mimeType": "application/json",
-        })
+        resources.append(
+            {
+                "uri": f"{ctx_uri}/bootstrap",
+                "name": f"{ctx.project_name} bootstrap",
+                "description": f"Session bootstrap packet for {ctx.project_name}",
+                "mimeType": "application/json",
+            }
+        )
+        resources.append(
+            {
+                "uri": f"{ctx_uri}/metadata",
+                "name": f"{ctx.project_name} metadata",
+                "description": f"Project metadata for {ctx.project_name}",
+                "mimeType": "application/json",
+            }
+        )
+        resources.append(
+            {
+                "uri": f"{ctx_uri}/mounts",
+                "name": f"{ctx.project_name} mounts",
+                "description": f"Mount listing for {ctx.project_name}",
+                "mimeType": "application/json",
+            }
+        )
+        resources.append(
+            {
+                "uri": f"{ctx_uri}/index",
+                "name": f"{ctx.project_name} index",
+                "description": f"Index summary for {ctx.project_name}",
+                "mimeType": "application/json",
+            }
+        )
     if registry is not None:
         resources.extend(registry.resource_specs())
     return resources
@@ -4739,7 +5638,7 @@ def _read_resource(
     if not uri.startswith(prefix):
         raise ValueError(f"Unknown resource URI: {uri}")
 
-    remainder = uri[len(prefix):]
+    remainder = uri[len(prefix) :]
     if remainder.endswith("/metadata"):
         context_path_str = remainder[: -len("/metadata")]
         context_path = _resolve_explicit_allowed_context_path(context_path_str, manager)
@@ -5020,7 +5919,9 @@ def _get_prompt(
             manager,
             context_path,
             task_limit=_coerce_int(arguments.get("task_limit"), default=10, minimum=1, maximum=100),
-            message_limit=_coerce_int(arguments.get("message_limit"), default=10, minimum=1, maximum=100),
+            message_limit=_coerce_int(
+                arguments.get("message_limit"), default=10, minimum=1, maximum=100
+            ),
             skills_prompt=str(arguments.get("skills_prompt", "") or ""),
             skills_top_k=_coerce_int(
                 arguments.get("skills_top_k"),
@@ -5055,7 +5956,10 @@ def _get_prompt(
         return [{"role": "user", "content": {"type": "text", "text": text}}]
 
     if name == "afs.context.overview":
-        explicit_context = isinstance(arguments.get("context_path"), str) and str(arguments.get("context_path")).strip()
+        explicit_context = (
+            isinstance(arguments.get("context_path"), str)
+            and str(arguments.get("context_path")).strip()
+        )
         explicit_project = any(
             isinstance(arguments.get(key), str) and str(arguments.get(key)).strip()
             for key in ("path", "project_path")
@@ -5082,7 +5986,9 @@ def _get_prompt(
             project_path = Path(context_path).parent
         codebase_target = project_path if explicit_project or ctx_root is None else context_path
         codebase = build_codebase_summary(codebase_target)
-        project_name = project_path.name if explicit_project or ctx_root is None else ctx_root.project_name
+        project_name = (
+            project_path.name if explicit_project or ctx_root is None else ctx_root.project_name
+        )
         lines = [
             f"# AFS Context: {project_name}",
             f"Context available: {'yes' if context_available else 'no'}",
@@ -5129,9 +6035,7 @@ def _get_prompt(
         schema_names = set(list_response_schema_names())
         schema_name = str(arguments.get("schema_name", "plan") or "plan").strip()
         if schema_name not in schema_names:
-            raise ValueError(
-                "schema_name must be one of: " + ", ".join(sorted(schema_names))
-            )
+            raise ValueError("schema_name must be one of: " + ", ".join(sorted(schema_names)))
         task = arguments.get("task", "")
         if not isinstance(task, str) or not task.strip():
             raise ValueError("task argument is required")
@@ -5294,7 +6198,9 @@ def _get_prompt(
             raise ValueError("mode argument is required")
         root_arg = arguments.get("context_root")
         context_root = (
-            Path(str(root_arg)).expanduser() if isinstance(root_arg, str) and root_arg.strip() else None
+            Path(str(root_arg)).expanduser()
+            if isinstance(root_arg, str) and root_arg.strip()
+            else None
         )
         text = render_personal_context(mode_arg.strip(), context_root=context_root)
         return [{"role": "user", "content": {"type": "text", "text": text}}]
@@ -5316,11 +6222,7 @@ def _handle_request(
 
     if method == "initialize":
         params = request.get("params", {})
-        requested_protocol = (
-            params.get("protocolVersion")
-            if isinstance(params, dict)
-            else None
-        )
+        requested_protocol = params.get("protocolVersion") if isinstance(params, dict) else None
         negotiated_protocol = (
             requested_protocol
             if requested_protocol in SUPPORTED_PROTOCOL_VERSIONS
@@ -5391,9 +6293,7 @@ def _handle_request(
         return _success_response(request_id, {"contents": [content]})
 
     if method == "prompts/list":
-        return _success_response(
-            request_id, {"prompts": _list_prompts(active_registry)}
-        )
+        return _success_response(request_id, {"prompts": _list_prompts(active_registry)})
 
     if method == "prompts/get":
         params = request.get("params", {})
@@ -5495,6 +6395,7 @@ def serve(config_path: Path | None = None, *, demo: bool = False) -> int:
     # Run diagnostics in background thread so the MCP message loop starts
     # immediately — Claude Desktop times out if initialize takes >60s.
     import threading
+
     threading.Thread(
         target=_startup_diagnostics,
         args=(config_path,),

@@ -54,7 +54,9 @@ class ProjectRecord:
         created_at = payload.get("created_at")
         updated_at = payload.get("updated_at")
         if not all(isinstance(item, str) and item for item in (project_id, scope_id, name, path)):
-            raise ValueError("project record requires non-empty project_id, scope_id, name, and path")
+            raise ValueError(
+                "project record requires non-empty project_id, scope_id, name, and path"
+            )
         if scope_id != f"project:{project_id}":
             raise ValueError("project scope_id must be derived from project_id")
         if not isinstance(aliases, list) or not all(isinstance(item, str) for item in aliases):
@@ -146,7 +148,9 @@ class ProjectRegistry:
         _atomic_write_text(self._record_path(project_id), record.render())
         return record
 
-    def add_alias(self, project_id: str, alias_path: Path, *, requester_path: Path) -> ProjectRecord:
+    def add_alias(
+        self, project_id: str, alias_path: Path, *, requester_path: Path
+    ) -> ProjectRecord:
         """Add a checkout/worktree alias after authorizing the current project."""
 
         record = self.get(project_id, requester_path=requester_path)
@@ -241,6 +245,30 @@ class ProjectRegistry:
     ) -> Path:
         """Resolve an artifact path with project/common authorization enforced."""
 
+        _requested_scope, expected_root = self.resolve_scope_root(
+            category,
+            requester_path=requester_path,
+            scope_id=scope_id,
+            allow_all_projects=allow_all_projects,
+        )
+        relative = Path(relative_path)
+        if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+            raise ValueError("artifact path must be a contained relative path")
+        target = (expected_root / relative).resolve(strict=False)
+        if not _contains(expected_root, target):
+            raise ValueError("artifact path escapes its authorized scope")
+        return target
+
+    def resolve_scope_root(
+        self,
+        category: ContextCategory,
+        *,
+        requester_path: Path,
+        scope_id: str | None = None,
+        allow_all_projects: bool = False,
+    ) -> tuple[str, Path]:
+        """Resolve the authorized root of one category scope."""
+
         requested_scope = scope_id
         if requested_scope is None:
             current = self.resolve(requester_path)
@@ -250,18 +278,10 @@ class ProjectRegistry:
             requester_path=requester_path,
             allow_all_projects=allow_all_projects,
         )
-        relative = Path(relative_path)
-        if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
-            raise ValueError("artifact path must be a contained relative path")
         scope_directory = (
             Path("common")
             if requested_scope == COMMON_SCOPE_ID
             else Path("projects") / requested_scope.removeprefix("project:")
         )
-        category_root = self.context_root / category.value
-        target = (category_root / scope_directory / relative).resolve(strict=False)
-        expected_root = (category_root / scope_directory).resolve(strict=False)
-        if not _contains(expected_root, target):
-            raise ValueError("artifact path escapes its authorized scope")
-        return target
-
+        root = (self.context_root / category.value / scope_directory).resolve(strict=False)
+        return requested_scope, root

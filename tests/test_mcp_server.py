@@ -25,6 +25,7 @@ from afs.mcp_server import (
     build_mcp_registry,
 )
 from afs.models import MountType
+from afs.project_registry import ProjectRegistry
 from afs.schema import (
     AFSConfig,
     ContextIndexConfig,
@@ -58,6 +59,35 @@ def _make_manager(tmp_path: Path) -> AFSManager:
     project_path.mkdir()
     manager.ensure(path=project_path, context_root=context_root)
     return manager
+
+
+def _make_v2_manager(tmp_path: Path) -> tuple[AFSManager, Path, Path, Path, str, str]:
+    context_root = tmp_path / "central" / ".context"
+    alpha = tmp_path / "projects" / "alpha"
+    beta = tmp_path / "projects" / "beta"
+    alpha.mkdir(parents=True)
+    beta.mkdir(parents=True)
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(
+                context_root=context_root,
+                mcp_allowed_roots=[tmp_path],
+            )
+        )
+    )
+    manager.ensure(path=alpha, context_root=context_root, layout_version=2)
+    registry = ProjectRegistry(context_root)
+    alpha_record = registry.resolve(alpha)
+    assert alpha_record is not None
+    beta_record = registry.register(beta)
+    return (
+        manager,
+        context_root,
+        alpha,
+        beta,
+        alpha_record.project_id,
+        beta_record.project_id,
+    )
 
 
 def _call_tool(
@@ -135,6 +165,17 @@ COMPATIBILITY_FILE_TOOL_ALIASES = {
     "fs.list",
 }
 
+PLAIN_SCOPED_TOOLS = {
+    "messages.send",
+    "messages.read",
+    "note.create",
+    "note.read",
+    "note.list",
+    "handoff.create",
+    "handoff.read",
+    "handoff.list",
+}
+
 
 def test_tools_list_defaults_to_slim_catalog(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("AFS_ALLOWED_TOOLS", raising=False)
@@ -146,7 +187,11 @@ def test_tools_list_defaults_to_slim_catalog(tmp_path: Path, monkeypatch) -> Non
     assert response is not None
     tools = response["result"]["tools"]
     names = {tool["name"] for tool in tools}
-    assert names == DEFAULT_MCP_TOOL_CATALOG | {"skill.match", "skill.read"}
+    assert names == DEFAULT_MCP_TOOL_CATALOG | {
+        "skill.match",
+        "skill.read",
+        *PLAIN_SCOPED_TOOLS,
+    }
     assert "context.repair" not in names
     assert "agent.spawn" not in names
     assert not COMPATIBILITY_FILE_TOOL_ALIASES.intersection(names)
@@ -180,6 +225,14 @@ def test_claude_tool_name_style_lists_safe_aliases_and_accepts_calls(
         "context_write",
         "skill_match",
         "skill_read",
+        "messages_send",
+        "messages_read",
+        "note_create",
+        "note_read",
+        "note_list",
+        "handoff_create",
+        "handoff_read",
+        "handoff_list",
     }
     assert all(re.fullmatch(r"^[a-zA-Z0-9_-]{1,64}$", name) for name in names)
 
@@ -319,6 +372,86 @@ def test_context_write_and_read_tool_calls(tmp_path: Path) -> None:
     )
     assert read_response is not None
     assert read_response["result"]["structuredContent"]["content"] == "hello"
+
+
+def test_v2_context_file_tools_enforce_registered_project_scope(tmp_path: Path) -> None:
+    manager, context_root, alpha, beta, alpha_id, beta_id = _make_v2_manager(tmp_path)
+    alpha_root = context_root / "scratchpad" / "projects" / alpha_id
+    beta_root = context_root / "scratchpad" / "projects" / beta_id
+    beta_root.mkdir(parents=True)
+    beta_note = beta_root / "private.md"
+    beta_note.write_text("beta only", encoding="utf-8")
+
+    write_response = _call_tool(
+        manager,
+        "context.write",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "path": "scratchpad/notes/alpha.md",
+            "content": "alpha only",
+            "mkdirs": True,
+        },
+    )
+    written = Path(write_response["result"]["structuredContent"]["path"])
+    assert written == alpha_root / "notes" / "alpha.md"
+    assert written.read_text(encoding="utf-8") == "alpha only"
+
+    listed = _call_tool(
+        manager,
+        "context.list",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "path": "scratchpad",
+            "max_depth": 3,
+        },
+    )
+    listed_paths = {entry["path"] for entry in listed["result"]["structuredContent"]["entries"]}
+    assert str(written) in listed_paths
+    assert str(beta_note) not in listed_paths
+
+    denied = _call_tool(
+        manager,
+        "context.read",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "path": str(beta_note),
+        },
+    )
+    assert "error" in denied
+    assert "outside the authorized" in denied["error"]["message"]
+
+    common_only = _call_tool(
+        manager,
+        "context.read",
+        {"context_path": str(context_root), "path": str(written)},
+    )
+    assert "error" in common_only
+    assert "outside the authorized common scope" in common_only["error"]["message"]
+
+
+def test_v2_context_list_empty_scope_is_non_mutating_success(tmp_path: Path) -> None:
+    manager, context_root, alpha, _beta, alpha_id, _beta_id = _make_v2_manager(tmp_path)
+    expected_root = context_root / "knowledge" / "projects" / alpha_id
+    assert not expected_root.exists()
+
+    response = _call_tool(
+        manager,
+        "context.list",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "path": "knowledge",
+        },
+    )
+
+    assert response["result"]["structuredContent"] == {
+        "path": str(expected_root),
+        "entries": [],
+    }
+    assert not expected_root.exists()
 
 
 # Compatibility aliases: keep explicit coverage that legacy fs.* names still
@@ -536,7 +669,9 @@ def test_work_mcp_tools_capture_style_and_request_approval(tmp_path: Path) -> No
         manager,
     )
     assert show_response is not None
-    assert show_response["result"]["structuredContent"]["approval"]["preview"]["body"].startswith("Thanks")
+    assert show_response["result"]["structuredContent"]["approval"]["preview"]["body"].startswith(
+        "Thanks"
+    )
 
 
 def test_events_analytics_tool_reports_mcp_usage(tmp_path: Path) -> None:
@@ -731,7 +866,9 @@ def test_context_init_tool_creates_project_context(tmp_path: Path, monkeypatch) 
     assert (project_root / ".context").exists()
 
 
-def test_context_init_rejects_project_outside_cwd_without_allowed_context_root(tmp_path: Path) -> None:
+def test_context_init_rejects_project_outside_cwd_without_allowed_context_root(
+    tmp_path: Path,
+) -> None:
     manager = _make_manager(tmp_path)
     project_root = tmp_path / "workspace_project"
     project_root.mkdir(parents=True)
@@ -959,6 +1096,192 @@ def test_context_query_tool_auto_indexes(tmp_path: Path) -> None:
     assert "index_rebuild" in structured
 
 
+def test_v2_context_query_filters_scope_before_ranking(tmp_path: Path) -> None:
+    manager, context_root, alpha, _beta, alpha_id, beta_id = _make_v2_manager(tmp_path)
+    scratchpad = context_root / "scratchpad"
+    paths = {
+        "common": scratchpad / "common" / "shared.md",
+        "alpha": scratchpad / "projects" / alpha_id / "alpha.md",
+        "beta": scratchpad / "projects" / beta_id / "beta.md",
+    }
+    for label, path in paths.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"scope-token {label}", encoding="utf-8")
+
+    scoped_response = _call_tool(
+        manager,
+        "context.query",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "mount_types": ["scratchpad"],
+            "query": "scope-token",
+            "refresh": True,
+            "limit": 10,
+        },
+    )
+    scoped = scoped_response["result"]["structuredContent"]
+    assert scoped["scope_id"] == f"project:{alpha_id}"
+    scoped_paths = {entry["relative_path"] for entry in scoped["entries"]}
+    assert scoped_paths == {
+        f"projects/{alpha_id}/alpha.md",
+        "common/shared.md",
+    }
+    assert f"projects/{beta_id}/beta.md" not in scoped_paths
+
+    common_response = _call_tool(
+        manager,
+        "context.query",
+        {
+            "context_path": str(context_root),
+            "mount_types": ["scratchpad"],
+            "query": "scope-token",
+            "limit": 10,
+        },
+    )
+    common_paths = {
+        entry["relative_path"]
+        for entry in common_response["result"]["structuredContent"]["entries"]
+    }
+    assert common_paths == {"common/shared.md"}
+
+    all_response = _call_tool(
+        manager,
+        "context.query",
+        {
+            "context_path": str(context_root),
+            "mount_types": ["scratchpad"],
+            "query": "scope-token",
+            "all_projects": True,
+            "limit": 10,
+        },
+    )
+    all_paths = {
+        entry["relative_path"] for entry in all_response["result"]["structuredContent"]["entries"]
+    }
+    assert all_paths == {path.relative_to(scratchpad).as_posix() for path in paths.values()}
+
+
+def test_context_file_tool_schemas_accept_scope_routing_fields(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    registry = build_mcp_registry(manager)
+
+    for name in PREFERRED_FILE_TOOLS:
+        properties = registry.tools[name].input_schema["properties"]
+        assert {"context_path", "project_path", "scope_id"}.issubset(properties)
+    query_properties = registry.tools["context.query"].input_schema["properties"]
+    assert "all_projects" in query_properties
+
+
+def test_v2_message_tools_default_to_project_plus_common(tmp_path: Path) -> None:
+    manager, context_root, alpha, beta, _alpha_id, _beta_id = _make_v2_manager(tmp_path)
+
+    for project, sender, payload, scope_id in (
+        (alpha, "alpha-agent", {"text": "alpha"}, None),
+        (beta, "beta-agent", {"text": "beta"}, None),
+        (alpha, "common-agent", {"text": "common"}, "common"),
+    ):
+        arguments: dict[str, object] = {
+            "context_path": str(context_root),
+            "project_path": str(project),
+            "from": sender,
+            "type": "status",
+            "payload": payload,
+        }
+        if scope_id is not None:
+            arguments["scope_id"] = scope_id
+        response = _call_tool(manager, "messages.send", arguments)
+        assert "result" in response
+
+    scoped_response = _call_tool(
+        manager,
+        "messages.read",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "limit": 10,
+        },
+    )
+    scoped = scoped_response["result"]["structuredContent"]
+    assert {message["payload"]["text"] for message in scoped["messages"]} == {
+        "alpha",
+        "common",
+    }
+
+    common_response = _call_tool(
+        manager,
+        "messages.read",
+        {"context_path": str(context_root), "limit": 10},
+    )
+    common = common_response["result"]["structuredContent"]
+    assert [message["payload"]["text"] for message in common["messages"]] == ["common"]
+
+    all_response = _call_tool(
+        manager,
+        "messages.read",
+        {"context_path": str(context_root), "all_projects": True, "limit": 10},
+    )
+    all_messages = all_response["result"]["structuredContent"]["messages"]
+    assert {message["payload"]["text"] for message in all_messages} == {
+        "alpha",
+        "beta",
+        "common",
+    }
+
+
+def test_v2_note_and_handoff_tools_create_readable_scoped_artifacts(tmp_path: Path) -> None:
+    manager, context_root, alpha, beta, alpha_id, _beta_id = _make_v2_manager(tmp_path)
+    scope_args = {"context_path": str(context_root), "project_path": str(alpha)}
+
+    note_response = _call_tool(
+        manager,
+        "note.create",
+        {
+            **scope_args,
+            "title": "Review parser edge cases",
+            "body": "Keep the empty-input regression pinned.",
+            "agent_name": "codex",
+        },
+    )
+    note = note_response["result"]["structuredContent"]
+    note_name = Path(note["path"]).name
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{6}Z--review-parser-edge-cases--[0-9a-f]{10}\.md",
+        note_name,
+    )
+    assert note["metadata"]["scope_id"] == f"project:{alpha_id}"
+
+    note_list = _call_tool(manager, "note.list", scope_args)
+    assert [
+        item["metadata"]["artifact_id"]
+        for item in note_list["result"]["structuredContent"]["notes"]
+    ] == [note["metadata"]["artifact_id"]]
+    beta_notes = _call_tool(
+        manager,
+        "note.list",
+        {"context_path": str(context_root), "project_path": str(beta)},
+    )
+    assert beta_notes["result"]["structuredContent"]["notes"] == []
+
+    handoff_response = _call_tool(
+        manager,
+        "handoff.create",
+        {
+            **scope_args,
+            "title": "Continue scoped MCP review",
+            "agent_name": "codex",
+            "accomplished": ["Scoped file and message tools"],
+            "next_steps": ["Run the full suite"],
+        },
+    )
+    handoff = handoff_response["result"]["structuredContent"]
+    assert handoff["scope_id"] == f"project:{alpha_id}"
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{6}Z--continue-scoped-mcp-review--[0-9a-f]{10}\.md",
+        Path(handoff["artifact_path"]).name,
+    )
+
+
 def test_context_tools_block_never_export_paths(tmp_path: Path) -> None:
     context_root = tmp_path / "context"
     manager = AFSManager(
@@ -1043,8 +1366,7 @@ def test_context_file_mutations_respect_sensitivity_rules(tmp_path: Path) -> Non
         request_id=510,
     )
     listed_paths = [
-        entry["path"]
-        for entry in list_response["result"]["structuredContent"]["entries"]
+        entry["path"] for entry in list_response["result"]["structuredContent"]["entries"]
     ]
     assert str(public_note) in listed_paths
     assert str(private_note) not in listed_paths
@@ -1825,9 +2147,7 @@ def test_initialize_negotiates_supported_protocol_version(tmp_path: Path) -> Non
 
 def test_read_message_accepts_lf_header_terminator() -> None:
     body = b'{"jsonrpc":"2.0","id":1,"method":"ping"}'
-    stream = BytesIO(
-        f"Content-Length: {len(body)}\n\n".encode("ascii") + body
-    )
+    stream = BytesIO(f"Content-Length: {len(body)}\n\n".encode("ascii") + body)
 
     payload, mode = _read_message(stream)
     assert mode == "content-length"
@@ -1836,9 +2156,7 @@ def test_read_message_accepts_lf_header_terminator() -> None:
 
 def test_read_message_accepts_cr_header_terminator() -> None:
     body = b'{"jsonrpc":"2.0","id":2,"method":"ping"}'
-    stream = BytesIO(
-        f"Content-Length: {len(body)}\r\r".encode("ascii") + body
-    )
+    stream = BytesIO(f"Content-Length: {len(body)}\r\r".encode("ascii") + body)
 
     payload, mode = _read_message(stream)
     assert mode == "content-length"
@@ -1855,9 +2173,7 @@ def test_read_message_accepts_jsonl_transport() -> None:
 
 def test_resources_list_returns_contexts_resource(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
-    response = _handle_request(
-        {"jsonrpc": "2.0", "id": 21, "method": "resources/list"}, manager
-    )
+    response = _handle_request({"jsonrpc": "2.0", "id": 21, "method": "resources/list"}, manager)
     assert response is not None
     resources = response["result"]["resources"]
     uris = [r["uri"] for r in resources]
@@ -2054,9 +2370,7 @@ def test_resources_read_rejects_context_outside_allowed_roots(tmp_path: Path) ->
 
 def test_prompts_list_returns_expected_prompts(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
-    response = _handle_request(
-        {"jsonrpc": "2.0", "id": 26, "method": "prompts/list"}, manager
-    )
+    response = _handle_request({"jsonrpc": "2.0", "id": 26, "method": "prompts/list"}, manager)
     assert response is not None
     prompts = response["result"]["prompts"]
     names = {p["name"] for p in prompts}
@@ -2113,7 +2427,9 @@ def test_prompts_get_session_bootstrap(tmp_path: Path, monkeypatch) -> None:
     project_root = context_root.parent
     (project_root / "README.md").write_text("# Demo\n", encoding="utf-8")
     (project_root / "src").mkdir(exist_ok=True)
-    (project_root / "src" / "demo.py").write_text("def demo() -> int:\n    return 1\n", encoding="utf-8")
+    (project_root / "src" / "demo.py").write_text(
+        "def demo() -> int:\n    return 1\n", encoding="utf-8"
+    )
     response = _handle_request(
         {
             "jsonrpc": "2.0",
@@ -2148,9 +2464,13 @@ def test_prompts_get_context_overview_without_existing_context(tmp_path: Path) -
     (project_path / "config" / "registry.json").write_text('{"models": []}\n', encoding="utf-8")
     (project_path / "config" / "system_prompt.md").write_text("# Prompt\n", encoding="utf-8")
     (project_path / "scripts").mkdir()
-    (project_path / "scripts" / "train.py").write_text("def train() -> None:\n    pass\n", encoding="utf-8")
+    (project_path / "scripts" / "train.py").write_text(
+        "def train() -> None:\n    pass\n", encoding="utf-8"
+    )
     (project_path / "training").mkdir()
-    (project_path / "training" / "dataset.py").write_text("def load_dataset() -> list[str]:\n    return []\n", encoding="utf-8")
+    (project_path / "training" / "dataset.py").write_text(
+        "def load_dataset() -> list[str]:\n    return []\n", encoding="utf-8"
+    )
 
     manager = AFSManager(
         config=AFSConfig(
@@ -2192,9 +2512,13 @@ def test_prompts_get_context_overview_prefers_requested_project_over_ancestor_co
     (project_path / "config").mkdir()
     (project_path / "config" / "registry.json").write_text('{"models": []}\n', encoding="utf-8")
     (project_path / "scripts").mkdir()
-    (project_path / "scripts" / "train.py").write_text("def train() -> None:\n    pass\n", encoding="utf-8")
+    (project_path / "scripts" / "train.py").write_text(
+        "def train() -> None:\n    pass\n", encoding="utf-8"
+    )
     (project_path / "training").mkdir()
-    (project_path / "training" / "dataset.py").write_text("def load_dataset() -> list[str]:\n    return []\n", encoding="utf-8")
+    (project_path / "training" / "dataset.py").write_text(
+        "def load_dataset() -> list[str]:\n    return []\n", encoding="utf-8"
+    )
 
     manager = AFSManager(
         config=AFSConfig(
@@ -2348,9 +2672,9 @@ def test_prompts_get_workflow_structured(tmp_path: Path) -> None:
     (tmp_path / ".afs").mkdir()
     (tmp_path / ".afs" / "policy.toml").write_text(
         "[review]\n"
-        "focus = [\"order findings by severity\"]\n\n"
+        'focus = ["order findings by severity"]\n\n'
         "[design]\n"
-        "constraints = [\"preserve compatibility\"]\n",
+        'constraints = ["preserve compatibility"]\n',
         encoding="utf-8",
     )
     (context_root / "knowledge").mkdir(exist_ok=True)
@@ -2418,13 +2742,15 @@ def test_prompts_get_context_overview(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     context_root = manager.config.general.context_root
     (context_root / "metadata.json").write_text(
-        json.dumps({
-            "created_at": "2025-01-01",
-            "description": "test project",
-            "agents": ["claude"],
-            "directories": {},
-            "manual_only": [],
-        }),
+        json.dumps(
+            {
+                "created_at": "2025-01-01",
+                "description": "test project",
+                "agents": ["claude"],
+                "directories": {},
+                "manual_only": [],
+            }
+        ),
         encoding="utf-8",
     )
     response = _handle_request(
@@ -2527,12 +2853,8 @@ def test_prompts_get_query_search_supports_context_path_and_auto_refresh(
 def test_prompts_get_scratchpad_review(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     context_root = manager.config.general.context_root
-    (context_root / "scratchpad" / "state.md").write_text(
-        "current state info", encoding="utf-8"
-    )
-    (context_root / "scratchpad" / "deferred.md").write_text(
-        "deferred task list", encoding="utf-8"
-    )
+    (context_root / "scratchpad" / "state.md").write_text("current state info", encoding="utf-8")
+    (context_root / "scratchpad" / "deferred.md").write_text("deferred task list", encoding="utf-8")
     response = _handle_request(
         {
             "jsonrpc": "2.0",
@@ -2556,12 +2878,8 @@ def test_prompts_get_scratchpad_review(tmp_path: Path) -> None:
 def test_prompts_get_scratchpad_review_uses_remapped_directory(tmp_path: Path) -> None:
     manager = _make_remapped_manager(tmp_path, scratchpad="notes")
     context_root = manager.config.general.context_root
-    (context_root / "notes" / "state.md").write_text(
-        "remapped state", encoding="utf-8"
-    )
-    (context_root / "notes" / "deferred.md").write_text(
-        "remapped deferred", encoding="utf-8"
-    )
+    (context_root / "notes" / "state.md").write_text("remapped state", encoding="utf-8")
+    (context_root / "notes" / "deferred.md").write_text("remapped deferred", encoding="utf-8")
     response = _handle_request(
         {
             "jsonrpc": "2.0",
@@ -2624,11 +2942,11 @@ def test_extension_mcp_tools_are_registered_and_callable(tmp_path: Path) -> None
     ext_dir = ext_root / "ext_workspace"
     ext_dir.mkdir(parents=True)
     (ext_dir / "extension.toml").write_text(
-        "name = \"ext_workspace\"\n"
+        'name = "ext_workspace"\n'
         "\n"
         "[mcp_tools]\n"
-        "module = \"ext_mcp\"\n"
-        "factory = \"register_mcp_tools\"\n",
+        'module = "ext_mcp"\n'
+        'factory = "register_mcp_tools"\n',
         encoding="utf-8",
     )
     (ext_dir / "ext_mcp.py").write_text(
@@ -2693,11 +3011,11 @@ def test_extension_mcp_server_registers_tools_resources_and_prompts(
     ext_dir = ext_root / "ext_workspace"
     ext_dir.mkdir(parents=True)
     (ext_dir / "extension.toml").write_text(
-        "name = \"ext_workspace\"\n"
+        'name = "ext_workspace"\n'
         "\n"
         "[mcp_server]\n"
-        "module = \"ext_surface\"\n"
-        "factory = \"register_mcp_server\"\n",
+        'module = "ext_surface"\n'
+        'factory = "register_mcp_server"\n',
         encoding="utf-8",
     )
     (ext_dir / "ext_surface.py").write_text(
@@ -2846,11 +3164,11 @@ def test_extension_mcp_server_conflicts_do_not_override_core_surface(
     ext_dir = ext_root / "ext_workspace"
     ext_dir.mkdir(parents=True)
     (ext_dir / "extension.toml").write_text(
-        "name = \"ext_workspace\"\n"
+        'name = "ext_workspace"\n'
         "\n"
         "[mcp_server]\n"
-        "module = \"ext_surface\"\n"
-        "factory = \"register_mcp_server\"\n",
+        'module = "ext_surface"\n'
+        'factory = "register_mcp_server"\n',
         encoding="utf-8",
     )
     (ext_dir / "ext_surface.py").write_text(
@@ -2914,7 +3232,9 @@ def test_extension_mcp_server_conflicts_do_not_override_core_surface(
 
     registry = build_mcp_registry(manager)
     errors = registry.load_errors
-    assert any("Tool 'context.read' already registered by core" in message for message in errors.values())
+    assert any(
+        "Tool 'context.read' already registered by core" in message for message in errors.values()
+    )
     assert any(
         "Resource 'afs://contexts' already registered by core" in message
         for message in errors.values()
@@ -3029,9 +3349,7 @@ def test_profile_mcp_tools_modules_are_loaded_into_registry(
         registry=registry,
     )
     assert resource_response is not None
-    assert json.loads(resource_response["result"]["contents"][0]["text"]) == {
-        "status": "profile"
-    }
+    assert json.loads(resource_response["result"]["contents"][0]["text"]) == {"status": "profile"}
 
     prompt_response = _handle_request(
         {
@@ -3525,11 +3843,11 @@ def test_companion_repo_mcp_server_uses_src_layout(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (repo / "extension.toml").write_text(
-        "name = \"afs_example\"\n"
+        'name = "afs_example"\n'
         "\n"
         "[mcp_server]\n"
-        "module = \"afs_example.mcp_surface\"\n"
-        "factory = \"register_mcp_server\"\n",
+        'module = "afs_example.mcp_surface"\n'
+        'factory = "register_mcp_server"\n',
         encoding="utf-8",
     )
 
@@ -3575,9 +3893,7 @@ def _write_matching_skill(root: Path, name: str, *, body_size: int = 2_600) -> N
         "enforcement:\n"
         "  - Keep the operation bounded.\n"
         "---\n"
-        f"# {name}\n\n"
-        + ("x" * body_size)
-        + "\n",
+        f"# {name}\n\n" + ("x" * body_size) + "\n",
         encoding="utf-8",
     )
 
@@ -3718,10 +4034,7 @@ def test_skill_read_sanitizes_control_characters_in_known_skill_preview(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    hostile_name = (
-        "known\x1b]8;;https://example.invalid\x07click\x1b]8;;\x07"
-        "\nnext\x85line"
-    )
+    hostile_name = "known\x1b]8;;https://example.invalid\x07click\x1b]8;;\x07\nnext\x85line"
     metadata = SkillMetadata(
         name=hostile_name,
         path=tmp_path / "known" / "SKILL.md",
@@ -3738,10 +4051,7 @@ def test_skill_read_sanitizes_control_characters_in_known_skill_preview(
     assert "\\u0007" in message
     assert "\\u000a" in message
     assert "\\u0085" in message
-    assert not any(
-        ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
-        for char in message
-    )
+    assert not any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in message)
     assert stderr == f"[afs-mcp] tool error: skill.read: {message}\n"
     assert len(message) <= 1_400
 
@@ -3870,8 +4180,9 @@ def test_skill_tools_bound_adversarial_metadata(tmp_path: Path) -> None:
         verification=[huge],
     )
 
-    with patch("afs.mcp_server.discover_skills", return_value=[metadata]), patch(
-        "afs.skills.discover_skills", return_value=[metadata]
+    with (
+        patch("afs.mcp_server.discover_skills", return_value=[metadata]),
+        patch("afs.skills.discover_skills", return_value=[metadata]),
     ):
         match_response = _call_tool(
             manager,
@@ -3896,19 +4207,14 @@ def _make_catalog_extension_manager(
 ) -> AFSManager:
     extension_root = tmp_path / "extensions" / "catalog_extension"
     extension_root.mkdir(parents=True)
-    catalog_line = (
-        f'catalog = "{manifest_catalog}"\n' if manifest_catalog is not None else ""
-    )
+    catalog_line = f'catalog = "{manifest_catalog}"\n' if manifest_catalog is not None else ""
     (extension_root / "extension.toml").write_text(
-        "name = \"catalog_extension\"\n\n"
+        'name = "catalog_extension"\n\n'
         "[mcp_tools]\n"
-        "module = \"catalog_extension_mcp\"\n"
-        + catalog_line,
+        'module = "catalog_extension_mcp"\n' + catalog_line,
         encoding="utf-8",
     )
-    tool_catalog_entry = (
-        f", 'catalog': {tool_catalog!r}" if tool_catalog is not None else ""
-    )
+    tool_catalog_entry = f", 'catalog': {tool_catalog!r}" if tool_catalog is not None else ""
     (extension_root / "catalog_extension_mcp.py").write_text(
         "def register_mcp_tools(_manager):\n"
         "    def echo(arguments):\n"
@@ -4013,9 +4319,9 @@ def test_invalid_extension_manifest_catalog_is_rejected(
     rendered = json.dumps(catalog) if not isinstance(catalog, str) else f'"{catalog}"'
     manifest = extension_root / "extension.toml"
     manifest.write_text(
-        "name = \"invalid-catalog\"\n\n"
+        'name = "invalid-catalog"\n\n'
         "[mcp_tools]\n"
-        "module = \"invalid_catalog_mcp\"\n"
+        'module = "invalid_catalog_mcp"\n'
         f"catalog = {rendered}\n",
         encoding="utf-8",
     )
