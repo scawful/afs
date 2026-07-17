@@ -178,7 +178,18 @@ def test_tools_list_defaults_to_slim_catalog_without_profile(
     tools = response["result"]["tools"]
     tool_names = {t["name"] for t in tools}
 
-    assert tool_names == DEFAULT_MCP_TOOL_CATALOG | {"skill.match", "skill.read"}
+    assert tool_names == DEFAULT_MCP_TOOL_CATALOG | {
+        "skill.match",
+        "skill.read",
+        "messages.send",
+        "messages.read",
+        "note.create",
+        "note.read",
+        "note.list",
+        "handoff.create",
+        "handoff.read",
+        "handoff.list",
+    }
     assert "context.repair" not in tool_names
     assert "session.pack" not in tool_names
 

@@ -31,6 +31,7 @@ from afs.session_harness import (
     _build_session_verification_state,
     _verification_record_from_event,
     build_client_session_payload,
+    record_client_session_activity,
 )
 from afs.tasks import TaskQueue
 from afs.verification import verification_item_id
@@ -267,6 +268,79 @@ def test_session_prepare_client_command_outputs_artifacts(
     supported_names = {entry["name"] for entry in payload["integration"]["supported_events"]}
     assert "user_prompt_submit" in supported_names
     assert "task_completed" in supported_names
+
+
+def test_v2_client_session_artifacts_are_project_scoped(tmp_path: Path) -> None:
+    from afs.context_index import ContextSQLiteIndex
+    from afs.project_registry import ProjectRegistry
+    from afs.schema import SessionPackCacheConfig
+
+    context_root = tmp_path / ".context"
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    config = AFSConfig(
+        general=GeneralConfig(context_root=context_root),
+        session_pack_cache=SessionPackCacheConfig(cache_dir=tmp_path / "pack-cache"),
+    )
+    manager = AFSManager(config=config)
+    manager.ensure(path=alpha, context_root=context_root, layout_version=2)
+    registry = ProjectRegistry(context_root)
+    alpha_record = registry.resolve(alpha)
+    assert alpha_record is not None
+    beta_record = registry.register(beta)
+
+    for record, marker in (
+        (alpha_record, "alpha-client-marker"),
+        (beta_record, "beta-client-marker"),
+    ):
+        path = context_root / "knowledge" / "projects" / record.project_id / "scope.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(f"client-scope-query {marker}", encoding="utf-8")
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE],
+        include_content=True,
+    )
+
+    payloads = {}
+    for name, project in (("alpha", alpha), ("beta", beta)):
+        payloads[name] = build_client_session_payload(
+            manager,
+            context_root,
+            client="codex",
+            cwd=project,
+            query="client-scope-query",
+            task="Prepare this project.",
+            include_content=True,
+            include_skills=False,
+            token_budget=2500,
+            write_artifacts=True,
+        )
+
+    alpha_payload = payloads["alpha"]
+    beta_payload = payloads["beta"]
+    assert alpha_payload["scope_id"] == alpha_record.scope_id
+    assert beta_payload["scope_id"] == beta_record.scope_id
+    for section in ("bootstrap", "pack", "prompt"):
+        assert (
+            alpha_payload[section]["artifact_paths"]["json"]
+            != beta_payload[section]["artifact_paths"]["json"]
+        )
+    assert alpha_payload["artifact_paths"]["json"] != beta_payload["artifact_paths"]["json"]
+    assert alpha_record.project_id in alpha_payload["artifact_paths"]["json"]
+    assert beta_record.project_id in beta_payload["artifact_paths"]["json"]
+    assert "beta-client-marker" not in json.dumps(alpha_payload)
+    with pytest.raises(PermissionError, match="does not match"):
+        record_client_session_activity(
+            manager,
+            context_root,
+            client="codex",
+            event_name="session_start",
+            event_payload={},
+            cwd=alpha,
+            payload_file=beta_payload["artifact_paths"]["json"],
+        )
 
 
 def test_prepared_session_redacts_verification_secrets_from_all_artifacts(

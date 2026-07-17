@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from afs.agents.supervisor import AgentSupervisor
+from afs.context_index import ContextSQLiteIndex
 from afs.extensions import load_extension_manifest
 from afs.history import append_history_event
 from afs.manager import AFSManager
@@ -2594,6 +2595,62 @@ def test_tool_session_pack(tmp_path: Path) -> None:
     assert payload["execution_profile"]["retry_hint"]
     assert payload["pack_mode"] == "retrieval"
     assert any("guide.md" in source for source in payload["sources"])
+
+
+def test_v2_session_pack_tool_and_prompt_propagate_project_scope(tmp_path: Path) -> None:
+    manager, context_root, alpha, _beta, alpha_id, beta_id = _make_v2_manager(tmp_path)
+    for project_id, marker in (
+        (alpha_id, "alpha-pack-marker"),
+        (beta_id, "beta-pack-marker"),
+    ):
+        path = context_root / "knowledge" / "projects" / project_id / "scope.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(f"pack-scope-query {marker}", encoding="utf-8")
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE],
+        include_content=True,
+    )
+
+    response = _call_tool(
+        manager,
+        "session.pack",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "query": "pack-scope-query",
+            "include_content": True,
+            "token_budget": 2000,
+        },
+    )
+    structured = response["result"]["structuredContent"]
+    assert structured["scope_id"] == f"project:{alpha_id}"
+    assert "alpha-pack-marker" in json.dumps(structured)
+    assert "beta-pack-marker" not in json.dumps(structured)
+
+    prompt_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 991,
+            "method": "prompts/get",
+            "params": {
+                "name": "afs.session.pack",
+                "arguments": {
+                    "context_path": str(context_root),
+                    "project_path": str(alpha),
+                    "query": "pack-scope-query",
+                    "token_budget": 2000,
+                },
+            },
+        },
+        manager,
+    )
+    assert prompt_response is not None
+    text = prompt_response["result"]["messages"][0]["content"]["text"]
+    assert f"Scope: project:{alpha_id}" in text
+    assert "beta-pack-marker" not in text
+
+    schema = build_mcp_registry(manager).tools["session.pack"].input_schema
+    assert "project_path" in schema["properties"]
 
 
 def test_tool_operator_digest(tmp_path: Path) -> None:

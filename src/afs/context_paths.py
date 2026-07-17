@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -61,14 +62,37 @@ def resolve_agent_output_root(
     *,
     config: AFSConfig | None = None,
     directories: Iterable[DirectoryConfig] | None = None,
+    scope_id: str = "common",
 ) -> Path:
-    """Resolve the shared scratchpad output directory used by built-in agents."""
-    return resolve_mount_root(
+    """Resolve the agent-output directory without crossing a v2 scope.
+
+    Version 1 keeps the historical ``scratchpad/afs_agents`` path.  A central
+    v2 context stores the same artifacts below either ``scratchpad/common`` or
+    ``scratchpad/projects/<project-id>`` so two registered projects cannot
+    overwrite or reuse one another's session state.
+    """
+    scratchpad_root = resolve_mount_root(
         context_path,
         MountType.SCRATCHPAD,
         config=config,
         directories=directories,
-    ) / "afs_agents"
+    )
+    if detect_layout_version(context_path) != LAYOUT_VERSION:
+        return scratchpad_root / "afs_agents"
+
+    normalized_scope = str(scope_id or "common").strip()
+    if normalized_scope == "common":
+        scope_root = scratchpad_root / "common"
+    else:
+        prefix, separator, project_id = normalized_scope.partition(":")
+        if (
+            prefix != "project"
+            or not separator
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", project_id)
+        ):
+            raise ValueError("scope_id must be 'common' or 'project:<project-id>'")
+        scope_root = scratchpad_root / "projects" / project_id
+    return scope_root / "afs_agents"
 
 
 def resolve_agent_scratchpad(

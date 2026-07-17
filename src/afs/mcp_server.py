@@ -1296,7 +1296,7 @@ def _tool_context_status(arguments: dict[str, Any], manager: AFSManager) -> dict
 
 def _tool_session_pack(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     """Build a token-budgeted context pack for a target model."""
-    context_path = _resolve_context_path(arguments, manager)
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
     query_value = arguments.get("query", "")
     if query_value is None:
         query_value = ""
@@ -1308,6 +1308,8 @@ def _tool_session_pack(arguments: dict[str, Any], manager: AFSManager) -> dict[s
     return build_context_pack(
         manager,
         context_path,
+        project_path=scoped.requester_path,
+        scope_id=scoped.scope_id,
         query=query_value,
         task=str(arguments.get("task", "") or ""),
         model=model,
@@ -3395,7 +3397,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "context_path": {"type": "string"},
+                    **_mcp_scope_properties(),
                     "query": {"type": "string", "description": "Optional retrieval query."},
                     "task": {
                         "type": "string",
@@ -5705,11 +5707,16 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
     prompts = [
         {
             "name": "afs.session.bootstrap",
-            "description": "Build a session-start bootstrap packet with health, scratchpad, tasks, hivemind, and durable memory. Call this first in a new session.",
+            "description": "Build a session-start bootstrap packet with health, scratchpad, tasks, messages, and durable memory. Call this first in a new session.",
             "arguments": [
                 {
                     "name": "context_path",
                     "description": "Path to .context root (uses configured default if omitted)",
+                    "required": False,
+                },
+                {
+                    "name": "project_path",
+                    "description": "Registered project path used to select the current project scope.",
                     "required": False,
                 },
                 {
@@ -5719,7 +5726,7 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                 },
                 {
                     "name": "message_limit",
-                    "description": "Maximum hivemind messages to include (default 10)",
+                    "description": "Maximum scoped messages to include (default 10)",
                     "required": False,
                 },
                 {
@@ -5741,6 +5748,11 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                 {
                     "name": "context_path",
                     "description": "Path to .context root (uses configured default if omitted)",
+                    "required": False,
+                },
+                {
+                    "name": "project_path",
+                    "description": "Registered project path used to select the current project scope.",
                     "required": False,
                 },
                 {
@@ -5803,6 +5815,11 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                 {
                     "name": "context_path",
                     "description": "Path to .context root (uses configured default if omitted)",
+                    "required": False,
+                },
+                {
+                    "name": "project_path",
+                    "description": "Registered project path used to select the current project scope.",
                     "required": False,
                 },
                 {
@@ -5931,10 +5948,11 @@ def _get_prompt(
 ) -> list[dict[str, Any]]:
     """Build MCP prompt messages for a named prompt."""
     if name == "afs.session.bootstrap":
-        context_path = _resolve_prompt_context_path(arguments, manager)
+        context_path, scoped = _resolve_mcp_scope(arguments, manager)
         payload = build_session_bootstrap(
             manager,
             context_path,
+            project_path=scoped.requester_path,
             task_limit=_coerce_int(arguments.get("task_limit"), default=10, minimum=1, maximum=100),
             message_limit=_coerce_int(
                 arguments.get("message_limit"), default=10, minimum=1, maximum=100
@@ -5951,10 +5969,12 @@ def _get_prompt(
         return [{"role": "user", "content": {"type": "text", "text": text}}]
 
     if name == "afs.session.pack":
-        context_path = _resolve_prompt_context_path(arguments, manager)
+        context_path, scoped = _resolve_mcp_scope(arguments, manager)
         payload = build_context_pack(
             manager,
             context_path,
+            project_path=scoped.requester_path,
+            scope_id=scoped.scope_id,
             query=str(arguments.get("query", "") or ""),
             task=str(arguments.get("task", "") or ""),
             model=str(arguments.get("model", "generic") or "generic"),
@@ -6056,10 +6076,12 @@ def _get_prompt(
         task = arguments.get("task", "")
         if not isinstance(task, str) or not task.strip():
             raise ValueError("task argument is required")
-        context_path = _resolve_prompt_context_path(arguments, manager)
+        context_path, scoped = _resolve_mcp_scope(arguments, manager)
         payload = build_context_pack(
             manager,
             context_path,
+            project_path=scoped.requester_path,
+            scope_id=scoped.scope_id,
             query=str(arguments.get("query", "") or ""),
             task=task,
             model=str(arguments.get("model", "generic") or "generic"),

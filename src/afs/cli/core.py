@@ -1099,9 +1099,15 @@ def session_pack_command(args: argparse.Namespace) -> int:
     )
     manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
+    project_path = (
+        Path(args.path).expanduser().resolve()
+        if isinstance(getattr(args, "path", None), str) and args.path.strip()
+        else None
+    )
     pack = build_context_pack(
         manager,
         context_path,
+        project_path=project_path,
         query=args.query or "",
         task=args.task or "",
         model=args.model,
@@ -2269,7 +2275,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     session_sub = session_parser.add_subparsers(dest="session_command")
     session_bootstrap = session_sub.add_parser(
         "bootstrap",
-        help="Build a startup packet from context health, scratchpad, tasks, hivemind, and memory.",
+        help="Build a startup packet from context health, scratchpad, tasks, messages, and memory.",
     )
     add_context_args(session_bootstrap)
     session_bootstrap.add_argument(

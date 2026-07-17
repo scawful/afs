@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .chat_registry import load_chat_registry
+from .context_layout import LAYOUT_VERSION
 from .context_pack import build_context_pack, write_context_pack_artifacts
 from .context_paths import resolve_agent_output_root
 from .manager import AFSManager
@@ -18,6 +19,7 @@ from .model_profiles import profile_for_client_model
 from .model_prompts import build_model_system_prompt
 from .profiles import resolve_active_profile
 from .repo_policy import evaluate_repo_policy, load_repo_policy
+from .scopes import resolve_scope
 from .session_bootstrap import build_session_bootstrap, write_session_bootstrap_artifacts
 from .session_workflows import build_session_execution_profile
 from .skills import build_skill_matches, resolve_skill_roots
@@ -133,8 +135,14 @@ def _client_output_paths(
     manager: AFSManager,
     context_path: Path,
     client: str,
+    *,
+    scope_id: str = "common",
 ) -> dict[str, Path]:
-    output_root = resolve_agent_output_root(context_path, config=manager.config)
+    output_root = resolve_agent_output_root(
+        context_path,
+        config=manager.config,
+        scope_id=scope_id,
+    )
     output_root.mkdir(parents=True, exist_ok=True)
     slug = _client_slug(client)
     return {
@@ -328,9 +336,16 @@ def resolve_client_session_payload_path(
     context_path: Path,
     *,
     client: str,
+    project_path: Path | None = None,
 ) -> Path:
     """Resolve the canonical client-session payload artifact path."""
-    return _client_output_paths(manager, context_path, client)["payload_json"]
+    scoped = resolve_scope(context_path, requester_path=project_path)
+    return _client_output_paths(
+        manager,
+        context_path,
+        client,
+        scope_id=scoped.scope_id,
+    )["payload_json"]
 
 
 def _load_client_session_payload(
@@ -343,10 +358,16 @@ def _load_client_session_payload(
     cwd: Path | None = None,
     payload_file: str | Path | None = None,
 ) -> tuple[dict[str, Any], Path]:
+    scoped = resolve_scope(context_path, requester_path=cwd)
     payload_path = (
         Path(payload_file).expanduser().resolve()
         if payload_file
-        else resolve_client_session_payload_path(manager, context_path, client=client)
+        else resolve_client_session_payload_path(
+            manager,
+            context_path,
+            client=client,
+            project_path=cwd,
+        )
     )
     if payload_path.exists():
         try:
@@ -367,6 +388,16 @@ def _load_client_session_payload(
             config_path=config_path,
             cwd=cwd,
         )
+    persisted_scope = str(payload.get("scope_id", "") or "").strip()
+    if cwd is not None and scoped.layout_version == LAYOUT_VERSION and persisted_scope not in {
+        "",
+        scoped.scope_id,
+    }:
+        raise PermissionError(
+            f"session payload scope {persisted_scope!r} does not match {scoped.scope_id!r}"
+        )
+    payload.setdefault("scope_id", scoped.scope_id)
+    payload.setdefault("project_id", scoped.project_id)
     return _ensure_client_session_payload_shape(payload), payload_path
 
 
@@ -1035,6 +1066,8 @@ def _bootstrap_bundle(
         "available": True,
         "context_path": summary["context_path"],
         "project": summary["project"],
+        "scope_id": summary.get("scope_id", "common"),
+        "project_id": summary.get("project_id", ""),
         "profile": summary["profile"],
         "stale_mounts": list(summary.get("stale_mounts", [])),
         "work_assistant": summary.get("work_assistant", {}),
@@ -1076,10 +1109,12 @@ def _pack_summary(
     max_query_results: int,
     max_embedding_results: int,
     write_artifacts: bool,
+    project_path: Path | None = None,
 ) -> dict[str, Any]:
     pack = build_context_pack(
         manager,
         context_path,
+        project_path=project_path,
         query=query,
         task=task,
         model=model,
@@ -1096,6 +1131,9 @@ def _pack_summary(
         artifact_paths = write_context_pack_artifacts(manager, context_path, pack)
     return {
         "available": True,
+        "scope_id": pack.get("scope_id", "common"),
+        "project_id": pack.get("project_id", ""),
+        "project_path": pack.get("project_path", ""),
         "query": query,
         "task": task,
         "model": pack.get("model", model),
@@ -1119,6 +1157,7 @@ def _skills_summary(
     prompt: str,
     top_k: int,
     write_artifacts: bool,
+    scope_id: str = "common",
     fallback_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile = resolve_active_profile(manager.config)
@@ -1150,7 +1189,12 @@ def _skills_summary(
         "artifact_paths": {},
     }
     if write_artifacts:
-        paths = _client_output_paths(manager, context_path, client)
+        paths = _client_output_paths(
+            manager,
+            context_path,
+            client,
+            scope_id=scope_id,
+        )
         payload["artifact_paths"] = {"json": str(paths["skills_json"])}
         paths["skills_json"].write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return payload
@@ -1199,6 +1243,7 @@ def _prompt_summary(
     policy_state: dict[str, Any],
     structured_guidance: dict[str, Any],
     write_artifacts: bool,
+    scope_id: str = "common",
 ) -> dict[str, Any]:
     base_prompt, base_prompt_source = _resolve_client_base_prompt(
         manager,
@@ -1227,7 +1272,12 @@ def _prompt_summary(
     estimated_tokens = _estimate_tokens(prompt_text) if prompt_text else 0
 
     if write_artifacts and prompt_text:
-        paths = _client_output_paths(manager, context_path, client)
+        paths = _client_output_paths(
+            manager,
+            context_path,
+            client,
+            scope_id=scope_id,
+        )
         prompt_payload = {
             "client": client,
             "model_family": model,
@@ -1523,6 +1573,8 @@ def build_client_session_payload(
         "session_id": session_id,
         "model_profile": model_profile,
         "context_path": str(resolved_context),
+        "scope_id": bootstrap_state.get("scope_id", "common"),
+        "project_id": bootstrap_state.get("project_id", ""),
         "config_path": str(config_path) if config_path else "",
         "cwd": str(resolved_cwd),
         "bootstrap": bootstrap_payload,
@@ -1556,6 +1608,7 @@ def build_client_session_payload(
             max_query_results=max_query_results,
             max_embedding_results=max_embedding_results,
             write_artifacts=write_artifacts,
+            project_path=resolved_cwd,
         )
 
     if include_skills:
@@ -1566,6 +1619,7 @@ def build_client_session_payload(
             prompt=skills_focus,
             top_k=skills_top_k,
             write_artifacts=write_artifacts,
+            scope_id=str(bootstrap_state.get("scope_id", "common") or "common"),
             fallback_state=(
                 bootstrap_state.get("skills")
                 if isinstance(bootstrap_state.get("skills"), dict)
@@ -1631,6 +1685,7 @@ def build_client_session_payload(
         policy_state=dict(payload.get("repo_policy") or {}),
         structured_guidance=dict(payload.get("structured_guidance") or {}),
         write_artifacts=write_artifacts,
+        scope_id=str(bootstrap_state.get("scope_id", "common") or "common"),
     )
 
     if write_artifacts:

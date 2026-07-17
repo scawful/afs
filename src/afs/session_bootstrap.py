@@ -876,7 +876,11 @@ def write_session_bootstrap_artifacts(
     summary: dict[str, Any],
 ) -> dict[str, str]:
     """Persist the latest bootstrap snapshot for wrappers and handoff tools."""
-    output_root = resolve_agent_output_root(context_path, config=manager.config)
+    output_root = resolve_agent_output_root(
+        context_path,
+        config=manager.config,
+        scope_id=str(summary.get("scope_id", "common") or "common"),
+    )
     output_root.mkdir(parents=True, exist_ok=True)
     json_path = output_root / SESSION_BOOTSTRAP_JSON
     markdown_path = output_root / SESSION_BOOTSTRAP_MARKDOWN
