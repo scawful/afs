@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .config import load_config_model
+from .context_layout import LAYOUT_VERSION, detect_layout_version, v2_directory_map
 from .mapping import resolve_directory_name
 from .models import MountType, ProjectMetadata
 from .schema import AFSConfig, DirectoryConfig
@@ -16,9 +17,15 @@ METADATA_FILE = "metadata.json"
 
 def load_context_metadata(context_path: Path) -> ProjectMetadata | None:
     """Load context metadata when available."""
-    metadata_path = context_path.expanduser().resolve() / METADATA_FILE
+    resolved_context = context_path.expanduser().resolve()
+    is_v2 = detect_layout_version(resolved_context) == LAYOUT_VERSION
+    metadata_path = (
+        resolved_context / ".afs" / "compat" / METADATA_FILE
+        if is_v2
+        else resolved_context / METADATA_FILE
+    )
     if not metadata_path.exists():
-        return None
+        return ProjectMetadata(directories=v2_directory_map()) if is_v2 else None
     try:
         data = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):

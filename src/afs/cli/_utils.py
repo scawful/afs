@@ -190,7 +190,28 @@ def resolve_context_paths(
     if prefer_existing and context_root is None and context_dir is None:
         existing_context = find_existing_root(project_path)
         if existing_context is not None:
-            return project_path, existing_context.expanduser().resolve(), None, None
+            resolved_existing = existing_context.expanduser().resolve()
+            try:
+                from ..context_layout import LAYOUT_VERSION, detect_layout_version
+
+                if detect_layout_version(resolved_existing) == LAYOUT_VERSION:
+                    return project_path, resolved_existing, resolved_existing, None
+            except (OSError, ValueError):
+                pass
+            return project_path, resolved_existing, None, None
+        configured_root = manager.config.general.context_root.expanduser().resolve()
+        try:
+            from ..context_layout import LAYOUT_VERSION, detect_layout_version
+            from ..project_registry import ProjectRegistry
+
+            if detect_layout_version(configured_root) == LAYOUT_VERSION:
+                registered_project = ProjectRegistry(configured_root).resolve(project_path)
+                if registered_project is not None:
+                    return project_path, configured_root, configured_root, None
+        except (OSError, ValueError):
+            # A malformed central registry must not weaken the legacy lookup
+            # boundary or make an unrelated project inherit central context.
+            pass
         raise FileNotFoundError(
             f"No existing AFS context found for {project_path}. "
             "Use `afs context ensure --path <project>` to create one."

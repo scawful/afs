@@ -33,6 +33,7 @@ def _context_to_dict(context) -> dict:
     return {
         "path": str(context.path),
         "project_name": context.project_name,
+        "layout_version": context.layout_version,
         "is_valid": context.is_valid,
         "total_mounts": context.total_mounts,
         "metadata": metadata,
@@ -54,6 +55,7 @@ def context_init_command(args: argparse.Namespace) -> int:
         link_context=args.link_context,
         force=args.force,
         profile=args.profile,
+        layout_version=args.layout_version,
     )
     print(f"context_path: {context.path}")
     print(f"project: {context.project_name}")
@@ -73,6 +75,7 @@ def context_ensure_command(args: argparse.Namespace) -> int:
         context_dir=context_dir,
         link_context=args.link_context,
         profile=args.profile,
+        layout_version=args.layout_version,
     )
     print(f"context_path: {context.path}")
     print(f"project: {context.project_name}")
@@ -940,12 +943,26 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     add_context_args(ctx_init)
     ctx_init.add_argument("--link-context", action="store_true", help="Create .context symlink.")
     ctx_init.add_argument("--force", action="store_true", help="Overwrite existing.")
+    ctx_init.add_argument(
+        "--layout-version",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="Layout version; v2 uses the configured central context root.",
+    )
     ctx_init.set_defaults(func=context_init_command)
 
     # context ensure
     ctx_ensure = context_sub.add_parser("ensure", help="Ensure context exists.")
     add_context_args(ctx_ensure)
     ctx_ensure.add_argument("--link-context", action="store_true", help="Create .context symlink.")
+    ctx_ensure.add_argument(
+        "--layout-version",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="Layout version; v2 uses the configured central context root.",
+    )
     ctx_ensure.set_defaults(func=context_ensure_command)
 
     # context list
