@@ -8,9 +8,11 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import load_config_model
+from .context_layout import _atomic_write_text, resolve_runtime_root
 from .discovery import discover_contexts
 from .mapping import resolve_directory_name
 from .models import ContextRoot, MountType
+from .path_safety import assert_no_linklike_components
 from .schema import AFSConfig
 from .version import __version__
 
@@ -198,15 +200,42 @@ def build_graph(
     }
 
 
-def write_graph(graph: dict[str, object], output_path: Path) -> Path:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(graph, indent=2) + "\n", encoding="utf-8")
+def write_graph(
+    graph: dict[str, object],
+    output_path: Path,
+    *,
+    context_root: Path | None = None,
+) -> Path:
+    """Write a graph export, hardening the managed v2 destination."""
+
+    if context_root is not None:
+        graph_root = resolve_runtime_root(
+            context_root,
+            "graph",
+            legacy_relative="index",
+            create=True,
+        )
+        output_path = assert_no_linklike_components(
+            output_path,
+            boundary=graph_root,
+        )
+    else:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(output_path, json.dumps(graph, indent=2) + "\n")
     return output_path
 
 
 def default_graph_path(config: AFSConfig | None = None) -> Path:
     config = config or load_config_model()
-    return config.general.context_root / "index" / "afs_graph.json"
+    graph_root = resolve_runtime_root(
+        config.general.context_root,
+        "graph",
+        legacy_relative="index",
+    )
+    return assert_no_linklike_components(
+        graph_root / "afs_graph.json",
+        boundary=graph_root,
+    )
 
 
 def _context_id(context: ContextRoot) -> str:

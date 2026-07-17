@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 from argparse import Namespace
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from afs.cli.skills import (
     skills_archive_command,
@@ -11,11 +15,16 @@ from afs.cli.skills import (
     skills_reject_command,
     skills_review_command,
 )
+from afs.context_layout import scaffold_v2
 from afs.history import append_history_event
 from afs.manager import AFSManager
 from afs.models import MountType
 from afs.schema import AFSConfig, GeneralConfig
-from afs.skill_mining import mine_skill_candidates, review_skill_candidates
+from afs.skill_mining import (
+    mine_skill_candidates,
+    review_skill_candidates,
+    write_skill_candidate_artifacts,
+)
 
 
 def _make_manager_and_context(tmp_path: Path) -> tuple[AFSManager, Path]:
@@ -27,6 +36,134 @@ def _make_manager_and_context(tmp_path: Path) -> tuple[AFSManager, Path]:
     project_path.mkdir()
     manager.ensure(path=project_path)
     return manager, project_path
+
+
+def test_skill_candidate_artifacts_use_v2_common_scope(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+
+    paths = write_skill_candidate_artifacts(
+        manager,
+        context_root,
+        {"candidate_count": 0, "candidates": []},
+    )
+    second_paths = write_skill_candidate_artifacts(
+        manager,
+        context_root,
+        {"candidate_count": 1, "candidates": [{"id": "second"}]},
+    )
+
+    expected = context_root / "scratchpad" / "common" / "skill_candidates"
+    assert Path(paths["json"]).parent == expected
+    assert Path(paths["markdown"]).parent == expected
+    assert paths["json"] != second_paths["json"]
+    assert paths["markdown"] != second_paths["markdown"]
+    assert Path(paths["json"]).is_file()
+    assert Path(second_paths["json"]).is_file()
+
+
+def test_skill_candidate_artifacts_reject_v2_symlinked_output_root(
+    tmp_path: Path,
+) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    common = context_root / "scratchpad" / "common"
+    common.mkdir()
+    try:
+        (common / "skill_candidates").symlink_to(
+            outside,
+            target_is_directory=True,
+        )
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        write_skill_candidate_artifacts(
+            manager,
+            context_root,
+            {"candidate_count": 0, "candidates": []},
+        )
+    assert list(outside.iterdir()) == []
+
+
+def test_skill_candidate_artifact_collision_preserves_old_pair_and_retries(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+    output_root = context_root / "scratchpad" / "common" / "skill_candidates"
+    output_root.mkdir(parents=True)
+    stem = "skill_candidates_20260717T080000Z_aaaaaaaaaa"
+    old_json = output_root / f"{stem}.json"
+    old_markdown = output_root / f"{stem}.md"
+    old_json.write_bytes(b"old-json\n")
+    old_markdown.write_bytes(b"old-markdown\n")
+
+    class _FixedDateTime:
+        @classmethod
+        def now(cls, _tz=None):  # noqa: ANN001
+            return datetime(2026, 7, 17, 8, 0, tzinfo=timezone.utc)
+
+    identities = iter(("a" * 32, "b" * 32))
+    monkeypatch.setattr("afs.skill_mining.datetime", _FixedDateTime)
+    monkeypatch.setattr(
+        "afs.skill_mining.uuid4",
+        lambda: SimpleNamespace(hex=next(identities)),
+    )
+
+    paths = write_skill_candidate_artifacts(
+        manager,
+        context_root,
+        {"candidate_count": 1, "candidates": [{"id": "new"}]},
+    )
+
+    assert old_json.read_bytes() == b"old-json\n"
+    assert old_markdown.read_bytes() == b"old-markdown\n"
+    assert Path(paths["json"]).name.endswith("_bbbbbbbbbb.json")
+    assert Path(paths["markdown"]).name.endswith("_bbbbbbbbbb.md")
+
+
+def test_skill_candidate_artifact_pair_cleans_json_when_markdown_write_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+    from afs import skill_mining
+
+    real_write = skill_mining._write_exclusive_text
+
+    def fail_markdown(path: Path, content: str) -> None:
+        if path.suffix == ".md":
+            raise OSError("injected markdown failure")
+        real_write(path, content)
+
+    monkeypatch.setattr(skill_mining, "_write_exclusive_text", fail_markdown)
+
+    with pytest.raises(OSError, match="injected markdown failure"):
+        write_skill_candidate_artifacts(
+            manager,
+            context_root,
+            {"candidate_count": 0, "candidates": []},
+        )
+
+    output_root = context_root / "scratchpad" / "common" / "skill_candidates"
+    assert list(output_root.glob("skill_candidates_*")) == []
 
 
 def _write_candidate_artifact(

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +11,8 @@ from unittest.mock import patch
 import pytest
 
 from afs.agents.supervisor import AgentSupervisor
+from afs.context_index import ContextSQLiteIndex
+from afs.context_layout import scaffold_v2
 from afs.extensions import load_extension_manifest
 from afs.history import append_history_event
 from afs.manager import AFSManager
@@ -25,6 +29,7 @@ from afs.mcp_server import (
     build_mcp_registry,
 )
 from afs.models import MountType
+from afs.project_registry import ProjectRegistry
 from afs.schema import (
     AFSConfig,
     ContextIndexConfig,
@@ -58,6 +63,35 @@ def _make_manager(tmp_path: Path) -> AFSManager:
     project_path.mkdir()
     manager.ensure(path=project_path, context_root=context_root)
     return manager
+
+
+def _make_v2_manager(tmp_path: Path) -> tuple[AFSManager, Path, Path, Path, str, str]:
+    context_root = tmp_path / "central" / ".context"
+    alpha = tmp_path / "projects" / "alpha"
+    beta = tmp_path / "projects" / "beta"
+    alpha.mkdir(parents=True)
+    beta.mkdir(parents=True)
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(
+                context_root=context_root,
+                mcp_allowed_roots=[tmp_path],
+            )
+        )
+    )
+    manager.ensure(path=alpha, context_root=context_root, layout_version=2)
+    registry = ProjectRegistry(context_root)
+    alpha_record = registry.resolve(alpha)
+    assert alpha_record is not None
+    beta_record = registry.register(beta)
+    return (
+        manager,
+        context_root,
+        alpha,
+        beta,
+        alpha_record.project_id,
+        beta_record.project_id,
+    )
 
 
 def _call_tool(
@@ -102,6 +136,39 @@ def _remap_directories(**overrides: str) -> list[DirectoryConfig]:
     return directories
 
 
+def test_legacy_retrieval_tools_fail_before_reading_v2_indexes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager, context_root, _alpha, _beta, _alpha_id, _beta_id = _make_v2_manager(
+        tmp_path
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("legacy retrieval touched an unscoped v2 index")
+
+    monkeypatch.setattr("afs.mcp_server._query_context_index", forbidden)
+    monkeypatch.setattr("afs.mcp_server._resolve_embedding_index_dir", forbidden)
+    monkeypatch.setattr("afs.codebase_index.build_codebase_index", forbidden)
+    monkeypatch.setattr("afs.codebase_index.search_codebase_index", forbidden)
+
+    calls = (
+        ("afs.search", {"query": "private marker"}),
+        ("afs.codebase.symbols", {"query": "PrivateSymbol"}),
+        ("afs.codebase.index", {}),
+    )
+    for request_id, (name, arguments) in enumerate(calls, start=910):
+        response = _call_tool(
+            manager,
+            name,
+            {"context_path": str(context_root), **arguments},
+            request_id=request_id,
+        )
+        message = str(response["error"]["message"])
+        assert f"{name} is unavailable for context v2" in message
+        assert "context.search" in message
+
+
 def _make_remapped_manager(tmp_path: Path, **overrides: str) -> AFSManager:
     context_root = tmp_path / "context"
     general = GeneralConfig(
@@ -135,6 +202,18 @@ COMPATIBILITY_FILE_TOOL_ALIASES = {
     "fs.list",
 }
 
+PLAIN_SCOPED_TOOLS = {
+    "context.search",
+    "messages.send",
+    "messages.read",
+    "note.create",
+    "note.read",
+    "note.list",
+    "handoff.create",
+    "handoff.read",
+    "handoff.list",
+}
+
 
 def test_tools_list_defaults_to_slim_catalog(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("AFS_ALLOWED_TOOLS", raising=False)
@@ -146,7 +225,11 @@ def test_tools_list_defaults_to_slim_catalog(tmp_path: Path, monkeypatch) -> Non
     assert response is not None
     tools = response["result"]["tools"]
     names = {tool["name"] for tool in tools}
-    assert names == DEFAULT_MCP_TOOL_CATALOG | {"skill.match", "skill.read"}
+    assert names == DEFAULT_MCP_TOOL_CATALOG | {
+        "skill.match",
+        "skill.read",
+        *PLAIN_SCOPED_TOOLS,
+    }
     assert "context.repair" not in names
     assert "agent.spawn" not in names
     assert not COMPATIBILITY_FILE_TOOL_ALIASES.intersection(names)
@@ -178,8 +261,17 @@ def test_claude_tool_name_style_lists_safe_aliases_and_accepts_calls(
         "context_read",
         "context_list",
         "context_write",
+        "context_search",
         "skill_match",
         "skill_read",
+        "messages_send",
+        "messages_read",
+        "note_create",
+        "note_read",
+        "note_list",
+        "handoff_create",
+        "handoff_read",
+        "handoff_list",
     }
     assert all(re.fullmatch(r"^[a-zA-Z0-9_-]{1,64}$", name) for name in names)
 
@@ -319,6 +411,241 @@ def test_context_write_and_read_tool_calls(tmp_path: Path) -> None:
     )
     assert read_response is not None
     assert read_response["result"]["structuredContent"]["content"] == "hello"
+
+
+def test_v2_context_file_tools_enforce_registered_project_scope(tmp_path: Path) -> None:
+    manager, context_root, alpha, beta, alpha_id, beta_id = _make_v2_manager(tmp_path)
+    alpha_root = context_root / "scratchpad" / "projects" / alpha_id
+    beta_root = context_root / "scratchpad" / "projects" / beta_id
+    beta_root.mkdir(parents=True)
+    beta_note = beta_root / "private.md"
+    beta_note.write_text("beta only", encoding="utf-8")
+
+    write_response = _call_tool(
+        manager,
+        "context.write",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "path": "scratchpad/notes/alpha.md",
+            "content": "alpha only",
+            "mkdirs": True,
+        },
+    )
+    written = Path(write_response["result"]["structuredContent"]["path"])
+    assert written == alpha_root / "notes" / "alpha.md"
+    assert written.read_text(encoding="utf-8") == "alpha only"
+
+    listed = _call_tool(
+        manager,
+        "context.list",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "path": "scratchpad",
+            "max_depth": 3,
+        },
+    )
+    listed_paths = {entry["path"] for entry in listed["result"]["structuredContent"]["entries"]}
+    assert str(written) in listed_paths
+    assert str(beta_note) not in listed_paths
+
+    denied = _call_tool(
+        manager,
+        "context.read",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "path": str(beta_note),
+        },
+    )
+    assert "error" in denied
+    assert "outside the authorized" in denied["error"]["message"]
+
+    common_only = _call_tool(
+        manager,
+        "context.read",
+        {"context_path": str(context_root), "path": str(written)},
+    )
+    assert "error" in common_only
+    assert "outside the authorized common scope" in common_only["error"]["message"]
+
+
+def test_v2_context_directory_move_sync_preserves_unrelated_index_rows(
+    monkeypatch, tmp_path: Path
+) -> None:
+    manager, context_root, alpha, _beta, alpha_id, beta_id = _make_v2_manager(
+        tmp_path
+    )
+    alpha_root = context_root / "scratchpad" / "projects" / alpha_id
+    beta_root = context_root / "scratchpad" / "projects" / beta_id
+    (alpha_root / "before").mkdir(parents=True)
+    (alpha_root / "before" / "note.md").write_text("alpha move", encoding="utf-8")
+    beta_root.mkdir(parents=True)
+    (beta_root / "private.md").write_text("beta private", encoding="utf-8")
+    index = ContextSQLiteIndex(manager, context_root)
+    index.rebuild(mount_types=[MountType.SCRATCHPAD], include_content=True)
+
+    real_iterdir = Path.iterdir
+
+    def guarded_iterdir(path: Path):
+        if path == beta_root:
+            raise AssertionError("beta scope was traversed")
+        return real_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
+    response = _call_tool(
+        manager,
+        "context.move",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "source": "scratchpad/before",
+            "destination": "knowledge/archive",
+            "mkdirs": True,
+        },
+    )
+
+    assert "result" in response
+    assert index.count_entries(
+        mount_types=[MountType.SCRATCHPAD],
+        relative_prefixes=[f"projects/{beta_id}/"],
+    ) >= 1
+
+
+def test_v2_context_list_empty_scope_is_non_mutating_success(tmp_path: Path) -> None:
+    manager, context_root, alpha, _beta, alpha_id, _beta_id = _make_v2_manager(tmp_path)
+    expected_root = context_root / "knowledge" / "projects" / alpha_id
+    assert not expected_root.exists()
+
+    response = _call_tool(
+        manager,
+        "context.list",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "path": "knowledge",
+        },
+    )
+
+    assert response["result"]["structuredContent"] == {
+        "path": str(expected_root),
+        "entries": [],
+    }
+    assert not expected_root.exists()
+
+
+def test_v2_context_list_skips_cross_scope_and_outside_links(tmp_path: Path) -> None:
+    manager, context_root, alpha, _beta, alpha_id, beta_id = _make_v2_manager(
+        tmp_path
+    )
+    alpha_root = context_root / "scratchpad" / "projects" / alpha_id
+    beta_root = context_root / "scratchpad" / "projects" / beta_id
+    alpha_root.mkdir(parents=True)
+    beta_root.mkdir(parents=True)
+    alpha_note = alpha_root / "alpha.md"
+    alpha_note.write_text("alpha", encoding="utf-8")
+    (beta_root / "beta-private.md").write_text("beta", encoding="utf-8")
+    outside = tmp_path / "outside-poison.md"
+    outside.write_text("outside poison metadata", encoding="utf-8")
+    try:
+        (alpha_root / "beta-link").symlink_to(beta_root, target_is_directory=True)
+        (alpha_root / "outside-link.md").symlink_to(outside)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    response = _call_tool(
+        manager,
+        "context.list",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "path": "scratchpad",
+            "max_depth": 3,
+        },
+    )
+
+    assert response["result"]["structuredContent"]["entries"] == [
+        {"path": str(alpha_note), "is_dir": False}
+    ]
+
+
+def test_v2_context_list_accepts_registered_project_path_without_context_path(
+    tmp_path: Path,
+) -> None:
+    manager, context_root, alpha, _beta, alpha_id, _beta_id = _make_v2_manager(
+        tmp_path
+    )
+    alpha_root = context_root / "scratchpad" / "projects" / alpha_id
+    alpha_root.mkdir(parents=True)
+    alpha_note = alpha_root / "alpha.md"
+    alpha_note.write_text("alpha", encoding="utf-8")
+
+    response = _call_tool(
+        manager,
+        "context.list",
+        {
+            "project_path": str(alpha),
+            "path": "scratchpad",
+            "max_depth": 1,
+        },
+    )
+
+    assert response["result"]["structuredContent"]["entries"] == [
+        {"path": str(alpha_note), "is_dir": False}
+    ]
+
+
+@pytest.mark.parametrize("tool_prefix", ["context", "fs"])
+@pytest.mark.parametrize("operation", ["delete", "move"])
+@pytest.mark.parametrize("target_kind", ["file", "directory"])
+def test_v2_absolute_mcp_file_tools_reject_linklike_source_and_preserve_target(
+    tool_prefix: str,
+    operation: str,
+    target_kind: str,
+    tmp_path: Path,
+) -> None:
+    manager, context_root, alpha, _beta, alpha_id, _beta_id = _make_v2_manager(
+        tmp_path
+    )
+    alpha_root = context_root / "scratchpad" / "projects" / alpha_id
+    alpha_root.mkdir(parents=True)
+    target = alpha_root / f"real-{target_kind}"
+    if target_kind == "directory":
+        target.mkdir()
+        (target / "keep.md").write_text("keep", encoding="utf-8")
+    else:
+        target.write_text("keep", encoding="utf-8")
+    link = alpha_root / f"{target_kind}-link"
+    destination = alpha_root / f"moved-{target_kind}"
+    try:
+        link.symlink_to(target, target_is_directory=target_kind == "directory")
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    arguments: dict[str, object] = {
+        "context_path": str(context_root),
+        "project_path": str(alpha),
+    }
+    if operation == "delete":
+        arguments.update({"path": str(link), "recursive": True})
+    else:
+        arguments.update(
+            {"source": str(link), "destination": str(destination)}
+        )
+    response = _call_tool(
+        manager,
+        f"{tool_prefix}.{operation}",
+        arguments,
+    )
+
+    assert "error" in response
+    assert "symbolic link or reparse point" in response["error"]["message"]
+    assert link.is_symlink()
+    assert target.exists()
+    assert not destination.exists()
+    if target_kind == "directory":
+        assert (target / "keep.md").read_text(encoding="utf-8") == "keep"
 
 
 # Compatibility aliases: keep explicit coverage that legacy fs.* names still
@@ -536,7 +863,9 @@ def test_work_mcp_tools_capture_style_and_request_approval(tmp_path: Path) -> No
         manager,
     )
     assert show_response is not None
-    assert show_response["result"]["structuredContent"]["approval"]["preview"]["body"].startswith("Thanks")
+    assert show_response["result"]["structuredContent"]["approval"]["preview"]["body"].startswith(
+        "Thanks"
+    )
 
 
 def test_events_analytics_tool_reports_mcp_usage(tmp_path: Path) -> None:
@@ -731,7 +1060,9 @@ def test_context_init_tool_creates_project_context(tmp_path: Path, monkeypatch) 
     assert (project_root / ".context").exists()
 
 
-def test_context_init_rejects_project_outside_cwd_without_allowed_context_root(tmp_path: Path) -> None:
+def test_context_init_rejects_project_outside_cwd_without_allowed_context_root(
+    tmp_path: Path,
+) -> None:
     manager = _make_manager(tmp_path)
     project_root = tmp_path / "workspace_project"
     project_root.mkdir(parents=True)
@@ -865,6 +1196,49 @@ def test_context_unmount_tool_removes_alias(tmp_path: Path) -> None:
     assert not (context_root / "knowledge" / "docs").exists()
 
 
+def test_context_mount_tool_fails_closed_for_v2_and_removes_legacy_alias(
+    tmp_path: Path,
+) -> None:
+    manager, context_root, alpha, _beta, _alpha_id, _beta_id = _make_v2_manager(
+        tmp_path
+    )
+    source_docs = tmp_path / "docs_source"
+    source_docs.mkdir()
+
+    response = _call_tool(
+        manager,
+        "context.mount",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "source": str(source_docs),
+            "mount_type": "knowledge",
+            "alias": "docs",
+        },
+    )
+
+    assert "error" in response
+    assert "manual filesystem mounts are not supported for layout v2" in response[
+        "error"
+    ]["message"]
+    assert not (context_root / "knowledge" / "docs").exists()
+
+    legacy_alias = context_root / "knowledge" / "legacy-docs"
+    legacy_alias.symlink_to(source_docs)
+    cleanup = _call_tool(
+        manager,
+        "context.unmount",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "mount_type": "knowledge",
+            "alias": "legacy-docs",
+        },
+    )
+    assert cleanup["result"]["structuredContent"]["removed"] is True
+    assert not legacy_alias.exists()
+
+
 def test_context_index_rebuild_tool(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     context_root = manager.config.general.context_root
@@ -959,6 +1333,615 @@ def test_context_query_tool_auto_indexes(tmp_path: Path) -> None:
     assert "index_rebuild" in structured
 
 
+def test_v2_context_query_filters_scope_before_ranking(tmp_path: Path) -> None:
+    manager, context_root, alpha, _beta, alpha_id, beta_id = _make_v2_manager(tmp_path)
+    scratchpad = context_root / "scratchpad"
+    paths = {
+        "common": scratchpad / "common" / "shared.md",
+        "alpha": scratchpad / "projects" / alpha_id / "alpha.md",
+        "beta": scratchpad / "projects" / beta_id / "beta.md",
+    }
+    for label, path in paths.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"scope-token {label}", encoding="utf-8")
+
+    scoped_response = _call_tool(
+        manager,
+        "context.query",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "mount_types": ["scratchpad"],
+            "query": "scope-token",
+            "refresh": True,
+            "limit": 10,
+        },
+    )
+    scoped = scoped_response["result"]["structuredContent"]
+    assert scoped["scope_id"] == f"project:{alpha_id}"
+    scoped_paths = {entry["relative_path"] for entry in scoped["entries"]}
+    assert scoped_paths == {
+        f"projects/{alpha_id}/alpha.md",
+        "common/shared.md",
+    }
+    assert f"projects/{beta_id}/beta.md" not in scoped_paths
+
+    common_response = _call_tool(
+        manager,
+        "context.query",
+        {
+            "context_path": str(context_root),
+            "mount_types": ["scratchpad"],
+            "query": "scope-token",
+            "limit": 10,
+        },
+    )
+    common_paths = {
+        entry["relative_path"]
+        for entry in common_response["result"]["structuredContent"]["entries"]
+    }
+    assert common_paths == {"common/shared.md"}
+
+    all_response = _call_tool(
+        manager,
+        "context.query",
+        {
+            "context_path": str(context_root),
+            "mount_types": ["scratchpad"],
+            "query": "scope-token",
+            "all_projects": True,
+            "limit": 10,
+        },
+    )
+    all_paths = {
+        entry["relative_path"] for entry in all_response["result"]["structuredContent"]["entries"]
+    }
+    assert all_paths == {path.relative_to(scratchpad).as_posix() for path in paths.values()}
+
+
+def test_v2_context_query_auto_index_does_not_traverse_or_replace_beta(
+    monkeypatch, tmp_path: Path
+) -> None:
+    manager, context_root, alpha, _beta, alpha_id, beta_id = _make_v2_manager(
+        tmp_path
+    )
+    knowledge = context_root / "knowledge"
+    alpha_root = knowledge / "projects" / alpha_id
+    beta_root = knowledge / "projects" / beta_id
+    common_root = knowledge / "common"
+    for root, marker in (
+        (alpha_root, "scoped-auto-index alpha"),
+        (beta_root, "scoped-auto-index beta"),
+        (common_root, "scoped-auto-index common"),
+    ):
+        root.mkdir(parents=True)
+        (root / "note.md").write_text(marker, encoding="utf-8")
+    index = ContextSQLiteIndex(manager, context_root)
+    index.rebuild(mount_types=[MountType.KNOWLEDGE], include_content=True)
+    index.delete_relative_prefix(MountType.KNOWLEDGE, f"projects/{alpha_id}")
+    index.delete_relative_prefix(MountType.KNOWLEDGE, "common")
+    statements: list[str] = []
+    original_connect = ContextSQLiteIndex._connect
+
+    def traced_connect(current: ContextSQLiteIndex):
+        connection = original_connect(current)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(ContextSQLiteIndex, "_connect", traced_connect)
+
+    real_iterdir = Path.iterdir
+
+    def guarded_iterdir(path: Path):
+        if path == beta_root:
+            raise AssertionError("beta scope was traversed")
+        return real_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
+    response = _call_tool(
+        manager,
+        "context.query",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "mount_types": ["knowledge"],
+            "query": "scoped-auto-index",
+            "limit": 10,
+        },
+    )
+    payload = response["result"]["structuredContent"]
+    assert {entry["relative_path"] for entry in payload["entries"]} == {
+        f"projects/{alpha_id}/note.md",
+        "common/note.md",
+    }
+    assert index.count_entries(
+        mount_types=[MountType.KNOWLEDGE],
+        relative_prefixes=[f"projects/{beta_id}/"],
+    ) >= 1
+    diff_response = _call_tool(
+        manager,
+        "context.diff",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "mount_types": ["knowledge"],
+        },
+    )
+    assert "result" in diff_response
+    freshness_response = _call_tool(
+        manager,
+        "context.freshness",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "mount_type": "knowledge",
+        },
+    )
+    assert "result" in freshness_response
+    scoped_metadata_selects = [
+        statement
+        for statement in statements
+        if "SELECT relative_path, size_bytes, modified_at" in statement
+        or "SELECT relative_path, modified_at, absolute_path" in statement
+    ]
+    assert len(scoped_metadata_selects) >= 2
+    assert all(alpha_id in statement for statement in scoped_metadata_selects)
+    assert all(beta_id not in statement for statement in scoped_metadata_selects)
+
+
+def test_v2_index_rebuild_tool_is_scoped_unless_all_projects(tmp_path: Path) -> None:
+    manager, context_root, alpha, _beta, alpha_id, beta_id = _make_v2_manager(
+        tmp_path
+    )
+    for project_id, marker in ((alpha_id, "alpha"), (beta_id, "beta")):
+        path = context_root / "knowledge" / "projects" / project_id / "note.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(marker, encoding="utf-8")
+
+    scoped_response = _call_tool(
+        manager,
+        "context.index.rebuild",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "mount_types": ["knowledge"],
+        },
+    )
+    assert scoped_response["result"]["structuredContent"]["scope_id"] == (
+        f"project:{alpha_id}"
+    )
+    index = ContextSQLiteIndex(manager, context_root)
+    assert index.count_entries(
+        mount_types=[MountType.KNOWLEDGE],
+        relative_prefixes=[f"projects/{beta_id}/"],
+    ) == 0
+
+    all_response = _call_tool(
+        manager,
+        "context.index.rebuild",
+        {
+            "context_path": str(context_root),
+            "mount_types": ["knowledge"],
+            "all_projects": True,
+        },
+    )
+    assert all_response["result"]["structuredContent"]["scope_id"] == "all-projects"
+    assert index.count_entries(
+        mount_types=[MountType.KNOWLEDGE],
+        relative_prefixes=[f"projects/{beta_id}/"],
+    ) >= 1
+
+
+def test_v2_empty_scope_root_does_not_auto_rebuild_repeatedly(tmp_path: Path) -> None:
+    manager, context_root, alpha, _beta, alpha_id, _beta_id = _make_v2_manager(
+        tmp_path
+    )
+    (context_root / "knowledge" / "projects" / alpha_id).mkdir(parents=True)
+    (context_root / "knowledge" / "common").mkdir(parents=True)
+    arguments = {
+        "context_path": str(context_root),
+        "project_path": str(alpha),
+        "mount_types": ["knowledge"],
+        "query": "nothing",
+    }
+
+    first = _call_tool(manager, "context.query", arguments)
+    second = _call_tool(manager, "context.query", arguments)
+
+    assert "index_rebuild" in first["result"]["structuredContent"]
+    assert "index_rebuild" not in second["result"]["structuredContent"]
+
+
+def test_v2_no_argument_mcp_scope_uses_registered_cwd_only(
+    monkeypatch, tmp_path: Path
+) -> None:
+    manager, context_root, alpha, _beta, alpha_id, _beta_id = _make_v2_manager(
+        tmp_path
+    )
+    monkeypatch.chdir(alpha)
+
+    implicit = _call_tool(manager, "context.status", {})
+    implicit_payload = implicit["result"]["structuredContent"]
+    assert implicit_payload["scope_id"] == f"project:{alpha_id}"
+
+    explicit = _call_tool(
+        manager,
+        "context.status",
+        {"context_path": str(context_root)},
+    )
+    explicit_payload = explicit["result"]["structuredContent"]
+    assert explicit_payload["scope_id"] == "common"
+
+
+def test_v2_context_status_slim_tool_counts_only_current_and_common_scope(
+    tmp_path: Path,
+) -> None:
+    manager, context_root, alpha, _beta, alpha_id, beta_id = _make_v2_manager(tmp_path)
+    for relative, marker in (
+        (Path("common") / "shared.md", "common"),
+        (Path("projects") / alpha_id / "alpha.md", "alpha"),
+        (Path("projects") / beta_id / "beta.md", "beta-private"),
+    ):
+        path = context_root / "knowledge" / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(marker, encoding="utf-8")
+
+    response = _call_tool(
+        manager,
+        "context.status",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+        },
+    )
+    payload = response["result"]["structuredContent"]
+
+    assert payload["scope_id"] == f"project:{alpha_id}"
+    assert payload["mount_counts"]["knowledge"] == 2
+    assert payload["total_files"] == sum(payload["mount_counts"].values())
+    assert "beta-private" not in json.dumps(payload)
+    assert beta_id not in json.dumps(payload)
+
+
+def test_context_file_tool_schemas_accept_scope_routing_fields(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    registry = build_mcp_registry(manager)
+
+    for name in PREFERRED_FILE_TOOLS:
+        properties = registry.tools[name].input_schema["properties"]
+        assert {"context_path", "project_path", "scope_id"}.issubset(properties)
+    query_properties = registry.tools["context.query"].input_schema["properties"]
+    assert "all_projects" in query_properties
+
+
+def test_v2_context_search_uses_hybrid_scope_filter(tmp_path: Path) -> None:
+    from afs.hybrid_search import HybridSearchEngine, HybridSource
+
+    manager, context_root, alpha, beta, alpha_id, beta_id = _make_v2_manager(tmp_path)
+    common = context_root / "knowledge" / "common"
+    common.mkdir(parents=True)
+    (alpha / "alpha.md").write_text("hybrid-token alpha", encoding="utf-8")
+    (beta / "beta.md").write_text("hybrid-token beta", encoding="utf-8")
+    (common / "common.md").write_text("hybrid-token common", encoding="utf-8")
+    engine = HybridSearchEngine(context_root / ".afs" / "search")
+    engine.build(
+        [
+            HybridSource(alpha, scope_id=f"project:{alpha_id}", project_id=alpha_id),
+            HybridSource(beta, scope_id=f"project:{beta_id}", project_id=beta_id),
+            HybridSource(common, scope_id="common"),
+        ]
+    )
+
+    response = _call_tool(
+        manager,
+        "context.search",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "query": "hybrid-token",
+            "limit": 10,
+        },
+    )
+    results = response["result"]["structuredContent"]["results"]
+    assert {Path(item["source_path"]).name for item in results} == {
+        "alpha.md",
+        "common.md",
+    }
+    assert all(Path(item["source_path"]).name != "beta.md" for item in results)
+
+
+def test_v2_context_search_filters_never_export_and_requires_literal_all_projects(
+    tmp_path: Path,
+) -> None:
+    from afs.hybrid_search import HybridSearchEngine, HybridSource
+
+    base, context_root, alpha, beta, alpha_id, beta_id = _make_v2_manager(tmp_path)
+    manager = AFSManager(
+        config=AFSConfig(
+            general=base.config.general,
+            sensitivity=SensitivityConfig(never_export=["knowledge/private/*"]),
+        )
+    )
+    private = context_root / "knowledge" / "common" / "private"
+    private.mkdir(parents=True)
+    (private / "secret.md").write_text("export-token secret", encoding="utf-8")
+    (alpha / "alpha.md").write_text("export-token alpha", encoding="utf-8")
+    (beta / "beta.md").write_text("export-token beta", encoding="utf-8")
+    HybridSearchEngine(context_root / ".afs" / "search").build(
+        [
+            HybridSource(alpha, scope_id=f"project:{alpha_id}", project_id=alpha_id),
+            HybridSource(beta, scope_id=f"project:{beta_id}", project_id=beta_id),
+            HybridSource(private, scope_id="common"),
+        ]
+    )
+
+    denied = _call_tool(
+        manager,
+        "context.search",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "query": "export-token",
+            "all_projects": "false",
+        },
+    )["result"]["structuredContent"]
+    denied_names = {Path(item["source_path"]).name for item in denied["results"]}
+    assert denied["scope_id"] == f"project:{alpha_id}"
+    assert denied_names == {"alpha.md"}
+
+    allowed = _call_tool(
+        manager,
+        "context.search",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "query": "export-token",
+            "all_projects": True,
+        },
+    )["result"]["structuredContent"]
+    allowed_names = {Path(item["source_path"]).name for item in allowed["results"]}
+    assert allowed["scope_id"] == "all-projects"
+    assert allowed_names == {"alpha.md", "beta.md"}
+
+
+def test_v2_message_tools_default_to_project_plus_common(tmp_path: Path) -> None:
+    manager, context_root, alpha, beta, _alpha_id, _beta_id = _make_v2_manager(tmp_path)
+
+    for project, sender, payload, scope_id in (
+        (alpha, "alpha-agent", {"text": "alpha"}, None),
+        (beta, "beta-agent", {"text": "beta"}, None),
+        (alpha, "common-agent", {"text": "common"}, "common"),
+    ):
+        arguments: dict[str, object] = {
+            "context_path": str(context_root),
+            "project_path": str(project),
+            "from": sender,
+            "type": "status",
+            "payload": payload,
+        }
+        if scope_id is not None:
+            arguments["scope_id"] = scope_id
+        response = _call_tool(manager, "messages.send", arguments)
+        assert "result" in response
+
+    scoped_response = _call_tool(
+        manager,
+        "messages.read",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "limit": 10,
+        },
+    )
+    scoped = scoped_response["result"]["structuredContent"]
+    assert {message["payload"]["text"] for message in scoped["messages"]} == {
+        "alpha",
+        "common",
+    }
+
+    raw_false = _call_tool(
+        manager,
+        "messages.read",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "all_projects": "false",
+            "include_legacy": "false",
+            "limit": 10,
+        },
+    )["result"]["structuredContent"]
+    assert raw_false["scope_id"] != "all-projects"
+    assert {message["payload"]["text"] for message in raw_false["messages"]} == {
+        "alpha",
+        "common",
+    }
+
+    refused_cleanup = _call_tool(
+        manager,
+        "messages.clean",
+        {
+            "context_path": str(context_root),
+            "all_projects": "false",
+            "apply": "false",
+        },
+    )
+    assert "error" in refused_cleanup
+
+    preview_cleanup = _call_tool(
+        manager,
+        "messages.clean",
+        {
+            "context_path": str(context_root),
+            "all_projects": True,
+            "apply": "false",
+        },
+    )["result"]["structuredContent"]
+    assert preview_cleanup["applied"] is False
+
+    common_response = _call_tool(
+        manager,
+        "messages.read",
+        {"context_path": str(context_root), "limit": 10},
+    )
+    common = common_response["result"]["structuredContent"]
+    assert [message["payload"]["text"] for message in common["messages"]] == ["common"]
+
+    all_response = _call_tool(
+        manager,
+        "messages.read",
+        {"context_path": str(context_root), "all_projects": True, "limit": 10},
+    )
+    all_messages = all_response["result"]["structuredContent"]["messages"]
+    assert {message["payload"]["text"] for message in all_messages} == {
+        "alpha",
+        "beta",
+        "common",
+    }
+
+
+def test_v2_legacy_hivemind_reap_requires_literal_all_projects(
+    tmp_path: Path,
+) -> None:
+    manager, context_root, alpha, beta, _alpha_id, _beta_id = _make_v2_manager(
+        tmp_path
+    )
+    for project, sender in ((alpha, "alpha-agent"), (beta, "beta-agent")):
+        response = _call_tool(
+            manager,
+            "messages.send",
+            {
+                "context_path": str(context_root),
+                "project_path": str(project),
+                "from": sender,
+                "type": "status",
+                "payload": {"sender": sender},
+            },
+        )
+        assert "result" in response
+
+    queue_root = manager.resolve_mount_root(context_root, MountType.HIVEMIND)
+    message_files = sorted(queue_root.glob("*/*.json"))
+    assert len(message_files) == 2
+    old_timestamp = time.time() - (2 * 3600)
+    for path in message_files:
+        os.utime(path, (old_timestamp, old_timestamp))
+
+    base_arguments: dict[str, object] = {
+        "context_path": str(context_root),
+        "project_path": str(alpha),
+        "max_age_hours": 1,
+        "dry_run": False,
+    }
+    for supplied_value in (None, False, "false"):
+        arguments = dict(base_arguments)
+        if supplied_value is not None:
+            arguments["all_projects"] = supplied_value
+        refused = _call_tool(manager, "hivemind.reap", arguments)
+        assert "error" in refused
+        assert "all_projects=true" in refused["error"]["message"]
+        assert all(path.exists() for path in message_files)
+
+    applied = _call_tool(
+        manager,
+        "hivemind.reap",
+        {**base_arguments, "all_projects": True},
+    )["result"]["structuredContent"]
+    assert applied["removed_count"] == 2
+    assert not any(path.exists() for path in message_files)
+
+    schema = build_mcp_registry(manager).tools["hivemind.reap"].input_schema
+    assert schema["properties"]["all_projects"]["type"] == "boolean"
+    assert "all_projects" in schema["required"]
+
+
+def test_v1_legacy_hivemind_reap_keeps_omitted_gate_compatibility(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    sent = _call_tool(
+        manager,
+        "messages.send",
+        {
+            "context_path": str(context_root),
+            "from": "legacy-agent",
+            "type": "status",
+            "payload": {"legacy": True},
+        },
+    )
+    assert "result" in sent
+    queue_root = manager.resolve_mount_root(context_root, MountType.HIVEMIND)
+    message_file = next(queue_root.glob("*/*.json"))
+    old_timestamp = time.time() - (2 * 3600)
+    os.utime(message_file, (old_timestamp, old_timestamp))
+
+    applied = _call_tool(
+        manager,
+        "hivemind.reap",
+        {
+            "context_path": str(context_root),
+            "max_age_hours": 1,
+            "dry_run": False,
+        },
+    )["result"]["structuredContent"]
+
+    assert applied["removed_count"] == 1
+    assert not message_file.exists()
+
+
+def test_v2_note_and_handoff_tools_create_readable_scoped_artifacts(tmp_path: Path) -> None:
+    manager, context_root, alpha, beta, alpha_id, _beta_id = _make_v2_manager(tmp_path)
+    scope_args = {"context_path": str(context_root), "project_path": str(alpha)}
+
+    note_response = _call_tool(
+        manager,
+        "note.create",
+        {
+            **scope_args,
+            "title": "Review parser edge cases",
+            "body": "Keep the empty-input regression pinned.",
+            "agent_name": "codex",
+        },
+    )
+    note = note_response["result"]["structuredContent"]
+    note_name = Path(note["path"]).name
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{6}Z--review-parser-edge-cases--[0-9a-f]{10}\.md",
+        note_name,
+    )
+    assert note["metadata"]["scope_id"] == f"project:{alpha_id}"
+
+    note_list = _call_tool(manager, "note.list", scope_args)
+    assert [
+        item["metadata"]["artifact_id"]
+        for item in note_list["result"]["structuredContent"]["notes"]
+    ] == [note["metadata"]["artifact_id"]]
+    beta_notes = _call_tool(
+        manager,
+        "note.list",
+        {"context_path": str(context_root), "project_path": str(beta)},
+    )
+    assert beta_notes["result"]["structuredContent"]["notes"] == []
+
+    handoff_response = _call_tool(
+        manager,
+        "handoff.create",
+        {
+            **scope_args,
+            "title": "Continue scoped MCP review",
+            "agent_name": "codex",
+            "accomplished": ["Scoped file and message tools"],
+            "next_steps": ["Run the full suite"],
+        },
+    )
+    handoff = handoff_response["result"]["structuredContent"]
+    assert handoff["scope_id"] == f"project:{alpha_id}"
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{6}Z--continue-scoped-mcp-review--[0-9a-f]{10}\.md",
+        Path(handoff["artifact_path"]).name,
+    )
+
+
 def test_context_tools_block_never_export_paths(tmp_path: Path) -> None:
     context_root = tmp_path / "context"
     manager = AFSManager(
@@ -1043,8 +2026,7 @@ def test_context_file_mutations_respect_sensitivity_rules(tmp_path: Path) -> Non
         request_id=510,
     )
     listed_paths = [
-        entry["path"]
-        for entry in list_response["result"]["structuredContent"]["entries"]
+        entry["path"] for entry in list_response["result"]["structuredContent"]["entries"]
     ]
     assert str(public_note) in listed_paths
     assert str(private_note) not in listed_paths
@@ -1825,9 +2807,7 @@ def test_initialize_negotiates_supported_protocol_version(tmp_path: Path) -> Non
 
 def test_read_message_accepts_lf_header_terminator() -> None:
     body = b'{"jsonrpc":"2.0","id":1,"method":"ping"}'
-    stream = BytesIO(
-        f"Content-Length: {len(body)}\n\n".encode("ascii") + body
-    )
+    stream = BytesIO(f"Content-Length: {len(body)}\n\n".encode("ascii") + body)
 
     payload, mode = _read_message(stream)
     assert mode == "content-length"
@@ -1836,9 +2816,7 @@ def test_read_message_accepts_lf_header_terminator() -> None:
 
 def test_read_message_accepts_cr_header_terminator() -> None:
     body = b'{"jsonrpc":"2.0","id":2,"method":"ping"}'
-    stream = BytesIO(
-        f"Content-Length: {len(body)}\r\r".encode("ascii") + body
-    )
+    stream = BytesIO(f"Content-Length: {len(body)}\r\r".encode("ascii") + body)
 
     payload, mode = _read_message(stream)
     assert mode == "content-length"
@@ -1855,9 +2833,7 @@ def test_read_message_accepts_jsonl_transport() -> None:
 
 def test_resources_list_returns_contexts_resource(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
-    response = _handle_request(
-        {"jsonrpc": "2.0", "id": 21, "method": "resources/list"}, manager
-    )
+    response = _handle_request({"jsonrpc": "2.0", "id": 21, "method": "resources/list"}, manager)
     assert response is not None
     resources = response["result"]["resources"]
     uris = [r["uri"] for r in resources]
@@ -1979,6 +2955,39 @@ def test_resources_read_metadata(tmp_path: Path) -> None:
     assert data["description"] == "test"
 
 
+def test_resources_read_v2_compat_metadata(tmp_path: Path) -> None:
+    manager, context_root, _alpha, _beta, _alpha_id, _beta_id = _make_v2_manager(
+        tmp_path
+    )
+    metadata_path = context_root / ".afs" / "compat" / "metadata.json"
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "created_at": "2026-07-16T00:00:00+00:00",
+                "description": "central v2 metadata",
+                "agents": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    uri = f"afs://context/{context_root}/metadata"
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 223,
+            "method": "resources/read",
+            "params": {"uri": uri},
+        },
+        manager,
+    )
+
+    assert response is not None and "result" in response
+    data = json.loads(response["result"]["contents"][0]["text"])
+    assert data["description"] == "central v2 metadata"
+
+
 def test_resources_read_index(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     context_root = manager.config.general.context_root
@@ -2054,9 +3063,7 @@ def test_resources_read_rejects_context_outside_allowed_roots(tmp_path: Path) ->
 
 def test_prompts_list_returns_expected_prompts(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
-    response = _handle_request(
-        {"jsonrpc": "2.0", "id": 26, "method": "prompts/list"}, manager
-    )
+    response = _handle_request({"jsonrpc": "2.0", "id": 26, "method": "prompts/list"}, manager)
     assert response is not None
     prompts = response["result"]["prompts"]
     names = {p["name"] for p in prompts}
@@ -2074,7 +3081,40 @@ def test_prompts_list_returns_expected_prompts(tmp_path: Path) -> None:
         assert isinstance(prompt["arguments"], list)
     bootstrap = next(prompt for prompt in prompts if prompt["name"] == "afs.session.bootstrap")
     argument_names = {argument["name"] for argument in bootstrap["arguments"]}
-    assert {"skills_prompt", "skills_top_k"}.issubset(argument_names)
+    assert {"project_path", "skills_prompt", "skills_top_k"}.issubset(argument_names)
+    for prompt_name in ("afs.session.pack", "afs.workflow.structured"):
+        prompt = next(prompt for prompt in prompts if prompt["name"] == prompt_name)
+        assert "semantic" in {argument["name"] for argument in prompt["arguments"]}
+    query_prompt = next(prompt for prompt in prompts if prompt["name"] == "afs.query.search")
+    assert {"project_path", "scope_id"}.issubset(
+        {argument["name"] for argument in query_prompt["arguments"]}
+    )
+
+
+def test_prompt_bootstrap_forwards_registered_project_path(tmp_path: Path) -> None:
+    manager, context_root, alpha, _beta, _alpha_id, _beta_id = _make_v2_manager(tmp_path)
+    with (
+        patch("afs.mcp_server.build_session_bootstrap", return_value={}) as build,
+        patch("afs.mcp_server.render_session_bootstrap", return_value="scoped bootstrap"),
+    ):
+        response = _handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 124,
+                "method": "prompts/get",
+                "params": {
+                    "name": "afs.session.bootstrap",
+                    "arguments": {
+                        "context_path": str(context_root),
+                        "project_path": str(alpha),
+                    },
+                },
+            },
+            manager,
+        )
+
+    assert response is not None and "result" in response
+    assert build.call_args.kwargs["project_path"] == alpha.resolve()
 
 
 def test_prompts_get_session_bootstrap(tmp_path: Path, monkeypatch) -> None:
@@ -2113,7 +3153,9 @@ def test_prompts_get_session_bootstrap(tmp_path: Path, monkeypatch) -> None:
     project_root = context_root.parent
     (project_root / "README.md").write_text("# Demo\n", encoding="utf-8")
     (project_root / "src").mkdir(exist_ok=True)
-    (project_root / "src" / "demo.py").write_text("def demo() -> int:\n    return 1\n", encoding="utf-8")
+    (project_root / "src" / "demo.py").write_text(
+        "def demo() -> int:\n    return 1\n", encoding="utf-8"
+    )
     response = _handle_request(
         {
             "jsonrpc": "2.0",
@@ -2148,9 +3190,13 @@ def test_prompts_get_context_overview_without_existing_context(tmp_path: Path) -
     (project_path / "config" / "registry.json").write_text('{"models": []}\n', encoding="utf-8")
     (project_path / "config" / "system_prompt.md").write_text("# Prompt\n", encoding="utf-8")
     (project_path / "scripts").mkdir()
-    (project_path / "scripts" / "train.py").write_text("def train() -> None:\n    pass\n", encoding="utf-8")
+    (project_path / "scripts" / "train.py").write_text(
+        "def train() -> None:\n    pass\n", encoding="utf-8"
+    )
     (project_path / "training").mkdir()
-    (project_path / "training" / "dataset.py").write_text("def load_dataset() -> list[str]:\n    return []\n", encoding="utf-8")
+    (project_path / "training" / "dataset.py").write_text(
+        "def load_dataset() -> list[str]:\n    return []\n", encoding="utf-8"
+    )
 
     manager = AFSManager(
         config=AFSConfig(
@@ -2192,9 +3238,13 @@ def test_prompts_get_context_overview_prefers_requested_project_over_ancestor_co
     (project_path / "config").mkdir()
     (project_path / "config" / "registry.json").write_text('{"models": []}\n', encoding="utf-8")
     (project_path / "scripts").mkdir()
-    (project_path / "scripts" / "train.py").write_text("def train() -> None:\n    pass\n", encoding="utf-8")
+    (project_path / "scripts" / "train.py").write_text(
+        "def train() -> None:\n    pass\n", encoding="utf-8"
+    )
     (project_path / "training").mkdir()
-    (project_path / "training" / "dataset.py").write_text("def load_dataset() -> list[str]:\n    return []\n", encoding="utf-8")
+    (project_path / "training" / "dataset.py").write_text(
+        "def load_dataset() -> list[str]:\n    return []\n", encoding="utf-8"
+    )
 
     manager = AFSManager(
         config=AFSConfig(
@@ -2270,6 +3320,156 @@ def test_tool_session_pack(tmp_path: Path) -> None:
     assert payload["execution_profile"]["retry_hint"]
     assert payload["pack_mode"] == "retrieval"
     assert any("guide.md" in source for source in payload["sources"])
+
+
+def test_v2_session_pack_tool_and_prompt_propagate_project_scope(tmp_path: Path) -> None:
+    manager, context_root, alpha, _beta, alpha_id, beta_id = _make_v2_manager(tmp_path)
+    for project_id, marker in (
+        (alpha_id, "alpha-pack-marker"),
+        (beta_id, "beta-pack-marker"),
+    ):
+        path = context_root / "knowledge" / "projects" / project_id / "scope.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(f"pack-scope-query {marker}", encoding="utf-8")
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE],
+        include_content=True,
+    )
+
+    response = _call_tool(
+        manager,
+        "session.pack",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "query": "pack-scope-query",
+            "include_content": True,
+            "token_budget": 2000,
+        },
+    )
+    structured = response["result"]["structuredContent"]
+    assert structured["scope_id"] == f"project:{alpha_id}"
+    assert "alpha-pack-marker" in json.dumps(structured)
+    assert "beta-pack-marker" not in json.dumps(structured)
+
+    prompt_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 991,
+            "method": "prompts/get",
+            "params": {
+                "name": "afs.session.pack",
+                "arguments": {
+                    "context_path": str(context_root),
+                    "project_path": str(alpha),
+                    "query": "pack-scope-query",
+                    "token_budget": 2000,
+                },
+            },
+        },
+        manager,
+    )
+    assert prompt_response is not None
+    text = prompt_response["result"]["messages"][0]["content"]["text"]
+    assert f"Scope: project:{alpha_id}" in text
+    assert "beta-pack-marker" not in text
+
+    schema = build_mcp_registry(manager).tools["session.pack"].input_schema
+    assert "project_path" in schema["properties"]
+    assert schema["properties"]["semantic"]["default"] is False
+
+
+def test_session_pack_prompt_string_false_does_not_enable_semantic_retrieval(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("semantic retrieval requires explicit true consent")
+
+    monkeypatch.setattr("afs.context_pack._embedding_section", forbidden)
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 992,
+            "method": "prompts/get",
+            "params": {
+                "name": "afs.session.pack",
+                "arguments": {
+                    "context_path": str(context_root),
+                    "query": "local-only",
+                    "semantic": "false",
+                },
+            },
+        },
+        manager,
+    )
+
+    assert response is not None
+    assert "error" not in response
+
+
+def test_session_pack_tool_string_true_does_not_enable_semantic_retrieval(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = _make_manager(tmp_path)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("semantic retrieval requires a literal JSON boolean true")
+
+    monkeypatch.setattr("afs.context_pack._embedding_section", forbidden)
+    response = _call_tool(
+        manager,
+        "session.pack",
+        {
+            "context_path": str(manager.config.general.context_root),
+            "query": "local-only",
+            "semantic": "true",
+        },
+        request_id=993,
+    )
+
+    assert "error" not in response
+
+
+def test_structured_prompt_semantic_requires_literal_true(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = _make_manager(tmp_path)
+    calls: list[str] = []
+
+    def record_embedding(*_args, **_kwargs):
+        calls.append("called")
+        return None
+
+    monkeypatch.setattr("afs.context_pack._embedding_section", record_embedding)
+    base_arguments = {
+        "context_path": str(manager.config.general.context_root),
+        "schema_name": "plan",
+        "task": "Plan local retrieval.",
+        "query": "local-only",
+    }
+    for request_id, semantic in ((994, "false"), (995, "true"), (996, True)):
+        response = _handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "prompts/get",
+                "params": {
+                    "name": "afs.workflow.structured",
+                    "arguments": {**base_arguments, "semantic": semantic},
+                },
+            },
+            manager,
+        )
+        assert response is not None
+        assert "error" not in response
+
+    assert calls == ["called"]
 
 
 def test_tool_operator_digest(tmp_path: Path) -> None:
@@ -2348,9 +3548,9 @@ def test_prompts_get_workflow_structured(tmp_path: Path) -> None:
     (tmp_path / ".afs").mkdir()
     (tmp_path / ".afs" / "policy.toml").write_text(
         "[review]\n"
-        "focus = [\"order findings by severity\"]\n\n"
+        'focus = ["order findings by severity"]\n\n'
         "[design]\n"
-        "constraints = [\"preserve compatibility\"]\n",
+        'constraints = ["preserve compatibility"]\n',
         encoding="utf-8",
     )
     (context_root / "knowledge").mkdir(exist_ok=True)
@@ -2418,13 +3618,15 @@ def test_prompts_get_context_overview(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     context_root = manager.config.general.context_root
     (context_root / "metadata.json").write_text(
-        json.dumps({
-            "created_at": "2025-01-01",
-            "description": "test project",
-            "agents": ["claude"],
-            "directories": {},
-            "manual_only": [],
-        }),
+        json.dumps(
+            {
+                "created_at": "2025-01-01",
+                "description": "test project",
+                "agents": ["claude"],
+                "directories": {},
+                "manual_only": [],
+            }
+        ),
         encoding="utf-8",
     )
     response = _handle_request(
@@ -2524,15 +3726,139 @@ def test_prompts_get_query_search_supports_context_path_and_auto_refresh(
     assert "Index refreshed before search." in text
 
 
+def test_v2_query_search_prompt_is_scope_isolated(tmp_path: Path) -> None:
+    manager, context_root, alpha, _beta, alpha_id, beta_id = _make_v2_manager(tmp_path)
+    alpha_note = context_root / "knowledge" / "projects" / alpha_id / "alpha-result.md"
+    beta_note = context_root / "knowledge" / "projects" / beta_id / "beta-secret.md"
+    alpha_note.parent.mkdir(parents=True)
+    beta_note.parent.mkdir(parents=True)
+    alpha_note.write_text("shared-prompt-query alpha", encoding="utf-8")
+    beta_note.write_text("shared-prompt-query beta", encoding="utf-8")
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE],
+        include_content=True,
+    )
+
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 995,
+            "method": "prompts/get",
+            "params": {
+                "name": "afs.query.search",
+                "arguments": {
+                    "context_path": str(context_root),
+                    "project_path": str(alpha),
+                    "query": "shared-prompt-query",
+                    "mount_types": "knowledge",
+                },
+            },
+        },
+        manager,
+    )
+
+    assert response is not None
+    text = response["result"]["messages"][0]["content"]["text"]
+    assert "alpha-result.md" in text
+    assert "beta-secret.md" not in text
+    assert beta_id not in text
+
+
+def test_v2_context_overview_never_infers_central_parent_as_project(
+    tmp_path: Path,
+) -> None:
+    manager, context_root, alpha, beta, _alpha_id, _beta_id = _make_v2_manager(tmp_path)
+    (context_root.parent / "central-parent-secret").mkdir()
+    (alpha / "alpha-visible-dir").mkdir()
+    (beta / "beta-private-dir").mkdir()
+
+    common_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 996,
+            "method": "prompts/get",
+            "params": {
+                "name": "afs.context.overview",
+                "arguments": {"context_path": str(context_root)},
+            },
+        },
+        manager,
+    )
+    assert common_response is not None
+    common_text = common_response["result"]["messages"][0]["content"]["text"]
+    assert "common scope; no project selected" in common_text
+    assert "central-parent-secret" not in common_text
+
+    project_response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 997,
+            "method": "prompts/get",
+            "params": {
+                "name": "afs.context.overview",
+                "arguments": {
+                    "context_path": str(context_root),
+                    "project_path": str(alpha),
+                },
+            },
+        },
+        manager,
+    )
+    assert project_response is not None
+    project_text = project_response["result"]["messages"][0]["content"]["text"]
+    assert "alpha-visible-dir" in project_text
+    assert "beta-private-dir" not in project_text
+
+
+def test_v2_mcp_context_overview_prunes_nested_project_and_visible_context(
+    tmp_path: Path,
+) -> None:
+    alpha = tmp_path / "workspace"
+    beta = alpha / "nested-beta"
+    context_root = alpha / "central-context"
+    beta.mkdir(parents=True)
+    scaffold_v2(context_root)
+    registry = ProjectRegistry(context_root)
+    registry.register(alpha)
+    registry.register(beta)
+    (alpha / "alpha_safe.py").write_text("ALPHA_SAFE = True\n", encoding="utf-8")
+    (beta / "beta_confidential_canary.py").write_text(
+        "BETA_PRIVATE = True\n",
+        encoding="utf-8",
+    )
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 998,
+            "method": "prompts/get",
+            "params": {
+                "name": "afs.context.overview",
+                "arguments": {
+                    "context_path": str(context_root),
+                    "project_path": str(alpha),
+                },
+            },
+        },
+        manager,
+    )
+    assert response is not None
+    text = response["result"]["messages"][0]["content"]["text"]
+    codebase_text = text.split("## Codebase\n", maxsplit=1)[1]
+    assert "alpha_safe.py" in codebase_text
+    assert "nested-beta" not in codebase_text
+    assert "beta_confidential_canary" not in codebase_text
+    assert "central-context" not in codebase_text
+
+
 def test_prompts_get_scratchpad_review(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     context_root = manager.config.general.context_root
-    (context_root / "scratchpad" / "state.md").write_text(
-        "current state info", encoding="utf-8"
-    )
-    (context_root / "scratchpad" / "deferred.md").write_text(
-        "deferred task list", encoding="utf-8"
-    )
+    (context_root / "scratchpad" / "state.md").write_text("current state info", encoding="utf-8")
+    (context_root / "scratchpad" / "deferred.md").write_text("deferred task list", encoding="utf-8")
     response = _handle_request(
         {
             "jsonrpc": "2.0",
@@ -2556,12 +3882,8 @@ def test_prompts_get_scratchpad_review(tmp_path: Path) -> None:
 def test_prompts_get_scratchpad_review_uses_remapped_directory(tmp_path: Path) -> None:
     manager = _make_remapped_manager(tmp_path, scratchpad="notes")
     context_root = manager.config.general.context_root
-    (context_root / "notes" / "state.md").write_text(
-        "remapped state", encoding="utf-8"
-    )
-    (context_root / "notes" / "deferred.md").write_text(
-        "remapped deferred", encoding="utf-8"
-    )
+    (context_root / "notes" / "state.md").write_text("remapped state", encoding="utf-8")
+    (context_root / "notes" / "deferred.md").write_text("remapped deferred", encoding="utf-8")
     response = _handle_request(
         {
             "jsonrpc": "2.0",
@@ -2624,11 +3946,11 @@ def test_extension_mcp_tools_are_registered_and_callable(tmp_path: Path) -> None
     ext_dir = ext_root / "ext_workspace"
     ext_dir.mkdir(parents=True)
     (ext_dir / "extension.toml").write_text(
-        "name = \"ext_workspace\"\n"
+        'name = "ext_workspace"\n'
         "\n"
         "[mcp_tools]\n"
-        "module = \"ext_mcp\"\n"
-        "factory = \"register_mcp_tools\"\n",
+        'module = "ext_mcp"\n'
+        'factory = "register_mcp_tools"\n',
         encoding="utf-8",
     )
     (ext_dir / "ext_mcp.py").write_text(
@@ -2693,11 +4015,11 @@ def test_extension_mcp_server_registers_tools_resources_and_prompts(
     ext_dir = ext_root / "ext_workspace"
     ext_dir.mkdir(parents=True)
     (ext_dir / "extension.toml").write_text(
-        "name = \"ext_workspace\"\n"
+        'name = "ext_workspace"\n'
         "\n"
         "[mcp_server]\n"
-        "module = \"ext_surface\"\n"
-        "factory = \"register_mcp_server\"\n",
+        'module = "ext_surface"\n'
+        'factory = "register_mcp_server"\n',
         encoding="utf-8",
     )
     (ext_dir / "ext_surface.py").write_text(
@@ -2846,11 +4168,11 @@ def test_extension_mcp_server_conflicts_do_not_override_core_surface(
     ext_dir = ext_root / "ext_workspace"
     ext_dir.mkdir(parents=True)
     (ext_dir / "extension.toml").write_text(
-        "name = \"ext_workspace\"\n"
+        'name = "ext_workspace"\n'
         "\n"
         "[mcp_server]\n"
-        "module = \"ext_surface\"\n"
-        "factory = \"register_mcp_server\"\n",
+        'module = "ext_surface"\n'
+        'factory = "register_mcp_server"\n',
         encoding="utf-8",
     )
     (ext_dir / "ext_surface.py").write_text(
@@ -2914,7 +4236,9 @@ def test_extension_mcp_server_conflicts_do_not_override_core_surface(
 
     registry = build_mcp_registry(manager)
     errors = registry.load_errors
-    assert any("Tool 'context.read' already registered by core" in message for message in errors.values())
+    assert any(
+        "Tool 'context.read' already registered by core" in message for message in errors.values()
+    )
     assert any(
         "Resource 'afs://contexts' already registered by core" in message
         for message in errors.values()
@@ -3029,9 +4353,7 @@ def test_profile_mcp_tools_modules_are_loaded_into_registry(
         registry=registry,
     )
     assert resource_response is not None
-    assert json.loads(resource_response["result"]["contents"][0]["text"]) == {
-        "status": "profile"
-    }
+    assert json.loads(resource_response["result"]["contents"][0]["text"]) == {"status": "profile"}
 
     prompt_response = _handle_request(
         {
@@ -3098,6 +4420,31 @@ def test_agent_stop_missing_agent(tmp_path: Path) -> None:
     assert response is not None
     content = response["result"]["structuredContent"]
     assert content["stopped"] is False
+
+
+@pytest.mark.parametrize("tool_name", ["agent.spawn", "agent.stop"])
+def test_agent_tools_reject_name_path_traversal(
+    tmp_path: Path,
+    tool_name: str,
+) -> None:
+    manager = _make_manager(tmp_path)
+    arguments = {"name": "../../outside"}
+    if tool_name == "agent.spawn":
+        arguments["module"] = "afs.agents.context_warm"
+
+    response = _handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments},
+        },
+        manager,
+    )
+
+    assert response is not None
+    assert "error" in response
+    assert "one safe filesystem segment" in response["error"]["message"]
 
 
 def test_hivemind_task_and_agent_logs_tools_use_context_path(tmp_path: Path) -> None:
@@ -3525,11 +4872,11 @@ def test_companion_repo_mcp_server_uses_src_layout(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (repo / "extension.toml").write_text(
-        "name = \"afs_example\"\n"
+        'name = "afs_example"\n'
         "\n"
         "[mcp_server]\n"
-        "module = \"afs_example.mcp_surface\"\n"
-        "factory = \"register_mcp_server\"\n",
+        'module = "afs_example.mcp_surface"\n'
+        'factory = "register_mcp_server"\n',
         encoding="utf-8",
     )
 
@@ -3575,9 +4922,7 @@ def _write_matching_skill(root: Path, name: str, *, body_size: int = 2_600) -> N
         "enforcement:\n"
         "  - Keep the operation bounded.\n"
         "---\n"
-        f"# {name}\n\n"
-        + ("x" * body_size)
-        + "\n",
+        f"# {name}\n\n" + ("x" * body_size) + "\n",
         encoding="utf-8",
     )
 
@@ -3718,10 +5063,7 @@ def test_skill_read_sanitizes_control_characters_in_known_skill_preview(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    hostile_name = (
-        "known\x1b]8;;https://example.invalid\x07click\x1b]8;;\x07"
-        "\nnext\x85line"
-    )
+    hostile_name = "known\x1b]8;;https://example.invalid\x07click\x1b]8;;\x07\nnext\x85line"
     metadata = SkillMetadata(
         name=hostile_name,
         path=tmp_path / "known" / "SKILL.md",
@@ -3738,10 +5080,7 @@ def test_skill_read_sanitizes_control_characters_in_known_skill_preview(
     assert "\\u0007" in message
     assert "\\u000a" in message
     assert "\\u0085" in message
-    assert not any(
-        ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
-        for char in message
-    )
+    assert not any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in message)
     assert stderr == f"[afs-mcp] tool error: skill.read: {message}\n"
     assert len(message) <= 1_400
 
@@ -3870,8 +5209,9 @@ def test_skill_tools_bound_adversarial_metadata(tmp_path: Path) -> None:
         verification=[huge],
     )
 
-    with patch("afs.mcp_server.discover_skills", return_value=[metadata]), patch(
-        "afs.skills.discover_skills", return_value=[metadata]
+    with (
+        patch("afs.mcp_server.discover_skills", return_value=[metadata]),
+        patch("afs.skills.discover_skills", return_value=[metadata]),
     ):
         match_response = _call_tool(
             manager,
@@ -3896,19 +5236,14 @@ def _make_catalog_extension_manager(
 ) -> AFSManager:
     extension_root = tmp_path / "extensions" / "catalog_extension"
     extension_root.mkdir(parents=True)
-    catalog_line = (
-        f'catalog = "{manifest_catalog}"\n' if manifest_catalog is not None else ""
-    )
+    catalog_line = f'catalog = "{manifest_catalog}"\n' if manifest_catalog is not None else ""
     (extension_root / "extension.toml").write_text(
-        "name = \"catalog_extension\"\n\n"
+        'name = "catalog_extension"\n\n'
         "[mcp_tools]\n"
-        "module = \"catalog_extension_mcp\"\n"
-        + catalog_line,
+        'module = "catalog_extension_mcp"\n' + catalog_line,
         encoding="utf-8",
     )
-    tool_catalog_entry = (
-        f", 'catalog': {tool_catalog!r}" if tool_catalog is not None else ""
-    )
+    tool_catalog_entry = f", 'catalog': {tool_catalog!r}" if tool_catalog is not None else ""
     (extension_root / "catalog_extension_mcp.py").write_text(
         "def register_mcp_tools(_manager):\n"
         "    def echo(arguments):\n"
@@ -4013,9 +5348,9 @@ def test_invalid_extension_manifest_catalog_is_rejected(
     rendered = json.dumps(catalog) if not isinstance(catalog, str) else f'"{catalog}"'
     manifest = extension_root / "extension.toml"
     manifest.write_text(
-        "name = \"invalid-catalog\"\n\n"
+        'name = "invalid-catalog"\n\n'
         "[mcp_tools]\n"
-        "module = \"invalid_catalog_mcp\"\n"
+        'module = "invalid_catalog_mcp"\n'
         f"catalog = {rendered}\n",
         encoding="utf-8",
     )

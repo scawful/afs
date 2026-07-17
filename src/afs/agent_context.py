@@ -13,17 +13,35 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .codebase_explorer import build_codebase_summary
+from .codebase_explorer import build_codebase_summary, build_scoped_codebase_summary
+from .context_layout import LAYOUT_VERSION, _atomic_write_text, detect_layout_version
+from .path_safety import assert_no_linklike_components, iter_regular_files_no_links
+from .scopes import ResolvedScope, resolve_scope, visible_mount_roots
 
 logger = logging.getLogger(__name__)
 
 # Environment variable for passing context snapshot path to spawned agents
 AGENT_CONTEXT_ENV = "AFS_AGENT_CONTEXT_PATH"
+
+
+def _scoped_codebase_summary(scoped: ResolvedScope) -> dict[str, Any]:
+    """Summarize only the authorized project checkout for one scope."""
+
+    if scoped.layout_version != LAYOUT_VERSION:
+        return build_codebase_summary(scoped.context_root)
+    if scoped.requester_path is None or not scoped.project_id:
+        return {}
+    return build_scoped_codebase_summary(
+        scoped.context_root,
+        scoped.requester_path,
+        project_id=scoped.project_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +83,9 @@ class AgentContextSnapshot:
 
     # Context root path
     context_root: str = ""
+    scope_id: str = "common"
+    project_id: str = ""
+    requester_path: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +100,9 @@ class AgentContextSnapshot:
             "mount_freshness": self.mount_freshness,
             "codebase_summary": self.codebase_summary,
             "context_root": self.context_root,
+            "scope_id": self.scope_id,
+            "project_id": self.project_id,
+            "requester_path": self.requester_path,
         }
 
     @classmethod
@@ -95,6 +119,9 @@ class AgentContextSnapshot:
             mount_freshness=data.get("mount_freshness", {}),
             codebase_summary=data.get("codebase_summary", {}),
             context_root=data.get("context_root", ""),
+            scope_id=str(data.get("scope_id", "common") or "common"),
+            project_id=str(data.get("project_id", "") or ""),
+            requester_path=str(data.get("requester_path", "") or ""),
         )
 
 
@@ -103,6 +130,7 @@ def build_agent_context_snapshot(
     context_root: Path,
     *,
     config: Any | None = None,
+    requester_path: Path | None = None,
     max_events: int = 20,
     max_memory_topics: int = 30,
 ) -> AgentContextSnapshot:
@@ -113,10 +141,18 @@ def build_agent_context_snapshot(
     loading, no embedding queries, no LLM calls.
     """
     context_path = context_root.expanduser().resolve()
+    scoped = resolve_scope(
+        context_path,
+        requester_path=requester_path,
+        common=requester_path is None,
+    )
     snapshot = AgentContextSnapshot(
         agent_name=agent_name,
         built_at=datetime.now(timezone.utc).isoformat(),
         context_root=str(context_path),
+        scope_id=scoped.scope_id,
+        project_id=scoped.project_id,
+        requester_path=str(scoped.requester_path or ""),
     )
 
     # 1. Index summary
@@ -128,21 +164,55 @@ def build_agent_context_snapshot(
         resolved_config = config or load_config_model(merge_user=True)
         manager = AFSManager(config=resolved_config)
         index = ContextSQLiteIndex(manager, context_path)
-        summary = index.summary()
-        snapshot.index_summary = summary.by_mount_type
-        snapshot.index_total = summary.rows_written
+        if scoped.layout_version == LAYOUT_VERSION:
+            from .models import ContextCategory, MountType
+
+            snapshot.index_summary = {
+                mount_type.value: count
+                for mount_type in MountType
+                if ContextCategory.from_mount_type(mount_type) is not None
+                and (
+                    count := index.count_entries_scoped(
+                        scoped,
+                        mount_types=[mount_type],
+                    )
+                )
+            }
+            snapshot.index_total = sum(snapshot.index_summary.values())
+        else:
+            summary = index.summary()
+            snapshot.index_summary = summary.by_mount_type
+            snapshot.index_total = summary.rows_written
     except Exception:
         logger.debug("Failed to read index summary for agent context", exc_info=True)
 
     # 2. Memory topics
     try:
+        from .models import MountType
+
         memory_dir = context_path / "memory"
         if memory_dir.is_dir():
-            entries = sorted(memory_dir.iterdir())
+            if scoped.layout_version == LAYOUT_VERSION:
+                entries = sorted(
+                    entry
+                    for root in visible_mount_roots(
+                        memory_dir,
+                        mount_type=MountType.MEMORY,
+                        scoped=scoped,
+                    )
+                    if root.is_dir()
+                    for entry in iter_regular_files_no_links(root)
+                    if entry.suffix in (".md", ".json", ".txt")
+                )
+            else:
+                entries = sorted(
+                    entry
+                    for entry in memory_dir.iterdir()
+                    if entry.is_file() and entry.suffix in (".md", ".json", ".txt")
+                )
             snapshot.memory_entry_count = len(entries)
             snapshot.memory_topics = [
-                e.stem for e in entries[:max_memory_topics]
-                if e.is_file() and e.suffix in (".md", ".json", ".txt")
+                entry.stem for entry in entries[:max_memory_topics]
             ]
     except Exception:
         logger.debug("Failed to read memory topics for agent context", exc_info=True)
@@ -171,7 +241,7 @@ def build_agent_context_snapshot(
     try:
         from .context_freshness import mount_freshness
 
-        freshness = mount_freshness(context_path)
+        freshness = mount_freshness(context_path, scoped=scoped)
         snapshot.mount_freshness = {
             name: {
                 "file_count": mf.file_count,
@@ -185,7 +255,7 @@ def build_agent_context_snapshot(
 
     # 5. Codebase structure
     try:
-        snapshot.codebase_summary = build_codebase_summary(context_path)
+        snapshot.codebase_summary = _scoped_codebase_summary(scoped)
     except Exception:
         logger.debug("Failed to read codebase summary for agent context", exc_info=True)
 
@@ -207,14 +277,37 @@ def build_agent_context_snapshot(
 def write_agent_context_snapshot(
     snapshot: AgentContextSnapshot,
     output_dir: Path,
+    *,
+    trusted_root: Path | None = None,
 ) -> Path:
     """Write the snapshot to a JSON file and return its path."""
+    if trusted_root is not None:
+        if not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
+            snapshot.agent_name,
+        ):
+            raise ValueError("agent name must be one safe filesystem segment")
+        trusted_root = assert_no_linklike_components(
+            trusted_root,
+            allow_missing=False,
+        )
+        output_dir = assert_no_linklike_components(
+            output_dir,
+            boundary=trusted_root,
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"agent_context_{snapshot.agent_name}.json"
-    path.write_text(
-        json.dumps(snapshot.to_dict(), indent=2) + "\n",
-        encoding="utf-8",
-    )
+    rendered = json.dumps(snapshot.to_dict(), indent=2) + "\n"
+    if trusted_root is not None:
+        output_dir = assert_no_linklike_components(
+            output_dir,
+            boundary=trusted_root,
+            allow_missing=False,
+        )
+        path = assert_no_linklike_components(path, boundary=output_dir)
+        _atomic_write_text(path, rendered)
+    else:
+        path.write_text(rendered, encoding="utf-8")
     return path
 
 
@@ -271,7 +364,12 @@ def index_agent_output(
     try:
         from .config import load_config_model
         from .context_index import ContextSQLiteIndex
+        from .context_layout import LAYOUT_VERSION, detect_layout_version
+        from .context_paths import resolve_mount_root
         from .manager import AFSManager
+        from .models import MountType
+        from .path_safety import assert_no_linklike_components, lexical_absolute
+        from .project_registry import ProjectRegistry
 
         config = load_config_model(merge_user=True)
         manager = AFSManager(config=config)
@@ -290,22 +388,57 @@ def index_agent_output(
                     parts.append(f"{key}: {value}")
         content_text = "\n".join(parts)
 
-        # Determine relative path from context root
-        try:
-            relative = result_path.resolve().relative_to(context_path)
-            relative_str = str(relative)
-        except ValueError:
-            relative_str = f"agents/{agent_name}/{result_path.name}"
+        # A v2 row must carry a mount-relative scope prefix (``common/...``
+        # or ``projects/<id>/...``). External and raw category-root outputs
+        # have no authorized scope and must not enter the shared index.
+        indexed_result_path = result_path.resolve()
+        if detect_layout_version(context_path) == LAYOUT_VERSION:
+            scratchpad_root = resolve_mount_root(
+                context_path,
+                MountType.SCRATCHPAD,
+                config=config,
+            )
+            lexical_result = lexical_absolute(result_path)
+            try:
+                indexed_result_path = assert_no_linklike_components(
+                    lexical_result,
+                    boundary=scratchpad_root,
+                    allow_missing=False,
+                )
+                relative = indexed_result_path.relative_to(scratchpad_root)
+            except (OSError, ValueError):
+                return False
+            parts = relative.parts
+            if len(parts) < 2:
+                return False
+            if parts[0] == "common":
+                pass
+            elif parts[0] == "projects" and len(parts) >= 3:
+                registered_ids = {
+                    record.project_id for record in ProjectRegistry(context_path).all_records()
+                }
+                if parts[1] not in registered_ids:
+                    return False
+            else:
+                return False
+            relative_str = relative.as_posix()
+        else:
+            try:
+                relative = indexed_result_path.relative_to(context_path)
+                relative_str = str(relative)
+            except ValueError:
+                relative_str = f"agents/{agent_name}/{result_path.name}"
 
         # Insert directly into the index
         now = datetime.now(timezone.utc).isoformat()
-        stat = result_path.stat() if result_path.exists() else None
+        stat = indexed_result_path.stat() if indexed_result_path.exists() else None
 
         with index._connect() as conn:
             # Remove any existing entry for this path
             conn.execute(
-                "DELETE FROM file_index WHERE context_path = ? AND relative_path = ?",
-                (str(context_path), relative_str),
+                "DELETE FROM file_index "
+                "WHERE context_path = ? AND mount_type = ? AND relative_path = ?",
+                (str(context_path), "scratchpad", relative_str),
             )
             conn.execute(
                 """INSERT INTO file_index (
@@ -316,7 +449,7 @@ def index_agent_output(
                     str(context_path),
                     "scratchpad",
                     relative_str,
-                    str(result_path.resolve()),
+                    str(indexed_result_path),
                     0,
                     stat.st_size if stat else len(content_text),
                     now,
@@ -386,6 +519,38 @@ class ContextAwareAgent:
             logger.debug("Failed to create context index", exc_info=True)
             return None
 
+    def _get_scope(self) -> ResolvedScope | None:
+        """Resolve snapshot authority, falling back to common-only in v2."""
+
+        if self._context_path is None:
+            return None
+        try:
+            if detect_layout_version(self._context_path) != LAYOUT_VERSION:
+                return resolve_scope(self._context_path)
+            if (
+                self.context_snapshot is not None
+                and self.context_snapshot.scope_id != "common"
+                and self.context_snapshot.requester_path
+            ):
+                try:
+                    scoped = resolve_scope(
+                        self._context_path,
+                        requester_path=Path(
+                            self.context_snapshot.requester_path
+                        ).expanduser().resolve(),
+                    )
+                except (OSError, PermissionError, ValueError):
+                    scoped = None
+                if (
+                    scoped is not None
+                    and scoped.scope_id == self.context_snapshot.scope_id
+                ):
+                    return scoped
+            return resolve_scope(self._context_path, common=True)
+        except (OSError, PermissionError, ValueError):
+            logger.debug("Failed to resolve agent context scope", exc_info=True)
+            return None
+
     def query_context(
         self,
         query: str,
@@ -401,7 +566,11 @@ class ContextAwareAgent:
         try:
             from .models import MountType
             mt = [MountType(t) for t in mount_types] if mount_types else None
-            return index.query(
+            scoped = self._get_scope()
+            if scoped is None:
+                return []
+            return index.query_scoped(
+                scoped,
                 query=query,
                 mount_types=mt,
                 limit=limit,
@@ -420,6 +589,8 @@ class ContextAwareAgent:
         """Search memory entries by keyword in filename or content."""
         if self._context_path is None:
             return []
+        from .models import MountType
+
         memory_dir = self._context_path / "memory"
         if not memory_dir.is_dir():
             return []
@@ -427,10 +598,24 @@ class ContextAwareAgent:
         results = []
         keyword_lower = keyword.lower()
         try:
-            for entry in sorted(memory_dir.iterdir()):
-                if not entry.is_file():
-                    continue
-                if entry.suffix not in (".md", ".json", ".txt"):
+            scoped = self._get_scope()
+            if scoped is None:
+                return []
+            if scoped.layout_version == LAYOUT_VERSION:
+                entries = sorted(
+                    entry
+                    for root in visible_mount_roots(
+                        memory_dir,
+                        mount_type=MountType.MEMORY,
+                        scoped=scoped,
+                    )
+                    if root.is_dir()
+                    for entry in iter_regular_files_no_links(root)
+                )
+            else:
+                entries = sorted(memory_dir.iterdir())
+            for entry in entries:
+                if not entry.is_file() or entry.suffix not in (".md", ".json", ".txt"):
                     continue
 
                 # Check filename match
@@ -492,7 +677,10 @@ class ContextAwareAgent:
             return {}
         try:
             from .context_freshness import mount_freshness
-            freshness = mount_freshness(self._context_path)
+            scoped = self._get_scope()
+            if scoped is None:
+                return {}
+            freshness = mount_freshness(self._context_path, scoped=scoped)
             return {
                 name: {
                     "file_count": mf.file_count,
@@ -511,7 +699,10 @@ class ContextAwareAgent:
         if self._context_path is None:
             return {}
         try:
-            return build_codebase_summary(self._context_path)
+            scoped = self._get_scope()
+            if scoped is None:
+                return {}
+            return _scoped_codebase_summary(scoped)
         except Exception:
             logger.debug("Codebase summary failed", exc_info=True)
             return {}

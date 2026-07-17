@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -7,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from afs.atomic_io import atomic_write_text
+from afs.context_layout import scaffold_v2
 from afs.missions import Mission, MissionNotFoundError, MissionStore
 
 
@@ -14,6 +17,13 @@ def _store(tmp_path: Path) -> MissionStore:
     context_root = tmp_path / ".context"
     context_root.mkdir()
     return MissionStore(context_root)
+
+
+def _symlink_or_skip(link: Path, target: Path, *, directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"symlinks unavailable: {exc}")
 
 
 def test_create_sets_active_status_and_fields(tmp_path: Path) -> None:
@@ -125,7 +135,7 @@ def test_mission_survives_manifest_loss(tmp_path: Path) -> None:
     kept = store.create(title="kept")
     raced = store.create(title="raced")
     # Rewrite the manifest to drop the raced mission (as a lost read-modify-write would).
-    store._atomic_write(  # type: ignore[attr-defined]
+    atomic_write_text(
         store._manifest_path,  # type: ignore[attr-defined]
         __import__("json").dumps([kept.mission_id]) + "\n",
     )
@@ -305,3 +315,132 @@ def test_agent_acceptance_suggestion_is_not_attributed_to_prior_human(
     assert updated.acceptance_suggestion == "agent suggestion"
     assert updated.log[-1]["actor"] == "planner-agent"
     assert updated.log[-1]["note"] == "unauthenticated acceptance suggestion updated"
+
+
+def test_v2_mission_store_rejects_linked_root_for_read_and_write(
+    tmp_path: Path,
+) -> None:
+    ctx = tmp_path / ".context"
+    scaffold_v2(ctx)
+    store = MissionStore(ctx)
+    outside = tmp_path / "outside-missions"
+    outside.mkdir()
+    _symlink_or_skip(store._root, outside, directory=True)  # type: ignore[attr-defined]
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        store.list()
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        store.create(title="Do not publish outside")
+
+    assert list(outside.iterdir()) == []
+
+
+def test_v2_mission_store_rejects_linked_record_for_read_and_update(
+    tmp_path: Path,
+) -> None:
+    ctx = tmp_path / ".context"
+    scaffold_v2(ctx)
+    store = MissionStore(ctx)
+    store._root.mkdir()  # type: ignore[attr-defined]
+    outside = tmp_path / "outside-mission.json"
+    outside.write_text(
+        json.dumps(
+            {
+                "mission_id": "mission_linked",
+                "title": "secret mission",
+                "status": "active",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    linked = store._root / "mission_linked.json"  # type: ignore[attr-defined]
+    _symlink_or_skip(linked, outside)
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        store.get("mission_linked")
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        store.list()
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        store.update("mission_linked", status="done")
+
+    assert json.loads(outside.read_text(encoding="utf-8"))["status"] == "active"
+
+
+def test_v2_mission_store_rejects_linked_manifest_before_create(
+    tmp_path: Path,
+) -> None:
+    ctx = tmp_path / ".context"
+    scaffold_v2(ctx)
+    store = MissionStore(ctx)
+    store._root.mkdir()  # type: ignore[attr-defined]
+    outside = tmp_path / "outside-manifest.json"
+    outside.write_text("[]\n", encoding="utf-8")
+    _symlink_or_skip(store._manifest_path, outside)  # type: ignore[attr-defined]
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        store.list()
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        store.create(title="Do not publish a partial mission")
+
+    assert outside.read_text(encoding="utf-8") == "[]\n"
+    assert list(store._root.glob("mission_*.json")) == []  # type: ignore[attr-defined]
+
+
+def test_v2_mission_store_rejects_linked_record_lock_before_update(
+    tmp_path: Path,
+) -> None:
+    ctx = tmp_path / ".context"
+    scaffold_v2(ctx)
+    store = MissionStore(ctx)
+    mission = store.create(title="Keep lock local")
+    outside = tmp_path / "outside-lock"
+    outside.write_bytes(b"outside")
+    mission_path = store._mission_path(mission.mission_id)  # type: ignore[attr-defined]
+    _symlink_or_skip(mission_path.with_suffix(".json.lock"), outside)
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        store.update(mission.mission_id, status="done")
+
+    assert outside.read_bytes() == b"outside"
+    assert store.get(mission.mission_id).status == "active"  # type: ignore[union-attr]
+
+
+def test_v2_mission_store_rejects_traversal_before_cross_category_read(
+    tmp_path: Path,
+) -> None:
+    ctx = tmp_path / ".context"
+    scaffold_v2(ctx)
+    store = MissionStore(ctx)
+    canary = ctx / "memory" / "common" / "canary.json"
+    canary.parent.mkdir(parents=True)
+    canary.write_text('{"secret": true}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="safe 'mission_<id>' path segment"):
+        store.get("mission_x/../../../../../memory/common/canary")
+
+    assert canary.read_text(encoding="utf-8") == '{"secret": true}\n'
+
+
+def test_v2_mission_store_skips_unsafe_manifest_and_mismatched_record_ids(
+    tmp_path: Path,
+) -> None:
+    ctx = tmp_path / ".context"
+    scaffold_v2(ctx)
+    store = MissionStore(ctx)
+    mission = store.create(title="Original")
+    mission_path = store._mission_path(mission.mission_id)  # type: ignore[attr-defined]
+    payload = json.loads(mission_path.read_text(encoding="utf-8"))
+    payload["mission_id"] = "mission_different"
+    mission_path.write_text(json.dumps(payload), encoding="utf-8")
+    manifest = [
+        "mission_x/../../../../../memory/common/canary",
+        mission.mission_id,
+    ]
+    store._manifest_path.write_text(json.dumps(manifest), encoding="utf-8")  # type: ignore[attr-defined]
+
+    assert store.get(mission.mission_id) is None
+    assert store.list() == []
+    with pytest.raises(MissionNotFoundError):
+        store.update(mission.mission_id, status="done")

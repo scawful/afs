@@ -1,52 +1,48 @@
 ---
 name: hivemind-comms
 triggers:
+  - afs messages
+  - scoped messages
+  - inter-agent message
   - hivemind
-  - message
-  - communicate
-  - bus
 profiles:
   - general
 requires:
   - afs
 ---
 
-# Hivemind Communication
+# Scoped Messages
 
-Inter-agent message passing via the hivemind mount.
+Project-scoped inter-agent messages. The skill's historical name and the
+`afs hivemind` command remain compatibility aliases for one cycle.
 
 ## CLI
 
 ```bash
-afs hivemind list              # show recent messages
-afs hivemind list --limit 50   # show more
+afs messages list --path .
+afs messages send --path . --from my-agent --type status --payload '{"ok":true}'
 ```
 
-## MCP Tools
+Normal reads include the current project and `common`; use `--all-projects`
+only for an intentional cross-project operation. Queue-wide cleanup also
+requires that explicit flag and is a dry run until `--apply` is passed.
 
-- `hivemind.send` — post a message (finding, request, status)
-- `hivemind.read` — read messages with optional filters
+## MCP tools
 
-## Message Types
-
-| Type | Purpose |
-|------|---------|
-| `finding` | Agent discovered something worth sharing |
-| `request` | Agent needs help or input from another |
-| `status` | Progress or state update |
+- `messages.send` posts a project/common scoped message.
+- `messages.read` reads current-project plus common messages.
+- Legacy `hivemind.*` tools are full-catalog compatibility aliases.
 
 ## Python API
 
 ```python
-from afs.hivemind import HivemindBus
 from pathlib import Path
+from afs.messages import MessageBus
 
-bus = HivemindBus(Path(".context"))
+bus = MessageBus(Path.home() / ".context", scope_id="project:prj_example")
 bus.send("my-agent", "finding", {"key": "value"})
 messages = bus.read(agent_name="my-agent", limit=10)
 ```
 
-## Storage
-
-Messages are JSON files in `.context/hivemind/<agent>/<timestamp>-<uuid>.json`.
-Old messages auto-cleanup after 24h via `bus.cleanup()`.
+Messages are stored below `.context/.afs/queue/messages/` and carry a
+`scope_id`; knowing the central context path is not project authorization.

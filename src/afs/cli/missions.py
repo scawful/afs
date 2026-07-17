@@ -213,7 +213,9 @@ def _add_context_args(parser: argparse.ArgumentParser) -> None:
 
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     mission_parser = subparsers.add_parser(
-        "mission", help="Track durable background missions across sessions."
+        "mission",
+        aliases=["missions"],
+        help="Track durable background missions across sessions.",
     )
     mission_sub = mission_parser.add_subparsers(dest="mission_command")
 

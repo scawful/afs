@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from afs.agent_registry import (
     AGENT_CONTEXT_ROOT_ENV,
     AGENT_EXPECTED_RESULT_NAME_ENV,
@@ -15,6 +17,8 @@ from afs.agent_registry import (
     resolve_agent_task,
 )
 from afs.agents.base import AgentResult, emit_result
+from afs.manager import AFSManager
+from afs.schema import AFSConfig, GeneralConfig
 
 
 def test_resolve_agent_task_uses_core_agent_description() -> None:
@@ -95,6 +99,66 @@ def test_emit_result_updates_global_agent_registry(tmp_path: Path, monkeypatch) 
     assert entry["output_path"] == str(output_path.resolve())
     assert "context_root" not in entry
     assert "run_id" not in entry
+
+
+@pytest.mark.parametrize("unsafe_component", ["root", "leaf", "external"])
+def test_emit_result_rejects_unsafe_v2_report_destinations(
+    tmp_path: Path,
+    monkeypatch,
+    unsafe_component: str,
+) -> None:
+    from afs.context_paths import resolve_agent_output_root
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("AFS_AGENT_REGISTRY_PATH", str(tmp_path / "registry.json"))
+    context_root = tmp_path / "context"
+    project = tmp_path / "project"
+    project.mkdir()
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+    AFSManager(config=config).ensure(
+        path=project,
+        context_root=context_root,
+        layout_version=2,
+    )
+    monkeypatch.setenv(AGENT_CONTEXT_ROOT_ENV, str(context_root))
+    output_root = resolve_agent_output_root(context_root, config=config, scope_id="common")
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    poison = outside / "context_audit.json"
+    poison.write_text("do-not-overwrite", encoding="utf-8")
+
+    try:
+        if unsafe_component == "root":
+            output_root.symlink_to(outside, target_is_directory=True)
+            output_path = output_root / "context_audit.json"
+        elif unsafe_component == "leaf":
+            output_root.mkdir()
+            output_path = output_root / "context_audit.json"
+            output_path.symlink_to(poison)
+        else:
+            output_path = poison
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    now = datetime.now()
+    result = AgentResult(
+        name="context-audit",
+        status="ok",
+        started_at=now.isoformat(),
+        finished_at=now.isoformat(),
+        duration_seconds=0.0,
+    )
+
+    with pytest.raises(ValueError, match="symbolic link|reparse point|escapes"):
+        emit_result(
+            result,
+            output_path=output_path,
+            force_stdout=False,
+            pretty=False,
+        )
+
+    assert poison.read_text(encoding="utf-8") == "do-not-overwrite"
 
 
 def test_supervised_results_are_scoped_by_context_and_run(tmp_path: Path) -> None:

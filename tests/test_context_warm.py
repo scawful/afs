@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from afs.agents import context_warm as agent
+from afs.context_layout import scaffold_v2
 from afs.manager import AFSManager
 from afs.models import MountType
 from afs.schema import AFSConfig, GeneralConfig, ProfileConfig, ProfilesConfig
@@ -130,3 +132,46 @@ def test_context_watch_roots_include_context_and_mount_sources(tmp_path: Path) -
     roots = watch_roots[context.path]
     assert context.path in roots
     assert any(root.name == "knowledge-src" for root in roots)
+
+
+def test_refresh_embeddings_refuses_unscoped_v2_legacy_index(
+    tmp_path: Path,
+) -> None:
+    context_root = tmp_path / ".context"
+    source = tmp_path / "source"
+    config_path = tmp_path / "embedding-projects.json"
+    scaffold_v2(context_root)
+    source.mkdir()
+    (source / "guide.md").write_text("semantic guide", encoding="utf-8")
+    config_path.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "alpha",
+                    "path": str(source),
+                    "embedding_provider": "none",
+                }
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+    args = type(
+        "Args",
+        (),
+        {
+            "embedding_config": str(config_path),
+            "embedding_provider": None,
+            "embedding_model": None,
+            "embedding_host": "http://localhost:11435",
+        },
+    )()
+
+    results, notes = agent._refresh_embeddings(args, config)
+
+    assert results == []
+    assert len(notes) == 1
+    assert "afs search --semantic --rebuild" in notes[0]
+    assert not (context_root / "knowledge" / "common" / "alpha").exists()
+    assert not (context_root / "knowledge" / "alpha").exists()

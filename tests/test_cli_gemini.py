@@ -6,7 +6,10 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from afs.cli import gemini
+from afs.context_layout import scaffold_v2
 from afs.embeddings import SearchResult
 from afs.schema import AFSConfig
 
@@ -262,3 +265,35 @@ def test_gemini_context_search_merges_indexed_children_and_uses_query_task_type(
         "alpha::doc-1",
         "beta::doc-2",
     ]
+
+
+def test_gemini_v2_default_cannot_read_another_project_canary(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    alpha = context_root / "knowledge" / "projects" / "prj_alpha"
+    alpha.mkdir(parents=True)
+    (alpha / "embedding_index.json").write_text(
+        '[{"text_preview": "alpha-private-canary"}]\n',
+        encoding="utf-8",
+    )
+    config = AFSConfig()
+    config.general.context_root = context_root
+
+    with pytest.raises(ValueError, match="scoped AFS search") as error:
+        gemini._candidate_knowledge_roots(_base_args(project="beta"), config)
+
+    assert "alpha-private-canary" not in str(error.value)
+
+
+def test_gemini_explicit_knowledge_override_remains_available_in_v2(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    explicit = tmp_path / "external-index"
+    scaffold_v2(context_root)
+    explicit.mkdir()
+    config = AFSConfig()
+    config.general.context_root = context_root
+
+    assert gemini._candidate_knowledge_roots(
+        _base_args(knowledge_path=str(explicit)),
+        config,
+    ) == [explicit]

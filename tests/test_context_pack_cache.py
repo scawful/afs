@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from afs.context_index import ContextSQLiteIndex
 from afs.context_pack import (
     CONTEXT_PACK_CACHE_VERSION,
@@ -73,6 +75,69 @@ def test_cache_miss_writes_artifact_files(tmp_path: Path) -> None:
     written = json.loads(Path(artifact_paths["json"]).read_text(encoding="utf-8"))
     assert "key" in written["cache"]
     assert written["cache"]["version"] == CONTEXT_PACK_CACHE_VERSION
+
+
+@pytest.mark.parametrize("kind", ["json", "markdown"])
+def test_context_pack_write_rejects_linked_artifact_leaf(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    pack = build_context_pack(
+        manager,
+        context_root,
+        query="safe artifact",
+        task="Do not cross the output boundary.",
+        model="codex",
+        token_budget=400,
+    )
+    json_path, markdown_path = _context_pack_artifact_paths(
+        manager,
+        context_root,
+        "codex",
+    )
+    target = json_path if kind == "json" else markdown_path
+    outside = tmp_path / f"outside-{kind}.txt"
+    outside.write_text("canary", encoding="utf-8")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        write_context_pack_artifacts(manager, context_root, pack)
+    assert outside.read_text(encoding="utf-8") == "canary"
+
+
+def test_context_pack_cache_rejects_linked_json_leaf(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    pack = build_context_pack(
+        manager,
+        context_root,
+        query="safe artifact",
+        task="Do not read outside the output boundary.",
+        model="codex",
+        token_budget=400,
+    )
+    paths = write_context_pack_artifacts(manager, context_root, pack)
+    json_path = Path(paths["json"])
+    outside = tmp_path / "crafted.json"
+    outside.write_text(
+        json.dumps({"cache": pack["cache"], "sections": [{"text": "outside-canary"}]}),
+        encoding="utf-8",
+    )
+    json_path.unlink()
+    json_path.symlink_to(outside)
+
+    assert (
+        _load_cached_context_pack(
+            manager,
+            context_root,
+            model="codex",
+            cache_key=str(pack["cache"]["key"]),
+        )
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +419,7 @@ def test_cache_key_is_deterministic(tmp_path: Path) -> None:
         "tool_profile": "default",
         "token_budget": 400,
         "include_content": False,
+        "semantic": False,
         "max_query_results": 6,
         "max_embedding_results": 4,
     }
@@ -373,6 +439,7 @@ def test_cache_key_changes_with_different_task(tmp_path: Path) -> None:
         "tool_profile": "default",
         "token_budget": 400,
         "include_content": False,
+        "semantic": False,
         "max_query_results": 6,
         "max_embedding_results": 4,
     }

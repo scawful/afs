@@ -260,14 +260,18 @@ The CLI equivalent is:
 <afs-root>/scripts/afs events replay --session-id "$AFS_SESSION_ID"
 ```
 
-The CLI also refreshes:
+In a v2 context, the CLI refreshes these files below the active scoped agent
+artifact directory, `.context/scratchpad/projects/<project-id>/afs_agents/`
+(or `.context/scratchpad/common/afs_agents/` for explicit common scope):
 
-- `.context/scratchpad/afs_agents/session_bootstrap.json`
-- `.context/scratchpad/afs_agents/session_bootstrap.md`
-- `.context/scratchpad/afs_agents/session_pack_<model>.json`
-- `.context/scratchpad/afs_agents/session_pack_<model>.md`
-- `.context/scratchpad/afs_agents/session_client_<client>.json`
-- `.context/scratchpad/afs_agents/session_skills_<client>.json`
+- `session_bootstrap.json`
+- `session_bootstrap.md`
+- `session_pack_<model>.json`
+- `session_pack_<model>.md`
+- `session_client_<client>.json`
+- `session_skills_<client>.json`
+
+Version 1 retains `.context/scratchpad/afs_agents/`.
 
 `session pack` is an explicit follow-on step, not the default startup path.
 When the bootstrap snapshot, pack inputs, and sensitivity rules have not
@@ -370,8 +374,9 @@ Gemini background agent surfaces:
 <afs-root>/scripts/afs services start agent-supervisor
 ```
 
-The brief agent writes JSON and Markdown summaries under
-`.context/scratchpad/afs_agents/` and requires `GEMINI_API_KEY` or
+The brief agent writes JSON and Markdown summaries under the v2 common agent
+artifact directory, `.context/scratchpad/common/afs_agents/` (or
+`.context/scratchpad/afs_agents/` in v1), and requires `GEMINI_API_KEY` or
 `GOOGLE_API_KEY`. Domain-specific orchestration agents such as
 `claude-orchestrator` are extension-owned; enable the companion repo that
 registers them before expecting them in `afs agents list`.
@@ -456,13 +461,15 @@ calls. Supervisor snapshots and index-health reads may still initialize
 context-local SQLite metadata under the configured context root.
 
 By default it stores state under
-`.context/scratchpad/afs_agents/supervisor/`, which makes repo-local and
+`.context/scratchpad/common/afs_agents/supervisor/` in v2 and
+`.context/scratchpad/afs_agents/supervisor/` in v1. This makes repo-local and
 context-local configs safer than a single user-global state cache.
 
 `history-memory` is the canonical durable-memory surface. It incrementally
 consolidates new `history/` events into compact summaries in `memory/` and
 tracks progress with a context-scoped checkpoint under
-`.context/scratchpad/afs_agents/`. By default it summarizes low-sensitivity
+`.context/scratchpad/common/afs_agents/` in v2 (or
+`.context/scratchpad/afs_agents/` in v1). By default it summarizes low-sensitivity
 event types (`context`, `fs`, `hook`, `review`, and `agent_progress`) rather
 than copying raw payloads into memory.
 

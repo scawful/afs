@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 import afs.config as config_module
 import afs.health.afs_status as afs_status_module
 from afs.health.afs_status import _looks_like_afs_mcp_command, collect_afs_health
@@ -173,3 +175,64 @@ def test_collect_afs_health_uses_remapped_history_and_scratchpad(
         report_dir / "doctor_snapshot.json"
     )
     assert snapshot["mcp"]["workflow_usage"]["tools"]["afs.session.bootstrap"]["count"] == 1
+
+
+@pytest.mark.parametrize("linked_component", ["root", "leaf"])
+def test_v2_maintenance_health_skips_linked_agent_reports(
+    tmp_path: Path,
+    monkeypatch,
+    linked_component: str,
+) -> None:
+    context_root = tmp_path / "context"
+    project = tmp_path / "project"
+    project.mkdir()
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+    manager = AFSManager(config=config)
+    manager.ensure(path=project, context_root=context_root, layout_version=2)
+    from afs.context_paths import resolve_agent_output_root
+
+    output_root = resolve_agent_output_root(context_root, config=config, scope_id="common")
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    poison = outside / "context_warm.json"
+    poison.write_text(
+        json.dumps({"status": "ok", "notes": ["poison-canary"]}),
+        encoding="utf-8",
+    )
+
+    try:
+        if linked_component == "root":
+            (outside / "context_warm.json").write_text(
+                poison.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            output_root.symlink_to(outside, target_is_directory=True)
+        else:
+            output_root.mkdir()
+            (output_root / "context_warm.json").symlink_to(poison)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    class _NoServices:
+        def get_definition(self, _name):  # noqa: ANN001
+            return None
+
+    class _UnavailableSupervisor:
+        def __init__(self, **_kwargs):  # noqa: ANN003
+            raise RuntimeError("disabled for report-read test")
+
+    monkeypatch.setattr(
+        afs_status_module,
+        "ServiceManager",
+        lambda **_kwargs: _NoServices(),
+    )
+    monkeypatch.setattr(
+        "afs.agents.supervisor.AgentSupervisor",
+        _UnavailableSupervisor,
+    )
+
+    maintenance = afs_status_module._maintenance_health(config, context_root)
+
+    assert maintenance["reports"]["context_warm"]["available"] is False
+    assert "poison-canary" not in json.dumps(maintenance)

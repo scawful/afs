@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -11,6 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from ..agent_context import ContextAwareAgent
+from ..context_layout import LAYOUT_VERSION, detect_layout_version
+from ..context_paths import resolve_agent_output_root, resolve_mount_root
+from ..models import MountType
+from ..path_safety import assert_no_linklike_components
 from .base import (
     AgentResult,
     build_base_parser,
@@ -25,8 +30,9 @@ logger = logging.getLogger(__name__)
 
 AGENT_NAME = "mission-runner"
 AGENT_DESCRIPTION = (
-    "Read mission definitions from scratchpad/missions/, execute OODA phases "
-    "(observe → orient → decide → act), write results, and respect guardrails."
+    "Read legacy mission-runner TOML definitions from scratchpad/missions/, "
+    "execute OODA phases (observe → orient → decide → act), write v2 "
+    "results to scratchpad/common/missions/, and respect guardrails."
 )
 
 AGENT_CAPABILITIES = {
@@ -39,7 +45,63 @@ AGENT_CAPABILITIES = {
     "description": "Autonomous mission executor with OODA loop and guardrails",
 }
 
+# Legacy runner definitions are separate from canonical MissionStore records,
+# which live under .afs/compat/items/missions in v2.
 MISSIONS_DIR = "scratchpad/missions"
+_SAFE_MISSION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+
+
+def _mission_output_dir(context_root: Path, mission_name: str) -> Path:
+    if detect_layout_version(context_root) != LAYOUT_VERSION:
+        return context_root / MISSIONS_DIR / mission_name
+    if not _SAFE_MISSION_NAME.fullmatch(mission_name):
+        raise ValueError("v2 mission name must be one safe filesystem segment")
+    root = context_root.expanduser().resolve()
+    scratchpad = resolve_mount_root(root, MountType.SCRATCHPAD)
+    return assert_no_linklike_components(
+        scratchpad / "common" / "missions" / mission_name,
+        boundary=root,
+    )
+
+
+def _safe_mission_output_path(
+    context_root: Path | None,
+    output_dir: Path,
+    path: Path,
+    *,
+    allow_missing: bool = True,
+) -> Path:
+    if context_root is None or detect_layout_version(context_root) != LAYOUT_VERSION:
+        return path
+    root = context_root.expanduser().resolve()
+    safe_output = assert_no_linklike_components(
+        output_dir,
+        boundary=root,
+        allow_missing=allow_missing,
+    )
+    return assert_no_linklike_components(
+        path,
+        boundary=safe_output,
+        allow_missing=allow_missing,
+    )
+
+
+def _write_mission_json(
+    path: Path,
+    payload: dict[str, Any],
+    *,
+    context_root: Path | None,
+    output_dir: Path,
+) -> None:
+    path = _safe_mission_output_path(context_root, output_dir, path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path = _safe_mission_output_path(
+        context_root,
+        output_dir,
+        path,
+        allow_missing=True,
+    )
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -363,15 +425,19 @@ def _phase_orient(
         from ..context_index import ContextSQLiteIndex
         from ..manager import AFSManager
         from ..models import MountType
+        from ..scopes import resolve_scope
         config = load_config_model(merge_user=True)
         manager = AFSManager(config=config)
         index = ContextSQLiteIndex(manager, context_path)
+        scoped = resolve_scope(context_path, common=True)
+        query_mounts = [MountType.KNOWLEDGE, MountType.MEMORY]
 
         # Query knowledge for mission-relevant content
-        if index.has_entries():
-            results = index.query(
+        if index.has_entries_scoped(scoped, mount_types=query_mounts):
+            results = index.query_scoped(
+                scoped,
                 query=phase.description or "recent changes",
-                mount_types=[MountType.KNOWLEDGE, MountType.MEMORY],
+                mount_types=query_mounts,
                 limit=15,
                 include_content=False,
             )
@@ -582,15 +648,19 @@ def _phase_act(
 
             elif action == "context_write":
                 # Write findings to scratchpad
-                scratchpad = context_path / "scratchpad"
-                if scratchpad.exists() and guard.can_do("file_write_scratchpad", "write mission results"):
-                    report_path = scratchpad / "afs_agents" / "mission_report.json"
-                    report_path.parent.mkdir(parents=True, exist_ok=True)
-                    report_path.write_text(json.dumps({
-                        "mission": output_dir.name,
-                        "timestamp": now_iso(),
-                        "actions_executed": len(data["executed"]),
-                    }, indent=2), encoding="utf-8")
+                report_root = resolve_agent_output_root(context_path, scope_id="common")
+                if guard.can_do("file_write_scratchpad", "write mission results"):
+                    report_path = report_root / "mission_report.json"
+                    _write_mission_json(
+                        report_path,
+                        {
+                            "mission": output_dir.name,
+                            "timestamp": now_iso(),
+                            "actions_executed": len(data["executed"]),
+                        },
+                        context_root=context_path,
+                        output_dir=report_root,
+                    )
                     data["executed"].append({"action": action, "result": str(report_path)})
                     notes.append(f"Wrote report to {report_path.name}")
 
@@ -663,14 +733,18 @@ def _execute_phase(
     # Write phase outputs
     for output_file in phase.outputs:
         out_path = output_dir / output_file
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps({
-            "phase": phase.name,
-            "mission": mission.name,
-            "data": result.get("data", {}),
-            "notes": result["notes"],
-            "model": result.get("model", {}),
-        }, indent=2), encoding="utf-8")
+        _write_mission_json(
+            out_path,
+            {
+                "phase": phase.name,
+                "mission": mission.name,
+                "data": result.get("data", {}),
+                "notes": result["notes"],
+                "model": result.get("model", {}),
+            },
+            context_root=context_root,
+            output_dir=output_dir,
+        )
     result["outputs"] = [str(output_dir / out) for out in phase.outputs]
 
     result["finished_at"] = now_iso()
@@ -687,8 +761,19 @@ def _run_mission(
     context_root: Path,
 ) -> dict[str, Any]:
     """Run a single mission through all its phases."""
-    output_dir = context_root / MISSIONS_DIR / mission.name
+    output_dir = _mission_output_dir(context_root, mission.name)
+    output_dir = _safe_mission_output_path(
+        context_root,
+        output_dir,
+        output_dir,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = _safe_mission_output_path(
+        context_root,
+        output_dir,
+        output_dir,
+        allow_missing=False,
+    )
 
     guard = GuardrailedAgent(
         AGENT_NAME,
@@ -727,7 +812,12 @@ def _run_mission(
 
         if guard.should_checkpoint():
             checkpoint_path = output_dir / "checkpoint.json"
-            checkpoint_path.write_text(json.dumps(mission_result, indent=2), encoding="utf-8")
+            _write_mission_json(
+                checkpoint_path,
+                mission_result,
+                context_root=context_root,
+                output_dir=output_dir,
+            )
 
     mission_result["finished_at"] = now_iso()
     mission_result["quota_usage"] = guard.usage_summary()
@@ -735,13 +825,20 @@ def _run_mission(
 
     # Write final result
     result_path = output_dir / "result.json"
-    result_path.write_text(json.dumps(mission_result, indent=2), encoding="utf-8")
+    _write_mission_json(
+        result_path,
+        mission_result,
+        context_root=context_root,
+        output_dir=output_dir,
+    )
 
     return mission_result
 
 
 def build_parser():
-    parser = build_base_parser("Execute pending missions from scratchpad/missions/.")
+    parser = build_base_parser(
+        "Execute legacy mission-runner TOML definitions from scratchpad/missions/."
+    )
     parser.add_argument(
         "--context-root",
         default=str(Path.home() / "src" / "lab" / ".context"),

@@ -40,7 +40,8 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register the doctor command."""
     parser = subparsers.add_parser(
         "doctor",
-        help="Diagnose and fix common AFS issues.",
+        aliases=["repair"],
+        help="Diagnose and repair common AFS issues (friendly alias: repair).",
     )
     parser.add_argument(
         "--fix",

@@ -15,7 +15,6 @@ PYTEST := $(PYTHON) -m pytest
 RUFF := $(PYTHON) -m ruff
 MYPY := $(PYTHON) -m mypy
 MKDOCS := $(PYTHON) -m mkdocs
-TYPECHECK_FILES := src/afs/version.py src/afs/mcp/transport.py src/afs/gateway/models.py scripts/check_release.py
 
 help: ## Show this help message
 	@echo "$(BLUE)AFS - Agentic File System$(NC)"
@@ -65,8 +64,9 @@ format: ## Format code with ruff format
 format-check: ## Check code formatting without changes
 	$(RUFF) format --check src/ tests/ examples/
 
-type-check: ## Run advisory mypy on release-critical package metadata surface
-	$(MYPY) $(TYPECHECK_FILES) --ignore-missing-imports
+type-check: ## Run mypy on the whole afs package (ratcheted baseline; new modules fully checked)
+	$(MYPY) -p afs
+	$(MYPY) scripts/check_release.py
 
 package-check: ## Build wheel/sdist and smoke-test package metadata
 	$(PYTHON) -m pip install --upgrade build >/dev/null

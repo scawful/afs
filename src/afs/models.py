@@ -8,9 +8,16 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .path_safety import assert_no_linklike_components
+
 
 class MountType(str, Enum):
-    """Supported AFS directory roles."""
+    """Legacy v1 directory roles.
+
+    ``MountType`` remains the wire and metadata type for v1 contexts.  New
+    layout-aware code should use :class:`ContextCategory` and treat mounts as
+    resources attached to a category rather than as the category itself.
+    """
 
     MEMORY = "memory"
     KNOWLEDGE = "knowledge"
@@ -20,6 +27,31 @@ class MountType(str, Enum):
     HIVEMIND = "hivemind"
     GLOBAL = "global"
     ITEMS = "items"
+
+
+class ContextCategory(str, Enum):
+    """Stable human-facing categories in the central context namespace."""
+
+    HISTORY = "history"
+    MEMORY = "memory"
+    SCRATCHPAD = "scratchpad"
+    KNOWLEDGE = "knowledge"
+    TOOLS = "tools"
+    HUMAN = "human"
+
+    @classmethod
+    def from_mount_type(cls, mount_type: MountType) -> ContextCategory | None:
+        """Return the v2 category represented by a legacy mount role.
+
+        ``hivemind``, ``global`` and ``items`` are runtime/storage mechanisms,
+        not context categories, so they deliberately have no implicit mapping.
+        This prevents a compatibility read from silently broadening access.
+        """
+
+        try:
+            return cls(mount_type.value)
+        except ValueError:
+            return None
 
 
 # Mount types that are not required for context validation.
@@ -200,9 +232,23 @@ class ContextRoot:
     project_name: str
     metadata: ProjectMetadata = field(default_factory=ProjectMetadata)
     mounts: dict[MountType, list[MountPoint]] = field(default_factory=dict)
+    layout_version: int = 1
 
     @property
     def is_valid(self) -> bool:
+        if self.layout_version == 2:
+            for category in ContextCategory:
+                try:
+                    path = assert_no_linklike_components(
+                        self.path / category.value,
+                        boundary=self.path,
+                        allow_missing=False,
+                    )
+                except (OSError, ValueError):
+                    return False
+                if not path.is_dir():
+                    return False
+            return True
         required = [
             mt.value for mt in MountType if mt not in OPTIONAL_MOUNT_TYPES
         ]

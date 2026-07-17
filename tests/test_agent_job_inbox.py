@@ -13,6 +13,12 @@ from afs.agent_job_inbox import (
 )
 from afs.agent_jobs import AgentJobQueue
 from afs.agent_runs import AgentRunStore
+from afs.config import AFSConfig
+from afs.context_layout import scaffold_v2
+from afs.handoff import HandoffStore
+from afs.manager import AFSManager
+from afs.schema import GeneralConfig
+from afs.session_bootstrap import build_session_bootstrap
 
 
 def test_agent_job_inbox_collects_reviewable_failed_stale_and_blocked_jobs(
@@ -91,3 +97,47 @@ def test_agent_job_review_archive_and_promote_to_handoff(tmp_path: Path) -> None
     assert archived.status == "archived"
     assert (context_path / "items" / "agent_jobs" / "archived" / f"{job.id}.md").exists()
     assert build_agent_job_inbox(context_path)["attention_count"] == 0
+
+
+def test_v2_agent_job_promotion_creates_visible_common_handoff(tmp_path: Path) -> None:
+    context_path = tmp_path / ".context"
+    scaffold_v2(context_path)
+    queue = AgentJobQueue(context_path)
+    job = queue.create("Completed index report", "summarize findings", priority=1)
+    run = AgentRunStore(context_path).start("Completed index report", harness="codex")
+    AgentRunStore(context_path).finish(run.id, status="done", summary="index is healthy")
+    queue.move(job.id, "done", result="ready to review", run_id=run.id)
+
+    promoted = promote_agent_job_to_handoff(
+        context_path,
+        job.id,
+        handoff_name="completed-index-report.md",
+    )
+
+    artifact = Path(promoted["path"])
+    assert artifact.is_file()
+    assert artifact.is_relative_to(context_path / "memory" / "common" / "handoffs")
+    assert "completed-index-report" in artifact.name
+    assert promoted["handoff"]["title"] == "completed index report"
+    packets = HandoffStore(context_path, scope_id="common").list()
+    assert [packet.revision_id for packet in packets] == [
+        promoted["handoff"]["revision_id"]
+    ]
+    assert packets[0].metadata == {
+        "source": "afs.agent_job_inbox",
+        "job_id": job.id,
+    }
+
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_path))
+    )
+    bootstrap = build_session_bootstrap(
+        manager,
+        context_path,
+        record_event=False,
+    )
+    assert bootstrap["handoff"]["revision_id"] == packets[0].revision_id
+    assert any(
+        "ready to review" in item
+        for item in bootstrap["handoff"]["accomplished"]
+    )

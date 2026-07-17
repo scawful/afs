@@ -85,6 +85,7 @@ def test_discover_bundled_skills() -> None:
     skills = discover_skills([skills_dir])
     names = {s.name for s in skills}
     assert names == {
+        "adversarial-verification",
         "afs-cli-map",
         "agent-ops",
         "approvals-and-gates",
@@ -98,16 +99,20 @@ def test_discover_bundled_skills() -> None:
         "health-repair",
         "hivemind-comms",
         "implementation-planning",
+        "issue-tracking",
         "mcp-server",
         "memory-maintenance",
         "mission-tracking",
         "profile-management",
         "python-quality",
+        "research",
+        "review-handoff",
         "session-workflows",
         "skill-authoring",
         "software-design",
         "structured-schemas",
         "task-queue",
+        "triage",
         "typescript-quality",
         "verification-plans",
     }

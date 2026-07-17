@@ -9,7 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .codebase_explorer import build_codebase_summary, render_codebase_summary
+from .codebase_explorer import (
+    build_codebase_summary,
+    build_scoped_codebase_summary,
+    render_codebase_summary,
+)
 from .context_freshness import (
     MountFreshness,
     context_diff_since_session,
@@ -17,10 +21,28 @@ from .context_freshness import (
     save_context_snapshot,
 )
 from .context_index import ContextSQLiteIndex, count_mount_files
+from .context_layout import (
+    LAYOUT_VERSION,
+    _atomic_write_text,
+    audit_layout,
+    detect_layout_version,
+)
 from .context_paths import resolve_agent_output_root, resolve_mount_root
 from .manager import AFSManager
 from .models import MountType
 from .profiles import resolve_active_profile
+from .project_registry import (
+    COMMON_SCOPE_ID,
+    ProjectRegistry,
+    assert_no_linklike_components,
+)
+from .scopes import (
+    ResolvedScope,
+    resolve_scope,
+    visible_mount_roots,
+    visible_scope_ids,
+    visible_scope_prefixes,
+)
 from .skills import (
     MAX_SKILL_BODIES_CHARS,
     MAX_SKILL_BODY_CHARS,
@@ -46,15 +68,19 @@ _ENGAGE_READER = None
 def build_agent_discovery_path(context_path: Path) -> dict[str, Any]:
     """Return the deterministic, low-noise AFS discovery path for agents."""
     context = context_path.expanduser().resolve()
+    is_v2 = detect_layout_version(context) == LAYOUT_VERSION
+    default_mcp_tools = [
+        "context.status",
+        "context.query",
+        "context.read",
+        "context.list",
+        "context.write",
+    ]
+    if is_v2:
+        default_mcp_tools.append("note.create")
     return {
         "principle": "Start with the smallest read-only context surface, then route richer intents through named CLI or slash-command flows.",
-        "default_mcp_tools": [
-            "context.status",
-            "context.query",
-            "context.read",
-            "context.list",
-            "context.write",
-        ],
+        "default_mcp_tools": default_mcp_tools,
         "steps": [
             {
                 "step": "status",
@@ -76,9 +102,14 @@ def build_agent_discovery_path(context_path: Path) -> dict[str, Any]:
             },
             {
                 "step": "scratchpad",
-                "tool": "context.write",
+                "tool": "note.create" if is_v2 else "context.write",
                 "when": "a local note, checkpoint, or handoff draft is explicitly useful",
-                "next": f"default writes under {context / 'scratchpad'}; keep memory/knowledge deliberate",
+                "next": (
+                    "write only to the authorized current-project or common scope; "
+                    "never write directly to the category root"
+                    if is_v2
+                    else f"default writes under {context / 'scratchpad'}; keep memory/knowledge deliberate"
+                ),
             },
             {
                 "step": "route",
@@ -135,16 +166,45 @@ _SECTION_PRIORITY = [
     "mount_freshness",  # medium: per-mount freshness scores
     "memory",           # medium: durable context
     "agent_runs",       # medium-low: recent recorded agent activity
-    "hivemind",         # low: cross-agent messages
+    "hivemind",         # low: compatibility key for scoped messages
     "agent_reports",    # low: background agent status
 ]
 
 
-def collect_context_status(manager: AFSManager, context_path: Path) -> dict[str, Any]:
+def collect_context_status(
+    manager: AFSManager,
+    context_path: Path,
+    *,
+    scoped: ResolvedScope | None = None,
+) -> dict[str, Any]:
     """Return the same context status summary used by MCP and session bootstrap."""
     context_path = context_path.expanduser().resolve()
+    scope = scoped or resolve_scope(context_path)
     settings = manager.config.context_index
-    mount_health = manager.context_health(context_path)
+    if scope.layout_version == LAYOUT_VERSION:
+        audit = audit_layout(context_path)
+        blocking = [issue for issue in audit.issues if issue.blocking]
+        mount_health = {
+            "healthy": not blocking,
+            "layout_version": LAYOUT_VERSION,
+            "scope_id": scope.scope_id,
+            "missing_dirs": [issue.path for issue in blocking if issue.path],
+            "symlink_mounts": 0,
+            "broken_mounts": [],
+            "duplicate_mount_sources": [],
+            "provenance": {
+                "tracked_mounts": 0,
+                "untracked_mounts": [],
+                "stale_records": [],
+            },
+            "profile": {
+                "name": manager.config.profiles.active_profile,
+                "mounts_supported": False,
+            },
+            "suggested_actions": [issue.message for issue in blocking],
+        }
+    else:
+        mount_health = manager.context_health(context_path)
 
     mount_counts: dict[str, int] = {}
     total_files = 0
@@ -152,7 +212,15 @@ def collect_context_status(manager: AFSManager, context_path: Path) -> dict[str,
         mount_dir = manager.resolve_mount_root(context_path, mount_type)
         if not mount_dir.exists():
             continue
-        count = count_mount_files(mount_dir)
+        count = sum(
+            count_mount_files(root)
+            for root in visible_mount_roots(
+                mount_dir,
+                mount_type=mount_type,
+                scoped=scope,
+            )
+            if root.exists()
+        )
         if count > 0:
             mount_counts[mount_type.value] = count
             total_files += count
@@ -163,11 +231,31 @@ def collect_context_status(manager: AFSManager, context_path: Path) -> dict[str,
         if db_path.exists():
             try:
                 index = ContextSQLiteIndex(manager, context_path)
-                has_entries = index.has_entries()
+                prefixes = (
+                    visible_scope_prefixes(scope)
+                    if scope.layout_version == LAYOUT_VERSION
+                    else None
+                )
+                total_entries = (
+                    index.count_entries_scoped(scope)
+                    if scope.layout_version == LAYOUT_VERSION
+                    else index.count_entries(relative_prefixes=prefixes)
+                )
+                has_entries = total_entries > 0
                 index_info["built"] = True
                 index_info["has_entries"] = has_entries
-                index_info["total_entries"] = index.total_entries
-                index_info["stale"] = index.needs_health_refresh() if has_entries else False
+                index_info["total_entries"] = total_entries
+                index_info["stale"] = (
+                    bool(
+                        index.diff(
+                            mount_types=index.health_mount_types(),
+                            relative_prefixes=prefixes,
+                            scoped=scope if scope.layout_version == LAYOUT_VERSION else None,
+                        )["total_changes"]
+                    )
+                    if has_entries
+                    else False
+                )
                 index_info["db_size_bytes"] = db_path.stat().st_size
                 index_info["db_path"] = str(db_path)
             except Exception:
@@ -177,6 +265,8 @@ def collect_context_status(manager: AFSManager, context_path: Path) -> dict[str,
 
     return {
         "context_path": str(context_path),
+        "scope_id": scope.scope_id,
+        "project_id": scope.project_id,
         "profile": manager.config.profiles.active_profile,
         "mount_counts": mount_counts,
         "total_files": total_files,
@@ -193,9 +283,11 @@ def collect_context_diff(
     *,
     mount_types: list[MountType] | None = None,
     item_limit: int = _MAX_LIST_ITEMS,
+    scoped: ResolvedScope | None = None,
 ) -> dict[str, Any]:
     """Return a trimmed diff summary for bootstrap and MCP."""
     context_path = context_path.expanduser().resolve()
+    scope = scoped or resolve_scope(context_path)
     settings = manager.config.context_index
     if not settings.enabled:
         return {
@@ -209,7 +301,20 @@ def collect_context_diff(
         }
 
     index = ContextSQLiteIndex(manager, context_path)
-    if not index.has_entries(mount_types=mount_types):
+    prefixes = (
+        visible_scope_prefixes(scope)
+        if scope.layout_version == LAYOUT_VERSION
+        else None
+    )
+    entry_count = (
+        index.count_entries_scoped(scope, mount_types=mount_types)
+        if scope.layout_version == LAYOUT_VERSION
+        else index.count_entries(
+            mount_types=mount_types,
+            relative_prefixes=prefixes,
+        )
+    )
+    if entry_count == 0:
         return {
             "context_path": str(context_path),
             "available": False,
@@ -220,7 +325,11 @@ def collect_context_diff(
             "total_changes": 0,
         }
 
-    diff = index.diff(mount_types=mount_types)
+    diff = index.diff(
+        mount_types=mount_types,
+        relative_prefixes=prefixes,
+        scoped=scope if scope.layout_version == LAYOUT_VERSION else None,
+    )
     trimmed = {
         "context_path": diff["context_path"],
         "available": True,
@@ -253,6 +362,7 @@ def build_session_bootstrap(
     manager: AFSManager,
     context_path: Path,
     *,
+    project_path: Path | None = None,
     task_limit: int = 10,
     message_limit: int = 10,
     agent_name: str = "cli",
@@ -271,18 +381,33 @@ def build_session_bootstrap(
     always included.
     """
     context_path = context_path.expanduser().resolve()
+    resolved_scope = resolve_scope(context_path, requester_path=project_path)
+    visible_scopes = list(visible_scope_ids(resolved_scope))
     manager.register_agent(agent_name, context_path)
     context = manager.list_context(context_path=context_path)
-    status = collect_context_status(manager, context_path)
-    diff = collect_context_diff(manager, context_path)
-    scratchpad = _collect_scratchpad(manager, context_path)
+    status = collect_context_status(manager, context_path, scoped=resolved_scope)
+    diff = collect_context_diff(manager, context_path, scoped=resolved_scope)
+    scratchpad = _collect_scratchpad(
+        manager,
+        context_path,
+        scope_ids=visible_scopes,
+        scoped=resolved_scope,
+    )
     tasks = _collect_tasks(context_path, limit=task_limit)
     agent_jobs = _collect_agent_jobs(context_path, limit=task_limit)
-    agent_runs = _collect_agent_runs(context_path, limit=task_limit)
+    agent_runs = _collect_agent_runs(
+        context_path,
+        limit=task_limit,
+        scoped=resolved_scope,
+    )
     agent_manifest = _collect_agent_manifest()
     work_assistant = _collect_work_assistant(manager, context_path, limit=task_limit)
     missions = _collect_missions(manager, context_path, limit=task_limit)
-    handoff = _collect_latest_handoff(context_path, config=manager.config)
+    handoff = _collect_latest_handoff(
+        context_path,
+        config=manager.config,
+        scope_ids=visible_scopes,
+    )
     skill_focus = skills_prompt.strip()
     skill_prompt_source = "explicit" if skill_focus else "session_state"
     if not skill_focus:
@@ -296,10 +421,25 @@ def build_session_bootstrap(
         top_k=skills_top_k,
         enabled=include_skills,
     )
-    hivemind = _collect_hivemind(context_path, limit=message_limit)
-    memory = _collect_memory(manager, context_path)
-    reports = _collect_agent_reports(manager, context_path)
-    codebase = build_codebase_summary(context_path)
+    messages = _collect_messages(
+        context_path,
+        scope_id=resolved_scope.scope_id,
+        limit=message_limit,
+        config=manager.config,
+    )
+    memory = _collect_memory(manager, context_path, scoped=resolved_scope)
+    reports = _collect_agent_reports(manager, context_path, scoped=resolved_scope)
+    if resolved_scope.layout_version == LAYOUT_VERSION:
+        if resolved_scope.requester_path is not None and resolved_scope.project_id:
+            codebase = build_scoped_codebase_summary(
+                context_path,
+                resolved_scope.requester_path,
+                project_id=resolved_scope.project_id,
+            )
+        else:
+            codebase = {}
+    else:
+        codebase = build_codebase_summary(context_path)
 
     # Compute per-mount freshness (filesystem-based, no DB needed)
     decay_hours = manager.config.context_index.decay_hours
@@ -310,6 +450,7 @@ def build_session_bootstrap(
             context_path,
             config=manager.config,
             decay_hours=decay_hours,
+            scoped=resolved_scope,
         )
         stale_mounts = [
             name for name, mf in freshness_map.items() if mf.stale
@@ -321,8 +462,26 @@ def build_session_bootstrap(
     if not freshness_map:
         try:
             index = ContextSQLiteIndex(manager, context_path)
-            if index.has_entries():
-                idx_freshness = index.freshness_scores(decay_hours=decay_hours)
+            prefixes = (
+                visible_scope_prefixes(resolved_scope)
+                if resolved_scope.layout_version == LAYOUT_VERSION
+                else None
+            )
+            entry_count = (
+                index.count_entries_scoped(resolved_scope)
+                if resolved_scope.layout_version == LAYOUT_VERSION
+                else index.count_entries(relative_prefixes=prefixes)
+            )
+            if entry_count:
+                idx_freshness = index.freshness_scores(
+                    decay_hours=decay_hours,
+                    relative_prefixes=prefixes,
+                    scoped=(
+                        resolved_scope
+                        if resolved_scope.layout_version == LAYOUT_VERSION
+                        else None
+                    ),
+                )
                 stale_mounts = [
                     mount for mount, score in idx_freshness["mount_scores"].items()
                     if score < 0.3
@@ -334,7 +493,9 @@ def build_session_bootstrap(
     session_changes: dict[str, Any] = {"available": False}
     try:
         session_diff = context_diff_since_session(
-            context_path, config=manager.config
+            context_path,
+            config=manager.config,
+            scoped=resolved_scope,
         )
         if session_diff is not None:
             session_changes = {
@@ -346,18 +507,25 @@ def build_session_bootstrap(
 
     summary = {
         "context_path": str(context_path),
-        "project": context.project_name,
+        "layout_version": resolved_scope.layout_version,
+        "project": resolved_scope.project_name or context.project_name,
+        "scope_id": resolved_scope.scope_id,
+        "project_id": resolved_scope.project_id,
         "project_description": getattr(context.metadata, "description", "") or "",
         "profile": status["profile"],
         "startup_sequence": [
             "Review context health and recent drift first.",
             "Check the agent manifest for shared harness, skill, and MCP routing before editing harness config.",
             "Read scratchpad state and deferred notes before editing.",
-            "Check pending tasks, agent jobs, recent run records, and hivemind messages for handoffs.",
+            "Check pending tasks, agent jobs, recent run records, and scoped messages for handoffs.",
             "Check `afs work` for people, review routes, activity, and pending approval-gated external writes.",
             "Use `afs context overview` / `afs.context.overview` for a fast repo map before deeper grep/query passes.",
-            "Use `afs context query` / `context.query` before asking for context that may already be in memory or knowledge.",
-            "Write updates back to scratchpad, tasks, or hivemind before handoff.",
+            (
+                "Use `afs search \"<task>\" --path <workspace>` / `context.search` before asking for context that may already be in memory or knowledge."
+                if resolved_scope.layout_version == LAYOUT_VERSION
+                else "Use `afs context query` / `context.query` before asking for context that may already be in memory or knowledge."
+            ),
+            "Write updates back to notes, tasks, or scoped messages before handoff.",
         ],
         "status": status,
         "diff": diff,
@@ -370,7 +538,9 @@ def build_session_bootstrap(
         "missions": missions,
         "skills": skills,
         "codebase": codebase,
-        "hivemind": hivemind,
+        # Keep the v1 key for one compatibility cycle. User-facing renderers
+        # call this section Messages.
+        "hivemind": messages,
         "memory": memory,
         "agent_reports": reports,
         "handoff": handoff,
@@ -404,7 +574,10 @@ def build_session_bootstrap(
             session_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         try:
             save_context_snapshot(
-                context_path, session_id, config=manager.config
+                context_path,
+                session_id,
+                config=manager.config,
+                scoped=resolved_scope,
             )
         except Exception:
             pass
@@ -488,7 +661,7 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
     agent_jobs = summary.get("agent_jobs", {})
     agent_runs = summary.get("agent_runs", {})
     work_assistant = summary.get("work_assistant", {})
-    hivemind = summary["hivemind"]
+    messages = summary["hivemind"]
     memory = summary["memory"]
     reports = summary["agent_reports"]
 
@@ -589,7 +762,18 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
         lines.append("- agent_namespaces:")
         for ns in scratchpad["agent_namespaces"]:
             lines.append(f"  - {ns['agent_name']}: {ns['file_count']} files, {ns['size_bytes']} bytes")
-    if not scratchpad["state_text"] and not scratchpad["deferred_text"] and not scratchpad["other_files"]:
+    if scratchpad.get("drafts"):
+        lines.append("- scoped_drafts:")
+        for draft in scratchpad["drafts"]:
+            lines.append(
+                f"  - {draft['title']} ({draft['artifact_id']}) [{draft['scope_id']}]"
+            )
+    if (
+        not scratchpad["state_text"]
+        and not scratchpad["deferred_text"]
+        and not scratchpad["other_files"]
+        and not scratchpad.get("drafts")
+    ):
         lines.append("- empty")
 
     lines.extend(["", "## Tasks"])
@@ -770,10 +954,10 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
                 f"  - [{item['status']}] {item.get('harness') or '-'} {item['task']} ({item['id']})"
             )
 
-    lines.extend(["", "## Hivemind"])
-    lines.append(f"- recent_messages: {hivemind['recent_count']}")
-    if hivemind["messages"]:
-        for message in hivemind["messages"]:
+    lines.extend(["", "## Messages"])
+    lines.append(f"- recent_messages: {messages['recent_count']}")
+    if messages["messages"]:
+        for message in messages["messages"]:
             to_part = f" -> {message['to']}" if message.get("to") else ""
             lines.append(
                 f"  - {message['timestamp'][:19]} [{message['type']}] {message['from']}{to_part}"
@@ -841,10 +1025,29 @@ def write_session_bootstrap_artifacts(
     summary: dict[str, Any],
 ) -> dict[str, str]:
     """Persist the latest bootstrap snapshot for wrappers and handoff tools."""
-    output_root = resolve_agent_output_root(context_path, config=manager.config)
+    output_root = resolve_agent_output_root(
+        context_path,
+        config=manager.config,
+        scope_id=str(summary.get("scope_id", "common") or "common"),
+    )
     output_root.mkdir(parents=True, exist_ok=True)
-    json_path = output_root / SESSION_BOOTSTRAP_JSON
-    markdown_path = output_root / SESSION_BOOTSTRAP_MARKDOWN
+    if detect_layout_version(context_path) == LAYOUT_VERSION:
+        output_root = assert_no_linklike_components(
+            output_root,
+            boundary=context_path,
+            allow_missing=False,
+        )
+        json_path = assert_no_linklike_components(
+            output_root / SESSION_BOOTSTRAP_JSON,
+            boundary=output_root,
+        )
+        markdown_path = assert_no_linklike_components(
+            output_root / SESSION_BOOTSTRAP_MARKDOWN,
+            boundary=output_root,
+        )
+    else:
+        json_path = output_root / SESSION_BOOTSTRAP_JSON
+        markdown_path = output_root / SESSION_BOOTSTRAP_MARKDOWN
 
     payload = dict(summary)
     payload["generated_at"] = datetime.now(timezone.utc).isoformat()
@@ -854,39 +1057,81 @@ def write_session_bootstrap_artifacts(
     }
     markdown = render_session_bootstrap(payload)
 
-    json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    markdown_path.write_text(markdown + "\n", encoding="utf-8")
+    _atomic_write_text(json_path, json.dumps(payload, indent=2) + "\n")
+    _atomic_write_text(markdown_path, markdown + "\n")
     return payload["artifact_paths"]
 
 
-def _collect_scratchpad(manager: AFSManager, context_path: Path) -> dict[str, Any]:
+def _collect_scratchpad(
+    manager: AFSManager,
+    context_path: Path,
+    *,
+    scope_ids: list[str] | None = None,
+    scoped: ResolvedScope | None = None,
+) -> dict[str, Any]:
     scratchpad_root = resolve_mount_root(context_path, MountType.SCRATCHPAD, config=manager.config)
-    state_text = _read_text(scratchpad_root / "state.md")
-    deferred_text = _read_text(scratchpad_root / "deferred.md")
+    scope = scoped or resolve_scope(context_path)
+    roots = visible_mount_roots(
+        scratchpad_root,
+        mount_type=MountType.SCRATCHPAD,
+        scoped=scope,
+    )
+
+    def scoped_text(name: str) -> str:
+        values = []
+        for root in roots:
+            candidate = _safe_scoped_candidate(root / name, root=root, scoped=scope)
+            values.append(
+                (
+                    root.relative_to(scratchpad_root).as_posix(),
+                    _read_text(candidate) if candidate is not None else "",
+                )
+            )
+        values = [(label, text) for label, text in values if text]
+        if len(values) <= 1:
+            return values[0][1] if values else ""
+        return "\n\n".join(f"[{label}]\n{text}" for label, text in values)
+
+    state_text = scoped_text("state.md")
+    deferred_text = scoped_text("deferred.md")
     other_files: list[str] = []
-    if scratchpad_root.exists():
+    for root in roots:
+        if not root.exists():
+            continue
         try:
-            for candidate in sorted(scratchpad_root.iterdir()):
+            for candidate in sorted(root.iterdir()):
+                if _safe_scoped_candidate(candidate, root=root, scoped=scope) is None:
+                    continue
                 if not candidate.is_file():
                     continue
                 if candidate.name in {"state.md", "deferred.md"}:
                     continue
-                other_files.append(candidate.name)
+                other_files.append(candidate.relative_to(scratchpad_root).as_posix())
                 if len(other_files) >= _MAX_LIST_ITEMS:
                     break
         except OSError:
             pass
+        if len(other_files) >= _MAX_LIST_ITEMS:
+            break
 
     agent_namespaces: list[dict[str, Any]] = []
-    agents_dir = scratchpad_root / "agents"
-    if agents_dir.exists():
+    for root in roots:
+        agents_dir = root / "agents"
+        if _safe_scoped_candidate(agents_dir, root=root, scoped=scope) is None:
+            continue
+        if not agents_dir.exists():
+            continue
         try:
             for agent_dir in sorted(agents_dir.iterdir()):
+                if _safe_scoped_candidate(agent_dir, root=root, scoped=scope) is None:
+                    continue
                 if not agent_dir.is_dir() or agent_dir.name.startswith("."):
                     continue
                 files: list[str] = []
                 size_bytes = 0
                 for f in sorted(agent_dir.rglob("*")):
+                    if _safe_scoped_candidate(f, root=root, scoped=scope) is None:
+                        continue
                     if f.is_file():
                         files.append(str(f.relative_to(agent_dir)))
                         try:
@@ -895,6 +1140,7 @@ def _collect_scratchpad(manager: AFSManager, context_path: Path) -> dict[str, An
                             pass
                 agent_namespaces.append({
                     "agent_name": agent_dir.name,
+                    "scope_path": root.relative_to(scratchpad_root).as_posix(),
                     "file_count": len(files),
                     "size_bytes": size_bytes,
                     "files": files[:_MAX_LIST_ITEMS],
@@ -902,12 +1148,42 @@ def _collect_scratchpad(manager: AFSManager, context_path: Path) -> dict[str, An
         except OSError:
             pass
 
+    scoped_drafts: list[dict[str, Any]] = []
+    try:
+        from .scratchpad import ScratchpadStore
+
+        for scope_id in dict.fromkeys(scope_ids or visible_scope_ids(scope)):
+            store = ScratchpadStore(
+                context_path,
+                scope_id=scope_id,
+                config=manager.config,
+            )
+            for draft in store.list(limit=_MAX_LIST_ITEMS):
+                scoped_drafts.append(
+                    {
+                        "artifact_id": draft.metadata.artifact_id,
+                        "title": draft.metadata.title,
+                        "created_at": draft.metadata.created_at,
+                        "scope_id": draft.metadata.scope_id,
+                        "path": str(draft.path),
+                    }
+                )
+        scoped_drafts.sort(
+            key=lambda item: (item["created_at"], item["artifact_id"]),
+            reverse=True,
+        )
+        scoped_drafts = scoped_drafts[:_MAX_LIST_ITEMS]
+    except Exception:
+        scoped_drafts = []
+
     return {
-        "path": str(scratchpad_root),
+        "path": str(roots[0]) if roots else "",
+        "paths": [str(root) for root in roots],
         "state_text": state_text,
         "deferred_text": deferred_text,
         "other_files": other_files,
         "agent_namespaces": agent_namespaces,
+        "drafts": scoped_drafts,
     }
 
 
@@ -956,6 +1232,28 @@ def _collect_agent_manifest() -> dict[str, Any]:
         return {"available": False, "error": str(exc), "issues": []}
 
 
+def _run_workspace_visible(value: str, *, scoped: ResolvedScope) -> bool:
+    """Return whether a globally stored agent run belongs to this scope."""
+
+    if scoped.layout_version != LAYOUT_VERSION:
+        return True
+    affiliation = value.strip()
+    if not affiliation or affiliation == COMMON_SCOPE_ID:
+        return True
+    if affiliation in {scoped.scope_id, scoped.project_id}:
+        return scoped.scope_id != COMMON_SCOPE_ID
+    candidate = Path(affiliation).expanduser()
+    if scoped.requester_path is None or not candidate.is_absolute():
+        # A relative workspace is ambiguous from the central store. Do not
+        # assign it to a project implicitly.
+        return False
+    try:
+        record = ProjectRegistry(scoped.context_root).resolve(candidate)
+    except (OSError, ValueError):
+        return False
+    return record is not None and record.project_id == scoped.project_id
+
+
 def _collect_agent_jobs(context_path: Path, *, limit: int) -> dict[str, Any]:
     try:
         from .agent_job_inbox import build_agent_job_inbox
@@ -984,11 +1282,20 @@ def _collect_agent_jobs(context_path: Path, *, limit: int) -> dict[str, Any]:
     }
 
 
-def _collect_agent_runs(context_path: Path, *, limit: int) -> dict[str, Any]:
+def _collect_agent_runs(
+    context_path: Path,
+    *,
+    limit: int,
+    scoped: ResolvedScope,
+) -> dict[str, Any]:
     try:
         from .agent_runs import AgentRunStore
 
-        runs = AgentRunStore(context_path).list(limit=max(1, limit))
+        runs = [
+            run
+            for run in AgentRunStore(context_path).list(limit=0)
+            if _run_workspace_visible(run.workspace, scoped=scoped)
+        ][: max(1, limit)]
     except Exception as exc:
         return {"recent_count": 0, "items": [], "error": str(exc)}
 
@@ -1044,7 +1351,9 @@ def _collect_work_assistant(
                 "commands": commands,
             }
 
-        store = WorkAssistantStore(context_path, config=manager.config, db_path=db_path)
+        # Let the store derive and validate its managed default path. Passing
+        # the same path as an explicit override would bypass v2 leaf checks.
+        store = WorkAssistantStore(context_path, config=manager.config)
         return {
             "available": True,
             "initialized": True,
@@ -1220,11 +1529,22 @@ def _skill_signal(
     return " ".join(parts)[:_MAX_SKILL_SIGNAL_CHARS]
 
 
-def _collect_hivemind(context_path: Path, *, limit: int) -> dict[str, Any]:
+def _collect_messages(
+    context_path: Path,
+    *,
+    scope_id: str,
+    limit: int,
+    config: Any = None,
+) -> dict[str, Any]:
     try:
-        from .hivemind import HivemindBus
+        from .messages import MessageBus
 
-        bus = HivemindBus(context_path)
+        bus = MessageBus(
+            context_path,
+            scope_id=scope_id,
+            config=config,
+            include_legacy=detect_layout_version(context_path) != LAYOUT_VERSION,
+        )
         messages = bus.read(limit=max(1, limit))
     except Exception as exc:
         return {"recent_count": 0, "messages": [], "error": str(exc)}
@@ -1234,21 +1554,47 @@ def _collect_hivemind(context_path: Path, *, limit: int) -> dict[str, Any]:
     }
 
 
-def _collect_memory(manager: AFSManager, context_path: Path) -> dict[str, Any]:
-    pipeline_status: dict[str, Any] = {}
-    try:
-        from .memory_consolidation import memory_status
+def _collect_hivemind(context_path: Path, *, limit: int) -> dict[str, Any]:
+    """Compatibility wrapper for callers that have not adopted project scopes."""
 
-        pipeline_status = memory_status(context_path, config=manager.config)
-    except Exception:
-        pipeline_status = {}
+    return _collect_messages(
+        context_path,
+        scope_id="common",
+        limit=limit,
+    )
+
+
+def _collect_memory(
+    manager: AFSManager,
+    context_path: Path,
+    *,
+    scoped: ResolvedScope | None = None,
+) -> dict[str, Any]:
+    scope = scoped or resolve_scope(context_path)
+    pipeline_status: dict[str, Any] = {}
+    if scope.layout_version != LAYOUT_VERSION:
+        try:
+            from .memory_consolidation import memory_status
+
+            pipeline_status = memory_status(context_path, config=manager.config)
+        except Exception:
+            pipeline_status = {}
 
     memory_root = resolve_mount_root(context_path, MountType.MEMORY, config=manager.config)
-    entries_path = memory_root / manager.config.memory_consolidation.entries_filename
-    summary_dir = memory_root / manager.config.memory_consolidation.summary_dir_name
+    roots = visible_mount_roots(memory_root, mount_type=MountType.MEMORY, scoped=scope)
+    entries_paths = [
+        root / manager.config.memory_consolidation.entries_filename for root in roots
+    ]
+    summary_dirs = [
+        root / manager.config.memory_consolidation.summary_dir_name for root in roots
+    ]
     entries_count = 0
     entries: list[dict[str, Any]] = []
-    if entries_path.exists():
+    for root, entries_path in zip(roots, entries_paths, strict=True):
+        if _safe_scoped_candidate(entries_path, root=root, scoped=scope) is None:
+            continue
+        if not entries_path.exists():
+            continue
         try:
             for line in entries_path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
@@ -1260,27 +1606,40 @@ def _collect_memory(manager: AFSManager, context_path: Path) -> dict[str, Any]:
                 except json.JSONDecodeError:
                     pass
         except OSError:
-            entries_count = 0
+            continue
 
     # Build memory manifest: unique topics from tags/domains, most recent first
     manifest = _build_memory_manifest(entries)
 
     latest_markdown_path = None
     latest_markdown_excerpt = ""
-    if summary_dir.exists():
+    candidates: list[Path] = []
+    for root, summary_dir in zip(roots, summary_dirs, strict=True):
+        if _safe_scoped_candidate(summary_dir, root=root, scoped=scope) is None:
+            continue
+        if not summary_dir.exists():
+            continue
         try:
-            candidates = [path for path in summary_dir.glob("*.md") if path.is_file()]
+            candidates.extend(
+                path
+                for path in summary_dir.glob("*.md")
+                if _safe_scoped_candidate(path, root=root, scoped=scope) is not None
+                and path.is_file()
+            )
         except OSError:
-            candidates = []
-        if candidates:
-            latest = max(candidates, key=lambda item: item.stat().st_mtime)
-            latest_markdown_path = latest
-            latest_markdown_excerpt = _read_text(latest)
+            continue
+    if candidates:
+        latest = max(candidates, key=lambda item: item.stat().st_mtime)
+        latest_markdown_path = latest
+        latest_markdown_excerpt = _read_text(latest)
 
     return {
-        "path": str(memory_root),
-        "entries_path": str(entries_path),
-        "summary_dir": str(summary_dir),
+        "path": str(roots[0]) if roots else "",
+        "paths": [str(root) for root in roots],
+        "entries_path": str(entries_paths[0]) if entries_paths else "",
+        "entries_paths": [str(path) for path in entries_paths],
+        "summary_dir": str(summary_dirs[0]) if summary_dirs else "",
+        "summary_dirs": [str(path) for path in summary_dirs],
         "entries_count": entries_count,
         "memory_manifest": manifest,
         "latest_markdown_path": str(latest_markdown_path) if latest_markdown_path else "",
@@ -1334,8 +1693,23 @@ def _build_memory_manifest(entries: list[dict[str, Any]]) -> list[dict[str, Any]
     return sorted_topics[:_MAX_MANIFEST_TOPICS]
 
 
-def _collect_agent_reports(manager: AFSManager, context_path: Path) -> dict[str, Any]:
-    output_root = resolve_agent_output_root(context_path, config=manager.config)
+def _collect_agent_reports(
+    manager: AFSManager,
+    context_path: Path,
+    *,
+    scoped: ResolvedScope | None = None,
+) -> dict[str, Any]:
+    scope = scoped or resolve_scope(context_path)
+    output_roots = []
+    for scope_id in visible_scope_ids(scope):
+        root = resolve_agent_output_root(
+            context_path,
+            config=manager.config,
+            scope_id=scope_id,
+        )
+        if scope.layout_version == LAYOUT_VERSION:
+            root = assert_no_linklike_components(root, boundary=context_path)
+        output_roots.append(root)
     reports: list[dict[str, Any]] = []
     for name in (
         "context_warm",
@@ -1344,7 +1718,16 @@ def _collect_agent_reports(manager: AFSManager, context_path: Path) -> dict[str,
         "history_memory",
         "gemini_workspace_brief",
     ):
-        path = output_root / f"{name}.json"
+        candidates = [root / f"{name}.json" for root in output_roots]
+        safe_candidates = [
+            candidate
+            for root, candidate in zip(output_roots, candidates, strict=True)
+            if _safe_scoped_candidate(candidate, root=root, scoped=scope) is not None
+        ]
+        path = next(
+            (candidate for candidate in safe_candidates if candidate.exists()),
+            safe_candidates[0],
+        )
         payload: dict[str, Any] = {}
         status = ""
         age_seconds = None
@@ -1369,16 +1752,34 @@ def _collect_agent_reports(manager: AFSManager, context_path: Path) -> dict[str,
                 "age_seconds": age_seconds,
             }
         )
-    return {"path": str(output_root), "reports": reports}
+    return {
+        "path": str(output_roots[0]),
+        "paths": [str(root) for root in output_roots],
+        "reports": reports,
+    }
 
 
-def _collect_latest_handoff(context_path: Path, *, config: Any = None) -> dict[str, Any]:
+def _collect_latest_handoff(
+    context_path: Path,
+    *,
+    config: Any = None,
+    scope_ids: list[str] | None = None,
+) -> dict[str, Any]:
     """Collect the latest handoff packet if available."""
     try:
         from .handoff import HandoffStore
 
-        store = HandoffStore(context_path, config=config)
-        packet = store.read()
+        packets = []
+        for scope_id in dict.fromkeys(scope_ids or ["common"]):
+            store = HandoffStore(context_path, config=config, scope_id=scope_id)
+            packet = store.read()
+            if packet is not None:
+                packets.append(packet)
+        packet = max(
+            packets,
+            key=lambda item: (item.timestamp, item.revision_id),
+            default=None,
+        )
         if packet is None:
             return {"available": False}
         result = packet.to_dict()
@@ -1397,8 +1798,9 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
     agent_jobs = summary.get("agent_jobs", {})
     agent_runs = summary.get("agent_runs", {})
     work_assistant = summary.get("work_assistant", {})
-    hivemind = summary["hivemind"]
+    messages = summary["hivemind"]
     memory = summary["memory"]
+    is_v2 = summary.get("layout_version") == LAYOUT_VERSION
 
     recommendations: list[str] = []
     if not status["mount_health"].get("healthy", False):
@@ -1408,12 +1810,24 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
     if not index_info.get("enabled", False):
         recommendations.append("Context indexing is disabled; rely on direct filesystem reads or enable the index.")
     elif not index_info.get("built", index_info.get("has_entries", False)):
-        recommendations.append("Run `afs index rebuild --path <workspace>` before relying on `afs context query`.")
+        recommendations.append(
+            "Run `afs search \"<task>\" --path <workspace>` to build scoped search context."
+            if is_v2
+            else "Run `afs index rebuild --path <workspace>` before relying on `afs context query`."
+        )
     elif index_info.get("stale", False):
-        recommendations.append("Refresh the stale SQLite index with `afs index rebuild --path <workspace>` before trusting `afs context query` results.")
+        recommendations.append(
+            "Refresh scoped search with `afs search \"<task>\" --path <workspace> --rebuild`."
+            if is_v2
+            else "Refresh the stale SQLite index with `afs index rebuild --path <workspace>` before trusting `afs context query` results."
+        )
 
     if diff.get("available") and diff.get("total_changes", 0) > 0:
-        recommendations.append("Review `context.diff` before editing because the workspace has unreviewed drift.")
+        recommendations.append(
+            "Review `afs context diff --path <workspace>` before editing because the workspace has unreviewed drift."
+            if is_v2
+            else "Review `context.diff` before editing because the workspace has unreviewed drift."
+        )
 
     stale_mounts = summary.get("stale_mounts", [])
     if stale_mounts:
@@ -1425,7 +1839,11 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
         recommendations.append("Read scratchpad state and deferred notes before making changes.")
 
     if tasks.get("total", 0) > 0:
-        recommendations.append("Check pending items tasks before creating parallel work.")
+        recommendations.append(
+            "Check `afs tasks list` before creating parallel work."
+            if is_v2
+            else "Check pending items tasks before creating parallel work."
+        )
 
     if agent_manifest.get("issues"):
         recommendations.append("Run `afs agent-manifest validate --check-paths` before editing harness config.")
@@ -1455,8 +1873,8 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
             f"matching tone (`{command}`)."
         )
 
-    if hivemind.get("recent_count", 0) > 0:
-        recommendations.append("Review recent hivemind messages for cross-agent handoffs.")
+    if messages.get("recent_count", 0) > 0:
+        recommendations.append("Review recent scoped messages for cross-agent handoffs.")
 
     if memory.get("latest_markdown_path"):
         recommendations.append("Scan the latest durable memory summary before asking for already-known context.")
@@ -1475,7 +1893,9 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
     if handoff.get("available") and handoff.get("blocked"):
         recommendations.append("Review blocked items from last handoff before starting new work.")
 
-    recommendations.append("Prefer scratchpad updates, task queue entries, and hivemind notes for handoff instead of ad hoc chat summaries.")
+    recommendations.append(
+        "Prefer scoped notes, task entries, and messages for handoff instead of ad hoc chat summaries."
+    )
     return recommendations
 
 
@@ -1489,6 +1909,22 @@ def _read_text(path: Path) -> str:
     if len(text) > _MAX_TEXT_CHARS:
         return text[:_MAX_TEXT_CHARS].rstrip() + "\n..."
     return text
+
+
+def _safe_scoped_candidate(
+    path: Path,
+    *,
+    root: Path,
+    scoped: ResolvedScope,
+) -> Path | None:
+    """Reject link-mediated reads from a v2 visible scope root."""
+
+    if scoped.layout_version != LAYOUT_VERSION:
+        return path
+    try:
+        return assert_no_linklike_components(path, boundary=root)
+    except (OSError, ValueError):
+        return None
 
 
 def _indent_block(text: str, *, bullet: str | None = None) -> list[str]:

@@ -5,13 +5,27 @@ from argparse import Namespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 import afs.cli.core as cli_core_module
 from afs.cli.core import memory_consolidate_command
+from afs.context_layout import scaffold_v2
 from afs.history import append_history_event
 from afs.manager import AFSManager
-from afs.memory_consolidation import consolidate_history_to_memory
+from afs.memory_consolidation import (
+    check_consolidation_gates,
+    consolidate_history_to_memory,
+    memory_status,
+    search_memory,
+)
 from afs.models import MountType
-from afs.schema import AFSConfig, DirectoryConfig, GeneralConfig, default_directory_configs
+from afs.schema import (
+    AFSConfig,
+    DirectoryConfig,
+    GeneralConfig,
+    MemoryConsolidationConfig,
+    default_directory_configs,
+)
 
 
 def _remap_directories(**overrides: str) -> list[DirectoryConfig]:
@@ -202,3 +216,275 @@ def test_memory_consolidate_command_outputs_json(tmp_path: Path, monkeypatch, ca
     assert payload["entries_written"] == 1
     assert payload["markdown_written"] == 0
     assert payload["memory_root"] == str(context_root / "memory")
+
+
+def _build_v2_context(tmp_path: Path) -> tuple[AFSConfig, Path]:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+    return config, context_root
+
+
+def test_v2_consolidation_uses_common_history_memory_and_checkpoint(
+    tmp_path: Path,
+) -> None:
+    config, context_root = _build_v2_context(tmp_path)
+    timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    append_history_event(
+        context_root / "history",
+        "fs",
+        "afs.context_fs",
+        op="write",
+        context_root=context_root,
+        metadata={"mount_type": "scratchpad", "relative_path": "note.md"},
+        timestamp=timestamp,
+        event_id="evt-v2-001",
+    )
+
+    result = consolidate_history_to_memory(
+        context_root,
+        config=config,
+        write_markdown=True,
+    )
+
+    assert result.history_root == context_root / "history" / "common"
+    assert result.memory_root == context_root / "memory" / "common"
+    assert result.entries_path == context_root / "memory" / "common" / "entries.jsonl"
+    assert result.checkpoint_path == (
+        context_root
+        / "scratchpad"
+        / "common"
+        / "afs_agents"
+        / "history_memory_checkpoint.json"
+    )
+    assert result.entries_written == 1
+    assert not (context_root / "memory" / "entries.jsonl").exists()
+
+
+def test_v2_memory_status_and_search_read_common_and_dedupe_prefix_data(
+    tmp_path: Path,
+) -> None:
+    config, context_root = _build_v2_context(tmp_path)
+    entry = {
+        "id": "history-memory-migrated",
+        "instruction": "Recall migrated context",
+        "output": "semantic dream result",
+        "tags": ["history-consolidated"],
+    }
+    rendered = json.dumps(entry) + "\n"
+    common = context_root / "memory" / "common"
+    common.mkdir(parents=True, exist_ok=True)
+    (common / "entries.jsonl").write_text(rendered, encoding="utf-8")
+    # Early v2 builds wrote the same record at the category root. A copied
+    # transition record must not be counted or returned twice.
+    (context_root / "memory" / "entries.jsonl").write_text(rendered, encoding="utf-8")
+
+    status = memory_status(context_root, config=config)
+    results = search_memory(context_root, "semantic dream", config=config)
+
+    assert status["entries_path"] == str(common / "entries.jsonl")
+    assert status["entries_count"] == 1
+    assert [result["id"] for result in results] == ["history-memory-migrated"]
+
+
+def test_v2_consolidation_reads_pre_fix_checkpoint_and_writes_canonical(
+    tmp_path: Path,
+) -> None:
+    config, context_root = _build_v2_context(tmp_path)
+    first_timestamp = "2026-07-17T01:00:00+00:00"
+    second_timestamp = "2026-07-17T02:00:00+00:00"
+    for event_id, timestamp in (
+        ("already-consolidated", first_timestamp),
+        ("new-after-upgrade", second_timestamp),
+    ):
+        append_history_event(
+            context_root / "history",
+            "fs",
+            "afs.context_fs",
+            op="write",
+            context_root=context_root,
+            timestamp=timestamp,
+            event_id=event_id,
+        )
+    pre_fix = (
+        context_root
+        / "scratchpad"
+        / "afs_agents"
+        / "history_memory_checkpoint.json"
+    )
+    pre_fix.parent.mkdir(parents=True)
+    pre_fix_payload = json.dumps(
+        {"timestamp": first_timestamp, "event_id": "already-consolidated"},
+        indent=2,
+    ) + "\n"
+    pre_fix.write_text(pre_fix_payload, encoding="utf-8")
+
+    result = consolidate_history_to_memory(
+        context_root,
+        config=config,
+        write_markdown=False,
+    )
+
+    canonical = (
+        context_root
+        / "scratchpad"
+        / "common"
+        / "afs_agents"
+        / "history_memory_checkpoint.json"
+    )
+    assert result.consolidated_events == 1
+    assert json.loads(canonical.read_text(encoding="utf-8"))["event_id"] == (
+        "new-after-upgrade"
+    )
+    assert pre_fix.read_text(encoding="utf-8") == pre_fix_payload
+
+
+def test_v1_memory_reads_ignore_non_file_entries_path(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    (context_root / "memory" / "entries.jsonl").mkdir(parents=True)
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+
+    assert memory_status(context_root, config=config)["entries_count"] == 0
+    assert search_memory(context_root, "anything", config=config) == []
+
+
+def test_v2_consolidation_rejects_a_linked_entries_leaf(tmp_path: Path) -> None:
+    config, context_root = _build_v2_context(tmp_path)
+    timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    append_history_event(
+        context_root / "history",
+        "fs",
+        "afs.context_fs",
+        op="write",
+        context_root=context_root,
+        metadata={"mount_type": "scratchpad", "relative_path": "note.md"},
+        timestamp=timestamp,
+        event_id="evt-v2-linked",
+    )
+    memory_common = context_root / "memory" / "common"
+    memory_common.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text("outside\n", encoding="utf-8")
+    try:
+        (memory_common / "entries.jsonl").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link|reparse point"):
+        consolidate_history_to_memory(
+            context_root,
+            config=config,
+            write_markdown=False,
+        )
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+
+
+def test_v2_search_uses_canonical_precedence_for_duplicate_ids(
+    tmp_path: Path,
+) -> None:
+    config, context_root = _build_v2_context(tmp_path)
+    canonical = context_root / "memory" / "common"
+    canonical.mkdir(parents=True)
+    (canonical / "entries.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "same-id",
+                "instruction": "canonical record",
+                "output": "safe content",
+                "tags": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (context_root / "memory" / "entries.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "same-id",
+                "instruction": "legacy duplicate",
+                "output": "must-not-surface",
+                "tags": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert search_memory(
+        context_root,
+        "must-not-surface",
+        config=config,
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "gate_config"),
+    [
+        (
+            Path("scratchpad/common/afs_agents/history_memory.lock"),
+            MemoryConsolidationConfig(
+                gate_min_hours=0,
+                gate_min_events=0,
+                gate_min_sessions=0,
+            ),
+        ),
+        (
+            Path(
+                "scratchpad/common/afs_agents/history_memory_checkpoint.json"
+            ),
+            MemoryConsolidationConfig(
+                gate_min_hours=24,
+                gate_min_events=0,
+                gate_min_sessions=0,
+            ),
+        ),
+    ],
+)
+def test_v2_consolidation_gates_reject_linked_managed_paths(
+    tmp_path: Path,
+    relative_path: Path,
+    gate_config: MemoryConsolidationConfig,
+) -> None:
+    _base_config, context_root = _build_v2_context(tmp_path)
+    config = AFSConfig(
+        general=GeneralConfig(context_root=context_root),
+        memory_consolidation=gate_config,
+    )
+    linked_path = context_root / relative_path
+    linked_path.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / f"outside-{linked_path.name}"
+    outside.write_text("{}\n", encoding="utf-8")
+    try:
+        linked_path.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link|reparse point"):
+        check_consolidation_gates(context_root, config=config)
+
+
+def test_v2_consolidation_session_gate_counts_canonical_history_events(
+    tmp_path: Path,
+) -> None:
+    _base_config, context_root = _build_v2_context(tmp_path)
+    config = AFSConfig(
+        general=GeneralConfig(context_root=context_root),
+        memory_consolidation=MemoryConsolidationConfig(
+            gate_min_hours=0,
+            gate_min_events=0,
+            gate_min_sessions=1,
+        ),
+    )
+    append_history_event(
+        context_root / "history",
+        "session",
+        "afs.session",
+        op="bootstrap",
+        context_root=context_root,
+        event_id="session-bootstrap-v2",
+    )
+
+    gate = check_consolidation_gates(context_root, config=config)
+
+    assert gate.passed is True
+    assert gate.gate == "all"

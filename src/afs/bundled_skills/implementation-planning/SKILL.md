@@ -51,4 +51,5 @@ afs fs write scratchpad plans/<topic>.md --content "goal, constraints, slices, c
 ```
 
 - Check existing queue state with `afs tasks list`.
-- Under MCP clients, use `task.create` for sub-work and `hivemind.send` for handoffs.
+- Under MCP clients, use `task.create` for sub-work, `messages.send` for live
+  coordination, and `handoff.create` for cross-session continuity.

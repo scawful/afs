@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import ModelBackend, ModelConfig, ToolCall, create_backend
-from .tools import AFS_TOOLS, Tool, ToolResult
+from .tools import Tool, ToolResult, create_afs_tools
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ class HarnessConfig:
     max_history_messages: int = 20
     verbose: bool = False
     context_root: Path = field(default_factory=lambda: Path.home() / ".context")
+    project_path: Path = field(default_factory=Path.cwd)
     log_to_history: bool = True
     auto_export: bool = True
     export_min_quality: float = 0.6
@@ -81,7 +82,7 @@ class AgentHarness:
 
     Example:
         ```python
-        harness = AgentHarness("ollama:llama3.2", tools=AFS_TOOLS)
+        harness = AgentHarness("ollama:llama3.2")
 
         async with harness:
             result = await harness.run("Summarize the current workspace context")
@@ -99,11 +100,20 @@ class AgentHarness:
 
         Args:
             model: Model identifier or config
-            tools: Tools available to the model (default: AFS_TOOLS)
+            tools: Tools available to the model. When omitted, create AFS tools
+                bound to ``config.context_root`` and ``config.project_path``.
             config: Harness configuration
         """
         self.config = config or HarnessConfig()
-        self.tools = {t.name: t for t in (tools or AFS_TOOLS)}
+        selected_tools = (
+            create_afs_tools(
+                self.config.context_root,
+                project_path=self.config.project_path,
+            )
+            if tools is None
+            else tools
+        )
+        self.tools = {tool.name: tool for tool in selected_tools}
         self._model_config = (
             model if isinstance(model, ModelConfig) else ModelConfig.from_string(model)
         )
@@ -383,8 +393,7 @@ async def main():
         from .tools import TRIFORCE_TOOLS
         tools = TRIFORCE_TOOLS
     else:
-        from .tools import AFS_TOOLS
-        tools = AFS_TOOLS
+        tools = None
 
     # Run agent
     config = HarnessConfig(
@@ -395,7 +404,7 @@ async def main():
     harness = AgentHarness(args.model, tools=tools, config=config)
 
     print(f"Model: {args.model}")
-    print(f"Tools: {args.tools} ({len(tools)} available)")
+    print(f"Tools: {args.tools} ({len(harness.tools)} available)")
     print(f"Prompt: {args.prompt}")
     print("-" * 60)
 

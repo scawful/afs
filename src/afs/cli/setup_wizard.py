@@ -251,9 +251,12 @@ def build_setup_plan(
 
     steps: list[SetupStep] = [
         SetupStep(
-            "Write AFS config and create context directories",
+            "Write AFS config and ensure the context layout",
             init_cmd,
-            note="Existing config files are left unchanged unless --force is used.",
+            note=(
+                "Existing config files are left unchanged unless --force is used; "
+                "an authorized v2 context is preserved without legacy directories."
+            ),
         ),
         SetupStep(
             "Repair context metadata and rebuild the search index",

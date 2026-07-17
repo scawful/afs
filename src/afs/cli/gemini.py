@@ -18,9 +18,16 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_config_model
+from ..context_layout import LAYOUT_VERSION, detect_layout_version
 from ..context_paths import resolve_mount_root
 from ..core import resolve_context_root
-from ..embeddings import SearchResult, create_embed_fn, search_embedding_index
+from ..embeddings import (
+    DEFAULT_GEMINI_DIMENSION,
+    DEFAULT_GEMINI_MODEL,
+    SearchResult,
+    create_embed_fn,
+    search_embedding_index,
+)
 from ..health.mcp_registration import find_afs_mcp_registrations
 from ..mcp_runtime import build_afs_mcp_entry
 from ..models import MountType
@@ -205,7 +212,12 @@ def gemini_status_command(args: argparse.Namespace) -> int:
     )
 
     # --- Embedding index state (doc count, age, staleness) ---
-    indexed_roots = _indexed_knowledge_roots(_candidate_knowledge_roots(args, config))
+    legacy_index_error = ""
+    try:
+        indexed_roots = _indexed_knowledge_roots(_candidate_knowledge_roots(args, config))
+    except ValueError as exc:
+        indexed_roots = []
+        legacy_index_error = str(exc)
     has_index = bool(indexed_roots)
     index_detail: dict[str, Any] = {}
     if indexed_roots:
@@ -241,7 +253,7 @@ def gemini_status_command(args: argparse.Namespace) -> int:
             f"{len(indexed_roots)} index roots, {total_docs} docs{age_label}{staleness_label}"
         )
     else:
-        index_info = "no embedding index found"
+        index_info = legacy_index_error or "no embedding index found"
         index_detail = {"roots": 0, "total_docs": 0, "stale": False}
     checks.append(("Embeddings indexed", has_index, index_info))
 
@@ -363,7 +375,11 @@ def gemini_context_command(args: argparse.Namespace) -> int:
         return _context_generate(args)
 
     config = _load_cli_config(args)
-    accessible_roots = _candidate_knowledge_roots(args, config)
+    try:
+        accessible_roots = _candidate_knowledge_roots(args, config)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
     indexed_roots = _indexed_knowledge_roots(accessible_roots)
 
     if not accessible_roots:
@@ -491,11 +507,12 @@ def _build_afs_context_text(args: argparse.Namespace, *, token_budget: int) -> s
             args.context_root = None
         if not hasattr(args, "context_dir"):
             args.context_dir = None
-        _project_path, context_path, _root, _dir = resolve_context_paths(args, manager)
+        project_path, context_path, _root, _dir = resolve_context_paths(args, manager)
 
         pack = build_context_pack(
             manager,
             context_path,
+            project_path=project_path,
             model="gemini",
             token_budget=token_budget,
             pack_mode="focused",
@@ -564,9 +581,10 @@ def _context_search(knowledge_roots: Iterable[Path], args: argparse.Namespace) -
         try:
             embed_fn = create_embed_fn(
                 "gemini",
-                model="gemini-embedding-001",
+                model=DEFAULT_GEMINI_MODEL,
                 api_key=api_key,
                 task_type="RETRIEVAL_QUERY",
+                output_dimensionality=DEFAULT_GEMINI_DIMENSION,
             )
         except (RuntimeError, ValueError):
             pass
@@ -652,17 +670,23 @@ def _load_cli_config(args: argparse.Namespace):
 def _candidate_knowledge_roots(args: argparse.Namespace, config) -> list[Path]:
     if getattr(args, "knowledge_path", None):
         base_root = Path(args.knowledge_path).expanduser().resolve()
-    else:
-        context_override = getattr(args, "context_root", None)
-        context_root = (
-            Path(context_override).expanduser().resolve()
-            if context_override
-            else resolve_context_root(config, None)
+        return _expand_knowledge_roots(base_root)
+    context_override = getattr(args, "context_root", None)
+    context_root = (
+        Path(context_override).expanduser().resolve()
+        if context_override
+        else resolve_context_root(config, None)
+    )
+    if detect_layout_version(context_root) == LAYOUT_VERSION:
+        raise ValueError(
+            "legacy Gemini knowledge indexes are disabled for v2; run "
+            "`afs search --semantic --rebuild --path <registered-project>` "
+            "and use scoped AFS search"
         )
-        base_root = resolve_mount_root(context_root, MountType.KNOWLEDGE, config=config)
-        project = getattr(args, "project", None)
-        if project:
-            base_root = base_root / project
+    base_root = resolve_mount_root(context_root, MountType.KNOWLEDGE, config=config)
+    project = getattr(args, "project", None)
+    if project:
+        base_root = base_root / project
     return _expand_knowledge_roots(base_root)
 
 

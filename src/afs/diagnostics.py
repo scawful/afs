@@ -24,8 +24,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from .context_layout import LAYOUT_VERSION, _atomic_write_text, detect_layout_version
 from .context_paths import resolve_agent_output_root
 from .models import MountType
+from .path_safety import assert_no_linklike_components
 
 _REQUIRED_CONTEXT_MOUNTS = (
     MountType.MEMORY,
@@ -338,6 +340,7 @@ def check_embedding_indexes(config_path: Path | None = None) -> DiagnosticResult
 
     total_indexes = 0
     stale_indexes = 0
+    unhealthy_indexes: list[str] = []
     missing_indexes: list[str] = []
     import time
 
@@ -351,11 +354,19 @@ def check_embedding_indexes(config_path: Path | None = None) -> DiagnosticResult
             continue
         total_indexes += 1
         try:
+            payload = json.loads(index_file.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                unhealthy_indexes.append(f"{index_file} (invalid root)")
+            else:
+                metadata = payload.get("_metadata", {})
+                collection = metadata.get("collection", {}) if isinstance(metadata, dict) else {}
+                if isinstance(collection, dict) and collection.get("health") == "unhealthy":
+                    unhealthy_indexes.append(str(index_file))
             age = time.time() - index_file.stat().st_mtime
             if age > 7 * 24 * 3600:  # 7 days
                 stale_indexes += 1
-        except OSError:
-            pass
+        except (OSError, json.JSONDecodeError) as exc:
+            unhealthy_indexes.append(f"{index_file} ({exc})")
 
     if missing_indexes:
         return DiagnosticResult(
@@ -363,6 +374,16 @@ def check_embedding_indexes(config_path: Path | None = None) -> DiagnosticResult
             status="warn",
             message=f"Missing embedding indexes in: {', '.join(missing_indexes)}",
             fix_description="Run: afs embeddings index --knowledge-path <path> --provider none --include '*.md'",
+        )
+
+    if unhealthy_indexes:
+        return DiagnosticResult(
+            name="embeddings",
+            status="warn",
+            message=f"Unhealthy embedding indexes: {', '.join(unhealthy_indexes)}",
+            fix_description=(
+                "Rebuild the listed collection; AFS will use keyword fallback until it is healthy"
+            ),
         )
 
     if stale_indexes:
@@ -892,7 +913,11 @@ def write_doctor_snapshot(
     elif counts["warn"]:
         overall_status = "warn"
 
-    output_root = resolve_agent_output_root(context_root, config=config)
+    output_root = resolve_agent_output_root(
+        context_root,
+        config=config,
+        scope_id="common",
+    )
     output_root.mkdir(parents=True, exist_ok=True)
     output_path = output_root / DOCTOR_SNAPSHOT_JSON
     now = datetime.now(timezone.utc).isoformat()
@@ -914,5 +939,18 @@ def write_doctor_snapshot(
             "config_path": str(config_path) if config_path else None,
         },
     }
-    output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    rendered = json.dumps(payload, indent=2) + "\n"
+    if detect_layout_version(context_root) == LAYOUT_VERSION:
+        output_root = assert_no_linklike_components(
+            output_root,
+            boundary=context_root.expanduser().resolve(),
+            allow_missing=False,
+        )
+        output_path = assert_no_linklike_components(
+            output_path,
+            boundary=output_root,
+        )
+        _atomic_write_text(output_path, rendered)
+    else:
+        output_path.write_text(rendered, encoding="utf-8")
     return output_path

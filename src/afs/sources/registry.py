@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from ..context_layout import LAYOUT_VERSION, detect_layout_version
 from ..plugins import load_enabled_extensions
 from .models import (
     ContextSourceProvider,
@@ -17,6 +18,20 @@ from .models import (
     SourceSyncResult,
     safe_source_id,
 )
+
+V2_SOURCE_SYNC_UNAVAILABLE = (
+    "context source sync is unavailable for layout v2 because scoped ingestion "
+    "is not implemented; use sources list/status for read-only inspection or a "
+    "v1 context for .context/items/sources materialization. Future v2 ingestion "
+    "will target knowledge/projects/<project-id> or explicit knowledge/common."
+)
+
+
+def assert_source_materialization_supported(context_path: Path) -> None:
+    """Fail before provider records can enter an unscoped v2 compatibility path."""
+
+    if detect_layout_version(context_path) == LAYOUT_VERSION:
+        raise ValueError(V2_SOURCE_SYNC_UNAVAILABLE)
 
 
 def _as_str_list(value: Any) -> list[str]:
@@ -110,7 +125,8 @@ def materialize_source_records(
     records: Iterable[ContextSourceRecord | dict[str, Any]],
     dry_run: bool = True,
 ) -> SourceSyncResult:
-    """Write provider records under ``.context/items/sources/<provider>/``."""
+    """Write provider records under the v1 ``items/sources/<provider>/`` path."""
+    assert_source_materialization_supported(context_path)
     provider_slug = safe_source_id(provider_name)
     target_dir = context_path.expanduser().resolve() / "items" / "sources" / provider_slug
     normalized: list[ContextSourceRecord] = []

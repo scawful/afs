@@ -1,30 +1,45 @@
 # AFS Embeddings
 
-AFS includes a file-based embedding index for semantic search over knowledge
-documents. It supports multiple embedding providers and a keyword-only fallback.
+AFS includes file-based vector collections and a scoped hybrid-search index. It
+supports multiple embedding providers, honest keyword fallback, and local-only
+retrieval when semantic search is not explicitly requested.
 
 ## Quick Start
 
 ```bash
-# Index markdown knowledge docs with Gemini vectors
+# Recommended v2 search: local text retrieval, current project + common
+afs search "how to debug a sprite" --path "$PWD"
+
+# Explicitly permit semantic indexing/querying
+afs search "similar rendering failures" --path "$PWD" --semantic --rebuild
+
+# Lower-level collection API: index markdown knowledge docs with Gemini vectors
 afs embeddings index \
   --knowledge-path ~/.context/knowledge \
   --provider gemini \
   --include "*.md"
 
-# Search
+# Search that collection directly
 afs embeddings search \
   --knowledge-path ~/.context/knowledge \
   --provider gemini \
   "how to debug a sprite"
 ```
 
+`afs search` is the normal version 2 interface. Without `--semantic` it does
+not call a remote embedding provider. With `--semantic`, Gemini is the default
+provider and uses stable `gemini-embedding-2` with 768-dimensional output.
+Use `--all-projects` only when cross-project results are intended.
+
+The `afs embeddings ...` commands remain the lower-level API for managing and
+evaluating a specific collection.
+
 ## Providers
 
 | Provider | Flag | Default Model | Requires |
 |----------|------|---------------|----------|
 | None (keyword) | `--provider none` | — | Nothing |
-| Gemini | `--provider gemini` | `gemini-embedding-001` | `GEMINI_API_KEY` + `google-genai` or `httpx` |
+| Gemini | `--provider gemini` | `gemini-embedding-2` | `GEMINI_API_KEY` + `google-genai` or `httpx` |
 | Ollama | `--provider ollama` | `nomic-embed-text` | Local Ollama server |
 | OpenAI | `--provider openai` | `text-embedding-3-small` | `OPENAI_API_KEY` + `httpx` |
 | HuggingFace | `--provider hf` | `nomic-embed-text` | `torch` + `transformers` |
@@ -52,8 +67,10 @@ afs embeddings index \
   [--include-hidden]
 ```
 
-The index is stored at `<knowledge-path>/embedding_index.json` with per-document
-embedding files in `<knowledge-path>/embeddings/`.
+The index is stored at `<knowledge-path>/embedding_index.json` with immutable,
+generation-qualified per-document payloads in `<knowledge-path>/embeddings/`.
+The manifest is the atomic publication pointer: readers see either the complete
+previous generation or the complete replacement, never a mixture of both.
 
 Each indexed document stores:
 - `id`: unique document identifier (`<root>::<relative_path>`)
@@ -66,8 +83,11 @@ Each indexed document stores:
 
 ### Re-indexing
 
-Re-running `index` overwrites the existing index. This is safe — the index is
-derived data and can always be rebuilt.
+Re-running `index` stages a new payload generation, fsyncs it, then atomically
+replaces the manifest. Builders are serialized and searches hold a read lock
+until all referenced payloads have been read. Unreachable payloads are removed
+only after publication while the write lock is held. Legacy manifests with
+payloads directly under `embeddings/` remain readable.
 
 ## Searching
 
@@ -143,8 +163,7 @@ afs gemini context   # dump full knowledge INDEX.md
 
 | Model | Dimensions | Notes |
 |-------|-----------|-------|
-| `gemini-embedding-001` | 3072 | Default, production-ready |
-| `gemini-embedding-2-preview` | 3072 | Preview, may have improved quality |
+| `gemini-embedding-2` | 768 by default | Stable default; output dimensionality is stored in collection metadata |
 
 ### Environment Variables
 
@@ -199,11 +218,11 @@ The embedding system uses a registry-based provider architecture:
 from afs.embeddings import create_embed_fn
 
 # Create an embedding function
-embed = create_embed_fn("gemini", model="gemini-embedding-001")
+embed = create_embed_fn("gemini", model="gemini-embedding-2")
 
 # Use it
 vector = embed("How to write an ASM hook")
-print(f"Dimensions: {len(vector)}")  # 3072
+print(f"Dimensions: {len(vector)}")  # 768
 ```
 
 Custom providers can be registered:
@@ -221,3 +240,78 @@ register_embedding_backend("custom", my_embed_factory)
 ```
 
 Registered backends: `ollama`, `hf`, `openai`, `gemini`.
+
+## Versioned Collections and Honest Fallback
+
+New `embedding_index.json` files carry a versioned `_metadata.collection` block
+with the provider, model, vector dimension, document instruction, query
+instruction, normalization flag, and health. Query callers can recreate the
+matching query-side embedder with `create_query_embed_fn_from_index()`; Gemini
+collections automatically use `RETRIEVAL_DOCUMENT` while indexing and
+`RETRIEVAL_QUERY` while searching.
+
+Use `search_embedding_index_detailed()` when reporting results to a user. Its
+`semantic_status` distinguishes real vector retrieval from keyword fallback.
+An embedding failure, missing payload, or dimension mismatch makes the
+collection unhealthy and fails closed to keyword retrieval rather than mixing
+in a partial or incompatible vector set. The original
+`search_embedding_index()` list-returning API remains available for legacy
+callers.
+
+Index discovery is deliberately bounded. `discover_embedding_indexes(root)`
+checks only `root`, `root/.afs/search`, `root/knowledge`, and direct project
+children under those locations; it never recursively crawls a home directory.
+Full and incremental rebuilds garbage-collect payload JSON that is no longer
+reachable from the current manifest. Generated index files are excluded when
+the output directory is inside an indexed source, including the common
+output-equals-source layout.
+
+## Scoped Hybrid Search Foundation
+
+`afs.hybrid_search.HybridSearchEngine` is the v2 retrieval foundation used by
+new CLI and MCP surfaces. Its rebuildable layout is:
+
+```text
+<index-root>/
+├── CURRENT                       # atomically replaced generation id
+├── generations/
+│   └── <generation-id>/
+│       ├── hybrid_index.json     # version, collection metadata, health
+│       ├── search.sqlite3        # scoped documents and FTS5 associations
+│       └── vectors.npy           # normalized float32 vectors
+├── .hybrid-build.lock            # serializes builders
+└── .hybrid-publication.lock      # protects publication and active readers
+```
+
+A rebuild writes and fsyncs an immutable generation before replacing `CURRENT`.
+Search resolves `CURRENT` once under a shared lock; publication and generation
+garbage collection use the exclusive side of that lock. The previous
+generation is retained for recovery. Pre-generation top-level layouts remain
+readable when `CURRENT` is absent.
+
+Each `HybridSource` requires a `scope_id`. Search applies the current/common
+scope filter in SQLite before FTS, path, symbol, project, or vector ranking.
+Ranked lists are combined deterministically with reciprocal-rank fusion
+(`k=60`), and every hit records its contributing signal ranks and raw scores.
+Cross-project retrieval requires the explicit `all_projects=True` option.
+
+Remote embedding is opt-in per source with `embed_allowed=True`. Hard safety
+rules always exclude credential filenames, secret-like text, VCS internals,
+dependencies, build output, binaries, ignored files, and symlinks escaping the
+registered root. Inactive sources default to at most 5,000 files and 50 MiB;
+active sources default to 10,000 files and 100 MiB. These are aggregate caps
+across every source registered for the same project (or scope when no project
+id is present). A per-source `max_files` can lower the file cap but cannot raise
+it. Tests use injected local functions and never call Gemini.
+
+User-facing equivalents:
+
+```bash
+afs search "release checklist" --path "$PWD"           # local text
+afs search "parser symbol" --path "$PWD" --mode symbol
+afs search "similar incidents" --path "$PWD" --semantic --rebuild
+```
+
+For MCP clients, `context.search` reads the same v2 index. Its `semantic`
+argument is also false by default and is the explicit query-side embedding
+permission.

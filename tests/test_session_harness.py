@@ -31,6 +31,8 @@ from afs.session_harness import (
     _build_session_verification_state,
     _verification_record_from_event,
     build_client_session_payload,
+    record_client_session_activity,
+    write_client_session_payload_artifact,
 )
 from afs.tasks import TaskQueue
 from afs.verification import verification_item_id
@@ -267,6 +269,147 @@ def test_session_prepare_client_command_outputs_artifacts(
     supported_names = {entry["name"] for entry in payload["integration"]["supported_events"]}
     assert "user_prompt_submit" in supported_names
     assert "task_completed" in supported_names
+
+
+def test_v2_client_session_artifacts_are_project_scoped(tmp_path: Path) -> None:
+    from afs.context_index import ContextSQLiteIndex
+    from afs.project_registry import ProjectRegistry
+    from afs.schema import SessionPackCacheConfig
+
+    context_root = tmp_path / ".context"
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    config = AFSConfig(
+        general=GeneralConfig(context_root=context_root),
+        session_pack_cache=SessionPackCacheConfig(cache_dir=tmp_path / "pack-cache"),
+    )
+    manager = AFSManager(config=config)
+    manager.ensure(path=alpha, context_root=context_root, layout_version=2)
+    registry = ProjectRegistry(context_root)
+    alpha_record = registry.resolve(alpha)
+    assert alpha_record is not None
+    beta_record = registry.register(beta)
+
+    for record, marker in (
+        (alpha_record, "alpha-client-marker"),
+        (beta_record, "beta-client-marker"),
+    ):
+        path = context_root / "knowledge" / "projects" / record.project_id / "scope.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(f"client-scope-query {marker}", encoding="utf-8")
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE],
+        include_content=True,
+    )
+
+    payloads = {}
+    for name, project in (("alpha", alpha), ("beta", beta)):
+        payloads[name] = build_client_session_payload(
+            manager,
+            context_root,
+            client="codex",
+            cwd=project,
+            query="client-scope-query",
+            task="Prepare this project.",
+            include_content=True,
+            include_skills=False,
+            token_budget=2500,
+            write_artifacts=True,
+        )
+
+    alpha_payload = payloads["alpha"]
+    beta_payload = payloads["beta"]
+    assert alpha_payload["scope_id"] == alpha_record.scope_id
+    assert beta_payload["scope_id"] == beta_record.scope_id
+    for section in ("bootstrap", "pack", "prompt"):
+        assert (
+            alpha_payload[section]["artifact_paths"]["json"]
+            != beta_payload[section]["artifact_paths"]["json"]
+        )
+    assert alpha_payload["artifact_paths"]["json"] != beta_payload["artifact_paths"]["json"]
+    assert alpha_record.project_id in alpha_payload["artifact_paths"]["json"]
+    assert beta_record.project_id in beta_payload["artifact_paths"]["json"]
+    assert "beta-client-marker" not in json.dumps(alpha_payload)
+    with pytest.raises(PermissionError, match="does not match"):
+        record_client_session_activity(
+            manager,
+            context_root,
+            client="codex",
+            event_name="session_start",
+            event_payload={},
+            cwd=alpha,
+            payload_file=beta_payload["artifact_paths"]["json"],
+        )
+
+
+@pytest.mark.parametrize("linked_component", ["root", "leaf"])
+def test_v2_client_payload_writer_rejects_linked_output_components(
+    tmp_path: Path,
+    linked_component: str,
+) -> None:
+    from afs.context_paths import resolve_agent_output_root
+    from afs.project_registry import ProjectRegistry
+
+    context_root = tmp_path / ".context"
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = AFSManager(config=AFSConfig(general=GeneralConfig(context_root=context_root)))
+    manager.ensure(path=project, context_root=context_root, layout_version=2)
+    record = ProjectRegistry(context_root).resolve(project)
+    assert record is not None
+    output_root = resolve_agent_output_root(
+        context_root,
+        config=manager.config,
+        scope_id=record.scope_id,
+    )
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    poison = outside / "payload.json"
+    poison.write_text("do-not-overwrite", encoding="utf-8")
+
+    try:
+        if linked_component == "root":
+            output_root.symlink_to(outside, target_is_directory=True)
+        else:
+            output_root.mkdir()
+            (output_root / "session_client_codex.json").symlink_to(poison)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link|reparse point"):
+        write_client_session_payload_artifact(
+            manager,
+            context_root,
+            client="codex",
+            payload={"client": "codex", "cwd": str(project)},
+        )
+
+    assert poison.read_text(encoding="utf-8") == "do-not-overwrite"
+
+
+def test_v2_client_payload_override_must_stay_in_authorized_output_root(
+    tmp_path: Path,
+) -> None:
+    context_root = tmp_path / ".context"
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = AFSManager(config=AFSConfig(general=GeneralConfig(context_root=context_root)))
+    manager.ensure(path=project, context_root=context_root, layout_version=2)
+    external_payload = tmp_path / "external-payload.json"
+
+    with pytest.raises(ValueError, match="escapes its trusted boundary"):
+        write_client_session_payload_artifact(
+            manager,
+            context_root,
+            client="codex",
+            payload={"client": "codex", "cwd": str(project)},
+            payload_path=external_payload,
+        )
+
+    assert not external_payload.exists()
 
 
 def test_prepared_session_redacts_verification_secrets_from_all_artifacts(

@@ -14,9 +14,12 @@ Working Rules
 2. Prefer the smallest working change over architecture churn.
 3. Touch only task-related files.
 4. Keep hygiene high: no dead code or commented-out leftovers.
-5. Run the fastest relevant verification command before finishing.
-6. If checks cannot run, report exactly why and residual risk.
-7. Ask before destructive actions (`rm`, force-push, history rewrite).
+5. Follow `docs/ENGINEERING_PRACTICES.md` for exceptions, atomic file
+   writes, typing, and tests. Never add entries to the ruff/mypy ratchet
+   baselines in `pyproject.toml`; shrink them when touching listed files.
+6. Run the fastest relevant verification command before finishing.
+7. If checks cannot run, report exactly why and residual risk.
+8. Ask before destructive actions (`rm`, force-push, history rewrite).
 
 Delivery Contract
 - Report what changed.

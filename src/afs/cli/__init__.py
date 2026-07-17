@@ -36,10 +36,12 @@ from . import (
     embeddings,
     events,
     execution,
+    friendly,
     fs,
     gemini,
     guide,
     gws_cli,
+    layout,
     manager_gui,
     mcp,
     missions,
@@ -229,6 +231,7 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
     guide.register_parsers(subparsers)
     manager_gui.register_parsers(subparsers)
     next_action.register_parsers(subparsers)
+    friendly.register_parsers(subparsers)
 
     # Register approvals commands
     approvals.register_parsers(subparsers)
@@ -244,6 +247,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
 
     # Register context commands (context, graph, workspace)
     context.register_parsers(subparsers)
+
+    # Register versioned central layout audit/planning commands.
+    layout.register_parsers(subparsers)
 
     # Register filesystem commands
     fs.register_parsers(subparsers)
