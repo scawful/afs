@@ -440,13 +440,15 @@ def _wait_for_posix_exit_without_reaping(
             raise RuntimeError(
                 "POSIX execution requires waitid or kqueue lifecycle support"
             )
+        # mypy analyzes as Linux (see pyproject); the kqueue API only exists
+        # in BSD/macOS stubs and this branch is hasattr-guarded at runtime.
         queue = select.kqueue()
         try:
-            event = select.kevent(
+            event = select.kevent(  # type: ignore[attr-defined]
                 process.pid,
-                filter=select.KQ_FILTER_PROC,
-                flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
-                fflags=select.KQ_NOTE_EXIT,
+                filter=select.KQ_FILTER_PROC,  # type: ignore[attr-defined]
+                flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,  # type: ignore[attr-defined]
+                fflags=select.KQ_NOTE_EXIT,  # type: ignore[attr-defined]
             )
             return bool(queue.control([event], 1, timeout_seconds))
         finally:

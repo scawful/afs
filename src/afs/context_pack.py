@@ -1277,7 +1277,7 @@ def _scoped_health_for_pack(
         try:
             index = ContextSQLiteIndex(manager, context_path)
             index_info["total_entries"] = index.count_entries_scoped(scoped)
-        except Exception:
+        except Exception:  # noqa: BLE001 - index health is an optional pack metric
             index_info.pop("total_entries", None)
 
     scoped_diff = json.loads(json.dumps(diff, default=str))

@@ -451,7 +451,7 @@ class HybridSearchEngine:
                         try:
                             raw_vector = embed_fn(chunk_text)
                             vector = _normalize_vector(raw_vector)
-                        except Exception as exc:
+                        except Exception as exc:  # noqa: BLE001 - extension callback boundary
                             result.errors.append(
                                 f"{path} chunk {chunk_index}: embed failed ({exc})"
                             )
@@ -675,7 +675,7 @@ class HybridSearchEngine:
             return [], "fallback", "query embedder was not provided"
         try:
             query_vector = _normalize_vector(query_embed_fn(query))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - extension callback boundary
             return [], "fallback", f"query embedding failed: {exc}"
         if query_vector is None:
             return [], "fallback", "query embedder returned an empty vector"

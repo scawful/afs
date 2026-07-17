@@ -288,13 +288,13 @@ def test_reader_holds_legacy_generation_until_search_completes(tmp_path: Path) -
             search_results.append(
                 search_embedding_index_detailed(output, "old", embed_fn=query_embed, min_score=0.0)
             )
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except BaseException as exc:  # noqa: BLE001  # pragma: no cover - asserted below
             failures.append(exc)
 
     def run_build() -> None:
         try:
             build_embedding_index([source], output, embed_fn=lambda _: [1.0, 0.0])
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except BaseException as exc:  # noqa: BLE001  # pragma: no cover - asserted below
             failures.append(exc)
 
     search_thread = threading.Thread(target=run_search)
@@ -340,7 +340,7 @@ def test_legacy_builders_are_serialized(tmp_path: Path) -> None:
     def run_build() -> None:
         try:
             build_embedding_index([source], output, embed_fn=slow_embed)
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except BaseException as exc:  # noqa: BLE001  # pragma: no cover - asserted below
             failures.append(exc)
 
     threads = [threading.Thread(target=run_build) for _ in range(3)]

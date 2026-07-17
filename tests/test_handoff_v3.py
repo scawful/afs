@@ -53,7 +53,7 @@ def _create_gated_revision(
             revision_id="concurrent-continuation",
             supersedes=parent_id,
         )
-    except Exception as exc:  # pragma: no cover - returned to the parent for assertion
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover - child reports failure
         result.put(("error", type(exc).__name__, str(exc)))
     else:
         result.put(("ok", packet.timestamp))
@@ -67,7 +67,7 @@ def _close_stream(
 ) -> None:
     try:
         closed = HandoffStore(Path(context_path)).close(stream_id, actor="closer")
-    except Exception as exc:  # pragma: no cover - returned to the parent for assertion
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover - child reports failure
         result.put(("error", type(exc).__name__, str(exc)))
     else:
         result.put(("ok", closed))

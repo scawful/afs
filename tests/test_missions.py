@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from afs.atomic_io import atomic_write_text
 from afs.context_layout import scaffold_v2
 from afs.missions import Mission, MissionNotFoundError, MissionStore
 
@@ -134,7 +135,7 @@ def test_mission_survives_manifest_loss(tmp_path: Path) -> None:
     kept = store.create(title="kept")
     raced = store.create(title="raced")
     # Rewrite the manifest to drop the raced mission (as a lost read-modify-write would).
-    store._atomic_write(  # type: ignore[attr-defined]
+    atomic_write_text(
         store._manifest_path,  # type: ignore[attr-defined]
         __import__("json").dumps([kept.mission_id]) + "\n",
     )
