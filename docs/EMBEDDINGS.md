@@ -1,23 +1,38 @@
 # AFS Embeddings
 
-AFS includes a file-based embedding index for semantic search over knowledge
-documents. It supports multiple embedding providers and a keyword-only fallback.
+AFS includes file-based vector collections and a scoped hybrid-search index. It
+supports multiple embedding providers, honest keyword fallback, and local-only
+retrieval when semantic search is not explicitly requested.
 
 ## Quick Start
 
 ```bash
-# Index markdown knowledge docs with Gemini vectors
+# Recommended v2 search: local text retrieval, current project + common
+afs search "how to debug a sprite" --path "$PWD"
+
+# Explicitly permit semantic indexing/querying
+afs search "similar rendering failures" --path "$PWD" --semantic --rebuild
+
+# Lower-level collection API: index markdown knowledge docs with Gemini vectors
 afs embeddings index \
   --knowledge-path ~/.context/knowledge \
   --provider gemini \
   --include "*.md"
 
-# Search
+# Search that collection directly
 afs embeddings search \
   --knowledge-path ~/.context/knowledge \
   --provider gemini \
   "how to debug a sprite"
 ```
+
+`afs search` is the normal version 2 interface. Without `--semantic` it does
+not call a remote embedding provider. With `--semantic`, Gemini is the default
+provider and uses stable `gemini-embedding-2` with 768-dimensional output.
+Use `--all-projects` only when cross-project results are intended.
+
+The `afs embeddings ...` commands remain the lower-level API for managing and
+evaluating a specific collection.
 
 ## Providers
 
@@ -288,3 +303,15 @@ active sources default to 10,000 files and 100 MiB. These are aggregate caps
 across every source registered for the same project (or scope when no project
 id is present). A per-source `max_files` can lower the file cap but cannot raise
 it. Tests use injected local functions and never call Gemini.
+
+User-facing equivalents:
+
+```bash
+afs search "release checklist" --path "$PWD"           # local text
+afs search "parser symbol" --path "$PWD" --mode symbol
+afs search "similar incidents" --path "$PWD" --semantic --rebuild
+```
+
+For MCP clients, `context.search` reads the same v2 index. Its `semantic`
+argument is also false by default and is the explicit query-side embedding
+permission.

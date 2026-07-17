@@ -43,8 +43,10 @@ make check                            # lint, tests, package smoke
 ./scripts/afs guide                   # Friendly workflow menu
 ./scripts/afs init                    # Initialize AFS configuration
 ./scripts/afs context init            # Create .context directory structure
+./scripts/afs start --path "$PWD"      # Start with current project context
+./scripts/afs search "next step" --path "$PWD"  # Local scoped search
 ./scripts/afs status --start-dir "$PWD"  # Show context, mount, and index health
-./scripts/afs doctor                  # Diagnose and auto-fix issues
+./scripts/afs doctor                  # Diagnose issues (`--fix` applies supported repairs)
 ./scripts/afs health                  # Health check
 ```
 
@@ -65,7 +67,10 @@ Current release line: `0.2.x` pre-1.0 core platform.
 
 ## Core Concepts
 
-**Context Mounting** — Structured `.context/` directories with typed mounts (knowledge, skills, scratchpad, memory, tasks) that agents can read and write.
+**Context Namespace** — Version 1 project contexts remain supported. The
+opt-in central version 2 namespace has six human-facing categories: `history`,
+`memory`, `scratchpad`, `knowledge`, `tools`, and `human`. Internal registries,
+messages, and indexes stay under `.afs/`.
 
 **Session System** — Token-budgeted context packs, bootstrap summaries, and client harness for Gemini, Claude, and Codex integrations.
 
@@ -76,8 +81,8 @@ handoffs for work that spans turns or harnesses.
 approval, and activity records for documents, sheets, tickets, planning, and
 other non-technical workflows.
 
-**Hivemind** — Optional inter-agent message bus for tasks that explicitly need
-cross-agent coordination.
+**Messages** — Scoped inter-agent coordination for tasks that need it. The old
+`hivemind` name remains a compatibility surface for one transition cycle.
 
 **Memory Consolidation** — Event history rolled up into durable memory entries, with optional LLM-assisted summarization.
 
@@ -121,7 +126,8 @@ src/afs/
 ├── context_pack.py   # Token-budgeted context packs with caching
 ├── session_*.py      # Session bootstrap, harness, workflows
 ├── memory_*.py       # Memory consolidation and LLM summarization
-├── hivemind.py       # Inter-agent message bus
+├── messages.py       # Scope-aware inter-agent messages
+├── hivemind.py       # Legacy message-bus compatibility
 ├── handoff.py        # Structured session handoff protocol
 ├── embeddings.py     # Embedding index with Gemini provider
 ├── services/         # launchd/systemd service adapters
@@ -137,8 +143,21 @@ src/afs/
 ### Context & Workspace
 
 ```bash
-afs context discover                  # Find .context roots
-afs context mount <path>              # Mount a context directory
+afs start --path "$PWD"                # Build the scoped session-start packet
+afs search "search term" --path "$PWD" # Current project + common, local-first
+afs files list knowledge --path "$PWD" # Friendly alias for `afs fs`
+afs notes draft "Investigation" --body-file notes.md
+afs handoff threads --path "$PWD"
+afs messages list --path "$PWD"
+afs projects current --path "$PWD"
+afs jobs status                       # Friendly alias for `afs agent-jobs`
+afs missions list                     # Friendly alias for `afs mission`
+afs check                             # Friendly alias for `afs health`
+afs repair                            # Friendly alias for `afs doctor`
+afs context discover                  # Find existing context roots
+afs context init --layout-version 2 --path "$PWD" # Fresh central v2 root
+afs layout audit --context-root ~/.context         # Read-only inspection
+afs layout plan --context-root ~/.context          # Manifest only; no apply
 afs status --start-dir "$PWD"         # Show mount status and index health
 afs context query "search term"       # Search the context index
 afs sources list                      # Extension-owned context source providers
@@ -199,7 +218,8 @@ afs work activity list                # Recent work-assistant activity
 ```
 
 Work-assistant state is native to AFS and backed by
-`.context/global/work_assistant.sqlite3`. It creates approval records for
+the legacy `global` storage role (`global/work_assistant.sqlite3` in v1 and
+`.afs/compat/global/work_assistant.sqlite3` in v2). It creates approval records for
 external writes instead of editing shared docs, sheets, tickets, or messages
 directly. Approved actions can be handed to explicit local connector commands
 with `afs work approvals execute`.
@@ -232,9 +252,15 @@ afs profile current                   # Show active profile
 ### Embeddings
 
 ```bash
-afs embeddings index --provider gemini --include "*.md"
-afs embeddings search "how to debug a sprite"
+afs search "how to debug a sprite" --path "$PWD"           # local text retrieval
+afs search "similar rendering failures" --path "$PWD" \
+  --semantic --rebuild                                      # explicit vectors
+afs embeddings search "how to debug a sprite"              # direct legacy collection API
 ```
+
+`afs search` filters to the current project plus `common` before ranking.
+Cross-project search requires `--all-projects`. Semantic retrieval is opt-in;
+Gemini defaults to stable `gemini-embedding-2` with 768-dimensional vectors.
 
 ### Health & Diagnostics
 
@@ -247,8 +273,8 @@ afs services status --system          # Service status
 ## MCP Server
 
 AFS exposes a small recommended MCP surface for normal agent work, with broader
-agent, hivemind, events, embeddings, and training tools available for harnesses
-that explicitly need them.
+agent, legacy-message, events, embeddings, and training tools available for
+harnesses that explicitly need them.
 
 ```bash
 afs mcp serve                         # Start MCP server
@@ -256,12 +282,11 @@ afs mcp serve                         # Start MCP server
 .venv/bin/python -m afs.mcp_server
 ```
 
-Recommended default tools/prompts: `afs.session.bootstrap`, `context.status`,
-`context.query`, `context.read`, `context.write`, `context.list`,
-`context.diff`, `context.index.rebuild`, and `handoff.create`.
-
-Optional categories: `agent.*`, `hivemind.*`, `task.*`, `review.*`,
-`events.*`, `embeddings.*`, and `training.*`.
+Recommended prompts include `afs.session.bootstrap`. The slim tool catalog
+contains scoped context read/query/search, `messages.send/read`,
+`note.create/read/list`, `handoff.create/read/list`, and `skill.match/read`.
+`messages.*`, `note.*`, and the version 3 `handoff.*` tools are the canonical
+new surfaces. `hivemind.*` is full-catalog compatibility only.
 
 See [docs/MCP_SERVER.md](docs/MCP_SERVER.md) for configuration and tool reference.
 
