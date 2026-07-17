@@ -197,6 +197,70 @@ def test_build_session_bootstrap_does_not_mutate_hivemind_or_memory(
     assert not (context_root / "memory" / "entries.jsonl").exists()
 
 
+def test_v2_bootstrap_reads_only_current_and_common_scopes(tmp_path: Path) -> None:
+    from afs.context_layout import scaffold_v2
+    from afs.handoff import HandoffStore
+    from afs.messages import MessageBus
+    from afs.project_registry import ProjectRegistry
+    from afs.scratchpad import ScratchpadStore
+    from afs.session_bootstrap import build_session_bootstrap, render_session_bootstrap
+
+    context_root = tmp_path / ".context"
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    scaffold_v2(context_root)
+    registry = ProjectRegistry(context_root)
+    alpha_record = registry.register(alpha)
+    beta_record = registry.register(beta)
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+    manager = AFSManager(config=config)
+
+    MessageBus(context_root, scope_id=alpha_record.scope_id, config=config).send(
+        "alpha-agent", "status", {"detail": "alpha-visible"}
+    )
+    MessageBus(context_root, scope_id=beta_record.scope_id, config=config).send(
+        "beta-agent", "status", {"detail": "beta-hidden"}
+    )
+    MessageBus(context_root, scope_id="common", config=config).send(
+        "common-agent", "status", {"detail": "common-visible"}
+    )
+    ScratchpadStore(
+        context_root, scope_id=alpha_record.scope_id, config=config
+    ).create(title="Alpha draft", body="alpha")
+    ScratchpadStore(
+        context_root, scope_id=beta_record.scope_id, config=config
+    ).create(title="Beta draft", body="beta")
+    HandoffStore(context_root, scope_id=alpha_record.scope_id, config=config).create_revision(
+        title="Alpha handoff", agent_name="alpha-agent"
+    )
+    HandoffStore(context_root, scope_id=beta_record.scope_id, config=config).create_revision(
+        title="Beta handoff", agent_name="beta-agent"
+    )
+
+    summary = build_session_bootstrap(
+        manager,
+        context_root,
+        project_path=alpha,
+        record_event=False,
+    )
+
+    assert summary["scope_id"] == alpha_record.scope_id
+    assert summary["project"] == "alpha"
+    assert {item["from"] for item in summary["hivemind"]["messages"]} == {
+        "alpha-agent",
+        "common-agent",
+    }
+    assert [item["title"] for item in summary["scratchpad"]["drafts"]] == [
+        "Alpha draft"
+    ]
+    assert summary["handoff"]["title"] == "Alpha handoff"
+    rendered = render_session_bootstrap(summary)
+    assert "## Messages" in rendered
+    assert "Hivemind" not in rendered
+
+
 def test_build_session_bootstrap_ignores_volatile_index_drift(
     tmp_path: Path,
 ) -> None:

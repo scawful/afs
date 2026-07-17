@@ -1051,9 +1051,15 @@ def session_bootstrap_command(args: argparse.Namespace) -> int:
     )
     manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
+    project_path = (
+        Path(args.path).expanduser().resolve()
+        if isinstance(getattr(args, "path", None), str) and args.path.strip()
+        else None
+    )
     summary = build_session_bootstrap(
         manager,
         context_path,
+        project_path=project_path,
         task_limit=args.task_limit,
         message_limit=args.message_limit,
         agent_name=getattr(args, "agent_name", "cli") or "cli",

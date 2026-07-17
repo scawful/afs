@@ -1011,6 +1011,7 @@ def _bootstrap_bundle(
     *,
     client: str,
     write_artifacts: bool,
+    project_path: Path | None = None,
     skills_prompt: str = "",
     skills_top_k: int = 5,
     include_skills: bool = True,
@@ -1018,6 +1019,7 @@ def _bootstrap_bundle(
     summary = build_session_bootstrap(
         manager,
         context_path,
+        project_path=project_path,
         agent_name=f"{client}-client",
         record_event=False,
         skills_prompt=skills_prompt,
@@ -1509,6 +1511,7 @@ def build_client_session_payload(
         resolved_context,
         client=client,
         write_artifacts=write_artifacts,
+        project_path=resolved_cwd,
         skills_prompt=skills_focus if include_skills else "",
         skills_top_k=skills_top_k,
         include_skills=include_skills,

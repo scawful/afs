@@ -491,11 +491,12 @@ def _build_afs_context_text(args: argparse.Namespace, *, token_budget: int) -> s
             args.context_root = None
         if not hasattr(args, "context_dir"):
             args.context_dir = None
-        _project_path, context_path, _root, _dir = resolve_context_paths(args, manager)
+        project_path, context_path, _root, _dir = resolve_context_paths(args, manager)
 
         pack = build_context_pack(
             manager,
             context_path,
+            project_path=project_path,
             model="gemini",
             token_budget=token_budget,
             pack_mode="focused",

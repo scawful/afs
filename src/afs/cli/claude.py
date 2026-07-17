@@ -159,9 +159,13 @@ def claude_context_command(args: argparse.Namespace) -> int:
 
     config_path = Path(args.config) if getattr(args, "config", None) else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
+    project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
 
-    summary = build_session_bootstrap(manager, context_path)
+    summary = build_session_bootstrap(
+        manager,
+        context_path,
+        project_path=project_path,
+    )
     print(render_session_bootstrap(summary))
     return 0
 
@@ -208,7 +212,7 @@ def claude_hook_command(args: argparse.Namespace) -> int:
     try:
         config_path = Path(args.config) if getattr(args, "config", None) else None
         manager = load_manager(config_path)
-        _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+        project_path, context_path, _context_root, _context_dir = resolve_context_paths(
             args, manager
         )
         session_state = None
@@ -222,6 +226,7 @@ def claude_hook_command(args: argparse.Namespace) -> int:
             session_state = build_session_bootstrap(
                 manager,
                 context_path,
+                project_path=project_path,
                 token_budget=0,
                 record_event=False,
                 skills_prompt=skills_prompt,

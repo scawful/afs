@@ -17,10 +17,12 @@ from .context_freshness import (
     save_context_snapshot,
 )
 from .context_index import ContextSQLiteIndex, count_mount_files
+from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_paths import resolve_agent_output_root, resolve_mount_root
 from .manager import AFSManager
 from .models import MountType
 from .profiles import resolve_active_profile
+from .scopes import resolve_scope
 from .skills import (
     MAX_SKILL_BODIES_CHARS,
     MAX_SKILL_BODY_CHARS,
@@ -135,7 +137,7 @@ _SECTION_PRIORITY = [
     "mount_freshness",  # medium: per-mount freshness scores
     "memory",           # medium: durable context
     "agent_runs",       # medium-low: recent recorded agent activity
-    "hivemind",         # low: cross-agent messages
+    "hivemind",         # low: compatibility key for scoped messages
     "agent_reports",    # low: background agent status
 ]
 
@@ -253,6 +255,7 @@ def build_session_bootstrap(
     manager: AFSManager,
     context_path: Path,
     *,
+    project_path: Path | None = None,
     task_limit: int = 10,
     message_limit: int = 10,
     agent_name: str = "cli",
@@ -271,18 +274,30 @@ def build_session_bootstrap(
     always included.
     """
     context_path = context_path.expanduser().resolve()
+    resolved_scope = resolve_scope(context_path, requester_path=project_path)
+    visible_scopes = [resolved_scope.scope_id]
+    if resolved_scope.scope_id != "common":
+        visible_scopes.append("common")
     manager.register_agent(agent_name, context_path)
     context = manager.list_context(context_path=context_path)
     status = collect_context_status(manager, context_path)
     diff = collect_context_diff(manager, context_path)
-    scratchpad = _collect_scratchpad(manager, context_path)
+    scratchpad = _collect_scratchpad(
+        manager,
+        context_path,
+        scope_ids=visible_scopes,
+    )
     tasks = _collect_tasks(context_path, limit=task_limit)
     agent_jobs = _collect_agent_jobs(context_path, limit=task_limit)
     agent_runs = _collect_agent_runs(context_path, limit=task_limit)
     agent_manifest = _collect_agent_manifest()
     work_assistant = _collect_work_assistant(manager, context_path, limit=task_limit)
     missions = _collect_missions(manager, context_path, limit=task_limit)
-    handoff = _collect_latest_handoff(context_path, config=manager.config)
+    handoff = _collect_latest_handoff(
+        context_path,
+        config=manager.config,
+        scope_ids=visible_scopes,
+    )
     skill_focus = skills_prompt.strip()
     skill_prompt_source = "explicit" if skill_focus else "session_state"
     if not skill_focus:
@@ -296,10 +311,15 @@ def build_session_bootstrap(
         top_k=skills_top_k,
         enabled=include_skills,
     )
-    hivemind = _collect_hivemind(context_path, limit=message_limit)
+    messages = _collect_messages(
+        context_path,
+        scope_id=resolved_scope.scope_id,
+        limit=message_limit,
+        config=manager.config,
+    )
     memory = _collect_memory(manager, context_path)
     reports = _collect_agent_reports(manager, context_path)
-    codebase = build_codebase_summary(context_path)
+    codebase = build_codebase_summary(resolved_scope.requester_path or context_path)
 
     # Compute per-mount freshness (filesystem-based, no DB needed)
     decay_hours = manager.config.context_index.decay_hours
@@ -346,18 +366,20 @@ def build_session_bootstrap(
 
     summary = {
         "context_path": str(context_path),
-        "project": context.project_name,
+        "project": resolved_scope.project_name or context.project_name,
+        "scope_id": resolved_scope.scope_id,
+        "project_id": resolved_scope.project_id,
         "project_description": getattr(context.metadata, "description", "") or "",
         "profile": status["profile"],
         "startup_sequence": [
             "Review context health and recent drift first.",
             "Check the agent manifest for shared harness, skill, and MCP routing before editing harness config.",
             "Read scratchpad state and deferred notes before editing.",
-            "Check pending tasks, agent jobs, recent run records, and hivemind messages for handoffs.",
+            "Check pending tasks, agent jobs, recent run records, and scoped messages for handoffs.",
             "Check `afs work` for people, review routes, activity, and pending approval-gated external writes.",
             "Use `afs context overview` / `afs.context.overview` for a fast repo map before deeper grep/query passes.",
             "Use `afs context query` / `context.query` before asking for context that may already be in memory or knowledge.",
-            "Write updates back to scratchpad, tasks, or hivemind before handoff.",
+            "Write updates back to notes, tasks, or scoped messages before handoff.",
         ],
         "status": status,
         "diff": diff,
@@ -370,7 +392,9 @@ def build_session_bootstrap(
         "missions": missions,
         "skills": skills,
         "codebase": codebase,
-        "hivemind": hivemind,
+        # Keep the v1 key for one compatibility cycle. User-facing renderers
+        # call this section Messages.
+        "hivemind": messages,
         "memory": memory,
         "agent_reports": reports,
         "handoff": handoff,
@@ -488,7 +512,7 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
     agent_jobs = summary.get("agent_jobs", {})
     agent_runs = summary.get("agent_runs", {})
     work_assistant = summary.get("work_assistant", {})
-    hivemind = summary["hivemind"]
+    messages = summary["hivemind"]
     memory = summary["memory"]
     reports = summary["agent_reports"]
 
@@ -589,7 +613,18 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
         lines.append("- agent_namespaces:")
         for ns in scratchpad["agent_namespaces"]:
             lines.append(f"  - {ns['agent_name']}: {ns['file_count']} files, {ns['size_bytes']} bytes")
-    if not scratchpad["state_text"] and not scratchpad["deferred_text"] and not scratchpad["other_files"]:
+    if scratchpad.get("drafts"):
+        lines.append("- scoped_drafts:")
+        for draft in scratchpad["drafts"]:
+            lines.append(
+                f"  - {draft['title']} ({draft['artifact_id']}) [{draft['scope_id']}]"
+            )
+    if (
+        not scratchpad["state_text"]
+        and not scratchpad["deferred_text"]
+        and not scratchpad["other_files"]
+        and not scratchpad.get("drafts")
+    ):
         lines.append("- empty")
 
     lines.extend(["", "## Tasks"])
@@ -770,10 +805,10 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
                 f"  - [{item['status']}] {item.get('harness') or '-'} {item['task']} ({item['id']})"
             )
 
-    lines.extend(["", "## Hivemind"])
-    lines.append(f"- recent_messages: {hivemind['recent_count']}")
-    if hivemind["messages"]:
-        for message in hivemind["messages"]:
+    lines.extend(["", "## Messages"])
+    lines.append(f"- recent_messages: {messages['recent_count']}")
+    if messages["messages"]:
+        for message in messages["messages"]:
             to_part = f" -> {message['to']}" if message.get("to") else ""
             lines.append(
                 f"  - {message['timestamp'][:19]} [{message['type']}] {message['from']}{to_part}"
@@ -859,7 +894,12 @@ def write_session_bootstrap_artifacts(
     return payload["artifact_paths"]
 
 
-def _collect_scratchpad(manager: AFSManager, context_path: Path) -> dict[str, Any]:
+def _collect_scratchpad(
+    manager: AFSManager,
+    context_path: Path,
+    *,
+    scope_ids: list[str] | None = None,
+) -> dict[str, Any]:
     scratchpad_root = resolve_mount_root(context_path, MountType.SCRATCHPAD, config=manager.config)
     state_text = _read_text(scratchpad_root / "state.md")
     deferred_text = _read_text(scratchpad_root / "deferred.md")
@@ -902,12 +942,41 @@ def _collect_scratchpad(manager: AFSManager, context_path: Path) -> dict[str, An
         except OSError:
             pass
 
+    scoped_drafts: list[dict[str, Any]] = []
+    try:
+        from .scratchpad import ScratchpadStore
+
+        for scope_id in dict.fromkeys(scope_ids or ["common"]):
+            store = ScratchpadStore(
+                context_path,
+                scope_id=scope_id,
+                config=manager.config,
+            )
+            for draft in store.list(limit=_MAX_LIST_ITEMS):
+                scoped_drafts.append(
+                    {
+                        "artifact_id": draft.metadata.artifact_id,
+                        "title": draft.metadata.title,
+                        "created_at": draft.metadata.created_at,
+                        "scope_id": draft.metadata.scope_id,
+                        "path": str(draft.path),
+                    }
+                )
+        scoped_drafts.sort(
+            key=lambda item: (item["created_at"], item["artifact_id"]),
+            reverse=True,
+        )
+        scoped_drafts = scoped_drafts[:_MAX_LIST_ITEMS]
+    except Exception:
+        scoped_drafts = []
+
     return {
         "path": str(scratchpad_root),
         "state_text": state_text,
         "deferred_text": deferred_text,
         "other_files": other_files,
         "agent_namespaces": agent_namespaces,
+        "drafts": scoped_drafts,
     }
 
 
@@ -1220,11 +1289,22 @@ def _skill_signal(
     return " ".join(parts)[:_MAX_SKILL_SIGNAL_CHARS]
 
 
-def _collect_hivemind(context_path: Path, *, limit: int) -> dict[str, Any]:
+def _collect_messages(
+    context_path: Path,
+    *,
+    scope_id: str,
+    limit: int,
+    config: Any = None,
+) -> dict[str, Any]:
     try:
-        from .hivemind import HivemindBus
+        from .messages import MessageBus
 
-        bus = HivemindBus(context_path)
+        bus = MessageBus(
+            context_path,
+            scope_id=scope_id,
+            config=config,
+            include_legacy=detect_layout_version(context_path) != LAYOUT_VERSION,
+        )
         messages = bus.read(limit=max(1, limit))
     except Exception as exc:
         return {"recent_count": 0, "messages": [], "error": str(exc)}
@@ -1232,6 +1312,16 @@ def _collect_hivemind(context_path: Path, *, limit: int) -> dict[str, Any]:
         "recent_count": len(messages),
         "messages": [message.to_dict() for message in messages],
     }
+
+
+def _collect_hivemind(context_path: Path, *, limit: int) -> dict[str, Any]:
+    """Compatibility wrapper for callers that have not adopted project scopes."""
+
+    return _collect_messages(
+        context_path,
+        scope_id="common",
+        limit=limit,
+    )
 
 
 def _collect_memory(manager: AFSManager, context_path: Path) -> dict[str, Any]:
@@ -1372,13 +1462,27 @@ def _collect_agent_reports(manager: AFSManager, context_path: Path) -> dict[str,
     return {"path": str(output_root), "reports": reports}
 
 
-def _collect_latest_handoff(context_path: Path, *, config: Any = None) -> dict[str, Any]:
+def _collect_latest_handoff(
+    context_path: Path,
+    *,
+    config: Any = None,
+    scope_ids: list[str] | None = None,
+) -> dict[str, Any]:
     """Collect the latest handoff packet if available."""
     try:
         from .handoff import HandoffStore
 
-        store = HandoffStore(context_path, config=config)
-        packet = store.read()
+        packets = []
+        for scope_id in dict.fromkeys(scope_ids or ["common"]):
+            store = HandoffStore(context_path, config=config, scope_id=scope_id)
+            packet = store.read()
+            if packet is not None:
+                packets.append(packet)
+        packet = max(
+            packets,
+            key=lambda item: (item.timestamp, item.revision_id),
+            default=None,
+        )
         if packet is None:
             return {"available": False}
         result = packet.to_dict()
@@ -1397,7 +1501,7 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
     agent_jobs = summary.get("agent_jobs", {})
     agent_runs = summary.get("agent_runs", {})
     work_assistant = summary.get("work_assistant", {})
-    hivemind = summary["hivemind"]
+    messages = summary["hivemind"]
     memory = summary["memory"]
 
     recommendations: list[str] = []
@@ -1455,8 +1559,8 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
             f"matching tone (`{command}`)."
         )
 
-    if hivemind.get("recent_count", 0) > 0:
-        recommendations.append("Review recent hivemind messages for cross-agent handoffs.")
+    if messages.get("recent_count", 0) > 0:
+        recommendations.append("Review recent scoped messages for cross-agent handoffs.")
 
     if memory.get("latest_markdown_path"):
         recommendations.append("Scan the latest durable memory summary before asking for already-known context.")
@@ -1475,7 +1579,9 @@ def _build_recommendations(summary: dict[str, Any]) -> list[str]:
     if handoff.get("available") and handoff.get("blocked"):
         recommendations.append("Review blocked items from last handoff before starting new work.")
 
-    recommendations.append("Prefer scratchpad updates, task queue entries, and hivemind notes for handoff instead of ad hoc chat summaries.")
+    recommendations.append(
+        "Prefer scoped notes, task entries, and messages for handoff instead of ad hoc chat summaries."
+    )
     return recommendations
 
 
