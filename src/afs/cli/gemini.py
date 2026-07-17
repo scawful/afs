@@ -20,7 +20,13 @@ from typing import Any
 from ..config import load_config_model
 from ..context_paths import resolve_mount_root
 from ..core import resolve_context_root
-from ..embeddings import SearchResult, create_embed_fn, search_embedding_index
+from ..embeddings import (
+    DEFAULT_GEMINI_DIMENSION,
+    DEFAULT_GEMINI_MODEL,
+    SearchResult,
+    create_embed_fn,
+    search_embedding_index,
+)
 from ..health.mcp_registration import find_afs_mcp_registrations
 from ..mcp_runtime import build_afs_mcp_entry
 from ..models import MountType
@@ -564,9 +570,10 @@ def _context_search(knowledge_roots: Iterable[Path], args: argparse.Namespace) -
         try:
             embed_fn = create_embed_fn(
                 "gemini",
-                model="gemini-embedding-001",
+                model=DEFAULT_GEMINI_MODEL,
                 api_key=api_key,
                 task_type="RETRIEVAL_QUERY",
+                output_dimensionality=DEFAULT_GEMINI_DIMENSION,
             )
         except (RuntimeError, ValueError):
             pass

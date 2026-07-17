@@ -185,7 +185,7 @@ def test_embedding_hits_respect_never_embed_rules(tmp_path: Path) -> None:
     )
 
     rendered = render_context_pack(pack)
-    assert "Embedding Hits" in rendered
+    assert "Indexed Text Hits" in rendered
     assert "embed-only public marker" in rendered
     assert "embed-only secret marker" not in rendered
     assert "private/secret.md" not in rendered
@@ -221,7 +221,7 @@ def test_embedding_hits_trim_previews_for_tight_packs(tmp_path: Path) -> None:
     )
 
     rendered = render_context_pack(pack)
-    assert "Embedding Hits" in rendered
+    assert "Indexed Text Hits" in rendered
     assert "TAIL_MARKER" not in rendered
     assert pack["estimated_tokens"] <= 1200
 

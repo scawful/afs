@@ -10,11 +10,13 @@ from ..config import load_config_model
 from ..context_paths import resolve_mount_root
 from ..core import resolve_context_root
 from ..embeddings import (
+    DEFAULT_GEMINI_DIMENSION,
+    DEFAULT_GEMINI_MODEL,
     build_embedding_index,
     create_embed_fn,
     evaluate_embedding_index,
     load_embedding_eval_cases,
-    search_embedding_index,
+    search_embedding_index_detailed,
 )
 from ..models import MountType
 from ..sensitivity import matches_path_rules
@@ -70,6 +72,8 @@ def embeddings_index_command(args: argparse.Namespace) -> int:
             "skipped": result.skipped,
             "reused": result.reused,
             "removed": result.removed,
+            "orphans_removed": result.orphans_removed,
+            "semantic_status": result.semantic_status,
             "mode": result.mode,
             "errors": result.errors,
         }
@@ -101,7 +105,7 @@ def embeddings_search_command(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        results = search_embedding_index(
+        response = search_embedding_index_detailed(
             index_root,
             args.query,
             embed_fn=embed_fn,
@@ -116,12 +120,19 @@ def embeddings_search_command(args: argparse.Namespace) -> int:
         payload = {
             "index_root": str(index_root),
             "query": args.query,
-            "results": [result.to_dict() for result in results],
+            "semantic_status": response.semantic_status,
+            "semantic_reason": response.semantic_reason,
+            "results": [result.to_dict() for result in response.results],
         }
         print(json.dumps(payload, indent=2))
         return 0
 
-    for result in results:
+    if response.semantic_status != "ready" and args.provider != "none":
+        print(
+            f"semantic_status: {response.semantic_status}"
+            + (f" ({response.semantic_reason})" if response.semantic_reason else "")
+        )
+    for result in response.results:
         print(f"{result.score:.3f}\t{result.doc_id}\t{result.source_path}")
         if args.preview and result.text_preview:
             print(result.text_preview)
@@ -217,7 +228,7 @@ _PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "ollama": "nomic-embed-text",
     "hf": "nomic-embed-text",
     "openai": "text-embedding-3-small",
-    "gemini": "gemini-embedding-001",
+    "gemini": DEFAULT_GEMINI_MODEL,
 }
 
 
@@ -250,6 +261,7 @@ def _resolve_embed_fn(args: argparse.Namespace, *, mode: str = "index"):
         kwargs["api_key"] = args.openai_api_key
     elif args.provider == "gemini":
         kwargs["api_key"] = args.gemini_api_key
+        kwargs["output_dimensionality"] = DEFAULT_GEMINI_DIMENSION
         # Use asymmetric retrieval: RETRIEVAL_DOCUMENT for indexing,
         # RETRIEVAL_QUERY for search queries.
         task_type = args.gemini_task_type
