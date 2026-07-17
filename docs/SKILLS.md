@@ -122,7 +122,7 @@ with `skill.read`.
 
 ## Bundled Skill Library
 
-Core AFS ships 25 skills. Feature guides map one-to-one onto AFS surfaces:
+Core AFS ships 30 skills. Feature guides map one-to-one onto AFS surfaces:
 
 | Skill | Covers |
 | ----- | ------ |
@@ -149,6 +149,17 @@ Core AFS ships 25 skills. Feature guides map one-to-one onto AFS surfaces:
 Engineering-practice skills apply across repos: `code-review`,
 `implementation-planning`, `software-design`, `cpp-quality`, `python-quality`,
 `typescript-quality`.
+
+Team-collaboration skills cover the quality loop between engineers and
+agents:
+
+| Skill | Covers |
+| ----- | ------ |
+| `triage` | classifying, deduping, and routing failures and findings |
+| `research` | evidence-first investigation with cited sources |
+| `adversarial-verification` | refute-first verification of findings, fixes, and guards |
+| `review-handoff` | team-consumable review packages: verdicts, checklists, validation |
+| `issue-tracking` | tickets vs missions vs tasks; linking work to evidence |
 
 ## Authoring Checklist
 
