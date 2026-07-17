@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from afs.cli import build_parser
+from afs.cli.core import hivemind_list_command, hivemind_reap_command
 from afs.cli.friendly import (
     handoff_create_command,
     handoff_revise_command,
@@ -131,6 +132,38 @@ def test_messages_commands_enforce_current_scope(tmp_path: Path, monkeypatch, ca
 
     assert messages_list_command(args(other, agent=None, type=None, topic=None, limit=10)) == 0
     assert json.loads(capsys.readouterr().out) == []
+
+    legacy_args = argparse.Namespace(
+        config=None,
+        path=str(other),
+        context_root=None,
+        context_dir=None,
+        topic=None,
+        limit=10,
+    )
+    assert hivemind_list_command(legacy_args) == 0
+    legacy_output = capsys.readouterr().out
+    assert "no messages" in legacy_output
+    assert "alpha" not in legacy_output
+
+
+def test_legacy_message_cleanup_requires_explicit_v2_scope(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _root, project, _other = _central(tmp_path, monkeypatch)
+    args = argparse.Namespace(
+        config=None,
+        path=str(project),
+        context_root=None,
+        context_dir=None,
+        max_age_hours=None,
+        dry_run=True,
+        all_projects=False,
+        json=False,
+    )
+
+    assert hivemind_reap_command(args) == 1
+    assert "--all-projects" in capsys.readouterr().out
 
 
 def test_friendly_top_level_parsers_are_discoverable() -> None:

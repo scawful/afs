@@ -829,9 +829,28 @@ def tasks_list_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _compat_message_bus(args: argparse.Namespace, manager, *, all_projects: bool = False):
+    """Build a scope-aware message view for the deprecated CLI surface."""
+    from ..context_layout import LAYOUT_VERSION, detect_layout_version
+    from ..messages import MessageBus
+    from ..scopes import resolve_scope
+
+    project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+        args, manager
+    )
+    scoped = resolve_scope(context_path, requester_path=project_path)
+    bus = MessageBus(
+        context_path,
+        scope_id=scoped.scope_id,
+        config=manager.config,
+        all_projects=all_projects,
+        include_legacy=detect_layout_version(context_path) != LAYOUT_VERSION,
+    )
+    return bus, context_path
+
+
 def hivemind_list_command(args: argparse.Namespace) -> int:
-    """List recent hivemind messages."""
-    from ..hivemind import HivemindBus
+    """List scoped messages through the deprecated command spelling."""
 
     config_path = (
         Path(args.config).expanduser().resolve()
@@ -839,13 +858,12 @@ def hivemind_list_command(args: argparse.Namespace) -> int:
         else None
     )
     manager = load_manager(config_path)
-    context_path = _resolve_command_context(args)
-    bus = HivemindBus(context_path, config=manager.config)
+    bus, _context_path = _compat_message_bus(args, manager)
     topic = getattr(args, "topic", None)
     messages = bus.read(limit=args.limit if hasattr(args, "limit") else 20, topic=topic)
     if not messages:
         print("no messages")
-        print(_hint("agents communicate via: hivemind.send / hivemind.read"))
+        print(_hint("preferred command: afs messages list/send"))
         print(_hint("or shell: afs-say my-agent finding key=value"))
         return 0
     for msg in messages:
@@ -860,7 +878,6 @@ def hivemind_list_command(args: argparse.Namespace) -> int:
 
 def hivemind_subscribe_command(args: argparse.Namespace) -> int:
     """Subscribe an agent to topics."""
-    from ..hivemind import HivemindBus
 
     config_path = (
         Path(args.config).expanduser().resolve()
@@ -868,8 +885,7 @@ def hivemind_subscribe_command(args: argparse.Namespace) -> int:
         else None
     )
     manager = load_manager(config_path)
-    context_path = _resolve_command_context(args)
-    bus = HivemindBus(context_path, config=manager.config)
+    bus, _context_path = _compat_message_bus(args, manager)
     topics = [t.strip() for t in args.topics.split(",") if t.strip()]
     if not topics:
         print("no topics specified")
@@ -881,7 +897,6 @@ def hivemind_subscribe_command(args: argparse.Namespace) -> int:
 
 def hivemind_unsubscribe_command(args: argparse.Namespace) -> int:
     """Unsubscribe an agent from topics."""
-    from ..hivemind import HivemindBus
 
     config_path = (
         Path(args.config).expanduser().resolve()
@@ -889,8 +904,7 @@ def hivemind_unsubscribe_command(args: argparse.Namespace) -> int:
         else None
     )
     manager = load_manager(config_path)
-    context_path = _resolve_command_context(args)
-    bus = HivemindBus(context_path, config=manager.config)
+    bus, _context_path = _compat_message_bus(args, manager)
     topics = [t.strip() for t in args.topics.split(",") if t.strip()]
     if not topics:
         print("no topics specified")
@@ -902,8 +916,7 @@ def hivemind_unsubscribe_command(args: argparse.Namespace) -> int:
 
 
 def hivemind_reap_command(args: argparse.Namespace) -> int:
-    """Reap expired or stale hivemind messages."""
-    from ..hivemind import HivemindBus
+    """Reap expired messages through the deprecated command spelling."""
 
     config_path = (
         Path(args.config).expanduser().resolve()
@@ -911,8 +924,14 @@ def hivemind_reap_command(args: argparse.Namespace) -> int:
         else None
     )
     manager = load_manager(config_path)
-    context_path = _resolve_command_context(args)
-    bus = HivemindBus(context_path, config=manager.config)
+    bus, context_path = _compat_message_bus(args, manager, all_projects=True)
+    from ..context_layout import LAYOUT_VERSION, detect_layout_version
+
+    if detect_layout_version(context_path) == LAYOUT_VERSION and not bool(
+        getattr(args, "all_projects", False)
+    ):
+        print("message cleanup is queue-wide; pass --all-projects (preferred: afs messages clean)")
+        return 1
     summary = bus.reap(
         max_age_hours=getattr(args, "max_age_hours", None),
         dry_run=bool(getattr(args, "dry_run", False)),
@@ -2612,7 +2631,10 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     session_replay_list.set_defaults(func=session_replay_list_command)
 
     # hivemind
-    hivemind_parser = subparsers.add_parser("hivemind", help="Inter-agent message bus.")
+    hivemind_parser = subparsers.add_parser(
+        "hivemind",
+        help="Deprecated compatibility spelling; prefer `afs messages`.",
+    )
     hivemind_sub = hivemind_parser.add_subparsers(dest="hivemind_command")
     hivemind_ls = hivemind_sub.add_parser("list", help="List recent messages.")
     add_context_args(hivemind_ls)
@@ -2640,6 +2662,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     add_context_args(hivemind_reap_cmd)
     hivemind_reap_cmd.add_argument("--max-age-hours", type=int, help="Override retention window.")
     hivemind_reap_cmd.add_argument("--dry-run", action="store_true", help="Report removals without deleting.")
+    hivemind_reap_cmd.add_argument(
+        "--all-projects",
+        action="store_true",
+        help="Confirm queue-wide cleanup for central context layout v2.",
+    )
     hivemind_reap_cmd.add_argument("--json", action="store_true", help="Output JSON.")
     hivemind_reap_cmd.set_defaults(func=hivemind_reap_command)
 
