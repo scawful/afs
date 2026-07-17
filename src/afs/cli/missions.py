@@ -177,6 +177,7 @@ def mission_update_command(args: argparse.Namespace) -> int:
     try:
         mission = store.update(
             args.mission_id,
+            title=getattr(args, "title", None),
             status=getattr(args, "status", None),
             summary=getattr(args, "summary", None),
             owner=getattr(args, "owner", None),
@@ -252,6 +253,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     update_parser = mission_sub.add_parser("update", help="Update a mission.")
     _add_context_args(update_parser)
     update_parser.add_argument("mission_id", help="Mission id.")
+    update_parser.add_argument("--title", help="Replace the mission title.")
     update_parser.add_argument(
         "--status", help="New status (active, blocked, done, abandoned)."
     )
