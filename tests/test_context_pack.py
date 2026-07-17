@@ -38,6 +38,162 @@ def _section_bodies(pack: dict) -> str:
     return "\n".join(section["body"] for section in pack["sections"])
 
 
+def test_v2_pack_isolates_project_content_artifacts_and_caches(tmp_path: Path) -> None:
+    from afs.context_layout import scaffold_v2
+    from afs.handoff import HandoffStore
+    from afs.hybrid_search import HybridSearchEngine, HybridSource
+    from afs.messages import MessageBus
+    from afs.project_registry import ProjectRegistry
+    from afs.schema import SessionPackCacheConfig
+    from afs.scratchpad import ScratchpadStore
+
+    context_root = tmp_path / ".context"
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    scaffold_v2(context_root)
+    registry = ProjectRegistry(context_root)
+    alpha_record = registry.register(alpha)
+    beta_record = registry.register(beta)
+    config = AFSConfig(
+        general=GeneralConfig(context_root=context_root),
+        session_pack_cache=SessionPackCacheConfig(cache_dir=tmp_path / "pack-cache"),
+    )
+    manager = AFSManager(config=config)
+
+    for scope_id, marker in (
+        ("common", "common-visible-marker"),
+        (alpha_record.scope_id, "alpha-visible-marker"),
+        (beta_record.scope_id, "beta-private-marker"),
+    ):
+        scope_dir = (
+            Path("common")
+            if scope_id == "common"
+            else Path("projects") / scope_id.removeprefix("project:")
+        )
+        knowledge = context_root / "knowledge" / scope_dir
+        knowledge.mkdir(parents=True)
+        (knowledge / "scope.md").write_text(
+            f"shared-query {marker}",
+            encoding="utf-8",
+        )
+
+    ScratchpadStore(
+        context_root,
+        scope_id=alpha_record.scope_id,
+        config=config,
+    ).create(title="Alpha draft", body="alpha-visible-marker")
+    ScratchpadStore(
+        context_root,
+        scope_id=beta_record.scope_id,
+        config=config,
+    ).create(title="Beta draft", body="beta-private-marker")
+    HandoffStore(
+        context_root,
+        scope_id=alpha_record.scope_id,
+        config=config,
+    ).create_revision(title="Alpha handoff", agent_name="alpha")
+    HandoffStore(
+        context_root,
+        scope_id=beta_record.scope_id,
+        config=config,
+    ).create_revision(title="Beta handoff", agent_name="beta")
+    MessageBus(
+        context_root,
+        scope_id=alpha_record.scope_id,
+        config=config,
+    ).send("alpha", "status", {"marker": "alpha-visible-marker"})
+    MessageBus(
+        context_root,
+        scope_id=beta_record.scope_id,
+        config=config,
+    ).send("beta", "status", {"marker": "beta-private-marker"})
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE],
+        include_content=True,
+    )
+    HybridSearchEngine(context_root / ".afs" / "search").build(
+        [
+            HybridSource(
+                context_root / "knowledge" / "common",
+                scope_id="common",
+            ),
+            HybridSource(
+                context_root / "knowledge" / "projects" / alpha_record.project_id,
+                scope_id=alpha_record.scope_id,
+                project_id=alpha_record.project_id,
+            ),
+            HybridSource(
+                context_root / "knowledge" / "projects" / beta_record.project_id,
+                scope_id=beta_record.scope_id,
+                project_id=beta_record.project_id,
+            ),
+        ]
+    )
+
+    kwargs = {
+        "query": "shared-query",
+        "task": "Review the scoped context.",
+        "model": "codex",
+        "pack_mode": "full_slice",
+        "token_budget": 4000,
+        "include_content": True,
+    }
+    alpha_pack = build_context_pack(
+        manager,
+        context_root,
+        project_path=alpha,
+        **kwargs,
+    )
+    alpha_text = json.dumps(alpha_pack)
+    assert alpha_pack["scope_id"] == alpha_record.scope_id
+    assert "alpha-visible-marker" in alpha_text
+    assert "common-visible-marker" in alpha_text
+    assert "beta-private-marker" not in alpha_text
+    assert "Beta draft" not in alpha_text
+    assert "Beta handoff" not in alpha_text
+    assert "Recent Messages" in {section["title"] for section in alpha_pack["sections"]}
+    hybrid_sources = {
+        source
+        for section in alpha_pack["sections"]
+        if section["title"] == "Indexed Text Hits"
+        for source in section["sources"]
+    }
+    assert hybrid_sources
+    assert all(beta_record.project_id not in source for source in hybrid_sources)
+
+    alpha_artifacts = write_context_pack_artifacts(manager, context_root, alpha_pack)
+    beta_pack = build_context_pack(
+        manager,
+        context_root,
+        project_path=beta,
+        **kwargs,
+    )
+    beta_artifacts = write_context_pack_artifacts(manager, context_root, beta_pack)
+    assert alpha_pack["cache"]["key"] != beta_pack["cache"]["key"]
+    assert alpha_artifacts["json"] != beta_artifacts["json"]
+    assert alpha_record.project_id in alpha_artifacts["json"]
+    assert beta_record.project_id in beta_artifacts["json"]
+    (
+        context_root
+        / "knowledge"
+        / "projects"
+        / beta_record.project_id
+        / "scope.md"
+    ).write_text("shared-query beta-changed-marker", encoding="utf-8")
+
+    cached_alpha = build_context_pack(
+        manager,
+        context_root,
+        project_path=alpha,
+        **kwargs,
+    )
+    assert cached_alpha["cache"]["hit"] is True
+    assert cached_alpha["scope_id"] == alpha_record.scope_id
+    assert "beta-private-marker" not in json.dumps(cached_alpha)
+
+
 def test_build_context_pack_respects_sensitivity_and_budget(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     context_root = manager.config.general.context_root
