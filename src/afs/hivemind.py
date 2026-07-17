@@ -40,6 +40,7 @@ class HivemindMessage:
     timestamp: str
     topic: str | None = None
     expires_at: str | None = None
+    scope_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -54,6 +55,8 @@ class HivemindMessage:
             d["topic"] = self.topic
         if self.expires_at is not None:
             d["expires_at"] = self.expires_at
+        if self.scope_id:
+            d["scope_id"] = self.scope_id
         return d
 
     @classmethod
@@ -67,6 +70,7 @@ class HivemindMessage:
             timestamp=str(data.get("timestamp", "")),
             topic=data.get("topic"),
             expires_at=data.get("expires_at"),
+            scope_id=str(data.get("scope_id", "") or ""),
         )
 
 
@@ -128,6 +132,7 @@ class HivemindBus:
         to: str | None = None,
         topic: str | None = None,
         ttl_hours: int | None = None,
+        scope_id: str = "",
     ) -> HivemindMessage:
         now = datetime.now(timezone.utc)
         msg_id = f"{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
@@ -150,6 +155,7 @@ class HivemindBus:
             timestamp=now.isoformat(),
             topic=topic,
             expires_at=expires_at,
+            scope_id=scope_id.strip(),
         )
 
         agent_dir = self._root / from_agent
@@ -169,6 +175,7 @@ class HivemindBus:
                     "topic": topic,
                     "ttl_hours": effective_ttl,
                     "expires_at": expires_at,
+                    "scope_id": message.scope_id,
                 },
                 context_root=self._context_path,
             )
