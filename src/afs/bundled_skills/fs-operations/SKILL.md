@@ -14,21 +14,21 @@ requires:
 
 # Filesystem Operations
 
-Read, write, and list files across AFS context mounts.
+Read, write, and list files in the current project scope.
 
 For MCP clients, prefer `context.read`, `context.write`, `context.list`,
 `context.move`, and `context.delete`. The older `fs.*` tool names remain
-compatibility aliases. The CLI still uses `afs fs ...`.
+compatibility aliases. Prefer the plain `afs files ...` CLI spelling.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `afs fs list <mount>` | List files in a mount |
-| `afs fs read <mount> <path>` | Read file from mount |
-| `afs fs write <mount> <path> --content ...` | Write to mount |
+| `afs files list <category>` | List files in the current project scope |
+| `afs files read <category> <path>` | Read a scoped file |
+| `afs files write <category> <path> --content ...` | Write a scoped file |
 
-## Mount Types
+## Version 2 categories
 
 | Mount | Purpose | Policy |
 |-------|---------|--------|
@@ -37,23 +37,19 @@ compatibility aliases. The CLI still uses `afs fs ...`.
 | `scratchpad` | Working scratch space | writable |
 | `tools` | Executable tools/scripts | executable |
 | `history` | CLI invocation logs | read-only |
-| `hivemind` | Inter-agent messages | writable |
-| `items` | Task queue items | writable |
-| `global` | Shared state, index DB | writable |
-| `monorepo` | Multi-project links | read-only |
+| `human` | Human intent and decisions | policy-controlled |
+
+Internal queues, indexes, and compatibility mounts live below `.afs`; use
+`afs messages`, `afs jobs`, and other domain commands instead of raw file access.
 
 ## MCP Tools
 
-- `context.list` — list files: `{"path": "/path/to/project/.context/knowledge", "max_depth": 2}`
-- `context.read` — read file: `{"path": "/path/to/project/.context/memory/notes.md"}`
-- `context.write` — write file: `{"path": "/path/to/project/.context/scratchpad/draft.md", "content": "...", "mkdirs": true}`
-- `context.delete` — delete file: `{"path": "/path/to/project/.context/scratchpad/old.md"}`
-- `context.move` — move file: `{"source": "/path/to/project/.context/scratchpad/a.md", "destination": "/path/to/project/.context/scratchpad/b.md"}`
+- Pass both the central `context_path` and registered `project_path`.
+- Keep category-relative paths such as `scratchpad/draft.md`; AFS resolves the
+  project scope and rejects absolute paths belonging to another project.
 
 ## Tips
 
-- `--relative` flag on `fs list` scopes to a subdirectory
-- All mounts are readable; only scratchpad/hivemind/items/global are writable
+- `--relative` on `files list` scopes to a subdirectory
+- Use `--common` only for intentionally shared category files
 - Sandbox agents can only write to their `allowed_mounts`
-- For MCP file tools, prefer absolute paths under the repo-local `.context`
-  root instead of mount-relative JSON arguments
