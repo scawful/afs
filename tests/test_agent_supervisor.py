@@ -25,12 +25,16 @@ from afs.agents.supervisor import (
     RunningAgent,
     _watch_signature,
 )
+from afs.context_layout import scaffold_v2
 from afs.event_log import read_agent_events
+from afs.project_registry import ProjectRegistry
 from afs.schema import (
     AFSConfig,
     AgentConfig,
     DirectoryConfig,
     GeneralConfig,
+    ProfileConfig,
+    ProfilesConfig,
     default_directory_configs,
 )
 
@@ -234,6 +238,92 @@ def test_supervisor_logs_lifecycle_events(tmp_path: Path, monkeypatch) -> None:
     assert any(event["op"] == "spawned" for event in events)
     spawned = next(event for event in events if event["op"] == "spawned")
     assert spawned["metadata"]["session_id"] == "sess-456"
+    assert spawned["metadata"]["scope_attribution"] == "unregistered"
+
+
+def test_supervisor_lifecycle_uses_only_explicit_configured_scope(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context_root = tmp_path / ".context"
+    project = tmp_path / "project"
+    unknown = tmp_path / "unknown"
+    project.mkdir()
+    unknown.mkdir()
+    scaffold_v2(context_root)
+    project_record = ProjectRegistry(context_root).register(project)
+    project_agent = AgentConfig(
+        name="project-reflect",
+        module="afs.agents.insights",
+        extra={"project_path": str(project)},
+    )
+    common_agent = AgentConfig(
+        name="common-reflect",
+        module="afs.agents.insights",
+        extra={"common": True},
+    )
+    unknown_agent = AgentConfig(
+        name="unknown-reflect",
+        module="afs.agents.insights",
+        extra={"project_path": str(unknown)},
+    )
+    unscoped_agent = AgentConfig(
+        name="unscoped",
+        module="afs.agents.context_warm",
+    )
+    config = AFSConfig(
+        general=GeneralConfig(context_root=context_root),
+        profiles=ProfilesConfig(
+            active_profile="work",
+            profiles={
+                "work": ProfileConfig(
+                    agent_configs=[
+                        project_agent,
+                        common_agent,
+                        unknown_agent,
+                        unscoped_agent,
+                    ]
+                )
+            },
+        ),
+    )
+    supervisor = AgentSupervisor(
+        state_dir=tmp_path / "state",
+        config=config,
+    )
+    captured: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        "afs.history.log_agent_lifecycle",
+        lambda _name, _op, **kwargs: captured.append(
+            dict(kwargs.get("metadata") or {})
+        ),
+    )
+    for agent in (
+        project_agent,
+        common_agent,
+        unknown_agent,
+        unscoped_agent,
+    ):
+        supervisor._log_lifecycle(
+            agent.name,
+            "failed",
+            metadata={
+                "status": "failed",
+                "scope_id": "forged",
+                "scope_attribution": "registry",
+            },
+        )
+
+    assert captured[0]["scope_attribution"] == "registry"
+    assert captured[0]["scope_id"] == project_record.scope_id
+    assert captured[0]["project_id"] == project_record.project_id
+    assert captured[1]["scope_attribution"] == "common"
+    assert captured[1]["scope_id"] == "common"
+    assert captured[2]["scope_attribution"] == "unregistered"
+    assert "scope_id" not in captured[2]
+    assert captured[3]["scope_attribution"] == "unregistered"
+    assert "scope_id" not in captured[3]
 
 
 def test_supervisor_spawn_and_stop(tmp_path: Path, monkeypatch) -> None:

@@ -45,6 +45,8 @@ make check                            # lint, tests, package smoke
 ./scripts/afs context init --layout-version 2 --path "$PWD"  # Create/register v2
 ./scripts/afs start --path "$PWD"      # Start with current project context
 ./scripts/afs search "next step" --path "$PWD"  # Local scoped search
+./scripts/afs insights research "retry policy" --path "$PWD"  # Refresh and search locally
+./scripts/afs insights reflect --path "$PWD"  # Create reviewable learning candidates
 ./scripts/afs status --start-dir "$PWD"  # Show context, mount, and index health
 ./scripts/afs doctor                  # Diagnose issues (`--fix` applies supported repairs)
 ./scripts/afs health                  # Health check
@@ -90,6 +92,12 @@ other non-technical workflows.
 
 **Context Sources** — Provider-neutral adapters for tasks, tickets, reviews, docs, messages, tests, hooks, and traces. Core AFS owns the normalized records; concrete source connectors live in extensions.
 
+**Insights** — Scoped `research` plus deterministic, payload-free reflection
+of repeated failures. Successful completions and general activity are ignored;
+reflection produces pending candidates for human review and never promotes
+them automatically. Optional scheduled research/reflection agents are off by
+default and write only to scratchpad.
+
 **Optimization Evidence** — Versioned, language-neutral evaluation and policy
 records plus a pure decision gate for bounded hill-climbing experiments. The
 gate can recommend human review but cannot execute or promote a candidate.
@@ -104,6 +112,7 @@ security sandbox.
 - [Executive Summary](docs/EXECUTIVE_SUMMARY.md)
 - [Lineage](docs/LINEAGE.md)
 - [Central Context Layout v2](docs/CONTEXT_LAYOUT_V2.md)
+- [Insights](docs/INSIGHTS.md)
 - [Setup Guide](docs/SETUP_GUIDE.md)
 - [Extension Authoring](docs/EXTENSION_AUTHORING.md)
 - [Autonomous Optimization Protocol](docs/OPTIMIZATION_PROTOCOL.md)
@@ -145,6 +154,8 @@ src/afs/
 ```bash
 afs start --path "$PWD"                # Build the scoped session-start packet
 afs search "search term" --path "$PWD" # Current project + common, local-first
+afs insights research "question" --path "$PWD" # Refreshed local research
+afs insights reflect --path "$PWD"     # Deterministic candidate generation
 afs files list knowledge --path "$PWD" # Friendly alias for `afs fs`
 afs notes draft "Investigation" --body-file notes.md
 afs handoff threads --path "$PWD"
@@ -170,6 +181,10 @@ afs session pack "query" --semantic   # Explicitly permit remote query embedding
 Context-source sync is v1-only today. Version 2 keeps provider list/status
 read-only and rejects sync before provider invocation until scoped ingestion
 can target `knowledge/projects/<project-id>/` or explicit `knowledge/common/`.
+
+Insights research is scoped to the current project plus `common`; semantic
+retrieval and internet providers are separate, explicit opt-ins. See
+[Insights](docs/INSIGHTS.md) for data-movement and human-review boundaries.
 
 ### Execution & Verification
 

@@ -1344,6 +1344,62 @@ def _emit_session_event(
         "summary": summary[:160] if summary else "",
         "prompt_preview": prompt[:180] if prompt else "",
     }
+    try:
+        from ..context_layout import LAYOUT_VERSION, detect_layout_version
+        from ..models import ContextCategory
+        from ..project_registry import ProjectRegistry
+        from ..scopes import resolve_scope
+
+        if (
+            detect_layout_version(context_path) == LAYOUT_VERSION
+            and (cwd == context_path or cwd.is_relative_to(context_path))
+        ):
+            relative = cwd.relative_to(context_path)
+            category_names = {category.value for category in ContextCategory}
+            if relative == Path(".") or (
+                len(relative.parts) >= 2
+                and relative.parts[0] in category_names
+                and relative.parts[1] == "common"
+            ):
+                scoped = resolve_scope(context_path, requester_path=cwd, common=True)
+            elif (
+                len(relative.parts) >= 3
+                and relative.parts[0] in category_names
+                and relative.parts[1] == "projects"
+            ):
+                project_id = relative.parts[2]
+                record = next(
+                    (
+                        item
+                        for item in ProjectRegistry(context_path).all_records()
+                        if item.project_id == project_id
+                    ),
+                    None,
+                )
+                if record is None:
+                    raise PermissionError(
+                        f"context project scope is not registered: {project_id}"
+                    )
+                metadata["scope_id"] = record.scope_id
+                metadata["project_id"] = record.project_id
+                metadata["scope_attribution"] = "registry"
+                scoped = None
+            else:
+                raise PermissionError("context-internal path has no explicit data scope")
+        else:
+            scoped = resolve_scope(context_path, requester_path=cwd)
+    except (OSError, PermissionError, ValueError):
+        # Event logging must remain best-effort, but unattributed v2 events
+        # must never be guessed into a project by later reflection jobs.
+        metadata["scope_attribution"] = "unregistered"
+    else:
+        if scoped is not None:
+            metadata["scope_id"] = scoped.scope_id
+            metadata["scope_attribution"] = (
+                "registry" if scoped.project_id else "common"
+            )
+            if scoped.project_id:
+                metadata["project_id"] = scoped.project_id
     if activity_snapshot:
         metadata.update(
             {

@@ -64,6 +64,7 @@ class ScratchpadStore:
         author_kind: str = "human",
         sensitivity: str = "internal",
         provenance: Mapping[str, Any] | None = None,
+        artifact_id: str | None = None,
     ) -> MarkdownArtifact:
         return self._active.create(
             kind="draft",
@@ -76,6 +77,7 @@ class ScratchpadStore:
             author_kind=author_kind,
             sensitivity=sensitivity,
             provenance=provenance or {"source": "afs.notes.draft"},
+            artifact_id=artifact_id,
         )
 
     def list(self, *, archived: bool = False, limit: int = 100) -> list[MarkdownArtifact]:
@@ -208,4 +210,19 @@ def _rename_between_directories(
     os.replace(source_path, destination_path)
 
 
-__all__ = ["ScratchpadStore"]
+def archive_markdown_artifact(
+    source: MarkdownArtifactCodec,
+    destination: MarkdownArtifactCodec,
+    filename: str,
+) -> None:
+    """Move one immutable artifact between two pinned collection roots.
+
+    Lifecycle stores use this narrow public helper instead of reimplementing
+    descriptor-relative rename and containment checks.  Callers must resolve
+    the artifact through ``source`` before invoking it.
+    """
+
+    _rename_between_directories(source, destination, filename)
+
+
+__all__ = ["ScratchpadStore", "archive_markdown_artifact"]

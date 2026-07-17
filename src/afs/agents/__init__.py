@@ -41,6 +41,8 @@ CORE_AGENT_MODULES = (
     "afs.agents.history_memory",
     "afs.agents.hivemind_capture",
     "afs.agents.index_rebuild",
+    "afs.agents.insights",
+    "afs.agents.research",
     "afs.agents.journal_agent",
     "afs.agents.mission_runner",
     "afs.agents.scribe_draft",
