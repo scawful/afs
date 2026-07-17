@@ -6,6 +6,16 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 
 ### Added
 
+- An opt-in version 2 central context layout with six human-facing categories,
+  stable project/common scopes, a project registry, and audit-only migration
+  planning. Version 1 discovery and compatibility aliases remain available;
+  this release does not apply a live filesystem migration.
+- Plain-language, scope-aware CLI and MCP workflows for starting sessions,
+  searching and listing files, durable notes, immutable handoff revisions,
+  messages, projects, jobs, missions, health checks, and repair guidance.
+- Local-first scoped hybrid search with explicit semantic opt-in, atomic index
+  publication, consent-aware project coverage, and stable
+  `gemini-embedding-2` defaults at 768 dimensions.
 - Engagement primitives that keep human judgment in the loop: approvals
   approve/reject on both surfaces now require a `--because` rationale and an
   interactive human confirmation (headless approval fails closed), with
