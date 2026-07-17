@@ -216,6 +216,15 @@ no_implicit_optional = true
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# numpy >=2.4 ships stubs using PEP 695 syntax that cannot parse under
+# python_version = "3.10"; skip them so results don't depend on which
+# numpy the resolver picks per Python version. numpy becomes Any, like
+# other unfollowed third-party libraries.
+module = "numpy.*"
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = "transformers.*"
 ignore_missing_imports = true
 
