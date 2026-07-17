@@ -17,6 +17,7 @@ from afs.cli.friendly import (
     notes_list_command,
     notes_promote_command,
     projects_current_command,
+    projects_import_command,
     projects_list_command,
 )
 from afs.context_layout import scaffold_v2
@@ -58,6 +59,39 @@ def test_projects_current_and_list_use_central_registry(
     listing = argparse.Namespace(config=None, context_root=None, json=True)
     assert projects_list_command(listing) == 0
     assert len(json.loads(capsys.readouterr().out)) == 2
+
+
+def test_projects_import_is_dry_run_until_apply(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    root, _project, _other = _central(tmp_path, monkeypatch)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (tmp_path / "WORKSPACE.toml").write_text(
+        '[[item]]\npath = "candidate"\ndescription = "new project"\n',
+        encoding="utf-8",
+    )
+
+    args = argparse.Namespace(
+        workspace_root=str(tmp_path),
+        config=None,
+        context_root=str(root),
+        no_local=False,
+        apply=False,
+        json=True,
+    )
+    assert projects_import_command(args) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["applied"] is False
+    assert preview["candidates"] == [str(candidate.resolve())]
+    assert ProjectRegistry(root).resolve(candidate) is None
+
+    args.apply = True
+    assert projects_import_command(args) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["applied"] is True
+    assert len(applied["registered"]) == 1
+    assert ProjectRegistry(root).resolve(candidate) is not None
 
 
 def test_messages_commands_enforce_current_scope(

@@ -107,6 +107,49 @@ def projects_register_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def projects_import_command(args: argparse.Namespace) -> int:
+    from ..workspace_sync import load_workspace_entries
+
+    registry = _registry_from_args(args)
+    workspace_root = Path(args.workspace_root).expanduser().resolve()
+    entries = load_workspace_entries(
+        workspace_root,
+        include_sections=False,
+        include_items=True,
+        include_local=not args.no_local,
+    )
+    existing_paths = {
+        str(root.resolve())
+        for record in registry.all_records()
+        for root in record.roots()
+    }
+    candidates = [
+        entry for entry in entries if str(entry.path.expanduser().resolve()) not in existing_paths
+    ]
+    registered: list[dict[str, Any]] = []
+    if args.apply:
+        for entry in candidates:
+            record = registry.register(entry.path, name=entry.path.name)
+            registered.append(record.to_dict())
+    payload = {
+        "workspace_root": str(workspace_root),
+        "applied": bool(args.apply),
+        "candidate_count": len(candidates),
+        "candidates": [str(entry.path.expanduser().resolve()) for entry in candidates],
+        "registered": registered,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"mode: {'applied' if args.apply else 'dry-run'}")
+        print(f"candidate_count: {len(candidates)}")
+        for entry in candidates:
+            print(f"  - {entry.path.expanduser().resolve()}")
+        if candidates and not args.apply:
+            print("run again with --apply to register these project paths")
+    return 0
+
+
 def _artifact_context(
     args: argparse.Namespace,
 ) -> tuple[Any, Path, Path, str, str]:
@@ -552,6 +595,29 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     register.add_argument("--context-root")
     register.add_argument("--json", action="store_true")
     register.set_defaults(func=projects_register_command)
+    project_import = project_commands.add_parser(
+        "import",
+        help="Preview or import project items from a workspace catalog.",
+    )
+    project_import.add_argument(
+        "--workspace-root",
+        default=str(Path.home() / "src"),
+        help="Directory containing WORKSPACE.toml (default: ~/src).",
+    )
+    project_import.add_argument("--config")
+    project_import.add_argument("--context-root")
+    project_import.add_argument(
+        "--no-local",
+        action="store_true",
+        help="Ignore WORKSPACE.local.toml entries.",
+    )
+    project_import.add_argument(
+        "--apply",
+        action="store_true",
+        help="Register the previewed project paths; default is dry-run.",
+    )
+    project_import.add_argument("--json", action="store_true")
+    project_import.set_defaults(func=projects_import_command)
 
     notes = subparsers.add_parser(
         "notes",
