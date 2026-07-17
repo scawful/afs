@@ -43,9 +43,9 @@ without a broker capability is retained only as `acceptance_suggestion`.
 
 Statuses: `active` -> `blocked` | `done` | `abandoned`.
 
-Update flags: `--status`, `--summary`, `--owner`, `--next-step` (repeatable,
-replaces the list), `--blocker`, `--note`, `--tag`, `--link-session`,
-`--link-handoff`, `--actor`.
+Update flags: `--title`, `--status`, `--summary`, `--owner`, `--next-step`
+(repeatable, replaces the list), `--blocker`, `--note`, `--tag`,
+`--link-session`, `--link-handoff`, `--actor`.
 
 ## Conventions
 
