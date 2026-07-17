@@ -38,6 +38,7 @@ nav:
   - Guides:
     - Agent Surfaces: AGENT_SURFACES.md
     - Architecture: ARCHITECTURE.md
+    - Engineering Practices: ENGINEERING_PRACTICES.md
     - Profiles and Hooks: PROFILES.md
     - Skills: SKILLS.md
     - Extensions: PLUGINS.md

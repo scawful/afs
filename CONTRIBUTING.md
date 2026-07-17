@@ -54,10 +54,17 @@ Use an extension repo for:
 
 ## Development checklist
 
+Code standards live in [docs/ENGINEERING_PRACTICES.md](docs/ENGINEERING_PRACTICES.md)
+(exception policy, atomic filesystem writes, typing, test expectations).
+Ruff and mypy enforce parts of it through ratcheted baselines in
+`pyproject.toml`: never add a baseline entry; when you touch a listed
+file, fix its violations and delete its entry.
+
 Before opening a PR:
 
 ```bash
 make lint
+make type-check
 make test
 make package-check
 ```
