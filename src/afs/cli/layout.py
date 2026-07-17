@@ -95,4 +95,3 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     plan.add_argument("--rollback-output", help="Write the paired rollback manifest atomically.")
     plan.add_argument("--json", action="store_true", help="Output JSON.")
     plan.set_defaults(func=layout_plan_command)
-
