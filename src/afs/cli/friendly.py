@@ -144,13 +144,29 @@ def search_command(args: argparse.Namespace) -> int:
     has_index = engine.current_path.is_file() or engine.metadata_path.is_file()
     build_payload: dict[str, Any] | None = None
     embed_fn = None
+    requested_model = args.model or (
+        DEFAULT_GEMINI_MODEL if args.provider == "gemini" else "nomic-embed-text"
+    )
+    semantic_index_ready = False
+    if args.semantic and has_index:
+        try:
+            metadata = json.loads(engine.metadata_path.read_text(encoding="utf-8"))
+            collection = metadata.get("collection", {})
+            stats = metadata.get("stats", {})
+            semantic_index_ready = (
+                collection.get("health") == "healthy"
+                and collection.get("provider") == args.provider
+                and collection.get("model") == requested_model
+                and int(stats.get("vectors", 0) or 0) > 0
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            semantic_index_ready = False
     if args.semantic:
         embed_fn = create_embed_fn(
             args.provider,
-            model=args.model
-            or (DEFAULT_GEMINI_MODEL if args.provider == "gemini" else "nomic-embed-text"),
+            model=requested_model,
         )
-    if args.rebuild or not has_index:
+    if args.rebuild or not has_index or (args.semantic and not semantic_index_ready):
         build = engine.build(sources, embed_fn=embed_fn)
         build_payload = {
             "total_files": build.total_files,

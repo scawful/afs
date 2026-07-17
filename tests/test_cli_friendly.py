@@ -193,6 +193,50 @@ def test_search_builds_once_and_filters_current_plus_common_scope(
     assert beta["rebuilt"] is False
 
 
+def test_search_semantic_opt_in_upgrades_keyword_index(tmp_path: Path, monkeypatch, capsys) -> None:
+    _root, project, _other = _central(tmp_path, monkeypatch)
+    (project / "semantic.md").write_text("semantic upgrade marker", encoding="utf-8")
+
+    def args(*, semantic: bool, rebuild: bool) -> argparse.Namespace:
+        return argparse.Namespace(
+            config=None,
+            path=str(project),
+            context_root=None,
+            context_dir=None,
+            query="semantic marker",
+            semantic=semantic,
+            all_projects=False,
+            rebuild=rebuild,
+            mode="text",
+            limit=10,
+            provider="gemini",
+            model=None,
+            json=True,
+        )
+
+    assert search_command(args(semantic=False, rebuild=True)) == 0
+    keyword = json.loads(capsys.readouterr().out)
+    assert keyword["build"]["vector_count"] == 0
+
+    def factory(_provider: str, **kwargs):
+        def embed(_text: str) -> list[float]:
+            return [1.0, 0.0, 0.25]
+
+        embed._afs_embedding_provider = "gemini"  # type: ignore[attr-defined]
+        embed._afs_embedding_model = kwargs.get("model", "gemini-embedding-2")  # type: ignore[attr-defined]
+        embed._afs_embedding_dimension = 3  # type: ignore[attr-defined]
+        embed._afs_embedding_instruction = kwargs.get("task_type", "RETRIEVAL_DOCUMENT")  # type: ignore[attr-defined]
+        return embed
+
+    monkeypatch.setattr("afs.embeddings.create_embed_fn", factory)
+    monkeypatch.setattr("afs.hybrid_search.create_embed_fn", factory)
+    assert search_command(args(semantic=True, rebuild=False)) == 0
+    semantic = json.loads(capsys.readouterr().out)
+    assert semantic["rebuilt"] is True
+    assert semantic["build"]["vector_count"] > 0
+    assert semantic["semantic_status"] == "ready"
+
+
 def test_message_cleanup_requires_explicit_all_projects() -> None:
     args = argparse.Namespace(all_projects=False)
 
