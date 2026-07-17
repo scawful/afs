@@ -91,15 +91,116 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "B", "C4", "UP"]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "BLE001", "S110", "S112"]
 ignore = ["E501", "B008", "C901"]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
 "tests/**/*.py" = ["B011"]
+# --- Exception-hygiene ratchet baseline ---------------------------------
+# BLE001 blind-except / S110 try-except-pass / S112 try-except-continue.
+# Generated 2026-07-17 with ruff 0.15.20 (pinned in CI). Files below are
+# grandfathered with their pre-existing violations; every file NOT listed
+# (including all new files) is fully enforced.
+# Contract: never add an entry. When touching a listed file, fix its
+# violations and delete its line. See docs/ENGINEERING_PRACTICES.md.
+# Verify a shrink with: ruff check src/ tests/ --select BLE001,S110,S112
+"src/afs/agent/harness.py" = ["BLE001"]
+"src/afs/agent/hooks.py" = ["BLE001"]
+"src/afs/agent/tools.py" = ["BLE001"]
+"src/afs/agent_context.py" = ["BLE001", "S110"]
+"src/afs/agent_job_worker.py" = ["BLE001"]
+"src/afs/agent_manifest_sync.py" = ["BLE001"]
+"src/afs/agent_registry.py" = ["BLE001", "S110"]
+"src/afs/agents/__init__.py" = ["BLE001"]
+"src/afs/agents/base.py" = ["BLE001"]
+"src/afs/agents/context_warm.py" = ["BLE001", "S110"]
+"src/afs/agents/dashboard_export.py" = ["BLE001", "S112"]
+"src/afs/agents/gemini_workspace_brief.py" = ["BLE001"]
+"src/afs/agents/llm_bridge.py" = ["BLE001"]
+"src/afs/agents/mission_runner.py" = ["BLE001"]
+"src/afs/agents/researcher.py" = ["BLE001"]
+"src/afs/agents/supervisor.py" = ["BLE001", "S110"]
+"src/afs/agents/tether_bridge.py" = ["BLE001"]
+"src/afs/benchmark/__init__.py" = ["BLE001", "S110"]
+"src/afs/benchmark/base.py" = ["BLE001"]
+"src/afs/benchmark/suite.py" = ["BLE001", "S110"]
+"src/afs/benchmarks/quality.py" = ["BLE001"]
+"src/afs/benchmarks/resources.py" = ["BLE001"]
+"src/afs/bundler.py" = ["BLE001", "S112"]
+"src/afs/calibration.py" = ["BLE001", "S110"]
+"src/afs/cli/__init__.py" = ["BLE001", "S110"]
+"src/afs/cli/_help.py" = ["BLE001"]
+"src/afs/cli/_utils.py" = ["BLE001"]
+"src/afs/cli/briefing.py" = ["BLE001"]
+"src/afs/cli/bundle.py" = ["BLE001"]
+"src/afs/cli/claude.py" = ["BLE001"]
+"src/afs/cli/comparison.py" = ["BLE001"]
+"src/afs/cli/core.py" = ["BLE001", "S110"]
+"src/afs/cli/gemini.py" = ["BLE001", "S110"]
+"src/afs/cli/optimize.py" = ["BLE001"]
+"src/afs/cli/personal.py" = ["BLE001"]
+"src/afs/cli/skills.py" = ["BLE001"]
+"src/afs/cli/sources.py" = ["BLE001"]
+"src/afs/cli/watch.py" = ["BLE001", "S110", "S112"]
+"src/afs/codebase_index.py" = ["BLE001"]
+"src/afs/comparison/framework.py" = ["BLE001"]
+"src/afs/config.py" = ["BLE001"]
+"src/afs/context_freshness.py" = ["BLE001", "S112"]
+"src/afs/context_fs.py" = ["BLE001"]
+"src/afs/context_index.py" = ["BLE001", "S112"]
+"src/afs/deployment/cli.py" = ["BLE001", "S110"]
+"src/afs/deployment/validator.py" = ["BLE001"]
+"src/afs/diagnostics.py" = ["BLE001"]
+"src/afs/discovery.py" = ["BLE001", "S112"]
+"src/afs/embeddings.py" = ["BLE001", "S110"]
+"src/afs/evaluation/semantic_eval.py" = ["BLE001"]
+"src/afs/extensions.py" = ["BLE001"]
+"src/afs/gateway/backends.py" = ["BLE001"]
+"src/afs/generators/__init__.py" = ["BLE001", "S110"]
+"src/afs/generators/cot/generator.py" = ["BLE001"]
+"src/afs/generators/data_cleaner.py" = ["BLE001"]
+"src/afs/generators/model_generator.py" = ["BLE001"]
+"src/afs/grounding_hooks.py" = ["BLE001"]
+"src/afs/gws.py" = ["BLE001", "S110"]
+"src/afs/handoff.py" = ["BLE001", "S110"]
+"src/afs/health/afs_status.py" = ["BLE001"]
+"src/afs/health/cli.py" = ["BLE001"]
+"src/afs/health/daemon.py" = ["BLE001"]
+"src/afs/health/enhanced_checks.py" = ["BLE001", "S110"]
+"src/afs/history.py" = ["BLE001"]
+"src/afs/hivemind.py" = ["BLE001", "S110"]
+"src/afs/knowledge/__init__.py" = ["BLE001", "S110"]
+"src/afs/knowledge/graph_core.py" = ["BLE001"]
+"src/afs/llm_memory.py" = ["BLE001"]
+"src/afs/manager.py" = ["BLE001"]
+"src/afs/manager_gui.py" = ["BLE001"]
+"src/afs/mcp/registry.py" = ["BLE001", "S110"]
+"src/afs/mcp_server.py" = ["BLE001", "S110", "S112"]
+"src/afs/memory_consolidation.py" = ["BLE001", "S110"]
+"src/afs/missions.py" = ["BLE001", "S110"]
+"src/afs/model_prompts.py" = ["BLE001"]
+"src/afs/next_action.py" = ["BLE001"]
+"src/afs/notifications/desktop.py" = ["BLE001"]
+"src/afs/notifications/discord.py" = ["BLE001"]
+"src/afs/notifications/email.py" = ["BLE001"]
+"src/afs/notifications/slack.py" = ["BLE001"]
+"src/afs/plugins.py" = ["BLE001"]
+"src/afs/pretraining/corpus_builder.py" = ["BLE001"]
+"src/afs/registry/cli.py" = ["BLE001"]
+"src/afs/services/manager.py" = ["BLE001", "S110"]
+"src/afs/session_bootstrap.py" = ["BLE001", "S110"]
+"src/afs/session_harness.py" = ["BLE001"]
+"src/afs/sources/registry.py" = ["BLE001", "S112"]
+"src/afs/workspace_sync.py" = ["BLE001"]
+"tests/test_agent_jobs.py" = ["BLE001"]
 
 [tool.mypy]
 python_version = "3.10"
+# Analyze as Linux so local runs (often macOS) reproduce CI exactly;
+# platform-conditional stdlib APIs (kqueue etc.) get reasoned ignores.
+platform = "linux"
+mypy_path = "src"
 exclude = [
     "^build/",
     "^dist/",
@@ -110,6 +211,22 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 no_implicit_optional = true
+# Third-party libraries without stubs are not this codebase's problem;
+# keep checking our own code without requiring the stub ecosystem.
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# numpy >=2.5 ships stubs using PEP 695 `type` statements that cannot
+# parse under python_version = "3.10"; skip them so results don't depend
+# on which numpy the resolver picks per Python version. numpy becomes
+# Any, like other unfollowed third-party libraries. NOTE:
+# follow_imports_for_stubs is required — without it mypy ignores
+# follow_imports for packages that ship .pyi stubs and parses them anyway
+# (verified against numpy 2.5.1 + mypy 1.11.2 on Python 3.12).
+module = "numpy.*"
+follow_imports = "skip"
+follow_imports_for_stubs = true
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "transformers.*"
@@ -118,6 +235,129 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = "trl.*"
 ignore_missing_imports = true
+
+# --- mypy ratchet baseline ----------------------------------------------
+# Generated 2026-07-17 with mypy 1.11.1 (pinned in CI). The modules below
+# carry 512 pre-existing errors and are ignore_errors-grandfathered; the
+# remaining ~223 modules in the package are fully type-checked, as is
+# every NEW module. Contract: never add an entry. When touching a listed
+# module, fix its errors and delete its line.
+# See docs/ENGINEERING_PRACTICES.md. Full check: mypy -p afs
+[[tool.mypy.overrides]]
+module = [
+    "afs.agent.hooks",
+    "afs.agent.models",
+    "afs.agent.tools",
+    "afs.agent_context",
+    "afs.agent_job_inbox",
+    "afs.agent_job_status",
+    "afs.agent_jobs",
+    "afs.agent_manifest",
+    "afs.agent_registry",
+    "afs.agent_runs",
+    "afs.agents",
+    "afs.agents.context_audit",
+    "afs.agents.context_warm",
+    "afs.agents.dashboard_export",
+    "afs.agents.event_reactor",
+    "afs.agents.gemini_workspace_brief",
+    "afs.agents.history_memory",
+    "afs.agents.llm_bridge",
+    "afs.agents.memory_export",
+    "afs.agents.mission_runner",
+    "afs.agents.researcher",
+    "afs.agents.scribe_draft",
+    "afs.agents.supervisor",
+    "afs.agents.workspace_analyst",
+    "afs.benchmark",
+    "afs.benchmark.base",
+    "afs.benchmark.leaderboard",
+    "afs.benchmark.suite",
+    "afs.benchmarks.quality",
+    "afs.benchmarks.resources",
+    "afs.benchmarks.speed",
+    "afs.bundler",
+    "afs.claude.doctor",
+    "afs.claude.session_report",
+    "afs.cli",
+    "afs.cli._help",
+    "afs.cli.antigravity",
+    "afs.cli.briefing",
+    "afs.cli.claude",
+    "afs.cli.comparison",
+    "afs.cli.context",
+    "afs.cli.core",
+    "afs.cli.embeddings",
+    "afs.cli.encoder",
+    "afs.cli.events",
+    "afs.cli.gemini",
+    "afs.cli.generator",
+    "afs.cli.generators",
+    "afs.cli.pipeline",
+    "afs.cli.review",
+    "afs.cli.schema",
+    "afs.cli.skills",
+    "afs.cli.tokenizer",
+    "afs.cli.training",
+    "afs.cli.verify",
+    "afs.codebase_explorer",
+    "afs.comparison.framework",
+    "afs.config_loader",
+    "afs.context_freshness",
+    "afs.context_index",
+    "afs.context_pack",
+    "afs.deployment.cli",
+    "afs.embeddings",
+    "afs.evaluation.harness",
+    "afs.evaluation.human",
+    "afs.event_log",
+    "afs.extensions",
+    "afs.gateway.backends",
+    "afs.generators",
+    "afs.generators.cot.client",
+    "afs.generators.cot.rate_limiter",
+    "afs.generators.model_generator",
+    "afs.grounding_hooks",
+    "afs.gws",
+    "afs.handoff",
+    "afs.health.afs_status",
+    "afs.health.enhanced_checks",
+    "afs.history",
+    "afs.human_provenance",
+    "afs.knowledge.graph_core",
+    "afs.logging_config",
+    "afs.manager",
+    "afs.mcp_server",
+    "afs.missions",
+    "afs.model_prompts",
+    "afs.models",
+    "afs.next_action",
+    "afs.notifications.base",
+    "afs.notifications.discord",
+    "afs.notifications.email",
+    "afs.notifications.slack",
+    "afs.orchestration",
+    "afs.personal_context",
+    "afs.plugins",
+    "afs.pretraining.corpus_builder",
+    "afs.pretraining.encoder_trainer",
+    "afs.quality.analyzer",
+    "afs.quality.metrics",
+    "afs.registry.lineage",
+    "afs.repo_policy",
+    "afs.response_schemas",
+    "afs.schema",
+    "afs.session_bootstrap",
+    "afs.session_harness",
+    "afs.skill_mining",
+    "afs.skills",
+    "afs.sources.models",
+    "afs.sources.registry",
+    "afs.training.lifecycle",
+    "afs.work_assistant",
+    "afs.workspace_sync",
+]
+ignore_errors = true
 
 [tool.black]
 line-length = 100

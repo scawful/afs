@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -51,7 +52,9 @@ def antigravity_status(
         return status
 
     try:
-        with sqlite3.connect(resolved_db) as connection:
+        # sqlite3's context manager only commits/rolls back — it does not
+        # close the connection; closing() releases the fd as well.
+        with closing(sqlite3.connect(resolved_db)) as connection:
             cursor = connection.cursor()
             payloads = 0
             for key in keys:

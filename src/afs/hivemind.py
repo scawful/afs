@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -11,23 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from .agent_scope import assert_mount_allowed
+from .atomic_io import atomic_write_text as _atomic_write_text
 from .config import load_config_model
 from .context_paths import resolve_mount_root
 from .models import MountType
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Publish one file without exposing a partially written final path."""
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_text(text, encoding="utf-8")
-        os.replace(temporary, path)
-    except OSError:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
 
 
 @dataclass
