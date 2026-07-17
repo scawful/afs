@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -103,6 +104,304 @@ def projects_register_command(args: argparse.Namespace) -> int:
         print(f"registered: {record.project_id}")
         print(f"scope_id: {record.scope_id}")
         print(f"path: {record.path}")
+    return 0
+
+
+def _artifact_context(
+    args: argparse.Namespace,
+) -> tuple[Any, Path, Path, str, str]:
+    manager, project, context = _manager_context(args)
+    scope_id, record = _scope_for(context, project)
+    if bool(getattr(args, "common", False)):
+        scope_id = COMMON_SCOPE_ID
+        record = None
+    project_id = record.project_id if record is not None else ""
+    return manager, project, context, scope_id, project_id
+
+
+def _artifact_body(args: argparse.Namespace) -> str:
+    body = getattr(args, "body", None)
+    body_file = getattr(args, "body_file", None)
+    if body is not None and body_file:
+        raise ValueError("provide only one of --body or --body-file")
+    if body_file:
+        return Path(body_file).expanduser().read_text(encoding="utf-8")
+    if body is not None:
+        return str(body)
+    if not sys.stdin.isatty():
+        return sys.stdin.read()
+    raise ValueError("note body is required; use --body, --body-file, or stdin")
+
+
+def _render_artifact(artifact: Any, *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(artifact.to_dict(), indent=2))
+        return
+    print(f"id: {artifact.metadata.artifact_id}")
+    print(f"title: {artifact.metadata.title}")
+    print(f"scope_id: {artifact.metadata.scope_id}")
+    print(f"path: {artifact.path}")
+    print()
+    sys.stdout.write(artifact.body)
+
+
+def notes_create_command(args: argparse.Namespace) -> int:
+    from ..artifacts import NoteStore
+
+    manager, _project, context, scope_id, project_id = _artifact_context(args)
+    note = NoteStore(context, scope_id=scope_id, config=manager.config).create(
+        title=args.title,
+        body=_artifact_body(args),
+        project_id=project_id,
+        task_id=args.task_id or "",
+        agent_name=args.agent_name or "",
+        author_kind=args.author_kind,
+        sensitivity=args.sensitivity,
+    )
+    _render_artifact(note, json_output=args.json)
+    return 0
+
+
+def notes_list_command(args: argparse.Namespace) -> int:
+    from ..artifacts import NoteStore
+
+    manager, _project, context, scope_id, _project_id = _artifact_context(args)
+    notes = NoteStore(context, scope_id=scope_id, config=manager.config).list(
+        limit=args.limit
+    )
+    if args.json:
+        print(json.dumps([note.to_dict() for note in notes], indent=2))
+    elif not notes:
+        print("no notes")
+    else:
+        for note in notes:
+            print(
+                f"{note.metadata.created_at[:19]}  {note.metadata.artifact_id}  "
+                f"{note.metadata.title}"
+            )
+    return 0
+
+
+def notes_read_command(args: argparse.Namespace) -> int:
+    from ..artifacts import NoteStore
+
+    manager, _project, context, scope_id, _project_id = _artifact_context(args)
+    note = NoteStore(context, scope_id=scope_id, config=manager.config).read(
+        args.identifier
+    )
+    if note is None:
+        print(f"note not found: {args.identifier}")
+        return 1
+    _render_artifact(note, json_output=args.json)
+    return 0
+
+
+def notes_draft_command(args: argparse.Namespace) -> int:
+    from ..scratchpad import ScratchpadStore
+
+    manager, _project, context, scope_id, project_id = _artifact_context(args)
+    draft = ScratchpadStore(context, scope_id=scope_id, config=manager.config).create(
+        title=args.title,
+        body=_artifact_body(args),
+        project_id=project_id,
+        task_id=args.task_id or "",
+        agent_name=args.agent_name or "",
+        author_kind=args.author_kind,
+        sensitivity=args.sensitivity,
+    )
+    _render_artifact(draft, json_output=args.json)
+    return 0
+
+
+def notes_drafts_command(args: argparse.Namespace) -> int:
+    from ..scratchpad import ScratchpadStore
+
+    manager, _project, context, scope_id, _project_id = _artifact_context(args)
+    drafts = ScratchpadStore(context, scope_id=scope_id, config=manager.config).list(
+        archived=args.archived,
+        limit=args.limit,
+    )
+    if args.json:
+        print(json.dumps([draft.to_dict() for draft in drafts], indent=2))
+    elif not drafts:
+        print("no archived drafts" if args.archived else "no drafts")
+    else:
+        for draft in drafts:
+            print(
+                f"{draft.metadata.created_at[:19]}  {draft.metadata.artifact_id}  "
+                f"{draft.metadata.title}"
+            )
+    return 0
+
+
+def notes_promote_command(args: argparse.Namespace) -> int:
+    from ..scratchpad import ScratchpadStore
+
+    manager, _project, context, scope_id, _project_id = _artifact_context(args)
+    note = ScratchpadStore(context, scope_id=scope_id, config=manager.config).promote(
+        args.identifier
+    )
+    _render_artifact(note, json_output=args.json)
+    return 0
+
+
+def notes_archive_command(args: argparse.Namespace) -> int:
+    from ..scratchpad import ScratchpadStore
+
+    manager, _project, context, scope_id, _project_id = _artifact_context(args)
+    draft = ScratchpadStore(context, scope_id=scope_id, config=manager.config).archive(
+        args.identifier
+    )
+    _render_artifact(draft, json_output=args.json)
+    return 0
+
+
+def _handoff_items(values: list[str] | None) -> list[str]:
+    items: list[str] = []
+    for value in values or []:
+        items.extend(part.strip() for part in value.split(";") if part.strip())
+    return items
+
+
+def _handoff_store(args: argparse.Namespace):
+    from ..handoff import HandoffStore
+
+    manager, _project, context, scope_id, project_id = _artifact_context(args)
+    store = HandoffStore(context, scope_id=scope_id, config=manager.config)
+    return store, project_id
+
+
+def _create_handoff_revision(
+    args: argparse.Namespace,
+    *,
+    stream_id: str | None = None,
+    supersedes: str | None = None,
+) -> Any:
+    store, project_id = _handoff_store(args)
+    return store.create_revision(
+        title=args.title,
+        agent_name=args.agent_name,
+        stream_id=stream_id,
+        supersedes=supersedes,
+        accomplished=_handoff_items(args.accomplished),
+        blocked=_handoff_items(args.blocked),
+        next_steps=_handoff_items(args.next_steps),
+        target_agent=args.target_agent,
+        priority=args.priority,
+        project_id=project_id,
+    )
+
+
+def handoff_create_command(args: argparse.Namespace) -> int:
+    packet = _create_handoff_revision(args)
+    if args.json:
+        print(json.dumps(packet.to_dict(), indent=2))
+    else:
+        print(f"handoff created: {packet.revision_id}")
+        print(f"thread: {packet.stream_id}")
+        print(f"path: {packet.artifact_path}")
+    return 0
+
+
+def handoff_revise_command(args: argparse.Namespace) -> int:
+    store, _project_id = _handoff_store(args)
+    parent = store.read(session_id=args.revision_id)
+    if parent is None:
+        print(f"handoff revision not found: {args.revision_id}")
+        return 1
+    packet = _create_handoff_revision(
+        args,
+        stream_id=parent.stream_id,
+        supersedes=parent.revision_id,
+    )
+    if args.json:
+        print(json.dumps(packet.to_dict(), indent=2))
+    else:
+        print(f"handoff revised: {packet.revision_id}")
+        print(f"thread: {packet.stream_id}")
+        print(f"supersedes: {parent.revision_id}")
+    return 0
+
+
+def handoff_list_command(args: argparse.Namespace) -> int:
+    store, _project_id = _handoff_store(args)
+    packets = store.list(limit=args.limit, stream_id=args.thread)
+    if args.json:
+        print(json.dumps([packet.to_dict() for packet in packets], indent=2))
+    elif not packets:
+        print("no handoffs")
+    else:
+        for packet in packets:
+            state = "closed" if packet.closed else "open"
+            print(
+                f"{packet.timestamp[:19]}  {packet.revision_id}  "
+                f"{packet.title}  [{state}]"
+            )
+    return 0
+
+
+def handoff_read_command(args: argparse.Namespace) -> int:
+    store, _project_id = _handoff_store(args)
+    packet = (
+        store.read(stream_id=args.identifier)
+        if args.thread
+        else store.read(session_id=args.identifier)
+    )
+    if packet is None:
+        print(f"handoff not found: {args.identifier}")
+        return 1
+    if args.json:
+        print(json.dumps(packet.to_dict(), indent=2))
+    else:
+        print(f"revision: {packet.revision_id}")
+        print(f"thread: {packet.stream_id}")
+        print(f"title: {packet.title}")
+        print(f"agent: {packet.agent_name}")
+        print(f"status: {'closed' if packet.closed else 'open'}")
+        for label, values in (
+            ("accomplished", packet.accomplished),
+            ("blocked", packet.blocked),
+            ("next", packet.next_steps),
+        ):
+            if values:
+                print(f"{label}:")
+                for value in values:
+                    print(f"  - {value}")
+    return 0
+
+
+def handoff_threads_command(args: argparse.Namespace) -> int:
+    store, _project_id = _handoff_store(args)
+    threads = store.list_streams(limit=args.limit)
+    if args.json:
+        print(json.dumps([thread.to_dict() for thread in threads], indent=2))
+    elif not threads:
+        print("no handoff threads")
+    else:
+        for thread in threads:
+            state = "closed" if thread.closed else "open"
+            print(
+                f"{thread.updated_at[:19]}  {thread.stream_id}  "
+                f"{thread.title}  {thread.revision_count} revision(s)  [{state}]"
+            )
+    return 0
+
+
+def handoff_ack_command(args: argparse.Namespace) -> int:
+    store, _project_id = _handoff_store(args)
+    if not store.acknowledge(args.revision_id, args.by):
+        print(f"handoff revision not found: {args.revision_id}")
+        return 1
+    print(f"acknowledged: {args.revision_id}")
+    return 0
+
+
+def handoff_close_command(args: argparse.Namespace) -> int:
+    store, _project_id = _handoff_store(args)
+    if not store.close(args.identifier, actor=args.by, reason=args.reason or ""):
+        print(f"handoff thread or revision not found: {args.identifier}")
+        return 1
+    print(f"closed: {args.identifier}")
     return 0
 
 
@@ -253,6 +552,158 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     register.add_argument("--context-root")
     register.add_argument("--json", action="store_true")
     register.set_defaults(func=projects_register_command)
+
+    notes = subparsers.add_parser(
+        "notes",
+        help="Create durable notes and manage temporary drafts.",
+    )
+    note_commands = notes.add_subparsers(dest="notes_command")
+
+    def add_artifact_context(parser: argparse.ArgumentParser) -> None:
+        _add_context_args(parser)
+        parser.add_argument(
+            "--common",
+            action="store_true",
+            help="Use the shared common scope instead of the current project.",
+        )
+
+    def add_note_content(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("title", help="Readable note title (required).")
+        parser.add_argument("--body", help="Note body; reads stdin when omitted.")
+        parser.add_argument("--body-file", help="Read the note body from a UTF-8 file.")
+        parser.add_argument("--task-id")
+        parser.add_argument("--agent-name")
+        parser.add_argument(
+            "--author-kind",
+            choices=("human", "agent", "import", "system"),
+            default="human",
+        )
+        parser.add_argument(
+            "--sensitivity",
+            choices=("internal", "private", "public", "restricted"),
+            default="internal",
+        )
+        parser.add_argument("--json", action="store_true")
+
+    note_create = note_commands.add_parser("create", help="Create a durable note.")
+    add_artifact_context(note_create)
+    add_note_content(note_create)
+    note_create.set_defaults(func=notes_create_command)
+
+    note_list = note_commands.add_parser("list", help="List durable notes.")
+    add_artifact_context(note_list)
+    note_list.add_argument("--limit", type=int, default=100)
+    note_list.add_argument("--json", action="store_true")
+    note_list.set_defaults(func=notes_list_command)
+
+    note_read = note_commands.add_parser("read", help="Read a durable note.")
+    add_artifact_context(note_read)
+    note_read.add_argument("identifier", help="Full note UUID or contained filename/path.")
+    note_read.add_argument("--json", action="store_true")
+    note_read.set_defaults(func=notes_read_command)
+
+    note_draft = note_commands.add_parser(
+        "draft",
+        help="Create a temporary note with a unique readable filename.",
+    )
+    add_artifact_context(note_draft)
+    add_note_content(note_draft)
+    note_draft.set_defaults(func=notes_draft_command)
+
+    note_drafts = note_commands.add_parser("drafts", help="List temporary notes.")
+    add_artifact_context(note_drafts)
+    note_drafts.add_argument("--archived", action="store_true")
+    note_drafts.add_argument("--limit", type=int, default=100)
+    note_drafts.add_argument("--json", action="store_true")
+    note_drafts.set_defaults(func=notes_drafts_command)
+
+    note_promote = note_commands.add_parser(
+        "promote",
+        help="Copy a draft into durable notes while preserving provenance.",
+    )
+    add_artifact_context(note_promote)
+    note_promote.add_argument("identifier")
+    note_promote.add_argument("--json", action="store_true")
+    note_promote.set_defaults(func=notes_promote_command)
+
+    note_archive = note_commands.add_parser(
+        "archive",
+        help="Explicitly move a draft out of the active scratchpad.",
+    )
+    add_artifact_context(note_archive)
+    note_archive.add_argument("identifier")
+    note_archive.add_argument("--json", action="store_true")
+    note_archive.set_defaults(func=notes_archive_command)
+
+    handoff = subparsers.add_parser(
+        "handoff",
+        help="Create and follow immutable cross-session handoff threads.",
+    )
+    handoff_commands = handoff.add_subparsers(dest="handoff_command")
+
+    def add_handoff_content(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--title", required=True, help="Readable handoff title.")
+        parser.add_argument("--agent-name", default="cli")
+        parser.add_argument("--accomplished", action="append")
+        parser.add_argument("--blocked", action="append")
+        parser.add_argument("--next", dest="next_steps", action="append")
+        parser.add_argument("--target-agent")
+        parser.add_argument(
+            "--priority",
+            choices=("low", "normal", "high", "critical"),
+            default="normal",
+        )
+        parser.add_argument("--json", action="store_true")
+
+    handoff_create = handoff_commands.add_parser(
+        "create", help="Start a handoff thread with an immutable revision."
+    )
+    add_artifact_context(handoff_create)
+    add_handoff_content(handoff_create)
+    handoff_create.set_defaults(func=handoff_create_command)
+
+    handoff_revise = handoff_commands.add_parser(
+        "revise", help="Append a revision that supersedes an earlier handoff."
+    )
+    add_artifact_context(handoff_revise)
+    handoff_revise.add_argument("revision_id", help="Revision to supersede.")
+    add_handoff_content(handoff_revise)
+    handoff_revise.set_defaults(func=handoff_revise_command)
+
+    handoff_list = handoff_commands.add_parser("list", help="List handoff revisions.")
+    add_artifact_context(handoff_list)
+    handoff_list.add_argument("--thread", help="Restrict to one thread ID.")
+    handoff_list.add_argument("--limit", type=int, default=20)
+    handoff_list.add_argument("--json", action="store_true")
+    handoff_list.set_defaults(func=handoff_list_command)
+
+    handoff_read = handoff_commands.add_parser("read", help="Read a handoff revision.")
+    add_artifact_context(handoff_read)
+    handoff_read.add_argument("identifier", help="Revision ID, or thread ID with --thread.")
+    handoff_read.add_argument("--thread", action="store_true")
+    handoff_read.add_argument("--json", action="store_true")
+    handoff_read.set_defaults(func=handoff_read_command)
+
+    handoff_threads = handoff_commands.add_parser(
+        "threads", help="List logical handoff threads."
+    )
+    add_artifact_context(handoff_threads)
+    handoff_threads.add_argument("--limit", type=int, default=100)
+    handoff_threads.add_argument("--json", action="store_true")
+    handoff_threads.set_defaults(func=handoff_threads_command)
+
+    handoff_ack = handoff_commands.add_parser("ack", help="Acknowledge one revision.")
+    add_artifact_context(handoff_ack)
+    handoff_ack.add_argument("revision_id")
+    handoff_ack.add_argument("--by", required=True)
+    handoff_ack.set_defaults(func=handoff_ack_command)
+
+    handoff_close = handoff_commands.add_parser("close", help="Close a handoff thread.")
+    add_artifact_context(handoff_close)
+    handoff_close.add_argument("identifier", help="Thread or revision ID.")
+    handoff_close.add_argument("--by", required=True)
+    handoff_close.add_argument("--reason")
+    handoff_close.set_defaults(func=handoff_close_command)
 
     messages = subparsers.add_parser(
         "messages",

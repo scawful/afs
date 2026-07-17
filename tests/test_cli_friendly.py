@@ -6,9 +6,16 @@ from pathlib import Path
 
 from afs.cli import build_parser
 from afs.cli.friendly import (
+    handoff_create_command,
+    handoff_revise_command,
     messages_clean_command,
     messages_list_command,
     messages_send_command,
+    notes_archive_command,
+    notes_create_command,
+    notes_draft_command,
+    notes_list_command,
+    notes_promote_command,
     projects_current_command,
     projects_list_command,
 )
@@ -104,7 +111,7 @@ def test_friendly_top_level_parsers_are_discoverable() -> None:
         if isinstance(action, argparse._SubParsersAction)
     )
 
-    assert {"start", "projects", "messages"}.issubset(choices)
+    assert {"start", "projects", "notes", "handoff", "messages"}.issubset(choices)
 
 
 def test_message_cleanup_requires_explicit_all_projects() -> None:
@@ -116,3 +123,78 @@ def test_message_cleanup_requires_explicit_all_projects() -> None:
         assert "--all-projects" in str(exc)
     else:  # pragma: no cover - assertion helper without pytest dependency
         raise AssertionError("cleanup unexpectedly crossed the scope boundary")
+
+
+def _artifact_args(project: Path, **values) -> argparse.Namespace:
+    defaults = {
+        "config": None,
+        "path": str(project),
+        "context_root": None,
+        "context_dir": None,
+        "common": False,
+        "json": True,
+    }
+    defaults.update(values)
+    return argparse.Namespace(**defaults)
+
+
+def test_notes_drafts_promote_and_archive_within_current_scope(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _root, project, other = _central(tmp_path, monkeypatch)
+    content = {
+        "title": "Readable planning note",
+        "body": "Keep the decision boundary explicit.",
+        "body_file": None,
+        "task_id": None,
+        "agent_name": "codex",
+        "author_kind": "agent",
+        "sensitivity": "internal",
+    }
+    assert notes_create_command(_artifact_args(project, **content)) == 0
+    durable = json.loads(capsys.readouterr().out)
+
+    assert notes_list_command(_artifact_args(other, limit=10)) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+    assert notes_draft_command(_artifact_args(project, **content)) == 0
+    draft = json.loads(capsys.readouterr().out)
+    draft_id = draft["metadata"]["artifact_id"]
+    assert "readable-planning-note" in Path(draft["path"]).name
+
+    assert notes_promote_command(_artifact_args(project, identifier=draft_id)) == 0
+    promoted = json.loads(capsys.readouterr().out)
+    assert promoted["metadata"]["provenance"]["source_artifact_id"] == draft_id
+    assert promoted["path"] != durable["path"]
+
+    assert notes_archive_command(_artifact_args(project, identifier=draft_id)) == 0
+    archived = json.loads(capsys.readouterr().out)
+    assert Path(archived["path"]).parent.name == "archive"
+
+
+def test_handoff_create_and_revise_require_readable_titles(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _root, project, _other = _central(tmp_path, monkeypatch)
+    base = {
+        "title": "Context v2 implementation",
+        "agent_name": "codex",
+        "accomplished": ["layout complete"],
+        "blocked": [],
+        "next_steps": ["review search"],
+        "target_agent": "reviewer",
+        "priority": "high",
+    }
+    assert handoff_create_command(_artifact_args(project, **base)) == 0
+    first = json.loads(capsys.readouterr().out)
+
+    revised = dict(base)
+    revised["title"] = "Context v2 review follow-up"
+    assert handoff_revise_command(
+        _artifact_args(project, revision_id=first["revision_id"], **revised)
+    ) == 0
+    second = json.loads(capsys.readouterr().out)
+
+    assert second["stream_id"] == first["stream_id"]
+    assert second["supersedes"] == [first["revision_id"]]
+    assert "context-v2-review-follow-up" in Path(second["artifact_path"]).name
