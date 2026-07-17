@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -103,6 +104,46 @@ def test_artifact_rejects_relative_directory_symlink_escape(tmp_path: Path) -> N
             relative_dir="stream",
         )
     assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative publication is POSIX-only")
+@pytest.mark.parametrize("swap_root", [False, True], ids=["intermediate", "root"])
+def test_artifact_publication_rejects_directory_swap(
+    tmp_path: Path,
+    swap_root: bool,
+) -> None:
+    root = tmp_path / "artifacts"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    class SwappingCodec(MarkdownArtifactCodec):
+        swapped = False
+
+        @staticmethod
+        def _write_exclusive_at(directory_fd: int, filename: str, payload: str) -> None:
+            if not SwappingCodec.swapped:
+                SwappingCodec.swapped = True
+                if swap_root:
+                    root.rename(tmp_path / "parked-root")
+                    root.symlink_to(outside, target_is_directory=True)
+                else:
+                    (root / "stream").rename(root / "parked-stream")
+                    (root / "stream").symlink_to(outside, target_is_directory=True)
+            MarkdownArtifactCodec._write_exclusive_at(directory_fd, filename, payload)
+
+    codec = SwappingCodec(root)
+    with pytest.raises(OSError, match="changed during publication"):
+        codec.create(
+            kind="handoff",
+            title="No swapped publication",
+            body="body",
+            scope_id="common",
+            relative_dir="stream",
+        )
+
+    assert list(outside.iterdir()) == []
+    parked = tmp_path / "parked-root" if swap_root else root / "parked-stream"
+    assert list(parked.rglob("*.md")) == []
 
 
 def test_note_store_uses_canonical_project_scope(tmp_path: Path) -> None:

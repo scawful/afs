@@ -14,7 +14,8 @@ import os
 import re
 import threading
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,7 @@ _SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _PAYLOAD_PATTERN = re.compile(r"<!-- afs-handoff-payload:([A-Za-z0-9_-]+) -->")
 _MANIFEST_LOCK = threading.RLock()
 _EVENT_LOCK = threading.RLock()
+_STREAM_LOCK = threading.RLock()
 
 
 def _now() -> str:
@@ -76,6 +78,30 @@ def _dict_list(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _strict_string_list(value: Any, *, field_name: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{field_name} must be a list of strings")
+    return list(value)
+
+
+def _strict_dict_list(value: Any, *, field_name: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ValueError(f"{field_name} must be a list of objects")
+    return [dict(item) for item in value]
+
+
+def _strict_dict(value: Any, *, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be an object")
+    return dict(value)
+
+
+@dataclass(frozen=True)
+class _EventState:
+    acknowledged_by_revision: dict[str, tuple[str, ...]]
+    closed_streams: frozenset[str]
 
 
 @dataclass
@@ -193,7 +219,12 @@ class HandoffStream:
 
 
 class HandoffStore:
-    """Immutable handoff revisions under ``memory/projects/<scope>/handoffs``."""
+    """Immutable handoff revisions under ``memory/projects/<scope>/handoffs``.
+
+    The store validates scope grammar and filesystem containment.  Registry
+    authorization remains the caller's boundary: callers accepting requester-
+    supplied scopes must authorize them before constructing this store.
+    """
 
     def __init__(
         self,
@@ -227,8 +258,11 @@ class HandoffStore:
         self._legacy_root = (
             resolve_mount_root(self._context_path, MountType.SCRATCHPAD, config=config) / "handoffs"
         )
-        self._legacy_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._manifest_path = self._legacy_root / "_manifest.json"
+        self._legacy_codec: MarkdownArtifactCodec | None = None
+        if self.scope_id == "common":
+            self._legacy_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self._legacy_codec = MarkdownArtifactCodec(self._legacy_root)
 
     def create_revision(
         self,
@@ -293,74 +327,101 @@ class HandoffStore:
         sensitivity: str,
         schema_version: str,
     ) -> HandoffPacket:
-
+        if not isinstance(title, str):
+            raise ValueError("title must be a string")
         normalized_title = title.strip()
         if not normalized_title:
             raise ValueError("title is required for a handoff revision")
+        if not isinstance(agent_name, str):
+            raise ValueError("agent_name must be a string")
         normalized_agent = agent_name.strip()
         if not normalized_agent:
             raise ValueError("agent_name is required")
         normalized_supersedes = self._normalize_supersedes(supersedes)
-
-        referenced: list[HandoffPacket] = []
-        for previous_id in normalized_supersedes:
-            previous = self.read(session_id=previous_id)
-            if previous is None:
-                raise ValueError(f"superseded revision does not exist: {previous_id}")
-            referenced.append(previous)
-
-        if stream_id is None and referenced:
-            stream_id = referenced[0].stream_id
-        normalized_stream_id = _safe_identifier(
-            stream_id or uuid.uuid4().hex, field_name="stream_id"
+        normalized_accomplished = _strict_string_list(
+            accomplished if accomplished is not None else [], field_name="accomplished"
         )
-        for previous in referenced:
-            if previous.stream_id != normalized_stream_id:
-                raise ValueError("superseded revisions must belong to the same stream")
-
-        normalized_revision_id = _safe_identifier(
-            revision_id or uuid.uuid4().hex, field_name="revision_id"
+        normalized_blocked = _strict_string_list(
+            blocked if blocked is not None else [], field_name="blocked"
         )
-        if self.read(session_id=normalized_revision_id) is not None:
-            raise FileExistsError(f"handoff revision already exists: {normalized_revision_id}")
+        normalized_next_steps = _strict_string_list(
+            next_steps if next_steps is not None else [], field_name="next_steps"
+        )
+        normalized_context = _strict_dict(
+            context_snapshot if context_snapshot is not None else {},
+            field_name="context_snapshot",
+        )
+        normalized_tasks = _strict_dict_list(
+            open_tasks if open_tasks is not None else [], field_name="open_tasks"
+        )
+        normalized_metadata = _strict_dict(
+            metadata if metadata is not None else {}, field_name="metadata"
+        )
+        if target_agent is not None and not isinstance(target_agent, str):
+            raise ValueError("target_agent must be a string or null")
+        if not isinstance(priority, str) or not priority.strip():
+            raise ValueError("priority must be a non-empty string")
 
-        if self.list_revisions(normalized_stream_id):
-            current = self.read(stream_id=normalized_stream_id)
-            if current is not None and current.closed:
+        with self._stream_transaction():
+            referenced: list[HandoffPacket] = []
+            for previous_id in normalized_supersedes:
+                previous = self.read(session_id=previous_id)
+                if previous is None:
+                    raise ValueError(f"superseded revision does not exist: {previous_id}")
+                referenced.append(previous)
+
+            if stream_id is None and referenced:
+                stream_id = referenced[0].stream_id
+            normalized_stream_id = _safe_identifier(
+                stream_id or uuid.uuid4().hex, field_name="stream_id"
+            )
+            for previous in referenced:
+                if previous.stream_id != normalized_stream_id:
+                    raise ValueError("superseded revisions must belong to the same stream")
+
+            normalized_revision_id = _safe_identifier(
+                revision_id or uuid.uuid4().hex, field_name="revision_id"
+            )
+            if self.read(session_id=normalized_revision_id) is not None:
+                raise FileExistsError(f"handoff revision already exists: {normalized_revision_id}")
+
+            revisions = self.list_revisions(normalized_stream_id)
+            if revisions and revisions[0].closed:
                 raise ValueError(f"handoff stream is closed: {normalized_stream_id}")
 
-        revision_claim = self._claim_revision_id(normalized_revision_id)
-
-        packet = HandoffPacket(
-            session_id=normalized_revision_id,
-            revision_id=normalized_revision_id,
-            stream_id=normalized_stream_id,
-            title=normalized_title,
-            agent_name=normalized_agent,
-            timestamp=_now(),
-            accomplished=list(accomplished or []),
-            blocked=list(blocked or []),
-            next_steps=list(next_steps or []),
-            context_snapshot=dict(context_snapshot or {}),
-            open_tasks=list(open_tasks or []),
-            metadata=dict(metadata or {}),
-            target_agent=target_agent,
-            priority=priority,
-            schema_version=schema_version,
-            supersedes=normalized_supersedes,
-        )
-        try:
-            artifact = self._write_revision(
-                packet,
-                project_id=project_id,
-                task_id=task_id,
-                sensitivity=sensitivity,
+            revision_claim = self._claim_revision_id(normalized_revision_id)
+            packet = HandoffPacket(
+                session_id=normalized_revision_id,
+                revision_id=normalized_revision_id,
+                stream_id=normalized_stream_id,
+                title=normalized_title,
+                agent_name=normalized_agent,
+                timestamp=_now(),
+                accomplished=normalized_accomplished,
+                blocked=normalized_blocked,
+                next_steps=normalized_next_steps,
+                context_snapshot=normalized_context,
+                open_tasks=normalized_tasks,
+                metadata=normalized_metadata,
+                target_agent=target_agent,
+                priority=priority.strip(),
+                schema_version=schema_version,
+                supersedes=normalized_supersedes,
             )
-        except BaseException:
-            revision_claim.unlink(missing_ok=True)
-            raise
-        packet.artifact_path = str(artifact.path)
-        self._update_legacy_manifest(packet.session_id)
+            try:
+                artifact = self._write_revision(
+                    packet,
+                    project_id=project_id,
+                    task_id=task_id,
+                    sensitivity=sensitivity,
+                )
+            except BaseException:
+                revision_claim.rollback()
+                raise
+            revision_claim.close()
+            packet.artifact_path = str(artifact.path)
+
+        self._update_legacy_compatibility_best_effort(packet)
         self._log_creation(packet)
         return packet
 
@@ -417,9 +478,11 @@ class HandoffStore:
             except ValueError:
                 return None
             packet = self._read_revision(safe_id)
-            if packet is None:
+            if packet is None and self.scope_id == "common":
                 packet = self._read_legacy(safe_id)
-            return self._apply_events(packet) if packet is not None else None
+            if packet is None:
+                return None
+            return self._apply_events(packet, self._load_event_state())
 
         packets = self.list(stream_id=stream_id, limit=1)
         return packets[0] if packets else None
@@ -442,21 +505,23 @@ class HandoffStore:
             if packet is None:
                 continue
             packets[packet.revision_id] = packet
-        legacy_ids = self._load_manifest()
-        legacy_ids.extend(
-            path.stem
-            for path in self._legacy_root.glob("*.json")
-            if path.name != self._manifest_path.name and _SAFE_ID_PATTERN.fullmatch(path.stem)
-        )
-        for legacy_id in dict.fromkeys(legacy_ids):
-            if legacy_id in packets:
-                continue
-            packet = self._read_legacy(legacy_id)
-            if packet is not None:
-                packets[packet.revision_id] = packet
+        if self.scope_id == "common":
+            legacy_ids = self._load_manifest()
+            legacy_ids.extend(
+                path.stem
+                for path in self._legacy_root.glob("*.json")
+                if path.name != self._manifest_path.name and _SAFE_ID_PATTERN.fullmatch(path.stem)
+            )
+            for legacy_id in dict.fromkeys(legacy_ids):
+                if legacy_id in packets:
+                    continue
+                packet = self._read_legacy(legacy_id)
+                if packet is not None:
+                    packets[packet.revision_id] = packet
 
+        event_state = self._load_event_state()
         selected = [
-            self._apply_events(packet)
+            self._apply_events(packet, event_state)
             for packet in packets.values()
             if safe_stream is None or packet.stream_id == safe_stream
         ]
@@ -531,31 +596,36 @@ class HandoffStore:
     def close(self, identifier: str, *, actor: str, reason: str = "") -> bool:
         """Close the stream containing ``identifier`` without editing a revision."""
 
-        packet = self.read(session_id=identifier)
-        if packet is None:
-            try:
-                revisions = self.list_revisions(identifier)
-            except ValueError:
-                return False
-            packet = revisions[0] if revisions else None
-        if packet is None:
-            return False
+        if not isinstance(actor, str):
+            raise ValueError("closing actor must be a string")
         normalized_actor = actor.strip()
         if not normalized_actor:
             raise ValueError("closing actor is required")
-        if packet.closed:
-            return True
-        self._append_event(
-            {
-                "event_id": uuid.uuid4().hex,
-                "kind": "closed",
-                "timestamp": _now(),
-                "stream_id": packet.stream_id,
-                "revision_id": packet.revision_id,
-                "actor": normalized_actor,
-                "reason": reason.strip(),
-            }
-        )
+        if not isinstance(reason, str):
+            raise ValueError("closing reason must be a string")
+        with self._stream_transaction():
+            packet = self.read(session_id=identifier)
+            if packet is None:
+                try:
+                    revisions = self.list_revisions(identifier)
+                except ValueError:
+                    return False
+                packet = revisions[0] if revisions else None
+            if packet is None:
+                return False
+            if packet.closed:
+                return True
+            self._append_event(
+                {
+                    "event_id": uuid.uuid4().hex,
+                    "kind": "closed",
+                    "timestamp": _now(),
+                    "stream_id": packet.stream_id,
+                    "revision_id": packet.revision_id,
+                    "actor": normalized_actor,
+                    "reason": reason.strip(),
+                }
+            )
         return True
 
     def _write_revision(
@@ -611,7 +681,10 @@ class HandoffStore:
         return "\n".join(lines)
 
     def _packet_from_artifact(self, artifact: MarkdownArtifact) -> HandoffPacket | None:
-        match = _PAYLOAD_PATTERN.search(artifact.body)
+        body_lines = artifact.body.rstrip("\n").splitlines()
+        if not body_lines:
+            return None
+        match = _PAYLOAD_PATTERN.fullmatch(body_lines[-1])
         if match is None:
             return None
         encoded = match.group(1)
@@ -622,12 +695,100 @@ class HandoffStore:
             return None
         if not isinstance(data, dict):
             return None
+        required = {
+            "session_id",
+            "agent_name",
+            "timestamp",
+            "accomplished",
+            "blocked",
+            "next_steps",
+            "context_snapshot",
+            "open_tasks",
+            "metadata",
+            "priority",
+            "schema_version",
+            "acknowledged_by",
+            "stream_id",
+            "revision_id",
+            "title",
+            "supersedes",
+            "closed",
+        }
+        if required.difference(data):
+            return None
+        if data.get("schema_version") not in {
+            HANDOFF_SCHEMA_VERSION,
+            LEGACY_HANDOFF_SCHEMA_VERSION,
+        }:
+            return None
+        string_fields = (
+            "session_id",
+            "agent_name",
+            "timestamp",
+            "priority",
+            "stream_id",
+            "revision_id",
+            "title",
+        )
+        if not all(isinstance(data.get(name), str) for name in string_fields):
+            return None
+        if data.get("target_agent") is not None and not isinstance(data.get("target_agent"), str):
+            return None
+        embedded_path = data.get("artifact_path")
+        if embedded_path is not None and embedded_path != "":
+            return None
+        try:
+            accomplished = _strict_string_list(data.get("accomplished"), field_name="accomplished")
+            blocked = _strict_string_list(data.get("blocked"), field_name="blocked")
+            next_steps = _strict_string_list(data.get("next_steps"), field_name="next_steps")
+            context_snapshot = _strict_dict(
+                data.get("context_snapshot"), field_name="context_snapshot"
+            )
+            open_tasks = _strict_dict_list(data.get("open_tasks"), field_name="open_tasks")
+            metadata = _strict_dict(data.get("metadata"), field_name="metadata")
+            acknowledged_by = _strict_string_list(
+                data.get("acknowledged_by"), field_name="acknowledged_by"
+            )
+            supersedes = _strict_string_list(data.get("supersedes"), field_name="supersedes")
+            revision_id = _safe_identifier(str(data["revision_id"]), field_name="revision_id")
+            stream_id = _safe_identifier(str(data["stream_id"]), field_name="stream_id")
+            normalized_supersedes = self._normalize_supersedes(supersedes)
+        except ValueError:
+            return None
+        if not isinstance(data.get("closed"), bool):
+            return None
+        if (
+            data["session_id"] != revision_id
+            or not str(data["agent_name"]).strip()
+            or not str(data["title"]).strip()
+            or not str(data["priority"]).strip()
+            or bool(data["closed"])
+            or acknowledged_by
+        ):
+            return None
+        timestamp = str(data["timestamp"])
+        timestamp_value = timestamp[:-1] + "+00:00" if timestamp.endswith("Z") else timestamp
+        try:
+            parsed_timestamp = datetime.fromisoformat(timestamp_value)
+        except ValueError:
+            return None
+        if parsed_timestamp.tzinfo is None or parsed_timestamp.utcoffset() is None:
+            return None
         packet = HandoffPacket.from_dict(data)
+        packet.accomplished = accomplished
+        packet.blocked = blocked
+        packet.next_steps = next_steps
+        packet.context_snapshot = context_snapshot
+        packet.open_tasks = open_tasks
+        packet.metadata = metadata
         provenance = artifact.metadata.provenance or {}
         if (
-            provenance.get("revision_id") != packet.revision_id
-            or provenance.get("stream_id") != packet.stream_id
+            provenance.get("source") != "afs.handoff"
+            or provenance.get("revision_id") != revision_id
+            or provenance.get("stream_id") != stream_id
+            or provenance.get("supersedes") != normalized_supersedes
             or artifact.metadata.title != packet.title
+            or artifact.metadata.agent_name != packet.agent_name
             or artifact.metadata.scope_id != self.scope_id
         ):
             return None
@@ -643,16 +804,13 @@ class HandoffStore:
         return None
 
     def _read_legacy(self, session_id: str) -> HandoffPacket | None:
+        if self.scope_id != "common" or self._legacy_codec is None:
+            return None
         packet_path = self._legacy_root / f"{session_id}.json"
         try:
-            packet_path.resolve().relative_to(self._legacy_root.resolve())
-        except ValueError:
-            return None
-        if not packet_path.is_file():
-            return None
-        try:
-            data = json.loads(packet_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+            _, payload = self._legacy_codec._read_contained_text(packet_path)
+            data = json.loads(payload)
+        except (json.JSONDecodeError, OSError, ValueError):
             return None
         if not isinstance(data, dict):
             return None
@@ -660,25 +818,40 @@ class HandoffStore:
         packet.artifact_path = str(packet_path)
         return packet
 
-    def _apply_events(self, packet: HandoffPacket) -> HandoffPacket:
+    def _apply_events(self, packet: HandoffPacket, event_state: _EventState) -> HandoffPacket:
         acknowledged = list(dict.fromkeys(packet.acknowledged_by))
-        closed = packet.closed
-        for event in self._load_events():
-            kind = event.get("kind")
-            if kind == "acknowledged" and event.get("revision_id") == packet.revision_id:
-                actor = event.get("actor")
-                if isinstance(actor, str) and actor and actor not in acknowledged:
-                    acknowledged.append(actor)
-            elif kind == "closed" and event.get("stream_id") == packet.stream_id:
-                closed = True
+        for actor in event_state.acknowledged_by_revision.get(packet.revision_id, ()):
+            if actor not in acknowledged:
+                acknowledged.append(actor)
+        closed = packet.closed or packet.stream_id in event_state.closed_streams
         return replace(packet, acknowledged_by=acknowledged, closed=closed)
 
+    def _load_event_state(self) -> _EventState:
+        acknowledged: dict[str, list[str]] = {}
+        closed_streams: set[str] = set()
+        for event in self._load_events():
+            kind = event.get("kind")
+            if kind == "acknowledged":
+                revision_id = event.get("revision_id")
+                actor = event.get("actor")
+                if isinstance(revision_id, str) and isinstance(actor, str) and actor:
+                    actors = acknowledged.setdefault(revision_id, [])
+                    if actor not in actors:
+                        actors.append(actor)
+            elif kind == "closed":
+                stream_id = event.get("stream_id")
+                if isinstance(stream_id, str) and stream_id:
+                    closed_streams.add(stream_id)
+        return _EventState(
+            acknowledged_by_revision={key: tuple(value) for key, value in acknowledged.items()},
+            closed_streams=frozenset(closed_streams),
+        )
+
     def _load_events(self) -> list[dict[str, Any]]:
-        if not self._events_path.exists():
-            return []
         events: list[dict[str, Any]] = []
         try:
-            with self._events_path.open(encoding="utf-8") as handle:
+            fd = self._codec._open_control_file("_events.jsonl", os.O_RDONLY)
+            with os.fdopen(fd, encoding="utf-8") as handle:
                 for line in handle:
                     try:
                         item = json.loads(line)
@@ -686,7 +859,7 @@ class HandoffStore:
                         continue
                     if isinstance(item, dict):
                         events.append(item)
-        except OSError:
+        except (OSError, ValueError):
             return []
         return events
 
@@ -694,18 +867,13 @@ class HandoffStore:
         payload = (json.dumps(dict(event), sort_keys=True) + "\n").encode("utf-8")
         if len(payload) > 64 * 1024:
             raise ValueError("handoff event exceeds 64 KiB")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
+        flags = os.O_RDWR | os.O_CREAT | os.O_APPEND
         with _EVENT_LOCK:
-            fd = os.open(self._events_path, flags, 0o600)
+            fd = self._codec._open_control_file("_events.jsonl", flags)
+            locked = False
             try:
-                try:
-                    import fcntl
-
-                    fcntl.flock(fd, fcntl.LOCK_EX)
-                except ImportError:  # pragma: no cover - non-POSIX fallback
-                    pass
+                self._lock_fd(fd)
+                locked = True
                 view = memoryview(payload)
                 while view:
                     written = os.write(fd, view)
@@ -714,26 +882,15 @@ class HandoffStore:
                     view = view[written:]
                 os.fsync(fd)
             finally:
+                if locked:
+                    self._unlock_fd(fd)
                 os.close(fd)
 
-    def _claim_revision_id(self, revision_id: str) -> Path:
-        claim_root = self._root / ".revision_ids"
-        claim_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        claim_root = claim_root.resolve()
+    def _claim_revision_id(self, revision_id: str) -> Any:
         try:
-            claim_root.relative_to(self._root)
-        except ValueError as exc:
-            raise ValueError("revision id registry resolves outside the handoff root") from exc
-        claim_path = claim_root / revision_id
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        try:
-            fd = os.open(claim_path, flags, 0o600)
+            return self._codec._claim_identifier(".revision_ids", revision_id)
         except FileExistsError as exc:
             raise FileExistsError(f"handoff revision already exists: {revision_id}") from exc
-        os.close(fd)
-        return claim_path
 
     @staticmethod
     def _normalize_supersedes(value: str | Sequence[str] | None) -> list[str]:
@@ -750,11 +907,13 @@ class HandoffStore:
         return result
 
     def _load_manifest(self) -> list[str]:
-        if not self._manifest_path.exists():
+        if self.scope_id != "common" or self._legacy_codec is None:
             return []
         try:
-            data = json.loads(self._manifest_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+            fd = self._legacy_codec._open_control_file("_manifest.json", os.O_RDONLY)
+            with os.fdopen(fd, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (json.JSONDecodeError, OSError, ValueError):
             return []
         if isinstance(data, list):
             return [str(item) for item in data if isinstance(item, str)]
@@ -766,34 +925,132 @@ class HandoffStore:
                     return [str(item) for item in value if isinstance(item, str)]
         return []
 
-    def _update_legacy_manifest(self, session_id: str) -> None:
-        lock_path = self._legacy_root / ".manifest.lock"
-        with _MANIFEST_LOCK:
-            lock_handle = lock_path.open("a+", encoding="utf-8")
-            try:
-                try:
-                    import fcntl
+    def _update_legacy_compatibility_best_effort(self, packet: HandoffPacket) -> None:
+        if self.scope_id != "common":
+            return
+        try:
+            self._write_legacy_compatibility(packet)
+        except Exception:
+            # Canonical Markdown is the source of truth.  Compatibility is
+            # derived state and must never turn a committed write into a
+            # reported failure.
+            pass
 
-                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-                except ImportError:  # pragma: no cover - non-POSIX fallback
-                    pass
-                manifest = self._load_manifest()
-                if session_id not in manifest:
-                    manifest.append(session_id)
-                temporary = self._legacy_root / f"._manifest.{uuid.uuid4().hex}.tmp"
-                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    def _write_legacy_compatibility(self, packet: HandoffPacket) -> None:
+        if self._legacy_codec is None:  # pragma: no cover - guarded by caller
+            return
+        with _MANIFEST_LOCK:
+            lock_fd = self._legacy_codec._open_control_file(
+                ".manifest.lock", os.O_RDWR | os.O_CREAT
+            )
+            locked = False
+            try:
+                self._lock_fd(lock_fd)
+                locked = True
+                compatibility = packet.to_dict()
+                compatibility.pop("artifact_path", None)
+                rendered_packet = json.dumps(compatibility, indent=2, allow_nan=False) + "\n"
+                legacy_fd = self._legacy_codec._open_relative_directory(None)
                 try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                        json.dump(manifest, handle, indent=2)
-                        handle.write("\n")
-                        handle.flush()
-                        os.fsync(handle.fileno())
-                    temporary.replace(self._manifest_path)
+                    if legacy_fd is not None:
+                        self._legacy_codec._write_exclusive_at(
+                            legacy_fd,
+                            f"{packet.session_id}.json",
+                            rendered_packet,
+                        )
+                    else:
+                        self._legacy_codec._write_exclusive(
+                            self._legacy_root / f"{packet.session_id}.json",
+                            rendered_packet,
+                        )
+                finally:
+                    if legacy_fd is not None:
+                        os.close(legacy_fd)
+
+                manifest = self._load_manifest()
+                if packet.session_id not in manifest:
+                    manifest.append(packet.session_id)
+                self._replace_legacy_manifest(manifest)
+            finally:
+                if locked:
+                    self._unlock_fd(lock_fd)
+                os.close(lock_fd)
+
+    def _replace_legacy_manifest(self, manifest: list[str]) -> None:
+        if self._legacy_codec is None:  # pragma: no cover - guarded by caller
+            return
+        payload = json.dumps(manifest, indent=2) + "\n"
+        temporary_name = f"_manifest.{uuid.uuid4().hex}.tmp"
+        legacy_fd = self._legacy_codec._open_relative_directory(None)
+        if legacy_fd is not None:
+            try:
+                self._legacy_codec._write_exclusive_at(legacy_fd, temporary_name, payload)
+                try:
+                    os.replace(
+                        temporary_name,
+                        "_manifest.json",
+                        src_dir_fd=legacy_fd,
+                        dst_dir_fd=legacy_fd,
+                    )
+                    os.fsync(legacy_fd)
                 except BaseException:
-                    temporary.unlink(missing_ok=True)
+                    try:
+                        os.unlink(temporary_name, dir_fd=legacy_fd)
+                    except FileNotFoundError:
+                        pass
                     raise
             finally:
-                lock_handle.close()
+                os.close(legacy_fd)
+            return
+
+        temporary = self._legacy_root / temporary_name
+        self._legacy_codec._write_exclusive(temporary, payload)
+        try:
+            temporary.replace(self._manifest_path)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+
+    @contextmanager
+    def _stream_transaction(self) -> Iterator[None]:
+        with _STREAM_LOCK:
+            fd = self._codec._open_control_file(".streams.lock", os.O_RDWR | os.O_CREAT)
+            if os.name == "nt" and os.fstat(fd).st_size == 0:  # pragma: no cover - Windows
+                os.write(fd, b"0")
+                os.fsync(fd)
+            locked = False
+            try:
+                self._lock_fd(fd)
+                locked = True
+                yield
+            finally:
+                if locked:
+                    self._unlock_fd(fd)
+                os.close(fd)
+
+    @staticmethod
+    def _lock_fd(fd: int) -> None:
+        try:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except ImportError:  # pragma: no cover - Windows
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+
+    @staticmethod
+    def _unlock_fd(fd: int) -> None:
+        try:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except ImportError:  # pragma: no cover - Windows
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
 
     def _log_creation(self, packet: HandoffPacket) -> None:
         try:
