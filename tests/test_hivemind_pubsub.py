@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from afs.hivemind import HivemindBus, HivemindMessage, HivemindSubscription
@@ -66,6 +67,34 @@ def test_subscribe_creates_file(tmp_path: Path) -> None:
     assert sub.agent_name == "agent-a"
     sub_path = ctx / "hivemind" / ".subscriptions" / "agent-a.json"
     assert sub_path.exists()
+
+
+def test_subscription_updates_publish_with_atomic_replace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ctx = tmp_path / ".context"
+    ctx.mkdir()
+    (ctx / "hivemind").mkdir()
+    original_replace = os.replace
+    publishes: list[tuple[Path, Path]] = []
+
+    def _track_replace(source, target) -> None:
+        source_path = Path(source)
+        target_path = Path(target)
+        if target_path.parent.name == ".subscriptions":
+            assert source_path.exists()
+            assert source_path.suffix == ".tmp"
+            publishes.append((source_path, target_path))
+        original_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", _track_replace)
+    bus = HivemindBus(ctx)
+    bus.subscribe("agent-a", ["topic-a"])
+    bus.unsubscribe("agent-a", ["topic-a"])
+
+    assert len(publishes) == 2
+    assert all(not source.exists() and target.exists() for source, target in publishes)
 
 
 def test_subscribe_merges_topics(tmp_path: Path) -> None:

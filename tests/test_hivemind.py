@@ -140,3 +140,61 @@ def test_hivemind_uses_remapped_mount(tmp_path: Path) -> None:
     msg = bus.send("agent-a", "status", {"state": "ok"})
 
     assert (hive_root / "agent-a" / f"{msg.id}.json").exists()
+
+
+def test_hivemind_rejects_unsafe_agent_path_names(tmp_path: Path) -> None:
+    ctx = tmp_path / ".context"
+    hive_root = ctx / "hivemind"
+    hive_root.mkdir(parents=True)
+    bus = HivemindBus(ctx)
+    absolute_target = tmp_path / "absolute-agent"
+    unsafe_names = [
+        str(absolute_target),
+        "../outside-agent",
+        "nested/agent",
+        r"nested\agent",
+    ]
+    operations = [
+        lambda name: bus.send(name, "status", {}),
+        lambda name: bus.read(agent_name=name),
+        lambda name: bus.subscribe(name, ["topic"]),
+        lambda name: bus.unsubscribe(name, ["topic"]),
+        bus.get_subscriptions,
+    ]
+
+    for unsafe_name in unsafe_names:
+        for operation in operations:
+            with pytest.raises(ValueError, match="single path component"):
+                operation(unsafe_name)
+
+    assert not absolute_target.exists()
+    assert not (ctx / "outside-agent").exists()
+    assert not (hive_root / "nested").exists()
+    assert not (hive_root / r"nested\agent").exists()
+    assert not (hive_root / ".subscriptions").exists()
+
+
+def test_hivemind_read_cannot_escape_queue(tmp_path: Path) -> None:
+    ctx = tmp_path / ".context"
+    (ctx / "hivemind").mkdir(parents=True)
+    outside_agent = tmp_path / "outside-agent"
+    outside_agent.mkdir()
+    (outside_agent / "message.json").write_text(
+        json.dumps(
+            {
+                "id": "outside",
+                "from": "outside-agent",
+                "to": None,
+                "type": "status",
+                "payload": {"secret": True},
+                "timestamp": "2026-01-01T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    bus = HivemindBus(ctx)
+
+    with pytest.raises(ValueError, match="single path component"):
+        bus.read(agent_name=str(outside_agent))
+    with pytest.raises(ValueError, match="single path component"):
+        bus.read(agent_name="../../outside-agent")
