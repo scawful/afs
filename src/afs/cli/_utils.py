@@ -225,7 +225,15 @@ def resolve_context_paths(
 
 
 def ensure_context_root(root: Path) -> None:
-    """Create context root directory structure."""
+    """Create the legacy root structure without mutating an existing v2 root."""
+
+    from ..context_layout import LAYOUT_VERSION, detect_layout_version, scaffold_v2
+
+    if root.exists() and detect_layout_version(root) == LAYOUT_VERSION:
+        # ``scaffold_v2`` is idempotent for an authorized v2 marker and never
+        # creates the legacy top-level hivemind/global/items directories.
+        scaffold_v2(root)
+        return
     root.mkdir(parents=True, exist_ok=True)
     for name in AFS_DIRS:
         (root / name).mkdir(parents=True, exist_ok=True)

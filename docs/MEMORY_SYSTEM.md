@@ -69,11 +69,14 @@ content edits.
 
 AFS also has a legacy-compatible event consolidation loop:
 
-- `history/` is the append-only event ledger.
-- `memory/entries.jsonl` stores summarized memory entries.
-- `memory/history_consolidation/` stores readable summaries.
-- `scratchpad/afs_agents/history_memory_checkpoint.json` stores the incremental
-  checkpoint.
+- `history/common/` is the v2 shared append-only event ledger.
+- `memory/common/entries.jsonl` stores v2 summarized memory entries.
+- `memory/common/history_consolidation/` stores readable v2 summaries.
+- `scratchpad/common/afs_agents/history_memory_checkpoint.json` stores the v2
+  incremental checkpoint.
+
+Version 1 keeps the corresponding paths directly under `.context/history/`,
+`.context/memory/`, and `.context/scratchpad/afs_agents/`.
 
 Run it manually or through the maintenance agent:
 
@@ -85,8 +88,8 @@ afs services start history-memory
 
 The default consolidator is intentionally low-sensitivity. It summarizes
 selected event metadata and does not copy raw history payloads unless payload
-capture was explicitly enabled. These paths are compatibility-era subsystem
-paths; new notes and handoffs use the scoped v2 artifact locations above.
+capture was explicitly enabled. Pre-fix v2 entries at the memory category root
+remain readable but all new writes use the explicit shared scope.
 
 Optional config:
 

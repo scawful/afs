@@ -7,6 +7,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..context_layout import (
+    LAYOUT_VERSION,
+    _atomic_write_text,
+    detect_layout_version,
+    resolve_runtime_root,
+)
+from ..path_safety import assert_no_linklike_components
 from .models import EvaluationScores, ModelMetadata, ModelVersion, TrainingMetadata, VersionStatus
 
 
@@ -57,14 +64,33 @@ class ModelRegistry:
 
     DEFAULT_PATH = Path.home() / ".context" / "training" / "registry.json"
 
-    def __init__(self, registry_path: Path | None = None):
+    def __init__(
+        self,
+        registry_path: Path | None = None,
+        *,
+        context_root: Path | None = None,
+    ):
         """Initialize registry.
 
         Args:
-            registry_path: Path to registry JSON file. Defaults to ~/.context/training/registry.json
+            registry_path: Explicit registry JSON file. The default is
+                ``.afs/training/registry.json`` in v2 and
+                ``training/registry.json`` in v1.
+            context_root: Context root used only for the layout-aware default path
         """
+        self._managed_context_root: Path | None = None
+        if registry_path is None:
+            root = (context_root or Path.home() / ".context").expanduser().resolve()
+            training_root = resolve_runtime_root(
+                root,
+                "training",
+                legacy_relative="training",
+            )
+            registry_path = training_root / "registry.json"
+            if detect_layout_version(root) == LAYOUT_VERSION:
+                self._managed_context_root = root
         self.registry_path = self._normalize_registry_path(
-            Path(registry_path or self.DEFAULT_PATH)
+            Path(registry_path)
         )
         self.models: dict[str, dict[str, Any]] = {}
         self._load()
@@ -77,12 +103,35 @@ class ModelRegistry:
             return path / "registry.json"
         return path
 
+    def _safe_registry_path(self, *, create_parent: bool = False) -> Path:
+        """Return the managed v2 registry leaf after containment checks."""
+
+        if self._managed_context_root is None:
+            if create_parent:
+                self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+            return self.registry_path
+        training_root = resolve_runtime_root(
+            self._managed_context_root,
+            "training",
+            legacy_relative="training",
+            create=create_parent,
+        )
+        expected = assert_no_linklike_components(
+            training_root / "registry.json",
+            boundary=training_root,
+        )
+        if self.registry_path != expected:
+            raise ValueError("managed model registry path escaped the v2 training root")
+        return expected
+
     def _load(self) -> None:
         """Load registry from disk."""
         self.registry_path = self._normalize_registry_path(self.registry_path)
-        if self.registry_path.exists():
+        registry_path = self._safe_registry_path()
+        if registry_path.exists():
             try:
-                with open(self.registry_path) as f:
+                self._safe_registry_path()
+                with open(registry_path) as f:
                     data = json.load(f)
                     if isinstance(data, dict) and "version" in data:
                         # Format with metadata wrapper
@@ -99,14 +148,13 @@ class ModelRegistry:
     def _save(self) -> None:
         """Save registry to disk."""
         self.registry_path = self._normalize_registry_path(self.registry_path)
-        self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+        registry_path = self._safe_registry_path(create_parent=True)
         data = {
             "version": "1.0",
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "models": self.models,
         }
-        with open(self.registry_path, "w") as f:
-            json.dump(data, f, indent=2)
+        _atomic_write_text(registry_path, json.dumps(data, indent=2))
 
     def _init_model(self, model_name: str) -> None:
         """Initialize model entry if it doesn't exist."""

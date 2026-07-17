@@ -10,8 +10,10 @@ from pathlib import Path
 
 from .agent_jobs import AgentJob, AgentJobQueue
 from .agent_runs import AgentRunStore
+from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_paths import resolve_mount_root
 from .models import MountType
+from .path_safety import assert_no_linklike_components
 
 DESTRUCTIVE_MARKERS = (
     "rm -rf",
@@ -90,6 +92,43 @@ def worker_policy_prompt() -> str:
     )
 
 
+def _agent_job_prompt_root(context_path: Path) -> tuple[Path, Path | None]:
+    scratchpad = resolve_mount_root(context_path, MountType.SCRATCHPAD)
+    if detect_layout_version(context_path) != LAYOUT_VERSION:
+        return scratchpad / "agent_job_prompts", None
+    context_root = context_path.expanduser().resolve()
+    root = assert_no_linklike_components(
+        scratchpad / "common" / "agent_job_prompts",
+        boundary=context_root,
+    )
+    return root, context_root
+
+
+def _write_prompt_file(
+    prompt_file: Path,
+    content: str,
+    *,
+    prompt_root: Path,
+    v2_boundary: Path | None,
+) -> None:
+    if v2_boundary is None:
+        prompt_file.parent.mkdir(parents=True, exist_ok=True)
+        prompt_file.write_text(content, encoding="utf-8")
+        return
+    assert_no_linklike_components(prompt_root, boundary=v2_boundary)
+    prompt_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    prompt_root = assert_no_linklike_components(
+        prompt_root,
+        boundary=v2_boundary,
+        allow_missing=False,
+    )
+    prompt_file = assert_no_linklike_components(
+        prompt_file,
+        boundary=prompt_root,
+    )
+    prompt_file.write_text(content, encoding="utf-8")
+
+
 def run_agent_job_worker(
     context_path: Path,
     *,
@@ -110,7 +149,7 @@ def run_agent_job_worker(
 
     queue = AgentJobQueue(context_path)
     run_store = AgentRunStore(context_path)
-    prompt_root = resolve_mount_root(context_path, MountType.SCRATCHPAD) / "agent_job_prompts"
+    prompt_root, prompt_boundary = _agent_job_prompt_root(context_path)
     workspace_path = (workspace or Path.cwd()).expanduser().resolve()
     results: list[AgentJobWorkerResult] = []
     runnable_processed = 0
@@ -148,8 +187,12 @@ def run_agent_job_worker(
             runnable_processed += 1
             continue
 
-        prompt_file.parent.mkdir(parents=True, exist_ok=True)
-        prompt_file.write_text(worker_policy_prompt() + job.prompt.rstrip() + "\n", encoding="utf-8")
+        _write_prompt_file(
+            prompt_file,
+            worker_policy_prompt() + job.prompt.rstrip() + "\n",
+            prompt_root=prompt_root,
+            v2_boundary=prompt_boundary,
+        )
         claimed = queue.claim(job.id, agent_name)
         run = run_store.start(
             claimed.title,

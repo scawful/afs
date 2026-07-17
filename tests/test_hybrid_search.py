@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -9,8 +10,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from afs.context_layout import scaffold_v2
 from afs.embeddings import EmbeddingCollectionMetadata
 from afs.hybrid_search import (
+    HybridScopeCoverageError,
     HybridSearchEngine,
     HybridSearchResponse,
     HybridSource,
@@ -25,6 +28,213 @@ def _semantic_vector(text: str) -> list[float]:
         1.0 if "release" in lowered else 0.0,
         0.25,
     ]
+
+
+def _symlink_or_skip(link: Path, target: Path, *, directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+
+def test_v2_system_search_root_rejects_link_escape(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    outside = tmp_path / "outside"
+    scaffold_v2(context_root)
+    outside.mkdir()
+    search_root = context_root / ".afs" / "search"
+    search_root.rmdir()
+    search_root.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        HybridSearchEngine(search_root)
+    assert not any(outside.iterdir())
+
+
+def test_v2_hybrid_rejects_linked_current_for_search_and_rebuild(
+    tmp_path: Path,
+) -> None:
+    context_root = tmp_path / ".context"
+    source = tmp_path / "project"
+    scaffold_v2(context_root)
+    source.mkdir()
+    (source / "guide.md").write_text("sprite guide", encoding="utf-8")
+    engine = HybridSearchEngine(context_root / ".afs" / "search")
+    registered = HybridSource(source, scope_id="project:alpha")
+    engine.build([registered])
+    current = engine.current_path
+    outside_current = tmp_path / "outside-current"
+    outside_payload = current.read_text(encoding="utf-8")
+    outside_current.write_text(outside_payload, encoding="utf-8")
+    current.unlink()
+    _symlink_or_skip(current, outside_current)
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        engine.search(
+            "sprite",
+            scope_ids=["project:alpha"],
+            include_common=False,
+            mode="text",
+        )
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        engine.build([registered])
+
+    assert outside_current.read_text(encoding="utf-8") == outside_payload
+
+
+def test_v2_hybrid_rejects_linked_active_generation_directory(
+    tmp_path: Path,
+) -> None:
+    context_root = tmp_path / ".context"
+    source = tmp_path / "project"
+    scaffold_v2(context_root)
+    source.mkdir()
+    (source / "guide.md").write_text("sprite guide", encoding="utf-8")
+    engine = HybridSearchEngine(context_root / ".afs" / "search")
+    engine.build([HybridSource(source, scope_id="project:alpha")])
+    generation_id = engine.current_path.read_text(encoding="utf-8").strip()
+    generation = engine.generations_root / generation_id
+    outside_generation = tmp_path / "outside-generation"
+    generation.rename(outside_generation)
+    _symlink_or_skip(generation, outside_generation, directory=True)
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        engine.search(
+            "sprite",
+            scope_ids=["project:alpha"],
+            include_common=False,
+            mode="text",
+        )
+
+
+def test_v2_hybrid_rejects_linked_generations_root_before_rebuild(
+    tmp_path: Path,
+) -> None:
+    context_root = tmp_path / ".context"
+    source = tmp_path / "project"
+    scaffold_v2(context_root)
+    source.mkdir()
+    (source / "guide.md").write_text("sprite guide", encoding="utf-8")
+    engine = HybridSearchEngine(context_root / ".afs" / "search")
+    outside = tmp_path / "outside-generations"
+    outside.mkdir()
+    _symlink_or_skip(engine.index_root / "generations", outside, directory=True)
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        engine.build([HybridSource(source, scope_id="project:alpha")])
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("filename", "mode"),
+    [
+        ("search.sqlite3", "text"),
+        ("vectors.npy", "semantic"),
+        ("hybrid_index.json", "text"),
+    ],
+)
+def test_v2_hybrid_rejects_linked_active_generation_leaf(
+    tmp_path: Path,
+    filename: str,
+    mode: str,
+) -> None:
+    context_root = tmp_path / ".context"
+    source = tmp_path / "project"
+    scaffold_v2(context_root)
+    source.mkdir()
+    (source / "guide.md").write_text("sprite guide", encoding="utf-8")
+    engine = HybridSearchEngine(context_root / ".afs" / "search")
+    engine.build(
+        [
+            HybridSource(
+                source,
+                scope_id="project:alpha",
+                embed_allowed=True,
+            )
+        ],
+        embed_fn=_semantic_vector,
+    )
+    generation_id = engine.current_path.read_text(encoding="utf-8").strip()
+    leaf = engine.generations_root / generation_id / filename
+    outside_leaf = tmp_path / f"outside-{filename}"
+    leaf.rename(outside_leaf)
+    _symlink_or_skip(leaf, outside_leaf)
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        engine.search(
+            "sprite",
+            scope_ids=["project:alpha"],
+            include_common=False,
+            mode=mode,
+            query_embed_fn=lambda _: [1.0, 0.0, 0.25],
+        )
+
+    assert outside_leaf.exists()
+
+
+@pytest.mark.parametrize(
+    ("lock_name", "operation"),
+    [
+        (".hybrid-build.lock", "build"),
+        (".hybrid-publication.lock", "search"),
+    ],
+)
+def test_v2_hybrid_rejects_linked_lock_leaf(
+    tmp_path: Path,
+    lock_name: str,
+    operation: str,
+) -> None:
+    context_root = tmp_path / ".context"
+    source = tmp_path / "project"
+    scaffold_v2(context_root)
+    source.mkdir()
+    (source / "guide.md").write_text("sprite guide", encoding="utf-8")
+    engine = HybridSearchEngine(context_root / ".afs" / "search")
+    registered = HybridSource(source, scope_id="project:alpha")
+    engine.build([registered])
+    lock_path = engine.index_root / lock_name
+    lock_path.unlink()
+    outside_lock = tmp_path / f"outside-{lock_name}"
+    outside_lock.write_bytes(b"outside")
+    _symlink_or_skip(lock_path, outside_lock)
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        if operation == "build":
+            engine.build([registered])
+        else:
+            engine.search(
+                "sprite",
+                scope_ids=["project:alpha"],
+                include_common=False,
+                mode="text",
+            )
+
+    assert outside_lock.read_bytes() == b"outside"
+
+
+def test_legacy_flat_hybrid_index_without_current_remains_searchable(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / "guide.md").write_text("legacy sprite guide", encoding="utf-8")
+    engine = HybridSearchEngine(tmp_path / "legacy-index")
+    engine.build([HybridSource(source, scope_id="project:alpha")])
+    generation_id = engine.current_path.read_text(encoding="utf-8").strip()
+    generation = engine.generations_root / generation_id
+    for filename in ("search.sqlite3", "vectors.npy", "hybrid_index.json"):
+        shutil.copy2(generation / filename, engine.index_root / filename)
+    engine.current_path.unlink()
+
+    response = engine.search(
+        "legacy sprite",
+        scope_ids=["project:alpha"],
+        include_common=False,
+        mode="text",
+    )
+
+    assert [hit.relative_path for hit in response.results] == ["guide.md"]
 
 
 def test_scope_filter_is_applied_before_all_ranking(tmp_path: Path) -> None:
@@ -220,6 +430,7 @@ def test_hybrid_layout_uses_normalized_float32_vectors_and_is_discoverable(
     assert metadata["scope_coverage"] == {
         "embedded_scope_ids": ["project:alpha"],
         "intended_scope_ids": ["project:alpha"],
+        "source_scope_ids": ["project:alpha"],
     }
     assert HybridSearchEngine.discover(tmp_path) == [index_root]
 
@@ -513,3 +724,44 @@ def test_builders_are_serialized_and_old_generations_are_collected(tmp_path: Pat
         previous_generation,
         current_generation,
     }
+
+
+def test_required_scope_rejects_generation_rebuilt_for_another_project(
+    tmp_path: Path,
+) -> None:
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    (alpha / "note.md").write_text("alpha-only marker", encoding="utf-8")
+    (beta / "note.md").write_text("beta-only marker", encoding="utf-8")
+    engine = HybridSearchEngine(tmp_path / "index")
+    engine.build([HybridSource(alpha, scope_id="project:alpha")])
+    engine.build([HybridSource(beta, scope_id="project:beta")])
+
+    with pytest.raises(HybridScopeCoverageError, match="project:alpha"):
+        engine.search(
+            "marker",
+            scope_ids=["project:alpha"],
+            include_common=False,
+            mode="text",
+            required_scope_ids=["project:alpha"],
+        )
+
+
+def test_source_policy_digest_changes_when_foreign_root_is_excluded(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    nested = source / "nested"
+    nested.mkdir(parents=True)
+    unrestricted = HybridSource(source, scope_id="project:alpha")
+    restricted = HybridSource(
+        source,
+        scope_id="project:alpha",
+        excluded_roots=(nested,),
+    )
+
+    from afs.hybrid_search import source_policy_digest
+
+    assert source_policy_digest([unrestricted]) != source_policy_digest([restricted])

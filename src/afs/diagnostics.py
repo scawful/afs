@@ -24,8 +24,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from .context_layout import LAYOUT_VERSION, _atomic_write_text, detect_layout_version
 from .context_paths import resolve_agent_output_root
 from .models import MountType
+from .path_safety import assert_no_linklike_components
 
 _REQUIRED_CONTEXT_MOUNTS = (
     MountType.MEMORY,
@@ -911,7 +913,11 @@ def write_doctor_snapshot(
     elif counts["warn"]:
         overall_status = "warn"
 
-    output_root = resolve_agent_output_root(context_root, config=config)
+    output_root = resolve_agent_output_root(
+        context_root,
+        config=config,
+        scope_id="common",
+    )
     output_root.mkdir(parents=True, exist_ok=True)
     output_path = output_root / DOCTOR_SNAPSHOT_JSON
     now = datetime.now(timezone.utc).isoformat()
@@ -933,5 +939,18 @@ def write_doctor_snapshot(
             "config_path": str(config_path) if config_path else None,
         },
     }
-    output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    rendered = json.dumps(payload, indent=2) + "\n"
+    if detect_layout_version(context_root) == LAYOUT_VERSION:
+        output_root = assert_no_linklike_components(
+            output_root,
+            boundary=context_root.expanduser().resolve(),
+            allow_missing=False,
+        )
+        output_path = assert_no_linklike_components(
+            output_path,
+            boundary=output_root,
+        )
+        _atomic_write_text(output_path, rendered)
+    else:
+        output_path.write_text(rendered, encoding="utf-8")
     return output_path

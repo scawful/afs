@@ -12,6 +12,7 @@ from .config import load_config_model
 from .context_layout import (
     LAYOUT_VERSION,
     V2_COMPAT_MOUNT_PATHS,
+    _atomic_write_text,
     detect_layout_version,
     scaffold_v2,
     v2_directory_map,
@@ -26,6 +27,7 @@ from .models import (
     MountType,
     ProjectMetadata,
 )
+from .path_safety import assert_no_linklike_components
 from .profiles import (
     apply_profile_mounts,
     list_profile_mount_specs,
@@ -75,13 +77,19 @@ class AFSManager:
         context_path: Path,
         mount_type: MountType,
     ) -> Path:
+        resolved_context = context_path.expanduser().resolve()
+        if detect_layout_version(resolved_context) == LAYOUT_VERSION:
+            return assert_no_linklike_components(
+                resolved_context / V2_COMPAT_MOUNT_PATHS[mount_type],
+                boundary=resolved_context,
+            )
         metadata = self._load_metadata(context_path)
         directory_name = resolve_directory_name(
             mount_type,
             afs_directories=self._directories,
             metadata=metadata,
         )
-        return context_path / directory_name
+        return resolved_context / directory_name
 
     def ensure(
         self,
@@ -328,6 +336,18 @@ class AFSManager:
         if metadata is None:
             metadata = ProjectMetadata()
 
+        layout_version = detect_layout_version(context_path)
+        if layout_version == LAYOUT_VERSION:
+            # Common/project scope containers are not legacy mounts. Keep the
+            # old mount projection empty instead of reporting "common" and
+            # "projects" as user-configured mount aliases.
+            return ContextRoot(
+                path=context_path,
+                project_name=context_path.parent.name,
+                metadata=metadata,
+                mounts={mount_type: [] for mount_type in MountType},
+                layout_version=layout_version,
+            )
         mounts: dict[MountType, list[MountPoint]] = {}
         directory_map = resolve_directory_map(
             afs_directories=self._directories,
@@ -362,7 +382,7 @@ class AFSManager:
             project_name=context_path.parent.name,
             metadata=metadata,
             mounts=mounts,
-            layout_version=detect_layout_version(context_path),
+            layout_version=layout_version,
         )
 
     def clean(self, context_path: Path | None = None) -> None:
@@ -824,9 +844,19 @@ class AFSManager:
     def _ensure_context_dirs(self, context_path: Path, *, layout_version: int = 1) -> None:
         context_path.mkdir(parents=True, exist_ok=True)
         if layout_version == LAYOUT_VERSION:
-            for relative_path in V2_COMPAT_MOUNT_PATHS.values():
-                (context_path / relative_path).mkdir(parents=True, exist_ok=True)
-            (context_path / "human").mkdir(parents=True, exist_ok=True)
+            for relative_path in dict.fromkeys(
+                [*V2_COMPAT_MOUNT_PATHS.values(), "human"]
+            ):
+                target = assert_no_linklike_components(
+                    context_path / relative_path,
+                    boundary=context_path,
+                )
+                target.mkdir(parents=True, exist_ok=True)
+                assert_no_linklike_components(
+                    target,
+                    boundary=context_path,
+                    allow_missing=False,
+                )
             return
         for dir_config in self._directories:
             subdir = context_path / dir_config.name
@@ -925,36 +955,60 @@ class AFSManager:
                 afs_directories=self._directories,
                 metadata=metadata,
             )
+        is_v2 = detect_layout_version(context_path) == LAYOUT_VERSION
+        if is_v2:
+            scratchpad_dir = assert_no_linklike_components(
+                scratchpad_dir,
+                boundary=context_path,
+            )
+            memory_dir = assert_no_linklike_components(
+                memory_dir,
+                boundary=context_path,
+            )
         scratchpad_dir.mkdir(parents=True, exist_ok=True)
         memory_dir.mkdir(parents=True, exist_ok=True)
+        if is_v2:
+            scratchpad_dir = assert_no_linklike_components(
+                scratchpad_dir,
+                boundary=context_path,
+                allow_missing=False,
+            )
+            memory_dir = assert_no_linklike_components(
+                memory_dir,
+                boundary=context_path,
+                allow_missing=False,
+            )
+
+        def ensure_text(path: Path, content: str) -> None:
+            if is_v2:
+                path = assert_no_linklike_components(path, boundary=context_path)
+            if not path.exists():
+                if is_v2:
+                    _atomic_write_text(path, content)
+                else:
+                    path.write_text(content, encoding="utf-8")
 
         state_file = scratchpad_dir / self.STATE_FILE
-        if not state_file.exists():
-            state_file.write_text(self.DEFAULT_STATE_TEMPLATE, encoding="utf-8")
+        ensure_text(state_file, self.DEFAULT_STATE_TEMPLATE)
 
         deferred_file = scratchpad_dir / self.DEFERRED_FILE
-        if not deferred_file.exists():
-            deferred_file.write_text(self.DEFAULT_DEFERRED_TEMPLATE, encoding="utf-8")
+        ensure_text(deferred_file, self.DEFAULT_DEFERRED_TEMPLATE)
 
         if self.config.cognitive.record_metacognition:
             meta_file = scratchpad_dir / self.METACOGNITION_FILE
-            if not meta_file.exists():
-                meta_file.write_text("{}\n", encoding="utf-8")
+            ensure_text(meta_file, "{}\n")
 
         if self.config.cognitive.record_goals:
             goals_file = scratchpad_dir / self.GOALS_FILE
-            if not goals_file.exists():
-                goals_file.write_text("[]\n", encoding="utf-8")
+            ensure_text(goals_file, "[]\n")
 
         if self.config.cognitive.record_emotions:
             emotions_file = scratchpad_dir / self.EMOTIONS_FILE
-            if not emotions_file.exists():
-                emotions_file.write_text("[]\n", encoding="utf-8")
+            ensure_text(emotions_file, "[]\n")
 
         if self.config.cognitive.record_epistemic:
             epistemic_file = scratchpad_dir / self.EPISTEMIC_FILE
-            if not epistemic_file.exists():
-                epistemic_file.write_text("{}\n", encoding="utf-8")
+            ensure_text(epistemic_file, "{}\n")
 
     def _mount_provenance_index(
         self,
@@ -1273,13 +1327,31 @@ class AFSManager:
         return ProjectMetadata.from_dict(payload)
 
     def _metadata_path(self, context_path: Path) -> Path:
-        if detect_layout_version(context_path) == LAYOUT_VERSION:
-            return context_path / ".afs" / "compat" / self.METADATA_FILE
-        return context_path / self.METADATA_FILE
+        resolved_context = context_path.expanduser().resolve()
+        if detect_layout_version(resolved_context) == LAYOUT_VERSION:
+            return assert_no_linklike_components(
+                resolved_context / ".afs" / "compat" / self.METADATA_FILE,
+                boundary=resolved_context,
+            )
+        return resolved_context / self.METADATA_FILE
 
     def _write_metadata(self, path: Path, metadata: ProjectMetadata) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(metadata.to_dict(), indent=2, default=str) + "\n",
-            encoding="utf-8",
+        path = path.expanduser()
+        is_v2_metadata = (
+            path.name == self.METADATA_FILE
+            and path.parent.name == "compat"
+            and path.parent.parent.name == ".afs"
         )
+        boundary = path.parent.parent.parent if is_v2_metadata else None
+        if boundary is not None:
+            path = assert_no_linklike_components(path, boundary=boundary)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(metadata.to_dict(), indent=2, default=str) + "\n"
+        if boundary is not None:
+            path = assert_no_linklike_components(
+                path,
+                boundary=boundary,
+            )
+            _atomic_write_text(path, payload)
+        else:
+            path.write_text(payload, encoding="utf-8")

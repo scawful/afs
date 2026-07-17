@@ -308,6 +308,10 @@ matching paths or file contents.
 fresh without a full rebuild. With `auto_index=true` (default),
 `context.query` also auto-refreshes when it detects stale path/content metadata
 via mount fingerprints, including external renames that keep file counts stable.
+In a v2 central context, `context.query` auto-indexing and
+`context.index.rebuild` traverse and replace only the authorized current-project
+and `common` prefixes. Queue-wide indexing is available only when the caller
+sets the explicit `all_projects: true` administration boundary.
 
 Work-context MCP tools stay deliberately narrow. `work.communication.preflight`
 combines stored tone/style evidence, optional opt-in personal context, pending
@@ -366,6 +370,9 @@ control while AFS still suggests narrower retries, schema-bound reruns, or
 model escalation paths. Guidance is rendered once as fixed pack overhead, not
 again as a selectable section, so query/embedding hits can displace generic
 session boilerplate in tight budgets.
+Both the `session.pack` tool and `afs.session.pack` prompt expose an optional
+`semantic` boolean. It defaults to `false`; only an explicit true value permits
+the configured provider to receive the pack query.
 
 `afs://schemas/<name>` exposes compact response contracts for structured agent
 workflows. Built-in names currently include:
@@ -589,8 +596,9 @@ it falls back to polling.
 
 `agent-supervisor` is the companion service for profile-defined background
 agents. It reconciles `auto_start`, interval `schedule`, and `watch_paths`
-settings and keeps state under `.context/scratchpad/afs_agents/supervisor/` by
-default.
+settings and keeps state under
+`.context/scratchpad/common/afs_agents/supervisor/` in v2 or
+`.context/scratchpad/afs_agents/supervisor/` in v1 by default.
 
 If you want maintenance services to stay on a repo-local config instead of the
 user config, start them with `--config`. The service layer preserves that
@@ -715,4 +723,6 @@ The older prompt-oriented search remains for version 1 clients:
 
 That prompt uses the SQLite compatibility index and does not accept v2 project
 scope arguments. New central-context clients should call `context.search`
-instead.
+instead. The older full-catalog `afs.search`, `afs.codebase.index`, and
+`afs.codebase.symbols` tools are likewise unavailable in v2 because their
+legacy index formats carry no project-scope authorization metadata.

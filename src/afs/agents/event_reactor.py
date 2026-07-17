@@ -40,8 +40,9 @@ from pathlib import Path
 from typing import Any
 
 from ..context_paths import resolve_mount_root
-from ..history import EVENT_FILE_PREFIX
+from ..history import EVENT_FILE_PREFIX, prepare_history_reactor_root
 from ..models import MountType
+from ..path_safety import assert_no_linklike_components
 from ..protocols.canonical_json import (
     CanonicalJSONError,
     sha256_canonical_json,
@@ -724,11 +725,23 @@ def _history_files(
     empty inventory would prune them and replay restored files from byte zero.
     """
     try:
-        history_root = resolve_mount_root(context_path, MountType.HISTORY, config=config)
+        mount_root = resolve_mount_root(
+            context_path,
+            MountType.HISTORY,
+            config=config,
+        )
+        history_root = prepare_history_reactor_root(context_path, config=config)
         if not history_root.is_dir():
-            return [], False
+            # A new v2 namespace has an available ``history/`` category before
+            # its first event creates the canonical ``history/common`` ledger.
+            return [], history_root != mount_root and mount_root.is_dir()
         paths: list[Path] = []
         for path in history_root.glob(f"{EVENT_FILE_PREFIX}_*.jsonl"):
+            path = assert_no_linklike_components(
+                path,
+                boundary=history_root,
+                allow_missing=False,
+            )
             if not _utf8_checkpoint_name(path.name):
                 raise ReactorStateError(
                     "history source contains a filename that cannot be represented "

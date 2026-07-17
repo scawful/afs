@@ -6,10 +6,16 @@ import argparse
 import json
 from pathlib import Path
 
-from ..codebase_explorer import build_codebase_summary, render_codebase_summary
+from ..codebase_explorer import (
+    build_codebase_summary,
+    build_scoped_codebase_summary,
+    render_codebase_summary,
+)
 from ..context_index import ContextSQLiteIndex
+from ..context_layout import LAYOUT_VERSION
 from ..core import find_existing_root
-from ..models import MountType
+from ..models import ContextCategory, MountType
+from ..scopes import ResolvedScope, resolve_scope, visible_scope_prefixes
 from ._utils import load_manager, parse_mount_type, resolve_context_paths
 
 
@@ -134,6 +140,15 @@ def context_overview_command(args: argparse.Namespace) -> int:
             context = manager.list_context(context_path=context_path)
 
     codebase_target = project_path if explicit_project or context is None else context.path
+    if context is not None and context.layout_version == LAYOUT_VERSION:
+        scoped = resolve_scope(Path(context.path), requester_path=project_path)
+        codebase = build_scoped_codebase_summary(
+            Path(context.path),
+            project_path,
+            project_id=scoped.project_id,
+        )
+    else:
+        codebase = build_codebase_summary(codebase_target)
     if context is not None:
         payload = {
             "project_path": str(project_path),
@@ -143,7 +158,7 @@ def context_overview_command(args: argparse.Namespace) -> int:
             "context_project_name": context.project_name,
             "is_valid": context.is_valid,
             "total_mounts": context.total_mounts,
-            "codebase": build_codebase_summary(codebase_target),
+            "codebase": codebase,
         }
     else:
         payload = {
@@ -154,7 +169,7 @@ def context_overview_command(args: argparse.Namespace) -> int:
             "context_project_name": "",
             "is_valid": False,
             "total_mounts": 0,
-            "codebase": build_codebase_summary(codebase_target),
+            "codebase": codebase,
         }
     if args.json:
         print(json.dumps(payload, indent=2))
@@ -558,7 +573,11 @@ def graph_export_command(args: argparse.Namespace) -> int:
         if args.output
         else default_graph_path(config)
     )
-    write_graph(graph, output_path)
+    write_graph(
+        graph,
+        output_path,
+        context_root=None if args.output else config.general.context_root,
+    )
     print(f"exported {len(projects)} contexts to {output_path}")
     return 0
 
@@ -694,8 +713,13 @@ def context_freshness_command(args: argparse.Namespace) -> int:
 
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+    project_path, context_path, _context_root, _context_dir = resolve_context_paths(
         args, manager
+    )
+    scoped = resolve_scope(
+        context_path,
+        requester_path=project_path,
+        common=bool(getattr(args, "common", False)),
     )
     index = ContextSQLiteIndex(manager, context_path)
 
@@ -712,6 +736,12 @@ def context_freshness_command(args: argparse.Namespace) -> int:
         mount_types=mount_types,
         decay_hours=decay_hours,
         threshold=args.threshold,
+        relative_prefixes=(
+            visible_scope_prefixes(scoped)
+            if scoped.layout_version == LAYOUT_VERSION
+            else None
+        ),
+        scoped=scoped if scoped.layout_version == LAYOUT_VERSION else None,
     )
 
     if args.json:
@@ -739,6 +769,45 @@ def _parse_mount_filters(
     return mount_types
 
 
+def _query_scoped_index(
+    index: ContextSQLiteIndex,
+    scoped: ResolvedScope,
+    *,
+    query: str | None,
+    mount_types: list[MountType] | None,
+    relative_prefix: str | None,
+    limit: int,
+    include_content: bool,
+) -> list[dict]:
+    suffix = ""
+    if relative_prefix:
+        raw = Path(relative_prefix.strip())
+        if raw.is_absolute() or any(part in {"", ".", ".."} for part in raw.parts):
+            raise ValueError("--prefix must be a contained relative path")
+        suffix = raw.as_posix().strip("/")
+    entries: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for scope_prefix in visible_scope_prefixes(scoped):
+        prefix = scope_prefix.rstrip("/")
+        if suffix:
+            prefix = f"{prefix}/{suffix}"
+        for entry in index.query(
+            query=query,
+            mount_types=mount_types,
+            relative_prefix=prefix,
+            limit=limit,
+            include_content=include_content,
+        ):
+            key = (str(entry.get("mount_type", "")), str(entry.get("relative_path", "")))
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(entry)
+            if len(entries) >= limit:
+                return entries
+    return entries
+
+
 def _maybe_refresh_context_index(
     *,
     index: ContextSQLiteIndex,
@@ -746,23 +815,41 @@ def _maybe_refresh_context_index(
     mount_types: list[MountType] | None,
     auto_index: bool,
     auto_refresh: bool,
+    scoped: ResolvedScope | None = None,
 ) -> dict | None:
+    has_entries = (
+        index.has_entries_scoped(scoped, mount_types=mount_types)
+        if scoped is not None and scoped.layout_version == LAYOUT_VERSION
+        else index.has_entries(mount_types=mount_types)
+    )
     should_rebuild = (
         manager.config.context_index.enabled
         and auto_index
         and (
-            not index.has_entries()
-            or (auto_refresh and index.needs_refresh(mount_types=mount_types))
+            not has_entries
+            or (
+                auto_refresh
+                and (
+                    index.needs_refresh_scoped(scoped, mount_types=mount_types)
+                    if scoped is not None and scoped.layout_version == LAYOUT_VERSION
+                    else index.needs_refresh(mount_types=mount_types)
+                )
+            )
         )
     )
     if not should_rebuild:
         return None
 
-    summary = index.rebuild(
-        mount_types=mount_types,
-        include_content=manager.config.context_index.include_content,
-        max_file_size_bytes=manager.config.context_index.max_file_size_bytes,
-        max_content_chars=manager.config.context_index.max_content_chars,
+    rebuild_kwargs = {
+        "mount_types": mount_types,
+        "include_content": manager.config.context_index.include_content,
+        "max_file_size_bytes": manager.config.context_index.max_file_size_bytes,
+        "max_content_chars": manager.config.context_index.max_content_chars,
+    }
+    summary = (
+        index.rebuild_scoped(scoped, **rebuild_kwargs)
+        if scoped is not None and scoped.layout_version == LAYOUT_VERSION
+        else index.rebuild(**rebuild_kwargs)
     )
     return summary.to_dict()
 
@@ -771,8 +858,18 @@ def context_query_command(args: argparse.Namespace) -> int:
     """Query the SQLite-backed context index."""
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+    project_path, context_path, _context_root, _context_dir = resolve_context_paths(
         args, manager
+    )
+    allow_all_projects = bool(getattr(args, "all_projects", False))
+    use_common = bool(getattr(args, "common", False))
+    if use_common and allow_all_projects:
+        print("--common and --all-projects are mutually exclusive")
+        return 1
+    scoped = resolve_scope(
+        context_path,
+        requester_path=project_path,
+        common=use_common or allow_all_projects,
     )
 
     if not args.query and not args.prefix:
@@ -784,6 +881,12 @@ def context_query_command(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(str(exc))
         return 1
+    if scoped.layout_version == LAYOUT_VERSION and not allow_all_projects:
+        mount_types = [
+            mount_type
+            for mount_type in (mount_types or list(MountType))
+            if ContextCategory.from_mount_type(mount_type) is not None
+        ]
 
     index = ContextSQLiteIndex(manager, context_path)
     rebuild_summary = _maybe_refresh_context_index(
@@ -792,14 +895,34 @@ def context_query_command(args: argparse.Namespace) -> int:
         mount_types=mount_types,
         auto_index=not args.no_auto_index,
         auto_refresh=not args.no_auto_refresh,
+        scoped=(
+            scoped
+            if scoped.layout_version == LAYOUT_VERSION and not allow_all_projects
+            else None
+        ),
     )
-    entries = index.query(
-        query=args.query,
-        mount_types=mount_types,
-        relative_prefix=args.prefix,
-        limit=args.limit,
-        include_content=args.include_content,
-    )
+    if scoped.layout_version == LAYOUT_VERSION and not allow_all_projects:
+        try:
+            entries = _query_scoped_index(
+                index,
+                scoped,
+                query=args.query,
+                mount_types=mount_types,
+                relative_prefix=args.prefix,
+                limit=args.limit,
+                include_content=args.include_content,
+            )
+        except ValueError as exc:
+            print(str(exc))
+            return 1
+    else:
+        entries = index.query(
+            query=args.query,
+            mount_types=mount_types,
+            relative_prefix=args.prefix,
+            limit=args.limit,
+            include_content=args.include_content,
+        )
 
     payload = {
         "context_path": str(context_path),
@@ -807,6 +930,7 @@ def context_query_command(args: argparse.Namespace) -> int:
         "relative_prefix": args.prefix or "",
         "count": len(entries),
         "entries": entries,
+        "scope_id": "all-projects" if allow_all_projects else scoped.scope_id,
     }
     if rebuild_summary:
         payload["index_rebuild"] = rebuild_summary
@@ -839,8 +963,18 @@ def context_index_rebuild_command(args: argparse.Namespace) -> int:
     """Rebuild the SQLite-backed context index."""
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+    project_path, context_path, _context_root, _context_dir = resolve_context_paths(
         args, manager
+    )
+    allow_all_projects = bool(getattr(args, "all_projects", False))
+    use_common = bool(getattr(args, "common", False))
+    if use_common and allow_all_projects:
+        print("--common and --all-projects are mutually exclusive")
+        return 1
+    scoped = resolve_scope(
+        context_path,
+        requester_path=project_path,
+        common=use_common or allow_all_projects,
     )
 
     try:
@@ -848,6 +982,12 @@ def context_index_rebuild_command(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(str(exc))
         return 1
+    if scoped.layout_version == LAYOUT_VERSION and not allow_all_projects:
+        mount_types = [
+            mount_type
+            for mount_type in (mount_types or list(MountType))
+            if ContextCategory.from_mount_type(mount_type) is not None
+        ]
 
     include_content = manager.config.context_index.include_content
     if args.include_content:
@@ -856,15 +996,21 @@ def context_index_rebuild_command(args: argparse.Namespace) -> int:
         include_content = False
 
     index = ContextSQLiteIndex(manager, context_path)
-    summary = index.rebuild(
-        mount_types=mount_types,
-        include_content=include_content,
-        max_file_size_bytes=args.max_file_size_bytes
+    rebuild_kwargs = {
+        "mount_types": mount_types,
+        "include_content": include_content,
+        "max_file_size_bytes": args.max_file_size_bytes
         or manager.config.context_index.max_file_size_bytes,
-        max_content_chars=args.max_content_chars
+        "max_content_chars": args.max_content_chars
         or manager.config.context_index.max_content_chars,
+    }
+    summary = (
+        index.rebuild_scoped(scoped, **rebuild_kwargs)
+        if scoped.layout_version == LAYOUT_VERSION and not allow_all_projects
+        else index.rebuild(**rebuild_kwargs)
     )
     payload = summary.to_dict()
+    payload["scope_id"] = "all-projects" if allow_all_projects else scoped.scope_id
 
     if args.json:
         print(json.dumps(payload, indent=2))
@@ -935,6 +1081,16 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
             "--no-auto-refresh",
             action="store_true",
             help="Skip automatic refresh when the index is stale.",
+        )
+        parser.add_argument(
+            "--all-projects",
+            action="store_true",
+            help="Explicitly query every registered v2 project scope.",
+        )
+        parser.add_argument(
+            "--common",
+            action="store_true",
+            help="Use only the shared v2 common scope.",
         )
         parser.add_argument("--json", action="store_true", help="Output JSON.")
 
@@ -1098,6 +1254,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     ctx_freshness.add_argument("--mount", help="Filter by mount type.")
     ctx_freshness.add_argument("--threshold", type=float, default=0.0, help="Minimum score threshold.")
     ctx_freshness.add_argument("--decay-hours", type=float, help="Decay window in hours.")
+    ctx_freshness.add_argument(
+        "--common",
+        action="store_true",
+        help="Use only the shared v2 common scope.",
+    )
     ctx_freshness.add_argument("--json", action="store_true", help="Output JSON.")
     ctx_freshness.set_defaults(func=context_freshness_command)
 
@@ -1150,6 +1311,16 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--include-content",
         action="store_true",
         help="Force content indexing on for this rebuild.",
+    )
+    idx_rebuild.add_argument(
+        "--all-projects",
+        action="store_true",
+        help="Explicitly rebuild every registered v2 project scope.",
+    )
+    idx_rebuild.add_argument(
+        "--common",
+        action="store_true",
+        help="Rebuild only the shared v2 common scope.",
     )
     idx_rebuild.add_argument(
         "--no-include-content",

@@ -10,7 +10,10 @@ from pathlib import Path
 from ..claude.doctor import inspect_claude_sessions, reap_claude_sessions
 from ..claude.session_report import build_session_report, render_session_report_markdown
 from ..context_fs import ContextFileSystem
+from ..context_layout import LAYOUT_VERSION, detect_layout_version
 from ..models import MountType
+from ..scopes import resolve_scope
+from ..scratchpad import ScratchpadStore
 from ._utils import load_manager, resolve_context_paths
 
 
@@ -70,7 +73,40 @@ def claude_session_report_command(args: argparse.Namespace) -> int:
     if args.write_scratchpad:
         config_path = Path(args.config) if args.config else None
         manager = load_manager(config_path)
-        _project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
+        project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+            args,
+            manager,
+        )
+        if detect_layout_version(context_path) == LAYOUT_VERSION:
+            if args.scratchpad_path:
+                print(
+                    "--scratchpad-path is not supported for v2 immutable drafts; "
+                    "omit it and AFS will allocate a readable unique name"
+                )
+                return 2
+            scoped = resolve_scope(
+                context_path,
+                requester_path=project_path,
+                common=bool(getattr(args, "common", False)),
+            )
+            artifact = ScratchpadStore(
+                context_path,
+                scope_id=scoped.scope_id,
+                config=manager.config,
+            ).create(
+                title=f"Claude session {report.paths.session_id[:8]}",
+                body=markdown,
+                project_id=scoped.project_id,
+                agent_name="claude",
+                author_kind="agent",
+                provenance={
+                    "source": "afs.claude.session-report",
+                    "session_id": report.paths.session_id,
+                },
+            )
+            print(f"wrote: {artifact.path}")
+            return 0
+
         fs = ContextFileSystem(manager, context_path)
 
         relative = args.scratchpad_path
@@ -403,6 +439,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     report_parser.add_argument(
         "--scratchpad-path",
         help="Scratchpad relative path override (used with --write-scratchpad).",
+    )
+    report_parser.add_argument(
+        "--common",
+        action="store_true",
+        help="Write a v2 scratchpad report to shared common scope instead of the current project.",
     )
     report_parser.add_argument(
         "--force",

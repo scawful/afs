@@ -6,16 +6,23 @@ import fnmatch
 import hashlib
 import logging
 import os
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from .agent_scope import assert_mount_allowed
+from .agent_scope import allowed_mounts, assert_mount_allowed
+from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .grounding_hooks import run_grounding_hooks
 from .history import log_event
 from .manager import AFSManager
 from .models import ContextCategory, MountType
+from .path_safety import (
+    assert_no_linklike_components,
+    is_linklike,
+    lexical_absolute,
+)
 from .policy import PolicyEnforcer
 
 logger = logging.getLogger(__name__)
@@ -52,7 +59,26 @@ class ContextEntry:
             modified_at=modified_at,
         )
 
-    def to_dict(self) -> dict:
+    @classmethod
+    def from_lstat(
+        cls,
+        path: Path,
+        relative_path: str,
+        path_stat: os.stat_result,
+    ) -> ContextEntry:
+        """Build metadata without following a filesystem link target."""
+
+        return cls(
+            path=path,
+            relative_path=relative_path,
+            is_dir=stat.S_ISDIR(path_stat.st_mode),
+            is_file=stat.S_ISREG(path_stat.st_mode),
+            is_symlink=is_linklike(path_stat),
+            size_bytes=path_stat.st_size,
+            modified_at=datetime.fromtimestamp(path_stat.st_mtime).isoformat(),
+        )
+
+    def to_dict(self) -> dict[str, object]:
         return {
             "path": str(self.path),
             "relative_path": self.relative_path,
@@ -75,17 +101,45 @@ class ContextFileSystem:
         scoped_mount_roots: Mapping[FileMountType, Path] | None = None,
     ) -> None:
         self._manager = manager
-        self._context_path = context_path.resolve()
+        lexical_context_path = lexical_absolute(context_path)
+        self._context_path = context_path.expanduser().resolve()
         if not self._context_path.exists():
             raise FileNotFoundError(f"No AFS context at {self._context_path}")
-        self._scoped_mount_roots = {
-            mount_type: root.expanduser().absolute()
-            for mount_type, root in (scoped_mount_roots or {}).items()
-        }
+        context_aliases = [lexical_context_path]
+        configured_context_path = lexical_absolute(
+            manager.config.general.context_root
+        )
+        if configured_context_path not in context_aliases:
+            try:
+                configured_matches = (
+                    configured_context_path.resolve(strict=False) == self._context_path
+                )
+            except OSError:
+                configured_matches = False
+            if configured_matches:
+                context_aliases.append(configured_context_path)
+
+        self._scoped_mount_roots: dict[FileMountType, Path] = {}
+        for mount_type, supplied_root in (scoped_mount_roots or {}).items():
+            lexical_root = lexical_absolute(supplied_root)
+            normalized_root = lexical_root
+            for alias in context_aliases:
+                try:
+                    relative_root = lexical_root.relative_to(alias)
+                except ValueError:
+                    continue
+                normalized_root = self._context_path / relative_root
+                break
+            self._scoped_mount_roots[mount_type] = normalized_root
+
         for mount_type, root in self._scoped_mount_roots.items():
-            canonical_root = self._manager.resolve_mount_root(
-                self._context_path, mount_type
-            ).resolve(strict=False)
+            canonical_root = (
+                lexical_absolute(self._context_path / mount_type.value)
+                if isinstance(mount_type, ContextCategory)
+                else lexical_absolute(
+                    self._manager.resolve_mount_root(self._context_path, mount_type)
+                )
+            )
             if root == canonical_root or not root.is_relative_to(canonical_root):
                 raise ValueError(
                     f"Scoped {mount_type.value} root must be inside its context category"
@@ -93,9 +147,14 @@ class ContextFileSystem:
             cursor = canonical_root
             for part in root.relative_to(canonical_root).parts:
                 cursor /= part
-                if cursor.is_symlink():
+                try:
+                    cursor_stat = os.lstat(cursor)
+                except FileNotFoundError:
+                    continue
+                if is_linklike(cursor_stat):
                     raise ValueError(
-                        f"Scoped {mount_type.value} root must not contain symlinks"
+                        f"Scoped {mount_type.value} root must not contain symbolic "
+                        "links or reparse points"
                     )
         self._policy = PolicyEnforcer(manager.config.directories)
 
@@ -107,7 +166,23 @@ class ContextFileSystem:
         scoped_root = self._scoped_mount_roots.get(mount_type)
         if scoped_root is not None:
             return scoped_root
-        return self._manager.resolve_mount_root(self._context_path, mount_type)
+        return self._canonical_mount_root(mount_type)
+
+    def _canonical_mount_root(self, mount_type: FileMountType) -> Path:
+        """Resolve a category root without passing v2-only types to v1 APIs."""
+
+        legacy_mount_type = _as_mount_type(mount_type)
+        if legacy_mount_type is not None:
+            return self._manager.resolve_mount_root(
+                self._context_path,
+                legacy_mount_type,
+            )
+        if detect_layout_version(self._context_path) != LAYOUT_VERSION:
+            raise ValueError(f"{mount_type.value!r} is available only in v2 contexts")
+        return assert_no_linklike_components(
+            self._context_path / mount_type.value,
+            boundary=self._context_path,
+        )
 
     def canonical_relative_path(
         self, mount_type: FileMountType, relative_path: str | None
@@ -115,9 +190,7 @@ class ContextFileSystem:
         """Return the index path relative to the canonical category root."""
 
         target, _scope_root = self.resolve_path(mount_type, relative_path)
-        canonical_root = self._manager.resolve_mount_root(
-            self._context_path, mount_type
-        ).resolve()
+        canonical_root = self._canonical_mount_root(mount_type).resolve()
         try:
             return target.relative_to(canonical_root).as_posix()
         except ValueError as exc:
@@ -130,6 +203,22 @@ class ContextFileSystem:
         is_scoped = mount_type in self._scoped_mount_roots
         if not mount_root.exists() and not is_scoped:
             raise FileNotFoundError(f"Mount root not found: {mount_root}")
+        if detect_layout_version(self._context_path) == LAYOUT_VERSION:
+            lexical_root = lexical_absolute(mount_root)
+            lexical_target = lexical_absolute(
+                lexical_root if not relative_path else lexical_root / relative_path
+            )
+            if lexical_target != lexical_root and not lexical_target.is_relative_to(
+                lexical_root
+            ):
+                raise ValueError("Path escapes mount root")
+            return (
+                assert_no_linklike_components(
+                    lexical_target,
+                    boundary=lexical_root,
+                ),
+                lexical_root,
+            )
         target = mount_root if not relative_path else mount_root / relative_path
         root_resolved = mount_root.resolve(strict=False)
         target_resolved = target.resolve(strict=False)
@@ -142,10 +231,30 @@ class ContextFileSystem:
     def _ensure_mount_access(
         self, mount_type: FileMountType, *, operation: str
     ) -> None:
-        allowed, message = self._policy.validate_operation(mount_type, operation)
+        legacy_mount_type = _as_mount_type(mount_type)
+        if legacy_mount_type is None:
+            allowed = operation == "read"
+            message = (
+                ""
+                if allowed
+                else f"{mount_type.value} is read-only, {operation} not allowed"
+            )
+        else:
+            allowed, message = self._policy.validate_operation(
+                legacy_mount_type,
+                operation,
+            )
         if not allowed:
             raise PermissionError(message)
-        assert_mount_allowed(mount_type, operation=operation)
+        if legacy_mount_type is not None:
+            assert_mount_allowed(legacy_mount_type, operation=operation)
+            return
+        permitted_mounts = allowed_mounts()
+        if permitted_mounts is not None and mount_type.value not in permitted_mounts:
+            agent_name = os.environ.get("AFS_AGENT_NAME", "unknown")
+            raise PermissionError(
+                f"agent {agent_name} not allowed to {operation} {mount_type.value}"
+            )
 
     def _content_history_metadata(self, content: str) -> dict[str, object]:
         return {
@@ -205,6 +314,15 @@ class ContextFileSystem:
         mkdirs: bool = False,
     ) -> Path:
         self._ensure_mount_access(mount_type, operation="write")
+        if (
+            detect_layout_version(self._context_path) == LAYOUT_VERSION
+            and _as_context_category(mount_type) is not None
+            and mount_type not in self._scoped_mount_roots
+        ):
+            raise PermissionError(
+                "unscoped v2 category writes are not allowed; resolve the current "
+                "project scope or request common scope explicitly"
+            )
         target, root = self.resolve_path(mount_type, relative_path)
         if not root.exists():
             if mount_type not in self._scoped_mount_roots:
@@ -260,9 +378,12 @@ class ContextFileSystem:
 
             from .context_index import ContextSQLiteIndex
 
+            legacy_mount_type = _as_mount_type(mount_type)
+            if legacy_mount_type is None:
+                return
             index = ContextSQLiteIndex(self._manager, self._context_path)
             index.upsert_relative_path(
-                mount_type,
+                legacy_mount_type,
                 relative_path,
                 include_content=settings.include_content,
                 max_file_size_bytes=settings.max_file_size_bytes,
@@ -297,6 +418,15 @@ class ContextFileSystem:
         target, root = self.resolve_path(mount_type, relative_path)
         if not target.exists():
             raise FileNotFoundError(f"Path not found: {target}")
+        if detect_layout_version(self._context_path) == LAYOUT_VERSION:
+            return self._list_v2_entries(
+                target,
+                root,
+                max_depth=max_depth,
+                glob_patterns=glob_patterns,
+                include_files=include_files,
+                include_dirs=include_dirs,
+            )
         if target.is_file():
             relative = target.relative_to(root).as_posix()
             return [ContextEntry.from_path(target, relative)]
@@ -322,8 +452,92 @@ class ContextFileSystem:
                         entries.append(ContextEntry.from_path(entry_path, relative))
         return entries
 
+    def _list_v2_entries(
+        self,
+        target: Path,
+        root: Path,
+        *,
+        max_depth: int | None,
+        glob_patterns: list[str] | None,
+        include_files: bool,
+        include_dirs: bool,
+    ) -> list[ContextEntry]:
+        """List lexical v2 descendants without following link-like entries."""
+
+        try:
+            target_stat = os.lstat(target)
+        except OSError as exc:
+            raise FileNotFoundError(f"Path not found: {target}") from exc
+        if is_linklike(target_stat):
+            raise ValueError(
+                f"Path contains a symbolic link or reparse point: {target}"
+            )
+        relative = target.relative_to(root).as_posix()
+        if not stat.S_ISDIR(target_stat.st_mode):
+            return [ContextEntry.from_lstat(target, relative, target_stat)]
+
+        entries: list[ContextEntry] = []
+        pending: list[tuple[Path, int]] = [(target, 0)]
+        while pending:
+            base, depth = pending.pop()
+            try:
+                with os.scandir(base) as scan:
+                    children = sorted(scan, key=lambda child: child.name)
+            except OSError:
+                continue
+
+            child_directories: list[Path] = []
+            for child in children:
+                try:
+                    child_stat = child.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if is_linklike(child_stat):
+                    continue
+
+                entry_path = Path(child.path)
+                entry_relative = entry_path.relative_to(root).as_posix()
+                child_is_dir = stat.S_ISDIR(child_stat.st_mode)
+                should_include = (
+                    include_dirs if child_is_dir else include_files
+                )
+                if should_include and _matches_patterns(
+                    entry_relative, glob_patterns
+                ):
+                    entries.append(
+                        ContextEntry.from_lstat(
+                            entry_path,
+                            entry_relative,
+                            child_stat,
+                        )
+                    )
+                if child_is_dir and (max_depth is None or depth < max_depth):
+                    child_directories.append(entry_path)
+
+            pending.extend((path, depth + 1) for path in reversed(child_directories))
+        return entries
+
 
 def _matches_patterns(path: str, patterns: list[str] | None) -> bool:
     if not patterns:
         return True
     return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+
+
+def _as_mount_type(mount_type: FileMountType) -> MountType | None:
+    """Return the legacy/index mount role represented by a file category."""
+
+    if isinstance(mount_type, MountType):
+        return mount_type
+    try:
+        return MountType(mount_type.value)
+    except ValueError:
+        return None
+
+
+def _as_context_category(mount_type: FileMountType) -> ContextCategory | None:
+    """Return the human-facing category represented by a file mount."""
+
+    if isinstance(mount_type, ContextCategory):
+        return mount_type
+    return ContextCategory.from_mount_type(mount_type)

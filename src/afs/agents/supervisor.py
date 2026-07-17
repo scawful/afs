@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -28,7 +29,9 @@ from ..agent_registry import (
 )
 from ..config import load_config_model
 from ..context_index import INDEX_SCAN_SKIP_NAMES
+from ..context_layout import LAYOUT_VERSION, _atomic_write_text, detect_layout_version
 from ..context_paths import resolve_agent_output_root
+from ..path_safety import assert_no_linklike_components
 from ..profiles import resolve_active_profile
 from ..schema import MAX_AGENT_RESTARTS, AFSConfig, AgentConfig
 from .base import AgentResult, build_base_parser, configure_logging, emit_result, now_iso
@@ -60,6 +63,7 @@ WatchSignature = tuple[bool, int, int, int, bool]
 _OWNED_PROCESSES: dict[int, subprocess.Popen[Any]] = {}
 _INCOMPLETE_WATCH_WARNED: set[Path] = set()
 DEFAULT_FAILURE_HISTORY_SECONDS = 7 * 86400
+_SAFE_AGENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 AGENT_NAME = "agent-supervisor"
 AGENT_DESCRIPTION = (
@@ -267,6 +271,7 @@ class AgentSupervisor:
         config_path: Path | None = None,
     ) -> None:
         self._config = config
+        self._managed_state_boundary: Path | None = None
         self._config_path = (
             config_path.expanduser().resolve() if config_path is not None else None
         )
@@ -297,13 +302,20 @@ class AgentSupervisor:
         if env_value:
             return Path(env_value).expanduser().resolve()
         resolved_config = config or load_config_model(merge_user=True)
-        return (
-            resolve_agent_output_root(
-                resolved_config.general.context_root,
-                config=resolved_config,
-            )
-            / "supervisor"
-        ).expanduser().resolve()
+        context_root = resolved_config.general.context_root
+        output_root = resolve_agent_output_root(
+            context_root,
+            config=resolved_config,
+            scope_id="common",
+        )
+        state_path = output_root / "supervisor"
+        if detect_layout_version(context_root) != LAYOUT_VERSION:
+            return state_path.expanduser().resolve()
+        self._managed_state_boundary = context_root.expanduser().resolve()
+        return assert_no_linklike_components(
+            state_path,
+            boundary=self._managed_state_boundary,
+        )
 
     def _python_executable(self) -> str:
         if self._config and self._config.general.python_executable:
@@ -311,13 +323,25 @@ class AgentSupervisor:
         return sys.executable
 
     def _state_path(self, name: str) -> Path:
-        return self._state_dir / f"{name}.json"
+        if not _SAFE_AGENT_NAME.fullmatch(str(name)):
+            raise ValueError("agent name must be one safe filesystem segment")
+        path = self._state_dir / f"{name}.json"
+        if self._managed_state_boundary is None:
+            return path
+        trusted_state_dir = assert_no_linklike_components(
+            self._state_dir,
+            boundary=self._managed_state_boundary,
+            allow_missing=False,
+        )
+        return assert_no_linklike_components(path, boundary=trusted_state_dir)
 
     def _write_state(self, agent: RunningAgent) -> None:
-        self._state_path(agent.name).write_text(
-            json.dumps(agent.to_dict()),
-            encoding="utf-8",
-        )
+        path = self._state_path(agent.name)
+        rendered = json.dumps(agent.to_dict())
+        if self._managed_state_boundary is None:
+            path.write_text(rendered, encoding="utf-8")
+        else:
+            _atomic_write_text(path, rendered)
 
     def _context_root_str(self) -> str:
         resolved_config = self._config or load_config_model(merge_user=True)
@@ -404,10 +428,17 @@ class AgentSupervisor:
 
     def _read_state(self, name: str) -> RunningAgent | None:
         path = self._state_path(name)
-        if not path.exists():
-            return None
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            if self._managed_state_boundary is None:
+                if not path.exists():
+                    return None
+                raw = path.read_text(encoding="utf-8")
+            else:
+                flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                fd = os.open(path, flags)
+                with open(fd, encoding="utf-8", closefd=True) as handle:
+                    raw = handle.read()
+            data = json.loads(raw)
         except (json.JSONDecodeError, OSError):
             return None
         args = data.get("args")
@@ -852,7 +883,11 @@ class AgentSupervisor:
                 name, context_root, config=self._config,
             )
             snapshot_path = write_agent_context_snapshot(
-                snapshot, self._state_dir / "context_snapshots",
+                snapshot,
+                self._state_dir / "context_snapshots",
+                trusted_root=self._state_dir
+                if self._managed_state_boundary is not None
+                else None,
             )
             env[AGENT_CONTEXT_ENV] = str(snapshot_path)
         except Exception:
@@ -1067,10 +1102,23 @@ class AgentSupervisor:
 
     def list_agents(self) -> list[RunningAgent]:
         agents: list[RunningAgent] = []
-        if not self._state_dir.exists():
+        state_dir = self._state_dir
+        if self._managed_state_boundary is not None:
+            try:
+                state_dir = assert_no_linklike_components(
+                    state_dir,
+                    boundary=self._managed_state_boundary,
+                    allow_missing=False,
+                )
+            except (OSError, ValueError):
+                return agents
+        if not state_dir.exists():
             return agents
-        for path in sorted(self._state_dir.glob("*.json")):
-            agent = self._read_state(path.stem)
+        for path in sorted(state_dir.glob("*.json")):
+            try:
+                agent = self._read_state(path.stem)
+            except ValueError:
+                continue
             if agent is None:
                 continue
             agents.append(self._refresh_state(agent))

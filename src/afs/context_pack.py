@@ -14,13 +14,19 @@ from pathlib import Path
 from typing import Any
 
 from .context_index import ContextSQLiteIndex
-from .context_layout import LAYOUT_VERSION, resolve_system_path
+from .context_layout import LAYOUT_VERSION, _atomic_write_text, resolve_system_path
 from .context_paths import load_context_metadata, resolve_agent_output_root, resolve_mount_root
 from .embeddings import search_embedding_index_detailed
-from .hybrid_search import HybridSearchEngine
+from .hybrid_search import HybridScopeCoverageError, HybridSearchEngine
 from .manager import AFSManager
 from .models import ContextCategory, MountType
-from .scopes import ResolvedScope, resolve_scope
+from .path_safety import assert_no_linklike_components, iter_regular_files_no_links
+from .scopes import (
+    ResolvedScope,
+    resolve_scope,
+    visible_mount_roots,
+    visible_scope_prefixes,
+)
 from .sensitivity import SensitivityRuleSet
 from .session_bootstrap import _build_recommendations, build_session_bootstrap
 from .session_workflows import build_session_execution_profile
@@ -44,7 +50,7 @@ DEFAULT_SEARCH_MOUNTS = (
     MountType.KNOWLEDGE,
     MountType.ITEMS,
 )
-CONTEXT_PACK_CACHE_VERSION = 7
+CONTEXT_PACK_CACHE_VERSION = 8
 EMBEDDING_HIT_PREVIEW_CHARS = 360
 
 
@@ -103,6 +109,7 @@ def build_context_pack(
     pack_mode: str = "focused",
     token_budget: int | None = None,
     include_content: bool = False,
+    semantic: bool = False,
     max_query_results: int = 6,
     max_embedding_results: int = 4,
 ) -> dict[str, Any]:
@@ -139,6 +146,7 @@ def build_context_pack(
         pack_mode=normalized_pack_mode,
         token_budget=resolved_budget,
         include_content=resolved_include_content,
+        semantic=semantic,
         max_query_results=resolved_max_query_results,
         max_embedding_results=resolved_max_embedding_results,
         sensitivity_state=sensitivity_state,
@@ -170,6 +178,7 @@ def build_context_pack(
         tool_profile=str((execution_profile.get("tool_profile") or {}).get("name", "default")),
         token_budget=resolved_budget,
         include_content=resolved_include_content,
+        semantic=semantic,
         max_query_results=resolved_max_query_results,
         max_embedding_results=resolved_max_embedding_results,
         sensitivity_state=sensitivity_state,
@@ -201,6 +210,7 @@ def build_context_pack(
         query=query,
         pack_mode=normalized_pack_mode,
         include_content=resolved_include_content,
+        semantic=semantic,
         max_query_results=resolved_max_query_results,
         max_embedding_results=resolved_max_embedding_results,
         scoped=scoped,
@@ -222,6 +232,7 @@ def build_context_pack(
         "model": normalized_model,
         "pack_mode": normalized_pack_mode,
         "pack_mode_summary": pack_mode_summary,
+        "semantic": bool(semantic),
         "query": query,
         "task": task,
         "execution_profile": execution_profile,
@@ -251,6 +262,7 @@ def build_context_pack(
         pack_mode=normalized_pack_mode,
         token_budget=resolved_budget,
         include_content=resolved_include_content,
+        semantic=semantic,
         max_query_results=resolved_max_query_results,
         max_embedding_results=resolved_max_embedding_results,
         sensitivity_state=sensitivity_state,
@@ -312,6 +324,9 @@ def write_context_pack_artifacts(
         pack["model"],
         scope_id=str(pack.get("scope_id", "common") or "common"),
     )
+    root = context_path.expanduser().resolve()
+    json_path = assert_no_linklike_components(json_path, boundary=root)
+    markdown_path = assert_no_linklike_components(markdown_path, boundary=root)
     json_path.parent.mkdir(parents=True, exist_ok=True)
 
     payload = dict(pack)
@@ -324,8 +339,8 @@ def write_context_pack_artifacts(
         "json": str(json_path),
         "markdown": str(markdown_path),
     }
-    json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    markdown_path.write_text(render_context_pack(payload) + "\n", encoding="utf-8")
+    _atomic_write_text(json_path, json.dumps(payload, indent=2) + "\n")
+    _atomic_write_text(markdown_path, render_context_pack(payload) + "\n")
     return payload["artifact_paths"]
 
 
@@ -360,6 +375,7 @@ def _context_pack_cache_key(
     tool_profile: str,
     token_budget: int,
     include_content: bool,
+    semantic: bool,
     max_query_results: int,
     max_embedding_results: int,
     sensitivity_state: dict[str, Any] | None = None,
@@ -380,6 +396,7 @@ def _context_pack_cache_key(
         "tool_profile": tool_profile,
         "token_budget": token_budget,
         "include_content": include_content,
+        "semantic": bool(semantic),
         "max_query_results": max_query_results,
         "max_embedding_results": max_embedding_results,
         "sensitivity": sensitivity_state or {},
@@ -497,6 +514,19 @@ def _load_cached_context_pack(
         model,
         scope_id=scope.scope_id,
     )
+    root = context_path.expanduser().resolve()
+    try:
+        json_path = assert_no_linklike_components(
+            json_path,
+            boundary=root,
+            allow_missing=False,
+        )
+        markdown_path = assert_no_linklike_components(
+            markdown_path,
+            boundary=root,
+        )
+    except (OSError, ValueError):
+        return None
     if not json_path.exists():
         return None
     try:
@@ -533,6 +563,7 @@ def _session_pack_cache_key(
     pack_mode: str,
     token_budget: int,
     include_content: bool,
+    semantic: bool,
     max_query_results: int,
     max_embedding_results: int,
     sensitivity_state: dict[str, Any] | None = None,
@@ -554,6 +585,7 @@ def _session_pack_cache_key(
         "pack_mode": pack_mode,
         "token_budget": token_budget,
         "include_content": include_content,
+        "semantic": bool(semantic),
         "max_query_results": max_query_results,
         "max_embedding_results": max_embedding_results,
         "sensitivity": sensitivity_state or {},
@@ -645,10 +677,11 @@ def _mount_fingerprint(
         for visible_root in roots:
             if not visible_root.exists():
                 continue
-            try:
-                paths = sorted(visible_root.rglob("*"))
-            except OSError:
-                continue
+            paths = (
+                list(iter_regular_files_no_links(visible_root))
+                if scope.layout_version == LAYOUT_VERSION
+                else sorted(visible_root.rglob("*"))
+            )
             for path in paths:
                 if not path.is_file():
                     continue
@@ -679,6 +712,7 @@ def _load_session_pack_cache(
     pack_mode: str,
     token_budget: int,
     include_content: bool,
+    semantic: bool,
     max_query_results: int,
     max_embedding_results: int,
     sensitivity_state: dict[str, Any],
@@ -703,6 +737,7 @@ def _load_session_pack_cache(
         pack_mode=pack_mode,
         token_budget=token_budget,
         include_content=include_content,
+        semantic=semantic,
         max_query_results=max_query_results,
         max_embedding_results=max_embedding_results,
         sensitivity_state=sensitivity_state,
@@ -804,6 +839,7 @@ def _write_session_pack_cache(
     pack_mode: str,
     token_budget: int,
     include_content: bool,
+    semantic: bool,
     max_query_results: int,
     max_embedding_results: int,
     sensitivity_state: dict[str, Any],
@@ -824,6 +860,7 @@ def _write_session_pack_cache(
         pack_mode=pack_mode,
         token_budget=token_budget,
         include_content=include_content,
+        semantic=semantic,
         max_query_results=max_query_results,
         max_embedding_results=max_embedding_results,
         sensitivity_state=sensitivity_state,
@@ -957,12 +994,8 @@ def _normalize_pack_mode(pack_mode: str | None) -> str:
 def _visible_scope_prefixes(scoped: ResolvedScope) -> tuple[str, ...]:
     """Return category-relative prefixes visible to one pack requester."""
 
-    if scoped.layout_version != LAYOUT_VERSION:
-        return ()
-    prefixes = ["common/"]
-    if scoped.project_id:
-        prefixes.insert(0, f"projects/{scoped.project_id}/")
-    return tuple(prefixes)
+    prefixes = visible_scope_prefixes(scoped)
+    return () if prefixes == ("",) else prefixes
 
 
 def _visible_mount_roots(
@@ -978,11 +1011,7 @@ def _visible_mount_roots(
     treated as globally readable project context.
     """
 
-    if scoped.layout_version != LAYOUT_VERSION:
-        return (mount_root,)
-    if ContextCategory.from_mount_type(mount_type) is None:
-        return ()
-    return tuple(mount_root / prefix.rstrip("/") for prefix in _visible_scope_prefixes(scoped))
+    return visible_mount_roots(mount_root, mount_type=mount_type, scoped=scoped)
 
 
 def _entry_visible_in_scope(entry: dict[str, Any], scoped: ResolvedScope) -> bool:
@@ -1094,6 +1123,7 @@ def _build_sections(
     query: str,
     pack_mode: str,
     include_content: bool,
+    semantic: bool,
     max_query_results: int,
     max_embedding_results: int,
     scoped: ResolvedScope,
@@ -1186,13 +1216,17 @@ def _build_sections(
             scoped=scoped,
         )
         sections.extend(query_sections)
-        embedding_section = _embedding_section(
-            manager,
-            context_path,
-            query=query,
-            max_results=max_embedding_results,
-            pack_mode=pack_mode,
-            scoped=scoped,
+        embedding_section = (
+            _embedding_section(
+                manager,
+                context_path,
+                query=query,
+                max_results=max_embedding_results,
+                pack_mode=pack_mode,
+                scoped=scoped,
+            )
+            if semantic
+            else None
         )
         if embedding_section is not None:
             sections.append(embedding_section)
@@ -1232,10 +1266,7 @@ def _scoped_health_for_pack(
         for visible_root in _visible_mount_roots(root, mount_type=mount_type, scoped=scoped):
             if not visible_root.exists():
                 continue
-            try:
-                count += sum(1 for path in visible_root.rglob("*") if path.is_file())
-            except OSError:
-                continue
+            count += sum(1 for _path in iter_regular_files_no_links(visible_root))
         if count:
             mount_counts[mount_type.value] = count
     scoped_status["mount_counts"] = mount_counts
@@ -1245,13 +1276,7 @@ def _scoped_health_for_pack(
     if isinstance(index_info, dict) and index_info.get("enabled"):
         try:
             index = ContextSQLiteIndex(manager, context_path)
-            indexed: set[tuple[str, str]] = set()
-            for prefix in _visible_scope_prefixes(scoped):
-                for entry in index.query(query="", relative_prefix=prefix, limit=500):
-                    indexed.add(
-                        (str(entry.get("mount_type", "")), str(entry.get("relative_path", "")))
-                    )
-            index_info["total_entries"] = len(indexed)
+            index_info["total_entries"] = index.count_entries_scoped(scoped)
         except Exception:
             index_info.pop("total_entries", None)
 
@@ -1290,26 +1315,47 @@ def _query_sections(
 ) -> list[ContextPackSection]:
     settings = manager.config.context_index
     mount_types = list(DEFAULT_SEARCH_MOUNTS)
+    if scoped.layout_version == LAYOUT_VERSION:
+        mount_types = [
+            mount_type
+            for mount_type in mount_types
+            if ContextCategory.from_mount_type(mount_type) is not None
+        ]
     index = ContextSQLiteIndex(manager, context_path)
+    is_scoped_v2 = scoped.layout_version == LAYOUT_VERSION
+    has_entries = (
+        index.has_entries_scoped(scoped, mount_types=mount_types)
+        if is_scoped_v2
+        else index.has_entries(mount_types=mount_types)
+    )
     if settings.enabled:
-        if not index.has_entries(mount_types=mount_types) and settings.auto_index:
-            index.rebuild(
-                mount_types=mount_types,
-                include_content=settings.include_content,
-                max_file_size_bytes=settings.max_file_size_bytes,
-                max_content_chars=settings.max_content_chars,
+        needs_refresh = False
+        if settings.auto_refresh and has_entries:
+            needs_refresh = (
+                index.needs_refresh_scoped(scoped, mount_types=mount_types)
+                if is_scoped_v2
+                else index.needs_refresh(mount_types=mount_types)
             )
-        elif settings.auto_refresh and index.has_entries(mount_types=mount_types) and index.needs_refresh(
-            mount_types=mount_types
+        if (not has_entries and settings.auto_index) or (
+            settings.auto_refresh and has_entries and needs_refresh
         ):
-            index.rebuild(
-                mount_types=mount_types,
-                include_content=settings.include_content,
-                max_file_size_bytes=settings.max_file_size_bytes,
-                max_content_chars=settings.max_content_chars,
+            rebuild_kwargs = {
+                "mount_types": mount_types,
+                "include_content": settings.include_content,
+                "max_file_size_bytes": settings.max_file_size_bytes,
+                "max_content_chars": settings.max_content_chars,
+            }
+            if is_scoped_v2:
+                index.rebuild_scoped(scoped, **rebuild_kwargs)
+            else:
+                index.rebuild(**rebuild_kwargs)
+            has_entries = (
+                index.has_entries_scoped(scoped, mount_types=mount_types)
+                if is_scoped_v2
+                else index.has_entries(mount_types=mount_types)
             )
 
-    if not settings.enabled or not index.has_entries(mount_types=mount_types):
+    if not settings.enabled or not has_entries:
         return []
 
     rules = _pack_export_rules(manager)
@@ -1403,6 +1449,10 @@ def _embedding_section(
     )
     if hybrid is not None:
         return hybrid
+    if scoped.layout_version == LAYOUT_VERSION:
+        # V2 semantic retrieval is authorized by the scoped hybrid index.
+        # Legacy per-directory embedding indexes have no durable scope metadata.
+        return None
 
     knowledge_root = resolve_mount_root(context_path, MountType.KNOWLEDGE, config=manager.config)
     candidates: list[Path] = []
@@ -1509,7 +1559,10 @@ def _hybrid_search_section(
             mode="hybrid",
             top_k=500 if rules.enabled else max(1, max_results),
             recreate_query_embedder=True,
+            required_scope_ids=[scoped.scope_id],
         )
+    except HybridScopeCoverageError:
+        raise
     except (FileNotFoundError, OSError, ValueError):
         return None
     if not response.results:
@@ -1568,8 +1621,29 @@ def _knowledge_slice_section(
         if not visible_root.exists():
             continue
         index_path = visible_root / "INDEX.md"
-        candidates = [index_path] if index_path.is_file() else sorted(visible_root.rglob("*.md"))
+        try:
+            safe_index = assert_no_linklike_components(
+                index_path,
+                boundary=visible_root,
+                allow_missing=False,
+            )
+        except (OSError, ValueError):
+            safe_index = None
+        candidates = (
+            [safe_index]
+            if safe_index is not None and safe_index.is_file()
+            else sorted(visible_root.rglob("*.md"))
+        )
         for path in candidates:
+            if scoped.layout_version == LAYOUT_VERSION:
+                try:
+                    path = assert_no_linklike_components(
+                        path,
+                        boundary=visible_root,
+                        allow_missing=False,
+                    )
+                except (OSError, ValueError):
+                    continue
             rel = path.relative_to(knowledge_root).as_posix()
             if _path_blocked_any(
                 path,

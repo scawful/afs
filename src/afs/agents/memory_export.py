@@ -7,10 +7,7 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from ..context_paths import resolve_mount_root
-from ..models import MountType
-from ..sensitivity import filtered_tree_copy
-from ..training import export_memory_to_dataset
+from ..training_export_scope import resolve_memory_export_tree
 from .base import (
     AgentResult,
     build_base_parser,
@@ -27,8 +24,14 @@ AGENT_DESCRIPTION = "Export memory entries into TrainingSample JSONL."
 def build_parser() -> argparse.ArgumentParser:
     parser = build_base_parser("Export memory entries into TrainingSample JSONL.")
     parser.add_argument("--context-root", help="Context root override.")
-    parser.add_argument("--memory-root", help="Memory directory override.")
-    parser.add_argument("--output", help="Write JSON report to this path.")
+    parser.add_argument(
+        "--path",
+        help="Registered project path for v2 scope authorization (default: cwd).",
+    )
+    parser.add_argument(
+        "--memory-root",
+        help="Administrative memory directory override (bypasses v2 project scope).",
+    )
     parser.add_argument("--dataset-output", help="Training JSONL output path.")
     parser.add_argument("--domain", default="memory", help="Default domain.")
     parser.add_argument(
@@ -79,10 +82,14 @@ def _run_export(args: argparse.Namespace, config) -> AgentResult:
         if args.context_root
         else config.general.context_root
     )
-    memory_root = (
-        Path(args.memory_root).expanduser().resolve()
-        if args.memory_root
-        else resolve_mount_root(Path(context_root), MountType.MEMORY, config=config)
+    raw_requester_path = getattr(args, "path", None)
+    requester_path = (
+        Path(raw_requester_path).expanduser().resolve()
+        if raw_requester_path
+        else Path.cwd().resolve()
+    )
+    memory_root_override = (
+        Path(args.memory_root).expanduser().resolve() if args.memory_root else None
     )
     dataset_output = (
         Path(args.dataset_output).expanduser().resolve()
@@ -92,9 +99,17 @@ def _run_export(args: argparse.Namespace, config) -> AgentResult:
 
     started_at = now_iso()
     start = time.monotonic()
-    with filtered_tree_copy(memory_root, config.sensitivity.never_export) as export_root:
+    with resolve_memory_export_tree(
+        Path(context_root),
+        config=config,
+        requester_path=requester_path,
+        memory_root_override=memory_root_override,
+        sensitivity_patterns=config.sensitivity.never_export,
+    ) as export_tree:
+        from ..training import export_memory_to_dataset
+
         export_result = export_memory_to_dataset(
-            export_root,
+            export_tree.export_root,
             dataset_output,
             default_domain=args.domain,
             allow_raw=args.allow_raw or config.memory_export.allow_raw,
@@ -112,7 +127,7 @@ def _run_export(args: argparse.Namespace, config) -> AgentResult:
                 continue
             route_output = Path(route.output)
             route_result = export_memory_to_dataset(
-                export_root,
+                export_tree.export_root,
                 route_output,
                 default_domain=route.domain or args.domain,
                 allow_raw=args.allow_raw or config.memory_export.allow_raw,
@@ -149,8 +164,12 @@ def _run_export(args: argparse.Namespace, config) -> AgentResult:
         },
         notes=export_result.errors[:5],
         payload={
-            "memory_root": str(memory_root),
-            "export_root": str(export_root),
+            "memory_root": str(export_tree.memory_root),
+            "export_root": str(export_tree.export_root),
+            "scope_id": export_tree.scope_id,
+            "project_id": export_tree.project_id,
+            "source_roots": [str(path) for path in export_tree.source_roots],
+            "explicit_memory_root": export_tree.explicit_override,
             "dataset_output": str(dataset_output),
             "routes": route_results,
         },

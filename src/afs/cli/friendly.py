@@ -11,7 +11,12 @@ from typing import Any
 from ..context_layout import LAYOUT_VERSION, detect_layout_version, resolve_system_path
 from ..messages import MessageBus
 from ..models import ContextCategory
-from ..project_registry import COMMON_SCOPE_ID, ProjectRecord, ProjectRegistry
+from ..project_registry import (
+    COMMON_SCOPE_ID,
+    ProjectRecord,
+    ProjectRegistry,
+    assert_no_linklike_components,
+)
 from ._utils import load_manager, resolve_context_paths
 
 
@@ -55,8 +60,17 @@ def _search_sources(
     semantic: bool,
     all_projects: bool,
     previously_consented_scopes: frozenset[str] = frozenset(),
+    never_index: tuple[str, ...] = (),
+    never_embed: tuple[str, ...] = (),
 ) -> tuple[list[Any], str, str]:
-    from ..hybrid_search import HybridSource
+    from ..hybrid_search import HybridSource, SourcePolicy
+
+    def policy(*prefixes: str) -> SourcePolicy:
+        return SourcePolicy(
+            never_index=never_index,
+            never_embed=never_embed,
+            sensitivity_prefixes=tuple(prefixes),
+        )
 
     version = detect_layout_version(context)
     sources: list[HybridSource] = []
@@ -69,21 +83,39 @@ def _search_sources(
             raise PermissionError(f"project is not registered in central context: {project}")
         current_scope = current.scope_id
         current_project_id = current.project_id
-        for record in registry.all_records():
+        all_records = registry.all_records()
+        records = all_records if all_projects else [current]
+        for record in records:
             active = record.project_id == current.project_id
+            source_path = Path(record.path).expanduser().resolve()
+            excluded_roots = registry.codebase_excluded_roots(
+                source_path,
+                project_id=record.project_id,
+            )
             sources.append(
                 HybridSource(
-                    Path(record.path),
+                    source_path,
                     scope_id=record.scope_id,
                     project_id=record.project_id,
                     project_terms=(record.name,),
                     active=active,
+                    excluded_roots=excluded_roots,
+                    policy=policy(),
                     embed_allowed=semantic
                     and (active or all_projects or record.scope_id in previously_consented_scopes),
                 )
             )
             for category in ContextCategory:
                 scoped_root = context / category.value / "projects" / record.project_id
+                try:
+                    scoped_root = assert_no_linklike_components(
+                        scoped_root,
+                        boundary=context,
+                    )
+                except ValueError:
+                    if active or all_projects:
+                        raise
+                    continue
                 if scoped_root.is_dir():
                     sources.append(
                         HybridSource(
@@ -92,6 +124,10 @@ def _search_sources(
                             project_id=record.project_id,
                             project_terms=(record.name, category.value),
                             active=active,
+                            policy=policy(
+                                category.value,
+                                f"{category.value}/projects/{record.project_id}",
+                            ),
                             embed_allowed=semantic
                             and (
                                 active
@@ -102,6 +138,10 @@ def _search_sources(
                     )
         for category in ContextCategory:
             common_root = context / category.value / "common"
+            common_root = assert_no_linklike_components(
+                common_root,
+                boundary=context,
+            )
             if common_root.is_dir():
                 sources.append(
                     HybridSource(
@@ -109,6 +149,10 @@ def _search_sources(
                         scope_id=COMMON_SCOPE_ID,
                         project_terms=("common", category.value),
                         embed_allowed=semantic,
+                        policy=policy(
+                            category.value,
+                            f"{category.value}/common",
+                        ),
                     )
                 )
     else:
@@ -118,6 +162,7 @@ def _search_sources(
                 scope_id=COMMON_SCOPE_ID,
                 project_terms=(project.name,),
                 embed_allowed=semantic,
+                policy=policy(),
             )
         )
         for category in ContextCategory:
@@ -129,6 +174,7 @@ def _search_sources(
                         scope_id=COMMON_SCOPE_ID,
                         project_terms=(category.value,),
                         embed_allowed=semantic,
+                        policy=policy(category.value),
                     )
                 )
     return sources, current_scope, current_project_id
@@ -161,9 +207,13 @@ def _required_semantic_scopes(
 def search_command(args: argparse.Namespace) -> int:
     """Run local-first scoped retrieval with explicit semantic opt-in."""
     from ..embeddings import DEFAULT_GEMINI_MODEL, create_embed_fn
-    from ..hybrid_search import HybridSearchEngine
+    from ..hybrid_search import (
+        HybridSearchEngine,
+        hybrid_hit_blocked,
+        source_policy_digest,
+    )
 
-    _manager, project, context = _manager_context(args)
+    manager, project, context = _manager_context(args)
     index_root = resolve_system_path(context, "search")
     engine = HybridSearchEngine(index_root)
     has_index = engine.current_path.is_file() or engine.metadata_path.is_file()
@@ -174,11 +224,11 @@ def search_command(args: argparse.Namespace) -> int:
     )
     previous_metadata: dict[str, Any] = {}
     previously_consented_scopes: frozenset[str] = frozenset()
-    if args.semantic and has_index:
+    if has_index:
         try:
             previous_metadata = json.loads(engine.metadata_path.read_text(encoding="utf-8"))
             collection = previous_metadata.get("collection", {})
-            if (
+            if args.semantic and (
                 isinstance(collection, dict)
                 and collection.get("provider") == args.provider
                 and collection.get("model") == requested_model
@@ -194,11 +244,21 @@ def search_command(args: argparse.Namespace) -> int:
         semantic=bool(args.semantic),
         all_projects=bool(args.all_projects),
         previously_consented_scopes=previously_consented_scopes,
+        never_index=tuple(manager.config.sensitivity.never_index),
+        never_embed=(
+            *manager.config.sensitivity.never_embed,
+            *manager.config.sensitivity.never_export,
+        ),
     )
     required_semantic_scopes = _required_semantic_scopes(
         sources,
         current_scope=scope_id,
         all_projects=bool(args.all_projects),
+    )
+    policy_digest = source_policy_digest(sources)
+    policy_index_ready = (
+        bool(previous_metadata)
+        and previous_metadata.get("sensitivity_policy_digest") == policy_digest
     )
     semantic_index_ready = False
     if args.semantic and has_index:
@@ -224,7 +284,12 @@ def search_command(args: argparse.Namespace) -> int:
             args.provider,
             model=requested_model,
         )
-    if args.rebuild or not has_index or (args.semantic and not semantic_index_ready):
+    if (
+        args.rebuild
+        or not has_index
+        or not policy_index_ready
+        or (args.semantic and not semantic_index_ready)
+    ):
         build = engine.build(sources, embed_fn=embed_fn)
         build_payload = {
             "total_files": build.total_files,
@@ -234,6 +299,7 @@ def search_command(args: argparse.Namespace) -> int:
             "vector_count": build.vector_count,
             "vector_dimension": build.vector_dimension,
             "semantic_status": build.semantic_status,
+            "source_scope_ids": build.source_scope_ids,
             "intended_scope_ids": build.intended_scope_ids,
             "embedded_scope_ids": build.embedded_scope_ids,
             "capped_sources": build.capped_sources,
@@ -248,7 +314,27 @@ def search_command(args: argparse.Namespace) -> int:
         mode="hybrid" if args.semantic else args.mode,
         top_k=args.limit,
         recreate_query_embedder=bool(args.semantic),
+        required_scope_ids=sorted(
+            {
+                source.scope_id
+                for source in sources
+                if source.path.exists()
+            }
+        ),
     )
+    export_patterns = [
+        *manager.config.sensitivity.never_index,
+        *manager.config.sensitivity.never_export,
+    ]
+    response.results = [
+        hit
+        for hit in response.results
+        if not hybrid_hit_blocked(
+            hit,
+            context_root=context,
+            patterns=export_patterns,
+        )
+    ]
     payload = response.to_dict()
     payload.update(
         {
@@ -278,15 +364,45 @@ def search_command(args: argparse.Namespace) -> int:
 
 
 def projects_current_command(args: argparse.Namespace) -> int:
-    manager, project, context = _manager_context(args)
-    scope_id, record = _scope_for(context, project)
+    try:
+        manager, project, context = _manager_context(args)
+    except FileNotFoundError:
+        # This orientation command must still explain how to register a
+        # checkout that has not yet been granted a project scope. Other
+        # commands intentionally keep the stricter resolver boundary.
+        config = (
+            Path(args.config).expanduser().resolve()
+            if getattr(args, "config", None)
+            else None
+        )
+        manager = load_manager(config)
+        project = (
+            Path(args.path).expanduser().resolve()
+            if getattr(args, "path", None)
+            else Path.cwd().resolve()
+        )
+        context = manager.config.general.context_root.expanduser().resolve()
+        if detect_layout_version(context) != LAYOUT_VERSION:
+            raise
+    layout_version = detect_layout_version(context)
+    record = (
+        ProjectRegistry(context).resolve(project)
+        if layout_version == LAYOUT_VERSION
+        else None
+    )
+    scope_id = record.scope_id if record is not None else COMMON_SCOPE_ID
     payload: dict[str, Any] = {
         "context_root": str(context),
-        "layout_version": detect_layout_version(context),
+        "layout_version": layout_version,
         "project_path": str(project),
         "registered": record is not None,
         "scope_id": scope_id,
         "project": record.to_dict() if record else None,
+        "next_step": (
+            None
+            if record is not None or layout_version != LAYOUT_VERSION
+            else f"afs projects register {project}"
+        ),
     }
     if args.json:
         print(json.dumps(payload, indent=2))
@@ -296,6 +412,8 @@ def projects_current_command(args: argparse.Namespace) -> int:
         print(f"project_path: {payload['project_path']}")
         print(f"scope_id: {payload['scope_id']}")
         print(f"registered: {str(payload['registered']).lower()}")
+        if payload["next_step"]:
+            print(f"next_step: {payload['next_step']}")
     return 0
 
 
@@ -381,11 +499,31 @@ def projects_import_command(args: argparse.Namespace) -> int:
 def _artifact_context(
     args: argparse.Namespace,
 ) -> tuple[Any, Path, Path, str, str]:
-    manager, project, context = _manager_context(args)
-    scope_id, record = _scope_for(context, project)
-    if bool(getattr(args, "common", False)):
+    common = bool(getattr(args, "common", False))
+    try:
+        manager, project, context = _manager_context(args)
+    except FileNotFoundError:
+        if not common:
+            raise
+        config_path = (
+            Path(args.config).expanduser().resolve()
+            if getattr(args, "config", None)
+            else None
+        )
+        manager = load_manager(config_path)
+        project = (
+            Path(args.path).expanduser().resolve()
+            if getattr(args, "path", None)
+            else Path.cwd().resolve()
+        )
+        context = manager.config.general.context_root.expanduser().resolve()
+        if detect_layout_version(context) != LAYOUT_VERSION:
+            raise
+    if common:
         scope_id = COMMON_SCOPE_ID
         record = None
+    else:
+        scope_id, record = _scope_for(context, project)
     project_id = record.project_id if record is not None else ""
     return manager, project, context, scope_id, project_id
 

@@ -23,6 +23,7 @@ import tomlkit
 
 from .context_paths import resolve_mount_root
 from .models import MountType
+from .project_registry import assert_no_linklike_components
 from .toml_compat import tomllib
 
 ARTIFACT_SCHEMA_VERSION = "1"
@@ -50,7 +51,7 @@ def _directory_open_flags() -> int:
     return flags
 
 
-def _open_directory_tree(path: Path) -> int:
+def _open_directory_tree(path: Path, *, create: bool = False) -> int:
     """Open an absolute directory without following any path component."""
 
     if not path.is_absolute():  # pragma: no cover - callers canonicalize first
@@ -59,7 +60,16 @@ def _open_directory_tree(path: Path) -> int:
     current = os.open(path.anchor, flags)
     try:
         for part in path.parts[1:]:
-            following = os.open(part, flags, dir_fd=current)
+            try:
+                following = os.open(part, flags, dir_fd=current)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=current)
+                except FileExistsError:
+                    pass
+                following = os.open(part, flags, dir_fd=current)
             os.close(current)
             current = following
         return current
@@ -77,6 +87,21 @@ def _mkdir_and_open_at(parent_fd: int, name: str) -> int:
         return os.open(name, _directory_open_flags(), dir_fd=parent_fd)
     except OSError as exc:
         raise ValueError(f"artifact directory is not a safe directory: {name}") from exc
+
+
+def _create_directory_tree_fallback(path: Path) -> None:
+    """Create a safe directory tree on platforms without descriptor-relative I/O."""
+
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            os.mkdir(current, mode=0o700)
+        except FileExistsError:
+            pass
+        assert_no_linklike_components(current, allow_missing=False)
+        if not current.is_dir():
+            raise ValueError(f"artifact root is not a safe directory: {current}")
 
 
 @dataclass
@@ -397,16 +422,41 @@ class MarkdownArtifactCodec:
     """Create and read immutable Markdown artifacts beneath one root."""
 
     def __init__(self, root: Path) -> None:
-        self.root = root.expanduser().resolve()
-        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.root = assert_no_linklike_components(root)
         self._root_fd: int | None = None
         self._root_finalizer: weakref.finalize | None = None
         if _DESCRIPTOR_RELATIVE_IO:
             try:
-                self._root_fd = _open_directory_tree(self.root)
+                self._root_fd = _open_directory_tree(self.root, create=True)
             except OSError as exc:
                 raise ValueError("artifact root is not a safe directory") from exc
             self._root_finalizer = weakref.finalize(self, os.close, self._root_fd)
+            root_stat = os.fstat(self._root_fd)
+        else:
+            _create_directory_tree_fallback(self.root)
+            root_stat = os.lstat(self.root)
+        self._root_identity = (root_stat.st_dev, root_stat.st_ino)
+
+    def _assert_root_binding(self) -> None:
+        """Fail closed if the lexical collection root was replaced or redirected."""
+
+        if self._root_fd is not None:
+            try:
+                current_fd = _open_directory_tree(self.root)
+            except OSError as exc:
+                raise ValueError("artifact root is no longer a safe directory") from exc
+            try:
+                current_stat = os.fstat(current_fd)
+            finally:
+                os.close(current_fd)
+        else:
+            try:
+                assert_no_linklike_components(self.root, allow_missing=False)
+                current_stat = os.lstat(self.root)
+            except (OSError, ValueError) as exc:
+                raise ValueError("artifact root is no longer a safe directory") from exc
+        if (current_stat.st_dev, current_stat.st_ino) != self._root_identity:
+            raise ValueError("artifact root changed after it was opened")
 
     def _duplicate_root_fd(self) -> int | None:
         return os.dup(self._root_fd) if self._root_fd is not None else None
@@ -434,6 +484,7 @@ class MarkdownArtifactCodec:
         created_at: str | datetime | None = None,
         relative_dir: str | None = None,
     ) -> MarkdownArtifact:
+        self._assert_root_binding()
         if not isinstance(body, str):
             raise TypeError("body must be a string")
         if "\x00" in body:
@@ -552,6 +603,7 @@ class MarkdownArtifactCodec:
         return MarkdownArtifact(metadata=metadata, body=body, path=resolved)
 
     def iter_artifacts(self, *, kind: str | None = None) -> Iterator[MarkdownArtifact]:
+        self._assert_root_binding()
         for path in sorted(self.root.rglob("*.md")):
             try:
                 artifact = self.read(path)
@@ -609,6 +661,7 @@ class MarkdownArtifactCodec:
             os.close(fd)
 
     def _open_relative_directory(self, relative_dir: str | None) -> int | None:
+        self._assert_root_binding()
         root_fd = self._duplicate_root_fd()
         if root_fd is None or relative_dir is None:
             return root_fd
@@ -664,6 +717,7 @@ class MarkdownArtifactCodec:
             os.close(current_root)
 
     def _read_contained_text(self, path: Path) -> tuple[Path, str]:
+        self._assert_root_binding()
         expanded = path.expanduser()
         candidate = Path(os.path.abspath(expanded))
         try:
@@ -697,6 +751,7 @@ class MarkdownArtifactCodec:
             os.close(directory_fd)
 
     def _claim_identifier(self, registry: str, identifier: str) -> _ExclusiveClaim:
+        self._assert_root_binding()
         safe_registry = _validate_control_name(registry, field_name="registry")
         safe_identifier = _validate_safe_segment(identifier, field_name="identifier")
         root_fd = self._duplicate_root_fd()
@@ -739,6 +794,7 @@ class MarkdownArtifactCodec:
         return _ExclusiveClaim(name=safe_identifier, path=claim_path)
 
     def _open_control_file(self, filename: str, flags: int, mode: int = 0o600) -> int:
+        self._assert_root_binding()
         safe_filename = _validate_control_name(filename, field_name="control filename")
         safe_flags = flags | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         root_fd = self._duplicate_root_fd()
@@ -771,15 +827,13 @@ class NoteStore:
         self.context_path = context_path.expanduser().resolve()
         self.scope_id = validate_scope_id(scope_id or infer_scope_id(self.context_path))
         resolver = root_resolver or default_artifact_root
-        self.root = (
+        self.root = assert_no_linklike_components(
             resolver(
                 self.context_path,
                 scope_id=self.scope_id,
                 collection="notes",
                 config=config,
             )
-            .expanduser()
-            .resolve()
         )
         self._codec = MarkdownArtifactCodec(self.root)
 

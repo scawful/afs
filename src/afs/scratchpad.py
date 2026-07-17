@@ -45,7 +45,7 @@ class ScratchpadStore:
             self.context_path,
             MountType.SCRATCHPAD,
             config=config,
-        ).expanduser().resolve()
+        )
         scoped = scratchpad_root / _scope_directory(self.scope_id)
         self.active_root = scoped / "notes"
         self.archive_root = scoped / "archive"
@@ -111,10 +111,9 @@ class ScratchpadStore:
                 return archived
             raise FileNotFoundError(f"draft note not found: {identifier}")
 
-        self.archive_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         _rename_between_directories(
-            self.active_root,
-            self.archive_root,
+            self._active,
+            self._archive,
             artifact.path.name,
         )
         archived = self._archive.read(self.archive_root / artifact.path.name)
@@ -170,37 +169,42 @@ class ScratchpadStore:
         return None
 
 
-def _rename_between_directories(source: Path, destination: Path, filename: str) -> None:
-    """Rename one contained file without following a swapped final directory."""
+def _rename_between_directories(
+    source: MarkdownArtifactCodec,
+    destination: MarkdownArtifactCodec,
+    filename: str,
+) -> None:
+    """Rename one contained file through the codecs' pinned directory handles."""
 
     if Path(filename).name != filename or filename in {"", ".", ".."}:
         raise ValueError("draft filename must be a contained basename")
-    directory_flag = getattr(os, "O_DIRECTORY", 0)
-    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
-    if os.name != "nt" and directory_flag:
-        source_fd = os.open(source, os.O_RDONLY | directory_flag | nofollow_flag)
+    source_fd = source._duplicate_root_fd()
+    destination_fd = destination._duplicate_root_fd()
+    if source_fd is not None and destination_fd is not None:
         try:
-            destination_fd = os.open(
-                destination,
-                os.O_RDONLY | directory_flag | nofollow_flag,
+            os.rename(
+                filename,
+                filename,
+                src_dir_fd=source_fd,
+                dst_dir_fd=destination_fd,
             )
-            try:
-                os.rename(
-                    filename,
-                    filename,
-                    src_dir_fd=source_fd,
-                    dst_dir_fd=destination_fd,
-                )
-            finally:
-                os.close(destination_fd)
         finally:
             os.close(source_fd)
+            os.close(destination_fd)
         return
+    if source_fd is not None:
+        os.close(source_fd)
+    if destination_fd is not None:
+        os.close(destination_fd)
 
-    source_path = (source / filename).resolve()
-    destination_path = (destination / filename).resolve(strict=False)
-    source_path.relative_to(source.resolve())
-    destination_path.relative_to(destination.resolve())
+    # Platforms without descriptor-relative I/O retain a best-effort static
+    # check immediately before the rename.
+    source._assert_root_binding()
+    destination._assert_root_binding()
+    source_path = (source.root / filename).resolve()
+    destination_path = (destination.root / filename).resolve(strict=False)
+    source_path.relative_to(source.root.resolve())
+    destination_path.relative_to(destination.root.resolve())
     os.replace(source_path, destination_path)
 
 

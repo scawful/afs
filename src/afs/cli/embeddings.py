@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from ..config import load_config_model
+from ..context_layout import LAYOUT_VERSION, detect_layout_version
 from ..context_paths import resolve_mount_root
 from ..core import resolve_context_root
 from ..embeddings import (
@@ -209,6 +210,11 @@ def _resolve_knowledge_root(args: argparse.Namespace, config) -> Path:
         context_root = Path(args.context_root).expanduser().resolve()
     else:
         context_root = resolve_context_root(config, None)
+    if detect_layout_version(context_root) == LAYOUT_VERSION:
+        raise ValueError(
+            "legacy per-project embedding indexes are disabled for v2; run "
+            "`afs search --semantic --rebuild --path <registered-project>`"
+        )
     return resolve_mount_root(context_root, MountType.KNOWLEDGE, config=config) / args.project
 
 

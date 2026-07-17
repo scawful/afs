@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .manager import AFSManager
-from .models import MountType
+from .models import ContextCategory, MountType
+from .project_registry import assert_no_linklike_components
+from .scopes import ResolvedScope, visible_mount_roots, visible_scope_prefixes
 from .sensitivity import matches_path_rules
 
 DEFAULT_DB_FILENAME = "context_index.sqlite3"
@@ -107,8 +112,11 @@ class ContextSQLiteIndex:
     ) -> None:
         self._manager = manager
         self._context_path = context_path.expanduser().resolve()
+        self._managed_v2_db_root: Path | None = None
         self._db_path = db_path.expanduser().resolve() if db_path else self._default_db_path()
+        self._assert_managed_db_safe()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._assert_managed_db_safe(require_parent=True)
         self._fts_enabled = False
         self._initialize()
 
@@ -147,6 +155,13 @@ class ContextSQLiteIndex:
                 continue
 
             for entry, relative_path in _iter_mount_entries(mount_root):
+                entry = self._safe_v2_index_entry(
+                    mount_type,
+                    relative_path,
+                    entry,
+                )
+                if entry is None:
+                    continue
                 if self._should_skip_relative_path(
                     mount_type,
                     relative_path,
@@ -210,6 +225,144 @@ class ContextSQLiteIndex:
             errors=errors,
         )
 
+    def rebuild_scoped(
+        self,
+        scoped: ResolvedScope,
+        *,
+        mount_types: list[MountType] | None = None,
+        include_content: bool = True,
+        max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE_BYTES,
+        max_content_chars: int = DEFAULT_MAX_CONTENT_CHARS,
+    ) -> IndexSummary:
+        """Rebuild only rows visible to one v2 project/common requester.
+
+        Rows belonging to other project scopes are preserved.  More
+        importantly, their filesystem roots are never traversed while the
+        scoped rebuild is collecting entries.
+        """
+
+        self._assert_scope_matches(scoped)
+        if scoped.layout_version != LAYOUT_VERSION:
+            return self.rebuild(
+                mount_types=mount_types,
+                include_content=include_content,
+                max_file_size_bytes=max_file_size_bytes,
+                max_content_chars=max_content_chars,
+            )
+
+        selected_mounts = self._normalize_scoped_mount_types(scoped, mount_types)
+        indexed_at = datetime.now(timezone.utc).isoformat()
+        rows: list[tuple[Any, ...]] = []
+        by_mount_type: dict[str, int] = {
+            mount_type.value: 0 for mount_type in selected_mounts
+        }
+        errors: list[str] = []
+        skipped_large_files = 0
+        skipped_binary_files = 0
+        prefixes_by_mount: dict[MountType, tuple[str, ...]] = {}
+
+        for mount_type in selected_mounts:
+            try:
+                mount_root = self._manager.resolve_mount_root(
+                    self._context_path, mount_type
+                )
+                roots = visible_mount_roots(
+                    mount_root,
+                    mount_type=mount_type,
+                    scoped=scoped,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                errors.append(f"{mount_type.value}: resolve failed: {exc}")
+                continue
+
+            prefixes: list[str] = []
+            for root in roots:
+                try:
+                    prefix = root.relative_to(mount_root).as_posix()
+                except ValueError:
+                    errors.append(
+                        f"{mount_type.value}: scoped root escaped mount: {root}"
+                    )
+                    continue
+                prefixes.append(prefix)
+                if not root.exists():
+                    continue
+                candidates = [(root, prefix), *_iter_mount_entries_with_prefix(root, prefix)]
+                for entry, relative_path in candidates:
+                    entry = self._safe_v2_index_entry(
+                        mount_type,
+                        relative_path,
+                        entry,
+                    )
+                    if entry is None:
+                        continue
+                    if self._should_skip_relative_path(
+                        mount_type,
+                        relative_path,
+                        entry=entry,
+                    ):
+                        continue
+                    try:
+                        row, reason = self._build_row(
+                            mount_type,
+                            relative_path=relative_path,
+                            entry=entry,
+                            include_content=include_content,
+                            max_file_size_bytes=max_file_size_bytes,
+                            max_content_chars=max_content_chars,
+                            indexed_at=indexed_at,
+                        )
+                    except OSError as exc:
+                        errors.append(
+                            f"{mount_type.value}: stat failed for {entry}: {exc}"
+                        )
+                        continue
+
+                    if reason == "too_large":
+                        skipped_large_files += 1
+                    elif reason == "binary":
+                        skipped_binary_files += 1
+                    rows.append(row)
+                    by_mount_type[mount_type.value] += 1
+            prefixes_by_mount[mount_type] = tuple(prefixes)
+
+        with self._connect() as connection:
+            rows_deleted = self._delete_rows_for_scoped_prefixes(
+                prefixes_by_mount,
+                connection=connection,
+            )
+            if rows:
+                connection.executemany(
+                    """
+                    INSERT INTO file_index (
+                        context_path,
+                        mount_type,
+                        relative_path,
+                        absolute_path,
+                        is_dir,
+                        size_bytes,
+                        modified_at,
+                        content_text,
+                        content_hash,
+                        indexed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+            self._commit_mutation(connection, truncate_wal=True)
+
+        return IndexSummary(
+            context_path=str(self._context_path),
+            db_path=str(self._db_path),
+            indexed_at=indexed_at,
+            rows_written=len(rows),
+            rows_deleted=rows_deleted,
+            by_mount_type=by_mount_type,
+            skipped_large_files=skipped_large_files,
+            skipped_binary_files=skipped_binary_files,
+            errors=errors,
+        )
+
     def upsert_relative_path(
         self,
         mount_type: MountType,
@@ -225,6 +378,17 @@ class ContextSQLiteIndex:
 
         mount_root = self._manager.resolve_mount_root(self._context_path, mount_type)
         entry = mount_root / normalized
+        entry = self._safe_v2_index_entry(mount_type, normalized, entry)
+        if entry is None:
+            self.delete_relative_path(mount_type, normalized)
+            return False
+        if self._should_skip_relative_path(
+            mount_type,
+            normalized,
+            entry=entry,
+        ):
+            self.delete_relative_path(mount_type, normalized)
+            return False
         if not entry.exists():
             self.delete_relative_path(mount_type, normalized)
             return False
@@ -265,6 +429,7 @@ class ContextSQLiteIndex:
         self,
         absolute_path: Path,
         *,
+        scoped: ResolvedScope | None = None,
         include_content: bool = True,
         max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE_BYTES,
         max_content_chars: int = DEFAULT_MAX_CONTENT_CHARS,
@@ -274,15 +439,21 @@ class ContextSQLiteIndex:
             return False
 
         mount_type, relative_path = inferred
+        if scoped is not None:
+            self._assert_scope_matches(scoped)
         candidate = absolute_path.expanduser().resolve()
         if candidate.exists():
             if candidate.is_dir():
-                self.rebuild(
-                    mount_types=[mount_type],
-                    include_content=include_content,
-                    max_file_size_bytes=max_file_size_bytes,
-                    max_content_chars=max_content_chars,
-                )
+                rebuild_kwargs = {
+                    "mount_types": [mount_type],
+                    "include_content": include_content,
+                    "max_file_size_bytes": max_file_size_bytes,
+                    "max_content_chars": max_content_chars,
+                }
+                if scoped is not None and scoped.layout_version == LAYOUT_VERSION:
+                    self.rebuild_scoped(scoped, **rebuild_kwargs)
+                else:
+                    self.rebuild(**rebuild_kwargs)
                 return True
             self.upsert_relative_path(
                 mount_type,
@@ -329,14 +500,15 @@ class ContextSQLiteIndex:
                   AND mount_type = ?
                   AND (
                     relative_path = ?
-                    OR relative_path LIKE ?
+                    OR substr(relative_path, 1, length(?)) = ?
                   )
                 """,
                 (
                     str(self._context_path),
                     mount_type.value,
                     normalized,
-                    f"{normalized}/%",
+                    f"{normalized}/",
+                    f"{normalized}/",
                 ),
             )
             self._commit_mutation(connection)
@@ -406,6 +578,19 @@ class ContextSQLiteIndex:
             ).fetchone()
         return bool(row and int(row["count"]) > 0)
 
+    def has_entries_scoped(
+        self,
+        scoped: ResolvedScope,
+        *,
+        mount_types: list[MountType] | None = None,
+    ) -> bool:
+        """Return whether the authorized v2 scope has indexed rows."""
+
+        self._assert_scope_matches(scoped)
+        if scoped.layout_version != LAYOUT_VERSION:
+            return self.has_entries(mount_types=mount_types)
+        return self.count_entries_scoped(scoped, mount_types=mount_types) > 0
+
     def needs_refresh(self, *, mount_types: list[MountType] | None = None) -> bool:
         selected_mounts = self._normalize_mount_types(mount_types)
         if not selected_mounts:
@@ -421,6 +606,29 @@ class ContextSQLiteIndex:
             ):
                 return True
         return False
+
+    def needs_refresh_scoped(
+        self,
+        scoped: ResolvedScope,
+        *,
+        mount_types: list[MountType] | None = None,
+    ) -> bool:
+        """Compare only authorized current/common filesystem and index rows."""
+
+        self._assert_scope_matches(scoped)
+        if scoped.layout_version != LAYOUT_VERSION:
+            return self.needs_refresh(mount_types=mount_types)
+        selected_mounts = self._normalize_scoped_mount_types(scoped, mount_types)
+        fs_snapshot = self._filesystem_snapshot_scoped(selected_mounts, scoped)
+        db_snapshot = self._indexed_snapshot(
+            selected_mounts,
+            relative_prefixes=visible_scope_prefixes(scoped),
+        )
+        return any(
+            fs_snapshot.get(mount_type.value, _empty_mount_snapshot())
+            != db_snapshot.get(mount_type.value, _empty_mount_snapshot())
+            for mount_type in selected_mounts
+        )
 
     @staticmethod
     def health_mount_types() -> list[MountType]:
@@ -466,16 +674,105 @@ class ContextSQLiteIndex:
             ).fetchone()
             return int(row["cnt"]) if row else 0
 
+    def count_entries(
+        self,
+        *,
+        mount_types: list[MountType] | None = None,
+        relative_prefixes: Sequence[str] | None = None,
+    ) -> int:
+        """Count indexed entries after optional mount and scope predicates."""
+
+        selected_mounts = self._normalize_mount_types(mount_types)
+        if not selected_mounts:
+            return 0
+        where = ["context_path = ?"]
+        params: list[Any] = [str(self._context_path)]
+        placeholders = ", ".join("?" for _ in selected_mounts)
+        where.append(f"mount_type IN ({placeholders})")
+        params.extend(mount.value for mount in selected_mounts)
+        prefixes = tuple(
+            str(prefix).replace("\\", "/").lstrip("/")
+            for prefix in (relative_prefixes or ())
+        )
+        if prefixes:
+            where.append(
+                "("
+                + " OR ".join(
+                    "substr(relative_path, 1, length(?)) = ?" for _ in prefixes
+                )
+                + ")"
+            )
+            for prefix in prefixes:
+                params.extend((prefix, prefix))
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(1) AS cnt FROM file_index WHERE {' AND '.join(where)}",
+                params,
+            ).fetchone()
+        return int(row["cnt"]) if row else 0
+
+    def count_entries_scoped(
+        self,
+        scoped: ResolvedScope,
+        *,
+        mount_types: list[MountType] | None = None,
+    ) -> int:
+        """Count only category rows visible to a current/common requester."""
+
+        self._assert_scope_matches(scoped)
+        if scoped.layout_version != LAYOUT_VERSION:
+            return self.count_entries(mount_types=mount_types)
+        selected_mounts = self._normalize_scoped_mount_types(scoped, mount_types)
+        if not selected_mounts:
+            return 0
+        placeholders = ", ".join("?" for _ in selected_mounts)
+        prefix_clause, prefix_params = _relative_prefix_sql(
+            visible_scope_prefixes(scoped),
+            leading_and=True,
+        )
+        params: list[Any] = [
+            str(self._context_path),
+            *[mount.value for mount in selected_mounts],
+            *prefix_params,
+        ]
+        with self._connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT COUNT(1) AS cnt
+                FROM file_index
+                WHERE context_path = ?
+                  AND mount_type IN ({placeholders})
+                  {prefix_clause}
+                """,
+                params,
+            ).fetchone()
+        return int(row["cnt"]) if row else 0
+
     def diff(
         self,
         *,
         mount_types: list[MountType] | None = None,
+        relative_prefixes: Sequence[str] | None = None,
+        scoped: ResolvedScope | None = None,
     ) -> dict[str, Any]:
         """Compare filesystem state against the index.
 
         Returns lists of new, modified, and deleted paths per mount type.
         """
-        selected_mounts = self._normalize_mount_types(mount_types)
+        if scoped is not None:
+            self._assert_scope_matches(scoped)
+        selected_mounts = (
+            self._normalize_scoped_mount_types(scoped, mount_types)
+            if scoped is not None and scoped.layout_version == LAYOUT_VERSION
+            else self._normalize_mount_types(mount_types)
+        )
+        normalized_prefixes = _effective_relative_prefixes(
+            relative_prefixes,
+            scoped=scoped,
+        )
+
+        def visible(relative_path: str) -> bool:
+            return _relative_path_matches_prefixes(relative_path, normalized_prefixes)
         added: list[dict[str, str]] = []
         modified: list[dict[str, str]] = []
         deleted: list[dict[str, str]] = []
@@ -492,7 +789,33 @@ class ContextSQLiteIndex:
 
             # Build filesystem snapshot: relative_path -> (size, mtime)
             fs_entries: dict[str, tuple[int, str]] = {}
-            for entry, relative_path in _iter_mount_entries(mount_root):
+            if scoped is not None and scoped.layout_version == LAYOUT_VERSION:
+                scoped_entries = []
+                for root in visible_mount_roots(
+                    mount_root,
+                    mount_type=mount_type,
+                    scoped=scoped,
+                ):
+                    if not root.exists():
+                        continue
+                    prefix = root.relative_to(mount_root).as_posix()
+                    scoped_entries.extend(
+                        _iter_mount_entries_with_prefix(root, prefix)
+                    )
+                mount_entries = scoped_entries
+            else:
+                mount_entries = _iter_mount_entries(mount_root)
+            for entry, relative_path in mount_entries:
+                if not visible(relative_path):
+                    continue
+                if scoped is not None and scoped.layout_version == LAYOUT_VERSION:
+                    entry = self._safe_v2_index_entry(
+                        mount_type,
+                        relative_path,
+                        entry,
+                    )
+                    if entry is None:
+                        continue
                 if self._should_skip_relative_path(
                     mount_type,
                     relative_path,
@@ -509,12 +832,19 @@ class ContextSQLiteIndex:
             # Build index snapshot: relative_path -> (size, mtime)
             db_entries: dict[str, tuple[int, str | None]] = {}
             with self._connect() as connection:
+                prefix_clause, prefix_params = _relative_prefix_sql(
+                    normalized_prefixes,
+                    leading_and=True,
+                )
                 rows = connection.execute(
                     "SELECT relative_path, size_bytes, modified_at "
-                    "FROM file_index WHERE context_path = ? AND mount_type = ?",
-                    (str(self._context_path), mount_type.value),
+                    "FROM file_index WHERE context_path = ? AND mount_type = ?"
+                    f"{prefix_clause}",
+                    (str(self._context_path), mount_type.value, *prefix_params),
                 ).fetchall()
                 for row in rows:
+                    if not visible(row["relative_path"]):
+                        continue
                     db_entries[row["relative_path"]] = (
                         int(row["size_bytes"]),
                         row["modified_at"],
@@ -558,13 +888,28 @@ class ContextSQLiteIndex:
         mount_types: list[MountType] | None = None,
         decay_hours: float = 168.0,
         threshold: float = 0.0,
+        relative_prefixes: Sequence[str] | None = None,
+        scoped: ResolvedScope | None = None,
     ) -> dict[str, Any]:
         """Compute per-file freshness scores based on index vs filesystem state.
 
         Score = max(0, 1 - age_seconds / decay_seconds) for indexed files.
         Modified or deleted files get 0.0.
         """
-        selected_mounts = self._normalize_mount_types(mount_types)
+        if scoped is not None:
+            self._assert_scope_matches(scoped)
+        selected_mounts = (
+            self._normalize_scoped_mount_types(scoped, mount_types)
+            if scoped is not None and scoped.layout_version == LAYOUT_VERSION
+            else self._normalize_mount_types(mount_types)
+        )
+        normalized_prefixes = _effective_relative_prefixes(
+            relative_prefixes,
+            scoped=scoped,
+        )
+
+        def visible(relative_path: str) -> bool:
+            return _relative_path_matches_prefixes(relative_path, normalized_prefixes)
         decay_seconds = decay_hours * 3600.0
         mount_scores: dict[str, float] = {}
         files: dict[str, list[dict[str, Any]]] = {}
@@ -585,7 +930,33 @@ class ContextSQLiteIndex:
                     continue
 
                 fs_entries: dict[str, Path] = {}
-                for entry, relative_path in _iter_mount_entries(mount_root):
+                if scoped is not None and scoped.layout_version == LAYOUT_VERSION:
+                    scoped_entries = []
+                    for root in visible_mount_roots(
+                        mount_root,
+                        mount_type=mount_type,
+                        scoped=scoped,
+                    ):
+                        if not root.exists():
+                            continue
+                        prefix = root.relative_to(mount_root).as_posix()
+                        scoped_entries.extend(
+                            _iter_mount_entries_with_prefix(root, prefix)
+                        )
+                    mount_entries = scoped_entries
+                else:
+                    mount_entries = _iter_mount_entries(mount_root)
+                for entry, relative_path in mount_entries:
+                    if not visible(relative_path):
+                        continue
+                    if scoped is not None and scoped.layout_version == LAYOUT_VERSION:
+                        entry = self._safe_v2_index_entry(
+                            mount_type,
+                            relative_path,
+                            entry,
+                        )
+                        if entry is None:
+                            continue
                     if self._should_skip_relative_path(
                         mount_type,
                         relative_path,
@@ -596,13 +967,18 @@ class ContextSQLiteIndex:
                         continue
                     fs_entries[relative_path] = entry
 
+                prefix_clause, prefix_params = _relative_prefix_sql(
+                    normalized_prefixes,
+                    leading_and=True,
+                )
                 rows = connection.execute(
                     """
                     SELECT relative_path, modified_at, absolute_path
                     FROM file_index
                     WHERE context_path = ? AND mount_type = ? AND is_dir = 0
-                    """,
-                    (str(self._context_path), mount_key),
+                    """
+                    + prefix_clause,
+                    (str(self._context_path), mount_key, *prefix_params),
                 ).fetchall()
 
                 file_entries: list[dict[str, Any]] = []
@@ -611,8 +987,22 @@ class ContextSQLiteIndex:
                 seen_paths: set[str] = set()
 
                 for rel_path, indexed_modified_at, abs_path in rows:
+                    if not visible(rel_path):
+                        continue
+                    try:
+                        row_mount = MountType(mount_key)
+                    except ValueError:
+                        continue
+                    safe_entry = self._safe_v2_index_entry(
+                        row_mount,
+                        rel_path,
+                        Path(abs_path) if abs_path else mount_root / rel_path,
+                        require_exists=False,
+                    )
+                    if safe_entry is None:
+                        continue
                     seen_paths.add(rel_path)
-                    entry_path = Path(abs_path) if abs_path else mount_root / rel_path
+                    entry_path = safe_entry
                     if not entry_path.exists():
                         score = 0.0
                         status = "deleted"
@@ -707,6 +1097,11 @@ class ContextSQLiteIndex:
         normalized_query = (query or "").strip()
         limit_value = max(1, min(limit, 500))
 
+        query_limit = (
+            500
+            if detect_layout_version(self._context_path) == LAYOUT_VERSION
+            else limit_value
+        )
         rows = []
         fts_query = _build_fts_query(normalized_query) if normalized_query else None
         if normalized_query and self._fts_enabled and fts_query:
@@ -714,7 +1109,7 @@ class ContextSQLiteIndex:
                 fts_query=fts_query,
                 mount_types=selected_mounts,
                 relative_prefix=normalized_prefix,
-                limit=limit_value,
+                limit=query_limit,
             )
 
         if not rows:
@@ -722,17 +1117,77 @@ class ContextSQLiteIndex:
                 query=normalized_query,
                 mount_types=selected_mounts,
                 relative_prefix=normalized_prefix,
-                limit=limit_value,
+                limit=query_limit,
             )
 
-        return [
-            self._row_to_payload(
-                row=row,
-                query=normalized_query,
+        payloads: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                mount_type = MountType(str(row["mount_type"]))
+            except ValueError:
+                continue
+            if self._safe_v2_index_entry(
+                mount_type,
+                str(row["relative_path"]),
+                Path(str(row["absolute_path"])),
+                require_exists=True,
+            ) is None:
+                continue
+            payloads.append(
+                self._row_to_payload(
+                    row=row,
+                    query=normalized_query,
+                    include_content=include_content,
+                )
+            )
+            if len(payloads) >= limit_value:
+                break
+        return payloads
+
+    def query_scoped(
+        self,
+        scoped: ResolvedScope,
+        *,
+        query: str | None = None,
+        mount_types: list[MountType] | None = None,
+        limit: int = 25,
+        include_content: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Query only the current/common rows authorized for one requester."""
+
+        self._assert_scope_matches(scoped)
+        if scoped.layout_version != LAYOUT_VERSION:
+            return self.query(
+                query=query,
+                mount_types=mount_types,
+                limit=limit,
                 include_content=include_content,
             )
-            for row in rows
-        ]
+        selected_mounts = self._normalize_scoped_mount_types(scoped, mount_types)
+        if not selected_mounts:
+            return []
+        limit_value = max(1, min(limit, 500))
+        results: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for prefix in visible_scope_prefixes(scoped):
+            for item in self.query(
+                query=query,
+                mount_types=selected_mounts,
+                relative_prefix=prefix,
+                limit=limit_value,
+                include_content=include_content,
+            ):
+                key = (
+                    str(item.get("mount_type", "")),
+                    str(item.get("relative_path", "")),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append(item)
+                if len(results) >= limit_value:
+                    return results
+        return results
 
     def _query_with_fts(
         self,
@@ -750,8 +1205,12 @@ class ContextSQLiteIndex:
         params.extend([mount.value for mount in mount_types])
 
         if relative_prefix:
-            where.append("fi.relative_path LIKE ?")
-            params.append(f"{relative_prefix}%")
+            descendant_prefix = f"{relative_prefix}/"
+            where.append(
+                "(fi.relative_path = ? OR "
+                "substr(fi.relative_path, 1, length(?)) = ?)"
+            )
+            params.extend((relative_prefix, descendant_prefix, descendant_prefix))
 
         with self._connect() as connection:
             return connection.execute(
@@ -792,8 +1251,12 @@ class ContextSQLiteIndex:
         params.extend([mount.value for mount in mount_types])
 
         if relative_prefix:
-            where.append("relative_path LIKE ?")
-            params.append(f"{relative_prefix}%")
+            descendant_prefix = f"{relative_prefix}/"
+            where.append(
+                "(relative_path = ? OR "
+                "substr(relative_path, 1, length(?)) = ?)"
+            )
+            params.extend((relative_prefix, descendant_prefix, descendant_prefix))
 
         if query:
             token = f"%{query.lower()}%"
@@ -910,6 +1373,13 @@ class ContextSQLiteIndex:
                 continue
 
             for entry, relative_path in _iter_mount_entries(mount_root):
+                entry = self._safe_v2_index_entry(
+                    mount_type,
+                    relative_path,
+                    entry,
+                )
+                if entry is None:
+                    continue
                 if self._should_skip_relative_path(
                     mount_type,
                     relative_path,
@@ -937,6 +1407,124 @@ class ContextSQLiteIndex:
                 fingerprint=fingerprint.hexdigest(),
             )
         return snapshot
+
+    def _filesystem_snapshot_scoped(
+        self,
+        mount_types: list[MountType],
+        scoped: ResolvedScope,
+    ) -> dict[str, MountSnapshot]:
+        snapshot: dict[str, MountSnapshot] = {}
+        for mount_type in mount_types:
+            count = 0
+            max_modified: str | None = None
+            fingerprint = hashlib.sha256()
+            try:
+                mount_root = self._manager.resolve_mount_root(
+                    self._context_path, mount_type
+                )
+                roots = visible_mount_roots(
+                    mount_root,
+                    mount_type=mount_type,
+                    scoped=scoped,
+                )
+            except Exception:
+                snapshot[mount_type.value] = _empty_mount_snapshot()
+                continue
+            scoped_candidates: list[tuple[Path, str]] = []
+            for root in roots:
+                try:
+                    prefix = root.relative_to(mount_root).as_posix()
+                except ValueError:
+                    continue
+                if not root.exists():
+                    continue
+                scoped_candidates.append((root, prefix))
+                scoped_candidates.extend(
+                    _iter_mount_entries_with_prefix(root, prefix)
+                )
+            for entry, relative_path in sorted(
+                scoped_candidates,
+                key=lambda candidate: candidate[1],
+            ):
+                entry = self._safe_v2_index_entry(
+                    mount_type,
+                    relative_path,
+                    entry,
+                )
+                if entry is None or self._should_skip_relative_path(
+                    mount_type,
+                    relative_path,
+                    entry=entry,
+                ):
+                    continue
+                try:
+                    stat = entry.stat()
+                except OSError:
+                    continue
+                modified = _iso_utc(stat.st_mtime)
+                count += 1
+                if max_modified is None or modified > max_modified:
+                    max_modified = modified
+                _update_snapshot_fingerprint(
+                    fingerprint,
+                    relative_path=relative_path,
+                    is_dir=entry.is_dir(),
+                    size_bytes=stat.st_size,
+                    modified_at=modified,
+                )
+            snapshot[mount_type.value] = MountSnapshot(
+                count=count,
+                max_modified=max_modified,
+                fingerprint=fingerprint.hexdigest(),
+            )
+        return snapshot
+
+    def _safe_v2_index_entry(
+        self,
+        mount_type: MountType,
+        relative_path: str,
+        entry: Path,
+        *,
+        require_exists: bool = False,
+    ) -> Path | None:
+        """Return a lexical v2 entry only when it stays in its exact scope."""
+
+        if detect_layout_version(self._context_path) != LAYOUT_VERSION:
+            return entry
+        if ContextCategory.from_mount_type(mount_type) is None:
+            return entry
+        normalized = _normalize_relative_path(relative_path)
+        if not normalized:
+            return None
+        parts = Path(normalized).parts
+        mount_root = self._manager.resolve_mount_root(self._context_path, mount_type)
+        if parts[0] == "common":
+            scope_root = mount_root / "common"
+        elif parts[0] == "projects":
+            if len(parts) == 1:
+                scope_root = mount_root
+            else:
+                scope_root = mount_root / "projects" / parts[1]
+        else:
+            return None
+        expected = mount_root / normalized
+        lexical_entry = Path(os.path.abspath(entry.expanduser()))
+        try:
+            safe_scope_root = assert_no_linklike_components(
+                scope_root,
+                boundary=self._context_path,
+                allow_missing=not require_exists,
+            )
+            safe = assert_no_linklike_components(
+                expected,
+                boundary=safe_scope_root,
+                allow_missing=not require_exists,
+            )
+        except (OSError, ValueError):
+            return None
+        if lexical_entry != safe or (require_exists and not safe.exists()):
+            return None
+        return safe
 
     def _should_skip_relative_path(
         self,
@@ -972,9 +1560,24 @@ class ContextSQLiteIndex:
     def _indexed_snapshot(
         self,
         mount_types: list[MountType],
+        *,
+        relative_prefixes: Sequence[str] | None = None,
     ) -> dict[str, MountSnapshot]:
         placeholders = ", ".join("?" for _ in mount_types)
         params = [str(self._context_path), *[mount.value for mount in mount_types]]
+        prefix_clause = ""
+        normalized_prefixes = tuple(
+            _normalize_relative_prefix(prefix) for prefix in (relative_prefixes or ())
+        )
+        if normalized_prefixes:
+            predicates: list[str] = []
+            for prefix in normalized_prefixes:
+                predicates.append(
+                    "(relative_path = ? OR substr(relative_path, 1, length(?)) = ?)"
+                )
+                descendant = f"{prefix}/"
+                params.extend((prefix, descendant, descendant))
+            prefix_clause = f" AND ({' OR '.join(predicates)})"
         snapshot_state: dict[str, dict[str, Any]] = {
             mount.value: {
                 "count": 0,
@@ -990,6 +1593,7 @@ class ContextSQLiteIndex:
                 FROM file_index
                 WHERE context_path = ?
                   AND mount_type IN ({placeholders})
+                  {prefix_clause}
                 ORDER BY mount_type ASC, relative_path ASC
                 """,
                 params,
@@ -1019,6 +1623,12 @@ class ContextSQLiteIndex:
             )
         return snapshot
 
+    def _assert_scope_matches(self, scoped: ResolvedScope) -> None:
+        if scoped.context_root.expanduser().resolve() != self._context_path:
+            raise ValueError("index scope belongs to a different context root")
+        if scoped.layout_version != detect_layout_version(self._context_path):
+            raise ValueError("index scope layout does not match context root")
+
     def _default_db_path(self) -> Path:
         configured_name = DEFAULT_DB_FILENAME
         try:
@@ -1029,12 +1639,40 @@ class ContextSQLiteIndex:
             configured_name = raw_name.strip()
 
         configured_path = Path(configured_name).expanduser()
+        layout_version = detect_layout_version(self._context_path)
+        if configured_path.is_absolute() and layout_version == LAYOUT_VERSION:
+            raise ValueError("v2 context index db_filename must be relative to its global root")
         if configured_path.is_absolute():
             return configured_path.resolve()
 
         global_root = self._manager.resolve_mount_root(self._context_path, MountType.GLOBAL)
         global_root.mkdir(parents=True, exist_ok=True)
+        if layout_version == LAYOUT_VERSION:
+            self._managed_v2_db_root = global_root
+            return assert_no_linklike_components(
+                global_root / configured_path,
+                boundary=global_root,
+            )
         return (global_root / configured_path).resolve()
+
+    def _assert_managed_db_safe(self, *, require_parent: bool = False) -> None:
+        """Reject redirected default v2 database and SQLite sidecar paths."""
+
+        root = self._managed_v2_db_root
+        if root is None:
+            return
+        assert_no_linklike_components(
+            self._db_path.parent,
+            boundary=self._context_path,
+            allow_missing=not require_parent,
+        )
+        for candidate in (
+            self._db_path,
+            Path(f"{self._db_path}-journal"),
+            Path(f"{self._db_path}-shm"),
+            Path(f"{self._db_path}-wal"),
+        ):
+            assert_no_linklike_components(candidate, boundary=self._context_path)
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -1179,6 +1817,40 @@ class ContextSQLiteIndex:
             return 0
         return int(cursor.rowcount)
 
+    def _delete_rows_for_scoped_prefixes(
+        self,
+        prefixes_by_mount: dict[MountType, tuple[str, ...]],
+        *,
+        connection: sqlite3.Connection,
+    ) -> int:
+        deleted = 0
+        for mount_type, prefixes in prefixes_by_mount.items():
+            normalized = tuple(
+                _normalize_relative_prefix(prefix) for prefix in prefixes if prefix
+            )
+            if not normalized:
+                continue
+            predicates: list[str] = []
+            params: list[Any] = [str(self._context_path), mount_type.value]
+            for prefix in normalized:
+                predicates.append(
+                    "(relative_path = ? OR substr(relative_path, 1, length(?)) = ?)"
+                )
+                descendant = f"{prefix}/"
+                params.extend((prefix, descendant, descendant))
+            cursor = connection.execute(
+                f"""
+                DELETE FROM file_index
+                WHERE context_path = ?
+                  AND mount_type = ?
+                  AND ({' OR '.join(predicates)})
+                """,
+                params,
+            )
+            if cursor.rowcount is not None and cursor.rowcount >= 0:
+                deleted += int(cursor.rowcount)
+        return deleted
+
     def _commit_mutation(
         self,
         connection: sqlite3.Connection,
@@ -1201,6 +1873,7 @@ class ContextSQLiteIndex:
             pass
 
     def _connect(self) -> sqlite3.Connection:
+        self._assert_managed_db_safe(require_parent=True)
         connection = sqlite3.connect(self._db_path, timeout=5.0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=5000")
@@ -1217,6 +1890,21 @@ class ContextSQLiteIndex:
             seen.add(mount_type)
             normalized.append(mount_type)
         return normalized
+
+    @classmethod
+    def _normalize_scoped_mount_types(
+        cls,
+        scoped: ResolvedScope,
+        mount_types: list[MountType] | None,
+    ) -> list[MountType]:
+        selected = cls._normalize_mount_types(mount_types)
+        if scoped.layout_version != LAYOUT_VERSION:
+            return selected
+        return [
+            mount_type
+            for mount_type in selected
+            if ContextCategory.from_mount_type(mount_type) is not None
+        ]
 
 
 INDEX_SCAN_SKIP_NAMES = {
@@ -1285,6 +1973,14 @@ def _iter_mount_entries(mount_root: Path):
                 yield nested, nested.relative_to(mount_root).as_posix()
 
 
+def _iter_mount_entries_with_prefix(root: Path, prefix: str):
+    """Yield lexical descendants without following any link-like directory."""
+
+    for entry in _walk_skipping(root):
+        relative = entry.relative_to(root).as_posix()
+        yield entry, f"{prefix}/{relative}" if prefix else relative
+
+
 def _walk_skipping(root: Path):
     """Walk directory tree, skipping known junk directories."""
     try:
@@ -1295,7 +1991,7 @@ def _walk_skipping(root: Path):
         if child.name in INDEX_SCAN_SKIP_NAMES:
             continue
         yield child
-        if child.is_dir() and not child.is_symlink():
+        if not child.is_symlink() and child.is_dir():
             yield from _walk_skipping(child)
 
 
@@ -1378,6 +2074,85 @@ def _normalize_relative_prefix(path: str | None) -> str:
     if path is None:
         return ""
     return _normalize_relative_path(path)
+
+
+_NO_VISIBLE_SCOPE_PREFIX = ".afs-no-visible-scope"
+
+
+def _effective_relative_prefixes(
+    requested: Sequence[str] | None,
+    *,
+    scoped: ResolvedScope | None,
+) -> tuple[str, ...]:
+    """Intersect optional caller prefixes with the requester's v2 scope."""
+
+    requested_values = tuple(requested or ())
+    normalized_requested = tuple(
+        prefix
+        for prefix in (
+            _normalize_relative_prefix(str(item)) for item in requested_values
+        )
+        if prefix
+    )
+    if scoped is None or scoped.layout_version != LAYOUT_VERSION:
+        return normalized_requested
+
+    authorized = tuple(
+        prefix
+        for prefix in (
+            _normalize_relative_prefix(item) for item in visible_scope_prefixes(scoped)
+        )
+        if prefix
+    )
+    if not requested_values:
+        return authorized
+    if not normalized_requested:
+        return (_NO_VISIBLE_SCOPE_PREFIX,)
+
+    intersections: list[str] = []
+    for requested_prefix in normalized_requested:
+        for authorized_prefix in authorized:
+            if _relative_path_matches_prefixes(requested_prefix, (authorized_prefix,)):
+                intersections.append(requested_prefix)
+            elif _relative_path_matches_prefixes(authorized_prefix, (requested_prefix,)):
+                intersections.append(authorized_prefix)
+    return tuple(dict.fromkeys(intersections)) or (_NO_VISIBLE_SCOPE_PREFIX,)
+
+
+def _relative_path_matches_prefixes(path: str, prefixes: Sequence[str]) -> bool:
+    """Return true when a path is exactly at or below one lexical prefix."""
+
+    if not prefixes:
+        return True
+    normalized_path = _normalize_relative_path(path)
+    return any(
+        normalized_path == prefix or normalized_path.startswith(f"{prefix}/")
+        for prefix in prefixes
+    )
+
+
+def _relative_prefix_sql(
+    prefixes: Sequence[str],
+    *,
+    leading_and: bool = False,
+) -> tuple[str, list[str]]:
+    """Build an exact-or-descendant SQLite predicate for lexical prefixes."""
+
+    normalized = tuple(
+        prefix for prefix in (_normalize_relative_prefix(item) for item in prefixes) if prefix
+    )
+    if not normalized:
+        return "", []
+    predicates: list[str] = []
+    params: list[str] = []
+    for prefix in normalized:
+        descendant = f"{prefix}/"
+        predicates.append(
+            "(relative_path = ? OR substr(relative_path, 1, length(?)) = ?)"
+        )
+        params.extend((prefix, descendant, descendant))
+    clause = f"({' OR '.join(predicates)})"
+    return (f" AND {clause}" if leading_and else clause), params
 
 
 def _empty_mount_snapshot() -> MountSnapshot:

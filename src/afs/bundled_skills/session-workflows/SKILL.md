@@ -32,7 +32,7 @@ Start, pack, hand off, and replay AFS-aware agent sessions.
 
 ## Key Flags
 
-- `bootstrap`: `--task-limit`, `--message-limit`, `--agent-name`, `--json`; writes `scratchpad/afs_agents/session_bootstrap.{json,md}` unless `--no-write-artifacts`
+- `bootstrap`: `--task-limit`, `--message-limit`, `--agent-name`, `--json`; writes under the active v2 scoped `scratchpad/{projects/<project-id>|common}/afs_agents/` directory (v1: `scratchpad/afs_agents/`) unless `--no-write-artifacts`
 - `pack`: `--model generic|gemini|claude|codex`, `--workflow general|scan_fast|edit_fast|review_deep|root_cause_deep`, `--tool-profile`, `--pack-mode focused|retrieval|full_slice`, `--token-budget`
 - Optional positional `query` on `pack` adds retrieval results
 

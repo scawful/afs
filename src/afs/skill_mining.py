@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from .context_layout import LAYOUT_VERSION, _atomic_write_text, detect_layout_version
 from .event_log import build_session_replay, list_recorded_sessions
+from .index_storage import fsync_directory
 from .models import MountType
+from .path_safety import assert_no_linklike_components
 
 _DEFAULT_LOOKBACK_HOURS = 24 * 7
 _DEFAULT_MAX_SESSIONS = 50
@@ -158,15 +163,35 @@ def write_skill_candidate_artifacts(
     payload: dict[str, Any],
 ) -> dict[str, str]:
     """Write mined skill candidates into scratchpad review artifacts."""
-    scratchpad_root = manager.resolve_mount_root(context_path, MountType.SCRATCHPAD)
-    output_root = scratchpad_root / "skill_candidates"
-    output_root.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    json_path = output_root / f"skill_candidates_{stamp}.json"
-    markdown_path = output_root / f"skill_candidates_{stamp}.md"
+    output_root = _skill_candidate_output_root(manager, context_path)
+    json_text = json.dumps(payload, indent=2) + "\n"
+    markdown_text = _render_markdown(payload) + "\n"
+    for _attempt in range(16):
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        artifact_stem = f"skill_candidates_{stamp}_{uuid4().hex[:10]}"
+        json_path = output_root / f"{artifact_stem}.json"
+        markdown_path = output_root / f"{artifact_stem}.md"
+        if detect_layout_version(context_path) == LAYOUT_VERSION:
+            json_path = assert_no_linklike_components(json_path, boundary=output_root)
+            markdown_path = assert_no_linklike_components(markdown_path, boundary=output_root)
 
-    json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    markdown_path.write_text(_render_markdown(payload) + "\n", encoding="utf-8")
+        try:
+            _write_exclusive_text(json_path, json_text)
+        except FileExistsError:
+            continue
+        try:
+            _write_exclusive_text(markdown_path, markdown_text)
+        except FileExistsError:
+            json_path.unlink(missing_ok=True)
+            fsync_directory(output_root)
+            continue
+        except BaseException:
+            json_path.unlink(missing_ok=True)
+            fsync_directory(output_root)
+            raise
+        break
+    else:
+        raise FileExistsError("could not allocate a unique skill-candidate artifact pair")
 
     return {
         "json": str(json_path),
@@ -174,10 +199,50 @@ def write_skill_candidate_artifacts(
     }
 
 
+def _write_exclusive_text(path: Path, content: str) -> None:
+    """Durably create one immutable artifact without replacing old bytes."""
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    installed = False
+    try:
+        encoded = content.encode("utf-8")
+        view = memoryview(encoded)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short write while creating skill-candidate artifact")
+            view = view[written:]
+        os.fsync(descriptor)
+        fsync_directory(path.parent)
+        installed = True
+    finally:
+        os.close(descriptor)
+        if not installed:
+            path.unlink(missing_ok=True)
+            fsync_directory(path.parent)
+
+
 def _skill_candidate_output_root(manager: Any, context_path: Path) -> Path:
+    resolved_context = context_path.expanduser().resolve()
     scratchpad_root = manager.resolve_mount_root(context_path, MountType.SCRATCHPAD)
-    output_root = scratchpad_root / "skill_candidates"
+    output_root = scratchpad_root
+    if detect_layout_version(resolved_context) == LAYOUT_VERSION:
+        output_root /= "common"
+    output_root /= "skill_candidates"
+    if detect_layout_version(resolved_context) == LAYOUT_VERSION:
+        output_root = assert_no_linklike_components(
+            output_root,
+            boundary=resolved_context,
+        )
     output_root.mkdir(parents=True, exist_ok=True)
+    if detect_layout_version(resolved_context) == LAYOUT_VERSION:
+        output_root = assert_no_linklike_components(
+            output_root,
+            boundary=resolved_context,
+            allow_missing=False,
+        )
     return output_root
 
 
@@ -193,6 +258,15 @@ def load_skill_candidate_review_state(
     state_path = _skill_candidate_review_state_path(manager, context_path)
     if not state_path.exists():
         return {"updated_at": "", "entries": {}}
+    if detect_layout_version(context_path) == LAYOUT_VERSION:
+        try:
+            state_path = assert_no_linklike_components(
+                state_path,
+                boundary=state_path.parent,
+                allow_missing=False,
+            )
+        except (OSError, ValueError):
+            return {"updated_at": "", "entries": {}}
     try:
         payload = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -229,7 +303,14 @@ def record_skill_candidate_review_state(
     state = load_skill_candidate_review_state(manager, resolved_context)
     state_path = Path(
         str(state.get("state_path") or _skill_candidate_review_state_path(manager, resolved_context))
-    ).expanduser().resolve()
+    ).expanduser()
+    if detect_layout_version(resolved_context) == LAYOUT_VERSION:
+        state_path = assert_no_linklike_components(
+            state_path,
+            boundary=_skill_candidate_output_root(manager, resolved_context),
+        )
+    else:
+        state_path = state_path.resolve()
     normalized_id = str(candidate_id or "").strip()
     if not normalized_id:
         raise ValueError("Candidate id is required to record review state.")
@@ -255,7 +336,7 @@ def record_skill_candidate_review_state(
     entries[normalized_id] = entry
 
     payload = {"updated_at": now, "entries": entries}
-    state_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    _atomic_write_text(state_path, json.dumps(payload, indent=2) + "\n")
     entry["state_path"] = str(state_path)
     return entry
 
@@ -266,11 +347,22 @@ def list_skill_candidate_artifact_paths(
 ) -> list[Path]:
     """List scratchpad skill-candidate JSON artifacts newest-first."""
     output_root = _skill_candidate_output_root(manager, context_path)
-    return sorted(
-        output_root.glob("skill_candidates_*.json"),
-        key=lambda path: path.name,
-        reverse=True,
-    )
+    candidates = output_root.glob("skill_candidates_*.json")
+    if detect_layout_version(context_path) == LAYOUT_VERSION:
+        safe_candidates = []
+        for candidate in candidates:
+            try:
+                safe_candidates.append(
+                    assert_no_linklike_components(
+                        candidate,
+                        boundary=output_root,
+                        allow_missing=False,
+                    )
+                )
+            except (OSError, ValueError):
+                continue
+        candidates = iter(safe_candidates)
+    return sorted(candidates, key=lambda path: path.name, reverse=True)
 
 
 def load_skill_candidate_artifact(path: Path | str) -> dict[str, Any]:

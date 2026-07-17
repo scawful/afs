@@ -19,8 +19,6 @@ enforcement:
 
 # Agent Operations
 
-Manage background agent processes via the AFS supervisor.
-
 ## Default Set
 
 An empty profile agent list gets `context-warm`, `index-rebuild`,
@@ -63,6 +61,7 @@ fnmatch patterns (`error`, `hivemind:context:*`) on new log/hivemind entries.
 
 ## Tips
 
-- State defaults to `<context_root>/scratchpad/afs_agents/supervisor/`.
+- Supervisor state: v2 `scratchpad/common/afs_agents/supervisor/`; v1
+  `scratchpad/afs_agents/supervisor/`.
 - Set `allowed_mounts` and `allowed_tools` per agent.
 - `--allow-destructive` requires exceptional user authorization.

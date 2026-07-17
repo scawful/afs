@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from afs.context_layout import scaffold_v2
 from afs.handoff import HANDOFF_SCHEMA_VERSION, HandoffStore
 
 
@@ -102,6 +103,31 @@ def test_v3_revision_is_readable_markdown_in_project_scope(tmp_path: Path) -> No
     restored = store.read(session_id=packet.revision_id)
     assert restored is not None
     assert restored.to_dict() == packet.to_dict()
+
+
+@pytest.mark.parametrize("target_kind", ["other-project", "outside"])
+def test_handoff_store_rejects_symlinked_project_collection(
+    tmp_path: Path,
+    target_kind: str,
+) -> None:
+    context = tmp_path / ".context"
+    scaffold_v2(context)
+    target = (
+        context / "memory" / "projects" / "prj_beta" / "handoffs"
+        if target_kind == "other-project"
+        else tmp_path / "outside-handoffs"
+    )
+    target.mkdir(parents=True)
+    collection = context / "memory" / "projects" / "prj_alpha" / "handoffs"
+    collection.parent.mkdir(parents=True)
+    try:
+        collection.symlink_to(target, target_is_directory=True)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        HandoffStore(context, scope_id="project:prj_alpha")
+    assert list(target.iterdir()) == []
 
 
 def test_v3_requires_title_and_rejects_path_identifiers(tmp_path: Path) -> None:
@@ -318,6 +344,179 @@ def test_legacy_json_and_wrapped_manifest_remain_readable(tmp_path: Path) -> Non
     # Legacy source packets are imports and remain untouched too.
     raw = json.loads((legacy_root / "legacy-id.json").read_text(encoding="utf-8"))
     assert raw["acknowledged_by"] == ["historical-reader"]
+
+
+def test_v1_handoff_reads_external_remapped_scratchpad(tmp_path: Path) -> None:
+    context = tmp_path / ".context"
+    context.mkdir()
+    external = tmp_path / "external-scratchpad"
+    legacy_root = external / "handoffs"
+    legacy_root.mkdir(parents=True)
+    (context / "metadata.json").write_text(
+        json.dumps({"directories": {"scratchpad": str(external)}}),
+        encoding="utf-8",
+    )
+    (legacy_root / "external-id.json").write_text(
+        json.dumps(
+            {
+                "session_id": "external-id",
+                "agent_name": "legacy",
+                "timestamp": "2026-07-17T00:00:00Z",
+                "accomplished": ["external remap retained"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    packet = HandoffStore(context).read(session_id="external-id")
+
+    assert packet is not None
+    assert packet.accomplished == ["external remap retained"]
+    assert packet.artifact_path == str(legacy_root / "external-id.json")
+
+
+def test_v2_migrated_and_old_handoffs_are_lazy_read_through_imports(tmp_path: Path) -> None:
+    context = tmp_path / ".context"
+    scaffold_v2(context)
+    migrated_root = context / "scratchpad" / "common" / "handoffs"
+    old_root = context / "scratchpad" / "handoffs"
+    store = HandoffStore(context)
+
+    assert not migrated_root.exists()
+    assert not old_root.exists()
+    assert store.list() == []
+    assert not migrated_root.exists()
+    assert not old_root.exists()
+
+    migrated_root.mkdir(parents=True)
+    (migrated_root / "migrated.json").write_text(
+        json.dumps(
+            {
+                "session_id": "migrated",
+                "agent_name": "migration",
+                "timestamp": "2026-07-17T00:00:00Z",
+                "accomplished": ["migrated content"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    old_root.mkdir(parents=True)
+    (old_root / "old.json").write_text(
+        json.dumps(
+            {
+                "session_id": "old",
+                "agent_name": "legacy",
+                "timestamp": "2026-07-16T00:00:00Z",
+                "accomplished": ["old fallback content"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    migrated = store.read(session_id="migrated")
+    old = store.read(session_id="old")
+    assert migrated is not None and migrated.accomplished == ["migrated content"]
+    assert old is not None and old.accomplished == ["old fallback content"]
+    assert {packet.session_id for packet in store.list()} == {"migrated", "old"}
+
+
+def test_v2_common_revision_does_not_publish_opaque_compatibility(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / ".context"
+    scaffold_v2(context)
+
+    packet = HandoffStore(context).create_revision(
+        title="V2 compatibility",
+        agent_name="agent",
+    )
+
+    migrated_root = context / "scratchpad" / "common" / "handoffs"
+    assert not (migrated_root / "_manifest.json").exists()
+    assert not (migrated_root / f"{packet.revision_id}.json").exists()
+    assert not (context / "scratchpad" / "handoffs").exists()
+    assert "v2-compatibility" in Path(packet.artifact_path).name
+    assert Path(packet.artifact_path).suffix == ".md"
+
+
+@pytest.mark.parametrize("root_kind", ["migrated", "old"])
+def test_v2_handoff_rejects_linked_legacy_root_without_writing_target(
+    tmp_path: Path,
+    root_kind: str,
+) -> None:
+    context = tmp_path / ".context"
+    scaffold_v2(context)
+    outside = tmp_path / "outside-legacy-handoffs"
+    outside.mkdir()
+    (outside / "leak.json").write_text(
+        json.dumps(
+            {
+                "session_id": "leak",
+                "agent_name": "outside",
+                "timestamp": "2026-07-17T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    legacy_root = (
+        context / "scratchpad" / "common" / "handoffs"
+        if root_kind == "migrated"
+        else context / "scratchpad" / "handoffs"
+    )
+    legacy_root.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        legacy_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+    before = {path.name: path.read_bytes() for path in outside.iterdir()}
+
+    store = HandoffStore(context)
+    assert store.read(session_id="leak") is None
+    packet = store.create_revision(title="Canonical only", agent_name="agent")
+
+    assert store._read_revision(packet.revision_id) is not None
+    assert {path.name: path.read_bytes() for path in outside.iterdir()} == before
+
+
+@pytest.mark.parametrize("root_kind", ["migrated", "old"])
+def test_v2_handoff_rejects_linked_legacy_record_leaf(
+    tmp_path: Path,
+    root_kind: str,
+) -> None:
+    context = tmp_path / ".context"
+    scaffold_v2(context)
+    legacy_root = (
+        context / "scratchpad" / "common" / "handoffs"
+        if root_kind == "migrated"
+        else context / "scratchpad" / "handoffs"
+    )
+    legacy_root.mkdir(parents=True)
+    outside = tmp_path / "outside-handoff.json"
+    outside.write_text(
+        json.dumps(
+            {
+                "session_id": "leak",
+                "agent_name": "outside",
+                "timestamp": "2026-07-17T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        (legacy_root / "leak.json").symlink_to(outside)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"file symlinks unavailable: {exc}")
+
+    store = HandoffStore(context)
+    assert store.read(session_id="leak") is None
+    before = outside.read_bytes()
+    packet = store.create_revision(
+        title="Must not follow leaf",
+        agent_name="agent",
+        revision_id="leak",
+    )
+    assert store._read_revision(packet.revision_id) is not None
+    assert outside.read_bytes() == before
 
 
 def test_legacy_imports_are_visible_only_in_common_scope(tmp_path: Path) -> None:

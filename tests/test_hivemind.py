@@ -8,7 +8,15 @@ from pathlib import Path
 
 import pytest
 
+from afs.context_layout import scaffold_v2
 from afs.hivemind import HivemindBus
+
+
+def _symlink_or_skip(link: Path, target: Path, *, directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"symlinks unavailable: {exc}")
 
 
 def test_hivemind_send_creates_file(tmp_path: Path) -> None:
@@ -198,3 +206,93 @@ def test_hivemind_read_cannot_escape_queue(tmp_path: Path) -> None:
         bus.read(agent_name=str(outside_agent))
     with pytest.raises(ValueError, match="single path component"):
         bus.read(agent_name="../../outside-agent")
+
+
+def test_v2_hivemind_rejects_replaced_queue_root_for_read_and_write(
+    tmp_path: Path,
+) -> None:
+    ctx = tmp_path / ".context"
+    scaffold_v2(ctx)
+    bus = HivemindBus(ctx)
+    queue_root = ctx / ".afs" / "queue" / "messages"
+    queue_root.rmdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _symlink_or_skip(queue_root, outside, directory=True)
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        bus.read()
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        bus.send("agent-a", "status", {"secret": "must stay local"})
+
+    assert list(outside.iterdir()) == []
+
+
+def test_v2_hivemind_rejects_linked_agent_directory_for_read_and_write(
+    tmp_path: Path,
+) -> None:
+    ctx = tmp_path / ".context"
+    scaffold_v2(ctx)
+    outside = tmp_path / "outside-agent"
+    outside.mkdir()
+    outside_message = outside / "outside.json"
+    outside_message.write_text(
+        json.dumps(
+            {
+                "id": "outside",
+                "from": "agent-a",
+                "to": None,
+                "type": "status",
+                "payload": {"secret": True},
+                "timestamp": "2026-01-01T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    agent_dir = ctx / ".afs" / "queue" / "messages" / "agent-a"
+    _symlink_or_skip(agent_dir, outside, directory=True)
+    bus = HivemindBus(ctx)
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        bus.read(agent_name="agent-a")
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        bus.send("agent-a", "status", {"overwrite": True})
+
+    assert json.loads(outside_message.read_text(encoding="utf-8"))["payload"] == {
+        "secret": True
+    }
+
+
+def test_v2_hivemind_rejects_linked_message_leaf_for_read_and_cleanup(
+    tmp_path: Path,
+) -> None:
+    ctx = tmp_path / ".context"
+    scaffold_v2(ctx)
+    agent_dir = ctx / ".afs" / "queue" / "messages" / "agent-a"
+    agent_dir.mkdir()
+    outside_message = tmp_path / "outside-message.json"
+    outside_message.write_text(
+        json.dumps(
+            {
+                "id": "outside",
+                "from": "agent-a",
+                "to": None,
+                "type": "status",
+                "payload": {"secret": True},
+                "timestamp": "2026-01-01T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    _symlink_or_skip(agent_dir / "linked.json", outside_message)
+    bus = HivemindBus(ctx)
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        bus.read(agent_name="agent-a")
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        bus.cleanup_stats(max_age_hours=0)
+
+    assert outside_message.exists()
+    assert json.loads(outside_message.read_text(encoding="utf-8"))["payload"] == {
+        "secret": True
+    }

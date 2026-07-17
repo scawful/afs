@@ -1135,6 +1135,7 @@ def session_pack_command(args: argparse.Namespace) -> int:
         pack_mode=args.pack_mode,
         token_budget=args.token_budget,
         include_content=args.include_content,
+        semantic=bool(getattr(args, "semantic", False)),
         max_query_results=args.max_query_results,
         max_embedding_results=args.max_embedding_results,
     )
@@ -1178,6 +1179,7 @@ def session_prepare_client_command(args: argparse.Namespace) -> int:
         pack_mode=args.pack_mode,
         token_budget=args.token_budget,
         include_content=args.include_content,
+        semantic=bool(getattr(args, "semantic", False)),
         max_query_results=args.max_query_results,
         max_embedding_results=args.max_embedding_results,
         include_pack=not args.no_session_pack,
@@ -1564,16 +1566,7 @@ def session_event_command(args: argparse.Namespace) -> int:
 
 def session_handoff_command(args: argparse.Namespace) -> int:
     """Create a handoff packet."""
-    from ..handoff import HandoffStore
-
-    config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
-    )
-    manager = load_manager(config_path)
-    context_path = _resolve_command_context(args)
-    store = HandoffStore(context_path, config=manager.config)
+    store = _session_handoff_store(args)
 
     accomplished = [s.strip() for s in (args.accomplished or "").split(";") if s.strip()]
     blocked = [s.strip() for s in (args.blocked or "").split(";") if s.strip()]
@@ -1595,16 +1588,7 @@ def session_handoff_command(args: argparse.Namespace) -> int:
 
 def session_handoff_list_command(args: argparse.Namespace) -> int:
     """List handoff packets."""
-    from ..handoff import HandoffStore
-
-    config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
-    )
-    manager = load_manager(config_path)
-    context_path = _resolve_command_context(args)
-    store = HandoffStore(context_path, config=manager.config)
+    store = _session_handoff_store(args)
     packets = store.list(limit=args.limit)
 
     if getattr(args, "json", False):
@@ -1618,16 +1602,7 @@ def session_handoff_list_command(args: argparse.Namespace) -> int:
 
 def session_handoff_read_command(args: argparse.Namespace) -> int:
     """Read a handoff packet."""
-    from ..handoff import HandoffStore
-
-    config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
-    )
-    manager = load_manager(config_path)
-    context_path = _resolve_command_context(args)
-    store = HandoffStore(context_path, config=manager.config)
+    store = _session_handoff_store(args)
     packet = store.read(session_id=getattr(args, "session_id", None))
 
     if packet is None:
@@ -1653,6 +1628,37 @@ def session_handoff_read_command(args: argparse.Namespace) -> int:
             for item in packet.next_steps:
                 print(f"  - {item}")
     return 0
+
+
+def _session_handoff_store(args: argparse.Namespace):
+    """Resolve the compatibility handoff command to its authorized scope."""
+    from ..context_layout import LAYOUT_VERSION, detect_layout_version
+    from ..handoff import HandoffStore
+    from ..project_registry import ProjectRegistry
+
+    config_path = (
+        Path(args.config).expanduser().resolve()
+        if getattr(args, "config", None)
+        else None
+    )
+    manager = load_manager(config_path)
+    project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+        args,
+        manager,
+    )
+    scope_id = None
+    if detect_layout_version(context_path) == LAYOUT_VERSION:
+        record = ProjectRegistry(context_path).resolve(project_path)
+        if record is None:
+            raise PermissionError(
+                f"project is not registered in central context: {project_path}"
+            )
+        scope_id = record.scope_id
+    return HandoffStore(
+        context_path,
+        config=manager.config,
+        scope_id=scope_id,
+    )
 
 
 def session_replay_command(args: argparse.Namespace) -> int:
@@ -1898,6 +1904,7 @@ def status_command(args: argparse.Namespace) -> int:
     from ..health.afs_status import _maintenance_health
     from ..manager import AFSManager
     from ..models import MountType
+    from ..scopes import resolve_scope, visible_mount_roots, visible_scope_prefixes
     from ..session_bootstrap import build_agent_discovery_path
 
     start_dir = Path(args.start_dir).expanduser().resolve() if args.start_dir else None
@@ -1908,6 +1915,15 @@ def status_command(args: argparse.Namespace) -> int:
     )
     context_root = resolve_context_root(config, root)
     manager = AFSManager(config=config)
+    try:
+        scoped = resolve_scope(
+            context_root,
+            requester_path=start_dir or Path.cwd().resolve(),
+        )
+    except PermissionError:
+        if start_dir is not None:
+            raise
+        scoped = resolve_scope(context_root, common=True)
 
     mount_health = manager.context_health(context_root)
     maintenance = _maintenance_health(config, context_root)
@@ -1919,7 +1935,15 @@ def status_command(args: argparse.Namespace) -> int:
     total_files = 0
     for mount_type in MountType:
         mount_dir = manager.resolve_mount_root(context_root, mount_type)
-        count = _count_mount_files(mount_dir)
+        count = sum(
+            _count_mount_files(visible_root)
+            for visible_root in visible_mount_roots(
+                mount_dir,
+                mount_type=mount_type,
+                scoped=scoped,
+            )
+            if visible_root.exists()
+        )
         if count > 0:
             mount_counts[mount_type.value] = count
             total_files += count
@@ -1931,15 +1955,37 @@ def status_command(args: argparse.Namespace) -> int:
         try:
             from ..context_index import ContextSQLiteIndex
             index = ContextSQLiteIndex(manager, context_root)
-            has_entries = index.has_entries()
+            prefixes = (
+                visible_scope_prefixes(scoped)
+                if scoped.layout_version == 2
+                else None
+            )
+            total_entries = (
+                index.count_entries_scoped(scoped)
+                if scoped.layout_version == 2
+                else index.count_entries(relative_prefixes=prefixes)
+            )
+            has_entries = total_entries > 0
             index_stats = {
                 "available": True,
                 "db_path": str(db_path),
                 "db_size": db_path.stat().st_size,
                 "has_entries": has_entries,
-                "stale": index.needs_health_refresh() if has_entries else False,
+                "stale": (
+                    bool(
+                        index.diff(
+                            mount_types=index.health_mount_types(),
+                            relative_prefixes=prefixes,
+                            scoped=(
+                                scoped if scoped.layout_version == 2 else None
+                            ),
+                        )["total_changes"]
+                    )
+                    if has_entries
+                    else False
+                ),
             }
-            index_stats["total_entries"] = index.total_entries
+            index_stats["total_entries"] = total_entries
         except Exception:
             pass
 
@@ -1953,6 +1999,8 @@ def status_command(args: argparse.Namespace) -> int:
             "missing_dirs": missing,
             "valid": not missing,
             "active_profile": active_profile,
+            "scope_id": scoped.scope_id,
+            "project_id": scoped.project_id,
             "mount_counts": mount_counts,
             "total_files": total_files,
             "mount_health": mount_health,
@@ -2088,7 +2136,10 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         parser.add_argument("--context-dir", help="Context directory name.")
 
     # init
-    init_parser = subparsers.add_parser("init", help="Initialize AFS context/root.")
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Initialize config and a v1 root, or preserve an existing v2 root.",
+    )
     init_parser.add_argument("--context-root", help="Context root path.")
     init_parser.add_argument("--config", help="Path to write afs.toml.")
     init_parser.add_argument("--no-config", action="store_true", help="Do not write config.")
@@ -2327,7 +2378,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     session_bootstrap.add_argument(
         "--no-write-artifacts",
         action="store_true",
-        help="Do not update scratchpad/afs_agents/session_bootstrap.{json,md}.",
+        help="Do not update the scoped session bootstrap artifacts.",
     )
     session_bootstrap.add_argument(
         "--engage",
@@ -2395,6 +2446,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Include indexed file content instead of excerpts when available.",
     )
     session_pack.add_argument(
+        "--semantic",
+        action="store_true",
+        help="Explicitly permit remote query embeddings for semantic retrieval.",
+    )
+    session_pack.add_argument(
         "--max-query-results",
         type=int,
         default=6,
@@ -2409,7 +2465,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     session_pack.add_argument(
         "--no-write-artifacts",
         action="store_true",
-        help="Do not update scratchpad/afs_agents/session_pack_<model>.{json,md}.",
+        help="Do not update the scoped session pack artifacts.",
     )
     session_pack.add_argument("--json", action="store_true", help="Output JSON.")
     session_pack.set_defaults(func=session_pack_command)
@@ -2467,6 +2523,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Include indexed file content instead of excerpts when available.",
     )
     session_prepare.add_argument(
+        "--semantic",
+        action="store_true",
+        help="Explicitly permit remote query embeddings for the session pack.",
+    )
+    session_prepare.add_argument(
         "--max-query-results",
         type=int,
         default=6,
@@ -2511,7 +2572,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     session_prepare.add_argument(
         "--no-write-artifacts",
         action="store_true",
-        help="Do not update scratchpad/afs_agents/session_client_<client>.json or related artifacts.",
+        help="Do not update scoped client session or skill artifacts.",
     )
     session_prepare.add_argument("--json", action="store_true", help="Output JSON.")
     session_prepare.set_defaults(func=session_prepare_client_command)

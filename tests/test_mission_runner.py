@@ -15,10 +15,17 @@ from afs.agents.mission_runner import (
     _discover_missions,
     _execute_phase,
     _load_mission,
+    _phase_orient,
     _run_mission,
     _run_phase_tools,
     main,
 )
+from afs.context_index import ContextSQLiteIndex
+from afs.context_layout import scaffold_v2
+from afs.manager import AFSManager
+from afs.models import MountType
+from afs.project_registry import ProjectRegistry
+from afs.schema import AFSConfig, GeneralConfig
 
 
 @pytest.fixture(autouse=True)
@@ -266,6 +273,62 @@ class TestPhaseExecution:
         assert len(drift) == 1
         assert drift[0]["detail"] == "8 files changed since last index"
 
+    def test_v2_orient_queries_common_scope_only(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        context = tmp_path / ".context-v2"
+        alpha = tmp_path / "alpha"
+        beta = tmp_path / "beta"
+        alpha.mkdir()
+        beta.mkdir()
+        scaffold_v2(context)
+        registry = ProjectRegistry(context)
+        alpha_record = registry.register(alpha)
+        beta_record = registry.register(beta)
+        files = {
+            "alpha": context
+            / "knowledge"
+            / "projects"
+            / alpha_record.project_id
+            / "alpha.md",
+            "beta": context
+            / "knowledge"
+            / "projects"
+            / beta_record.project_id
+            / "beta.md",
+            "common": context / "knowledge" / "common" / "common.md",
+        }
+        for name, path in files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"mission-scope-token {name}-marker", encoding="utf-8")
+        config = AFSConfig(general=GeneralConfig(context_root=context))
+        index = ContextSQLiteIndex(AFSManager(config=config), context)
+        index.rebuild(mount_types=[MountType.KNOWLEDGE], include_content=True)
+        monkeypatch.setattr("afs.config.load_config_model", lambda **_kwargs: config)
+        monkeypatch.setattr(
+            "afs.agents.llm_bridge.query_llm",
+            lambda **_kwargs: "ERROR: disabled in test",
+        )
+        guard = GuardrailedAgent(
+            "test",
+            GuardrailConfig(task_tier="background", enable_approvals=False),
+        )
+
+        data = _phase_orient(
+            MissionPhase(name="orient", description="mission-scope-token"),
+            context,
+            guard,
+            [],
+            context / "scratchpad" / "common" / "missions" / "test",
+        )
+
+        rendered = json.dumps(data["query_results"])
+        assert "common/common.md" in rendered
+        assert alpha_record.project_id not in rendered
+        assert beta_record.project_id not in rendered
+
     def test_decide_produces_actions(self, context_root: Path) -> None:
         """Decide phase should produce actions from orient findings."""
         output_dir = context_root / "scratchpad" / "missions" / "test-decide"
@@ -319,6 +382,55 @@ class TestPhaseExecution:
 
 
 class TestRunMission:
+    def test_v2_mission_results_use_common_scratchpad(self, tmp_path: Path) -> None:
+        context = tmp_path / ".context-v2"
+        scaffold_v2(context)
+        mission = Mission(
+            name="v2-output",
+            guardrails=MissionGuardrails(max_iterations=5),
+            phases=[MissionPhase(name="observe", outputs=["observations.json"])],
+        )
+
+        result = _run_mission(tmp_path / "mission.toml", mission, context)
+
+        output = context / "scratchpad" / "common" / "missions" / "v2-output"
+        assert result["status"] == "ok"
+        assert (output / "result.json").is_file()
+        assert (output / "observations.json").is_file()
+        assert not (context / "scratchpad" / "missions" / "v2-output").exists()
+
+    def test_v2_mission_results_reject_linked_output_root(self, tmp_path: Path) -> None:
+        context = tmp_path / ".context-v2"
+        scaffold_v2(context)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        mission_root = context / "scratchpad" / "common" / "missions"
+        mission_root.parent.mkdir(parents=True)
+        try:
+            mission_root.symlink_to(outside, target_is_directory=True)
+        except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+            pytest.skip(f"directory symlinks unavailable: {exc}")
+        mission = Mission(name="linked-output", phases=[])
+
+        with pytest.raises(ValueError, match="symbolic link or reparse point"):
+            _run_mission(tmp_path / "mission.toml", mission, context)
+
+        assert list(outside.iterdir()) == []
+
+    def test_v2_mission_results_reject_traversing_phase_output(self, tmp_path: Path) -> None:
+        context = tmp_path / ".context-v2"
+        scaffold_v2(context)
+        mission = Mission(
+            name="traversal",
+            guardrails=MissionGuardrails(max_iterations=5),
+            phases=[MissionPhase(name="observe", outputs=["../../outside.json"])],
+        )
+
+        with pytest.raises(ValueError, match="trusted boundary"):
+            _run_mission(tmp_path / "mission.toml", mission, context)
+
+        assert not (context / "scratchpad" / "common" / "outside.json").exists()
+
     def test_full_mission_no_approval_gates(
         self, context_root: Path, tmp_path: Path,
     ) -> None:

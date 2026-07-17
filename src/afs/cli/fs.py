@@ -10,12 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..context_fs import ContextFileSystem, FileMountType
+from ..context_fs import ContextEntry, ContextFileSystem, FileMountType
 from ..context_index import ContextSQLiteIndex
 from ..context_layout import LAYOUT_VERSION, detect_layout_version
 from ..models import ContextCategory, MountType
-from ..project_registry import COMMON_SCOPE_ID
-from ..scopes import resolve_scope
+from ..project_registry import COMMON_SCOPE_ID, ProjectRegistry
+from ..scopes import ResolvedScope, resolve_scope
 from ._utils import load_manager, parse_mount_type, resolve_context_paths
 
 
@@ -27,12 +27,13 @@ class _FileAccess:
     context_path: Path
     scope_id: str
     layout_version: int
+    resolved_scope: ResolvedScope
 
     @property
     def scoped(self) -> bool:
         return self.layout_version == LAYOUT_VERSION
 
-    def entry_payload(self, entry: Any) -> dict[str, Any]:
+    def entry_payload(self, entry: ContextEntry) -> dict[str, object]:
         payload = entry.to_dict()
         if self.scoped:
             payload["path"] = entry.relative_path
@@ -71,16 +72,22 @@ def _resolve_file_access(
     if version != LAYOUT_VERSION:
         if any(not isinstance(mount_type, MountType) for mount_type in mount_types):
             raise PermissionError("'human' is available only in a v2 context")
+        resolved = resolve_scope(context_path, requester_path=project_path)
         return _FileAccess(
             ContextFileSystem(manager, context_path),
             context_path,
             COMMON_SCOPE_ID,
             version,
+            resolved,
         )
 
     categories: dict[FileMountType, ContextCategory] = {}
     for mount_type in mount_types:
-        category = ContextCategory.from_mount_type(mount_type)
+        category = (
+            mount_type
+            if isinstance(mount_type, ContextCategory)
+            else ContextCategory.from_mount_type(mount_type)
+        )
         if category is None:
             raise PermissionError(
                 f"{mount_type.value!r} is an internal v2 mount and is not available "
@@ -94,15 +101,18 @@ def _resolve_file_access(
         requester_path=project_path,
         common=bool(getattr(args, "common", False)),
     )
-    scope_prefix = (
-        Path("common")
-        if resolved.scope_id == COMMON_SCOPE_ID
-        else Path("projects") / resolved.project_id
-    )
-    scoped_roots = {
-        mount_type: manager.resolve_mount_root(context_path, mount_type) / scope_prefix
-        for mount_type in categories
-    }
+    registry = ProjectRegistry(context_path)
+    requester_path = resolved.requester_path
+    if requester_path is None:
+        raise PermissionError("v2 file access requires a requester path")
+    scoped_roots = {}
+    for mount_type, category in categories.items():
+        _scope_id, root = registry.resolve_scope_root(
+            category,
+            requester_path=requester_path,
+            scope_id=resolved.scope_id,
+        )
+        scoped_roots[mount_type] = root
     return _FileAccess(
         ContextFileSystem(
             manager,
@@ -112,6 +122,7 @@ def _resolve_file_access(
         context_path,
         resolved.scope_id,
         version,
+        resolved,
     )
 
 
@@ -341,13 +352,16 @@ def fs_delete_command(args: argparse.Namespace) -> int:
         return 1
 
     index = ContextSQLiteIndex(manager, access.context_path)
-    if is_dir:
+    index_mount_type = _as_index_mount_type(mount_type)
+    if index_mount_type is None:
+        rows_deleted = 0
+    elif is_dir:
         rows_deleted = index.delete_relative_prefix(
-            mount_type, canonical_relative_path
+            index_mount_type, canonical_relative_path
         )
     else:
         rows_deleted = index.delete_relative_path(
-            mount_type, canonical_relative_path
+            index_mount_type, canonical_relative_path
         )
 
     if args.json:
@@ -432,12 +446,29 @@ def fs_move_command(args: argparse.Namespace) -> int:
         return 1
 
     index = ContextSQLiteIndex(manager, access.context_path)
-    mounts_to_rebuild = list({source_mount_type, destination_mount_type})
-    summary = index.rebuild(
-        mount_types=mounts_to_rebuild,
-        include_content=manager.config.context_index.include_content,
-        max_file_size_bytes=manager.config.context_index.max_file_size_bytes,
-        max_content_chars=manager.config.context_index.max_content_chars,
+    mounts_to_rebuild = list(
+        {
+            mount_type
+            for candidate in (source_mount_type, destination_mount_type)
+            if (mount_type := _as_index_mount_type(candidate)) is not None
+        }
+    )
+    index_settings = manager.config.context_index
+    summary = (
+        index.rebuild_scoped(
+            access.resolved_scope,
+            mount_types=mounts_to_rebuild,
+            include_content=index_settings.include_content,
+            max_file_size_bytes=index_settings.max_file_size_bytes,
+            max_content_chars=index_settings.max_content_chars,
+        )
+        if access.scoped
+        else index.rebuild(
+            mount_types=mounts_to_rebuild,
+            include_content=index_settings.include_content,
+            max_file_size_bytes=index_settings.max_file_size_bytes,
+            max_content_chars=index_settings.max_content_chars,
+        )
     )
 
     if args.json:
@@ -562,3 +593,14 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     fs_move.add_argument("--mkdirs", action="store_true", help="Create parent dirs.")
     fs_move.add_argument("--json", action="store_true", help="Output JSON.")
     fs_move.set_defaults(func=fs_move_command)
+
+
+def _as_index_mount_type(mount_type: FileMountType) -> MountType | None:
+    """Return the indexable legacy role for a file mount, if one exists."""
+
+    if isinstance(mount_type, MountType):
+        return mount_type
+    try:
+        return MountType(mount_type.value)
+    except ValueError:
+        return None

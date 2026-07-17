@@ -4,9 +4,12 @@ import shlex
 import sys
 from pathlib import Path
 
+import pytest
+
 from afs.agent_job_worker import run_agent_job_worker
 from afs.agent_jobs import AgentJobQueue
 from afs.agent_runs import AgentRunStore
+from afs.context_layout import scaffold_v2
 
 
 def test_agent_job_worker_runs_command_and_records_run(tmp_path: Path) -> None:
@@ -124,3 +127,45 @@ def test_agent_job_worker_skips_destructive_jobs_without_blocking_safe_jobs(tmp_
     assert [result.status for result in results] == ["skipped_destructive", "done"]
     assert AgentJobQueue(context_path).get(destructive.id).status == "queue"  # type: ignore[union-attr]
     assert AgentJobQueue(context_path).get(safe.id).status == "done"  # type: ignore[union-attr]
+
+
+def test_agent_job_worker_writes_v2_prompt_in_common_scope(tmp_path: Path) -> None:
+    context_path = tmp_path / ".context"
+    scaffold_v2(context_path)
+    job = AgentJobQueue(context_path).create("Review", "Check state.")
+
+    results = run_agent_job_worker(
+        context_path,
+        agent_name="reviewer",
+        command="printf ok",
+        workspace=tmp_path,
+    )
+
+    assert results[0].status == "done"
+    prompt = context_path / "scratchpad" / "common" / "agent_job_prompts" / f"{job.id}.md"
+    assert prompt.is_file()
+    assert not (context_path / "scratchpad" / "agent_job_prompts").exists()
+
+
+def test_agent_job_worker_rejects_linked_v2_prompt_root(tmp_path: Path) -> None:
+    context_path = tmp_path / ".context"
+    outside = tmp_path / "outside"
+    scaffold_v2(context_path)
+    outside.mkdir()
+    (context_path / "scratchpad" / "common").mkdir()
+    (context_path / "scratchpad" / "common" / "agent_job_prompts").symlink_to(
+        outside,
+        target_is_directory=True,
+    )
+    job = AgentJobQueue(context_path).create("Review", "Check state.")
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        run_agent_job_worker(
+            context_path,
+            agent_name="reviewer",
+            command="printf ok",
+            workspace=tmp_path,
+        )
+
+    assert list(outside.iterdir()) == []
+    assert AgentJobQueue(context_path).get(job.id).status == "queue"  # type: ignore[union-attr]

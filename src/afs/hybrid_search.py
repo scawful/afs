@@ -35,6 +35,8 @@ from .index_storage import (
     index_file_lock,
     read_generation_id,
 )
+from .path_safety import assert_no_linklike_components, lexical_absolute
+from .sensitivity import SensitivityRuleSet
 
 HYBRID_INDEX_VERSION = 1
 RRF_K = 60
@@ -104,6 +106,9 @@ class SourcePolicy:
     exclude_globs: tuple[str, ...] = ()
     respect_gitignore: bool = True
     allow_hidden: bool = False
+    never_index: tuple[str, ...] = ()
+    never_embed: tuple[str, ...] = ()
+    sensitivity_prefixes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -117,6 +122,7 @@ class HybridSource:
     embed_allowed: bool = False
     active: bool = True
     max_files: int | None = None
+    excluded_roots: tuple[Path, ...] = ()
     policy: SourcePolicy = field(default_factory=SourcePolicy)
 
     def __post_init__(self) -> None:
@@ -135,11 +141,13 @@ class HybridBuildResult:
     vector_count: int = 0
     vector_dimension: int | None = None
     semantic_status: str = "disabled"
+    source_scope_ids: list[str] = field(default_factory=list)
     intended_scope_ids: list[str] = field(default_factory=list)
     embedded_scope_ids: list[str] = field(default_factory=list)
     capped_sources: list[str] = field(default_factory=list)
     denied: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    sensitivity_policy_digest: str = ""
 
     @property
     def healthy(self) -> bool:
@@ -196,6 +204,10 @@ class HybridSearchResponse:
         }
 
 
+class HybridScopeCoverageError(ValueError):
+    """The active immutable generation does not cover an authorized scope."""
+
+
 @dataclass
 class _DocumentRow:
     row_id: int
@@ -227,35 +239,93 @@ class HybridSearchEngine:
     """Build and query a deterministic project-scoped hybrid index."""
 
     def __init__(self, index_root: Path) -> None:
-        self.index_root = index_root.expanduser().resolve()
+        candidate = lexical_absolute(index_root)
+        self._trusted_boundary: Path | None = None
+        if candidate.name == "search" and candidate.parent.name == ".afs":
+            self._trusted_boundary = candidate.parent.parent
+            candidate = assert_no_linklike_components(
+                candidate,
+                boundary=self._trusted_boundary,
+            )
+        self.index_root = candidate
+
+    def _safe_index_root(self) -> Path:
+        if self._trusted_boundary is None:
+            return self.index_root
+        return assert_no_linklike_components(
+            self.index_root,
+            boundary=self._trusted_boundary,
+        )
+
+    def _safe_internal_path(
+        self,
+        path: Path,
+        *,
+        allow_missing: bool = True,
+    ) -> Path:
+        """Validate one managed v2 index path while preserving legacy roots."""
+
+        if self._trusted_boundary is None:
+            return path
+        # Revalidate the search root on every operation.  Passing the search
+        # root itself as the helper boundary would trust a root replaced after
+        # engine construction, so first bind it to the context boundary.
+        search_root = self._safe_index_root()
+        return assert_no_linklike_components(
+            path,
+            boundary=search_root,
+            allow_missing=allow_missing,
+        )
+
+    def _safe_database_bundle(self, database_path: Path) -> Path:
+        """Validate SQLite's database leaf and predictable sidecar files."""
+
+        safe_database = self._safe_internal_path(database_path)
+        for suffix in ("-journal", "-shm", "-wal"):
+            self._safe_internal_path(Path(f"{safe_database}{suffix}"))
+        return safe_database
 
     @property
     def database_path(self) -> Path:
-        return self._active_generation_root() / DATABASE_FILENAME
+        return self._safe_database_bundle(
+            self._active_generation_root() / DATABASE_FILENAME
+        )
 
     @property
     def vector_path(self) -> Path:
-        return self._active_generation_root() / VECTOR_FILENAME
+        return self._safe_internal_path(
+            self._active_generation_root() / VECTOR_FILENAME
+        )
 
     @property
     def metadata_path(self) -> Path:
-        return self._active_generation_root() / METADATA_FILENAME
+        return self._safe_internal_path(
+            self._active_generation_root() / METADATA_FILENAME
+        )
 
     @property
     def current_path(self) -> Path:
-        return self.index_root / CURRENT_FILENAME
+        return self._safe_internal_path(
+            self._safe_index_root() / CURRENT_FILENAME
+        )
 
     @property
     def generations_root(self) -> Path:
-        return self.index_root / GENERATIONS_DIRNAME
+        return self._safe_internal_path(
+            self._safe_index_root() / GENERATIONS_DIRNAME
+        )
 
     @property
     def build_lock_path(self) -> Path:
-        return self.index_root / BUILD_LOCK_FILENAME
+        return self._safe_internal_path(
+            self._safe_index_root() / BUILD_LOCK_FILENAME
+        )
 
     @property
     def publication_lock_path(self) -> Path:
-        return self.index_root / PUBLICATION_LOCK_FILENAME
+        return self._safe_internal_path(
+            self._safe_index_root() / PUBLICATION_LOCK_FILENAME
+        )
 
     @staticmethod
     def discover(root: Path) -> list[Path]:
@@ -288,7 +358,8 @@ class HybridSearchEngine:
         chunk_overlap: int = 120,
     ) -> HybridBuildResult:
         """Serialize builders while readers continue using the current generation."""
-        self.index_root.mkdir(parents=True, exist_ok=True)
+        self._safe_index_root().mkdir(parents=True, exist_ok=True)
+        self._safe_index_root()
         with index_file_lock(self.build_lock_path):
             return self._build_locked(
                 sources,
@@ -317,7 +388,8 @@ class HybridSearchEngine:
         if chunk_overlap < 0 or chunk_overlap >= chunk_tokens:
             raise ValueError("chunk_overlap must be >= 0 and < chunk_tokens")
 
-        self.index_root.mkdir(parents=True, exist_ok=True)
+        self._safe_index_root().mkdir(parents=True, exist_ok=True)
+        self._safe_index_root()
         result = HybridBuildResult()
         documents: list[_DocumentRow] = []
         vectors: list[np.ndarray] = []
@@ -328,6 +400,7 @@ class HybridSearchEngine:
         next_row_id = 1
         budgets: dict[str, _ScopeBudget] = {}
         registered_sources = sorted(sources, key=lambda item: (item.scope_id, str(item.path)))
+        result.sensitivity_policy_digest = source_policy_digest(registered_sources)
         for source in registered_sources:
             _scope_budget(source, budgets)
 
@@ -337,7 +410,7 @@ class HybridSearchEngine:
                 source,
                 result,
                 budget=budget,
-                excluded_root=self.index_root,
+                excluded_root=self._safe_index_root(),
             ):
                 result.total_files += 1
                 text = _safe_read_text(path, source.policy, result)
@@ -365,9 +438,15 @@ class HybridSearchEngine:
                     )
                 )
                 file_had_row = False
+                embed_path_allowed = not _sensitivity_blocked(
+                    path,
+                    relative_path,
+                    patterns=source.policy.never_embed,
+                    prefixes=source.policy.sensitivity_prefixes,
+                )
                 for chunk_index, (line_start, line_end, chunk_text) in enumerate(chunks):
                     vector_row: int | None = None
-                    if source.embed_allowed and embed_fn is not None:
+                    if source.embed_allowed and embed_path_allowed and embed_fn is not None:
                         semantic_attempts += 1
                         try:
                             raw_vector = embed_fn(chunk_text)
@@ -433,6 +512,7 @@ class HybridSearchEngine:
         result.semantic_status = semantic_status
         result.vector_count = len(vectors)
         result.vector_dimension = expected_dimension
+        result.source_scope_ids = sorted({source.scope_id for source in registered_sources})
         result.intended_scope_ids = sorted(
             {
                 source.scope_id
@@ -463,6 +543,7 @@ class HybridSearchEngine:
         top_k: int = 10,
         query_embed_fn: Callable[[str], list[float]] | None = None,
         recreate_query_embedder: bool = False,
+        required_scope_ids: Sequence[str] = (),
     ) -> HybridSearchResponse:
         """Search one immutable generation under a shared publication lock."""
         if not query.strip():
@@ -478,6 +559,7 @@ class HybridSearchEngine:
                 top_k=top_k,
                 query_embed_fn=query_embed_fn,
                 recreate_query_embedder=recreate_query_embedder,
+                required_scope_ids=required_scope_ids,
             )
 
     def _search_locked(
@@ -492,6 +574,7 @@ class HybridSearchEngine:
         top_k: int = 10,
         query_embed_fn: Callable[[str], list[float]] | None = None,
         recreate_query_embedder: bool = False,
+        required_scope_ids: Sequence[str] = (),
     ) -> HybridSearchResponse:
         """Search after applying scope constraints, then fuse ranked signals."""
         normalized_mode = mode.strip().lower()
@@ -506,9 +589,34 @@ class HybridSearchEngine:
             all_projects=all_projects,
         )
         metadata = self._load_metadata()
+        coverage = metadata.get("scope_coverage", {})
+        source_scope_ids = {
+            value
+            for value in (
+                coverage.get("source_scope_ids", [])
+                if isinstance(coverage, dict)
+                else []
+            )
+            if isinstance(value, str) and value.strip()
+        }
+        missing_scopes = sorted(
+            {
+                value
+                for value in required_scope_ids
+                if isinstance(value, str) and value.strip()
+            }
+            - source_scope_ids
+        )
+        if missing_scopes:
+            missing = ", ".join(missing_scopes)
+            raise HybridScopeCoverageError(
+                "hybrid index does not cover requested scope(s): "
+                f"{missing}; rebuild the index from the requested project"
+            )
         collection = _collection_from_hybrid_metadata(metadata)
 
-        with sqlite3.connect(self.database_path) as connection:
+        database_path = self.database_path
+        with sqlite3.connect(database_path) as connection:
             connection.row_factory = sqlite3.Row
             documents = _load_scoped_documents(connection, allowed_scopes)
             by_id = {document.doc_id: document for document in documents}
@@ -578,8 +686,12 @@ class HybridSearchEngine:
                 f"query dimension {query_vector.shape[0]} != collection dimension "
                 f"{collection.dimension}",
             )
+        # Resolve the managed leaf outside the decoder error boundary so a
+        # link/reparse rejection cannot be downgraded to ordinary index
+        # corruption and silently hidden behind text fallback.
+        vector_path = self.vector_path
         try:
-            matrix = np.load(self.vector_path, mmap_mode="r", allow_pickle=False)
+            matrix = np.load(vector_path, mmap_mode="r", allow_pickle=False)
         except (OSError, ValueError) as exc:
             return [], "unhealthy", f"vector collection unreadable: {exc}"
         if matrix.ndim != 2 or matrix.shape[1] != collection.dimension:
@@ -616,10 +728,13 @@ class HybridSearchEngine:
     def _active_generation_root(self) -> Path:
         generation_id = read_generation_id(self.current_path)
         if generation_id is None:
-            return self.index_root
-        generation_root = self.generations_root / generation_id
+            return self._safe_index_root()
+        generation_root = self._safe_internal_path(
+            self.generations_root / generation_id
+        )
         if not generation_root.is_dir():
             raise ValueError(f"Missing hybrid index generation: {generation_root}")
+        self._safe_internal_path(generation_root, allow_missing=False)
         return generation_root
 
     def _write_index(
@@ -630,12 +745,19 @@ class HybridSearchEngine:
         result: HybridBuildResult,
     ) -> None:
         generation_id = uuid.uuid4().hex
-        generation_root = self.generations_root / generation_id
+        generations_root = self.generations_root
+        generation_root = self._safe_internal_path(generations_root / generation_id)
         generation_root.mkdir(parents=True, exist_ok=False)
-        database_path = generation_root / DATABASE_FILENAME
-        vector_path = generation_root / VECTOR_FILENAME
-        metadata_path = generation_root / METADATA_FILENAME
+        self._safe_internal_path(generation_root, allow_missing=False)
+        database_path = self._safe_database_bundle(
+            generation_root / DATABASE_FILENAME
+        )
+        vector_path = self._safe_internal_path(generation_root / VECTOR_FILENAME)
+        metadata_path = self._safe_internal_path(
+            generation_root / METADATA_FILENAME
+        )
         try:
+            database_path = self._safe_database_bundle(database_path)
             with sqlite3.connect(database_path) as connection:
                 connection.execute("PRAGMA synchronous=FULL")
                 _create_schema(connection)
@@ -686,6 +808,7 @@ class HybridSearchEngine:
                 if vectors
                 else np.empty((0, dimension), dtype=np.float32)
             )
+            vector_path = self._safe_internal_path(vector_path)
             with vector_path.open("wb") as handle:
                 np.save(handle, matrix, allow_pickle=False)
                 handle.flush()
@@ -700,9 +823,11 @@ class HybridSearchEngine:
                 },
                 "collection": collection.to_dict(),
                 "scope_coverage": {
+                    "source_scope_ids": result.source_scope_ids,
                     "intended_scope_ids": result.intended_scope_ids,
                     "embedded_scope_ids": result.embedded_scope_ids,
                 },
+                "sensitivity_policy_digest": result.sensitivity_policy_digest,
                 "stats": {
                     "files": result.indexed_files,
                     "chunks": result.chunks_written,
@@ -713,26 +838,80 @@ class HybridSearchEngine:
                     "capped_sources": sorted(result.capped_sources),
                 },
             }
+            metadata_path = self._safe_internal_path(metadata_path)
             atomic_write_text(
                 metadata_path,
                 json.dumps(metadata, indent=2, sort_keys=True) + "\n",
             )
-            fsync_file(database_path)
-            fsync_directory(generation_root)
+            fsync_file(self._safe_database_bundle(database_path))
+            fsync_directory(
+                self._safe_internal_path(generation_root, allow_missing=False)
+            )
             fsync_directory(self.generations_root)
 
             with index_file_lock(self.publication_lock_path):
                 previous_generation = read_generation_id(self.current_path)
+                retain_previous = False
+                if previous_generation:
+                    previous_metadata = self._safe_internal_path(
+                        self.generations_root / previous_generation / METADATA_FILENAME
+                    )
+                    try:
+                        previous_payload = json.loads(
+                            previous_metadata.read_text(encoding="utf-8")
+                        )
+                        retain_previous = (
+                            previous_payload.get("sensitivity_policy_digest")
+                            == result.sensitivity_policy_digest
+                        )
+                    except (OSError, json.JSONDecodeError):
+                        retain_previous = False
+                self._validated_generation_directories()
                 atomic_write_text(self.current_path, generation_id + "\n")
-                self._gc_generations(generation_id, previous_generation, result)
+                if previous_generation is None:
+                    for legacy_name in (
+                        DATABASE_FILENAME,
+                        VECTOR_FILENAME,
+                        METADATA_FILENAME,
+                    ):
+                        self._safe_internal_path(
+                            self._safe_index_root() / legacy_name
+                        ).unlink(missing_ok=True)
+                self._gc_generations(
+                    generation_id,
+                    previous_generation if retain_previous else None,
+                    result,
+                )
         except Exception:
             try:
                 published = read_generation_id(self.current_path) == generation_id
             except (OSError, ValueError):
                 published = False
             if not published:
-                shutil.rmtree(generation_root, ignore_errors=True)
+                try:
+                    safe_generation_root = self._safe_internal_path(
+                        generation_root,
+                        allow_missing=False,
+                    )
+                except (OSError, ValueError):
+                    pass
+                else:
+                    shutil.rmtree(safe_generation_root, ignore_errors=True)
             raise
+
+    def _validated_generation_directories(self) -> list[Path]:
+        """Return generation directories only after rejecting linked entries."""
+
+        generations_root = self.generations_root
+        if not generations_root.exists():
+            return []
+        self._safe_internal_path(generations_root, allow_missing=False)
+        generations: list[Path] = []
+        for path in generations_root.iterdir():
+            safe_path = self._safe_internal_path(path)
+            if safe_path.is_dir():
+                generations.append(safe_path)
+        return sorted(generations, key=lambda path: path.name)
 
     def _gc_generations(
         self,
@@ -741,10 +920,7 @@ class HybridSearchEngine:
         result: HybridBuildResult,
     ) -> None:
         try:
-            generations = sorted(
-                (path for path in self.generations_root.iterdir() if path.is_dir()),
-                key=lambda path: path.name,
-            )
+            generations = self._validated_generation_directories()
         except OSError as exc:
             result.errors.append(f"generation cleanup scan failed: {exc}")
             return
@@ -755,7 +931,9 @@ class HybridSearchEngine:
             if generation.name in keep:
                 continue
             try:
-                shutil.rmtree(generation)
+                shutil.rmtree(
+                    self._safe_internal_path(generation, allow_missing=False)
+                )
             except OSError as exc:
                 result.errors.append(f"{generation}: generation cleanup failed ({exc})")
 
@@ -789,6 +967,60 @@ def _create_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def source_policy_digest(sources: Iterable[HybridSource]) -> str:
+    """Hash sensitivity inputs that determine persisted hybrid-index content."""
+
+    payload = [
+        {
+            "path": str(source.path.expanduser().resolve()),
+            "scope_id": source.scope_id,
+            "never_index": list(source.policy.never_index),
+            "never_embed": list(source.policy.never_embed),
+            "sensitivity_prefixes": list(source.policy.sensitivity_prefixes),
+            "excluded_roots": sorted(
+                str(path.expanduser().resolve()) for path in source.excluded_roots
+            ),
+        }
+        for source in sorted(sources, key=lambda item: (item.scope_id, str(item.path)))
+    ]
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def hybrid_hit_blocked(
+    hit: HybridSearchHit,
+    *,
+    context_root: Path,
+    patterns: Iterable[str],
+) -> bool:
+    """Apply export rules to a hybrid hit using v1 and v2 path spellings."""
+
+    source = Path(hit.source_path)
+    relative_paths = [hit.relative_path]
+    try:
+        context_relative = source.resolve().relative_to(context_root.expanduser().resolve())
+    except (OSError, ValueError):
+        context_relative = None
+    if context_relative is not None:
+        relative_paths.append(context_relative.as_posix())
+        parts = context_relative.parts
+        if len(parts) >= 3 and parts[0] in {
+            "history",
+            "memory",
+            "scratchpad",
+            "knowledge",
+            "tools",
+            "human",
+        }:
+            offset = 2 if parts[1] == "common" else 3 if parts[1] == "projects" else 1
+            if len(parts) > offset:
+                relative_paths.append("/".join((parts[0], *parts[offset:])))
+    return SensitivityRuleSet.from_patterns(patterns).blocked(
+        source,
+        relative_paths=relative_paths,
+    )
+
+
 def _scope_budget(source: HybridSource, budgets: dict[str, _ScopeBudget]) -> _ScopeBudget:
     key = source.project_id or source.scope_id
     max_files = (
@@ -817,6 +1049,17 @@ def _is_generated_path(path: Path, source_root: Path, excluded_root: Path) -> bo
     resolved_path = path.resolve()
     resolved_source = source_root.resolve()
     resolved_excluded = excluded_root.resolve()
+    if resolved_excluded.name == "search" and resolved_excluded.parent.name == ".afs":
+        context_root = resolved_excluded.parent.parent
+        if (
+            resolved_source != context_root
+            and _is_within(context_root, resolved_source)
+            and _is_within(resolved_path, context_root)
+        ):
+            # A central context may be configured under a registered project
+            # with a visible directory name. Never crawl that managed tree as
+            # project source content and relabel another scope's artifacts.
+            return True
     if resolved_source != resolved_excluded and _is_within(resolved_excluded, resolved_source):
         return _is_within(resolved_path, resolved_excluded)
     if resolved_source != resolved_excluded:
@@ -860,10 +1103,16 @@ def _iter_safe_source_files(
     except OSError as exc:
         result.errors.append(f"{requested}: source unavailable ({exc})")
         return
+    excluded_source_roots = tuple(
+        path.expanduser().resolve() for path in source.excluded_roots
+    )
     if root.is_file():
         container = root.parent
         if (
             not _is_generated_path(root, container, excluded_root)
+            and not any(
+                _is_within(root, denied_root) for denied_root in excluded_source_roots
+            )
             and _path_allowed(root, container, root.name, source.policy, [])
             and budget.used_files < budget.max_files
             and budget.used_bytes + root.stat().st_size <= budget.max_bytes
@@ -901,6 +1150,10 @@ def _iter_safe_source_files(
             if (
                 not _is_within(resolved, root)
                 or _is_generated_path(resolved, root, excluded_root)
+                or any(
+                    _is_within(resolved, denied_root)
+                    for denied_root in excluded_source_roots
+                )
                 or _gitignored(rel + "/", gitignore)
             ):
                 continue
@@ -917,6 +1170,12 @@ def _iter_safe_source_files(
                 continue
             if not _is_within(resolved, root):
                 result.denied.append(f"{path}: escaping symlink denied")
+                result.skipped += 1
+                continue
+            if any(
+                _is_within(resolved, denied_root)
+                for denied_root in excluded_source_roots
+            ):
                 result.skipped += 1
                 continue
             if not _path_allowed(resolved, root, rel, source.policy, gitignore):
@@ -963,11 +1222,37 @@ def _path_allowed(
         fnmatch.fnmatch(relative_path, pattern) for pattern in policy.exclude_globs
     ):
         return False
+    if _sensitivity_blocked(
+        path,
+        relative_path,
+        patterns=policy.never_index,
+        prefixes=policy.sensitivity_prefixes,
+    ):
+        return False
     if policy.include_globs and not any(
         fnmatch.fnmatch(relative_path, pattern) for pattern in policy.include_globs
     ):
         return False
     return not (policy.respect_gitignore and _gitignored(relative_path, gitignore))
+
+
+def _sensitivity_blocked(
+    path: Path,
+    relative_path: str,
+    *,
+    patterns: tuple[str, ...],
+    prefixes: tuple[str, ...],
+) -> bool:
+    if not patterns:
+        return False
+    relative_paths = [relative_path]
+    relative_paths.extend(
+        f"{prefix.strip('/')}/{relative_path}" for prefix in prefixes if prefix.strip("/")
+    )
+    return SensitivityRuleSet.from_patterns(patterns).blocked(
+        path,
+        relative_paths=relative_paths,
+    )
 
 
 def _safe_read_text(path: Path, policy: SourcePolicy, result: HybridBuildResult) -> str | None:

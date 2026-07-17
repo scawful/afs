@@ -8,6 +8,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .path_safety import assert_no_linklike_components
+
 
 class MountType(str, Enum):
     """Legacy v1 directory roles.
@@ -235,7 +237,18 @@ class ContextRoot:
     @property
     def is_valid(self) -> bool:
         if self.layout_version == 2:
-            return all((self.path / category.value).is_dir() for category in ContextCategory)
+            for category in ContextCategory:
+                try:
+                    path = assert_no_linklike_components(
+                        self.path / category.value,
+                        boundary=self.path,
+                        allow_missing=False,
+                    )
+                except (OSError, ValueError):
+                    return False
+                if not path.is_dir():
+                    return False
+            return True
         required = [
             mt.value for mt in MountType if mt not in OPTIONAL_MOUNT_TYPES
         ]

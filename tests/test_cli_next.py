@@ -36,6 +36,13 @@ def test_build_next_action_routes_intent_to_commands(tmp_path: Path) -> None:
 
     catchup = build_next_action("continue", workspace=workspace)
     assert catchup.commands[0].command == f"afs status --start-dir {workspace}"
+    assert "--mount memory --mount scratchpad" in catchup.commands[1].command
+
+    handoff = build_next_action("handoff", workspace=workspace)
+    assert handoff.first_step == "list canonical handoff threads or create one immutable revision"
+    assert handoff.mcp_sequence[0] == "handoff.list"
+    assert len(handoff.commands) == 1
+    assert "scratchpad/handoffs" not in json.dumps(handoff.to_dict())
 
 
 def test_next_command_json_and_parser(monkeypatch, tmp_path: Path, capsys) -> None:

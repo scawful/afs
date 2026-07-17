@@ -16,6 +16,8 @@ from .codebase_explorer import (
     _IGNORED_DIRS,
     _LANGUAGE_BY_EXTENSION,
 )
+from .context_layout import LAYOUT_VERSION, detect_layout_version
+from .path_safety import assert_no_linklike_components, lexical_absolute
 
 _SCHEMA_VERSION = 1
 _DEFAULT_MAX_INDEX_FILES = 5000
@@ -23,6 +25,51 @@ _DEFAULT_MAX_FILE_BYTES = 1_000_000  # skip files > 1 MB
 
 # Languages with AST or regex extraction support
 _SUPPORTED_LANGUAGES = {"python", "typescript", "javascript", "rust", "go"}
+_ARTIFACT_FILE = re.compile(r"[0-9a-f]{40}\.json\Z")
+
+
+def _v2_codebase_context(output_dir: Path) -> Path | None:
+    output = lexical_absolute(output_dir)
+    if (
+        output.name != "codebase"
+        or output.parent.name != "common"
+        or output.parent.parent.name != "scratchpad"
+    ):
+        return None
+    context_root = output.parent.parent.parent
+    if detect_layout_version(context_root) != LAYOUT_VERSION:
+        return None
+    assert_no_linklike_components(output, boundary=context_root)
+    return context_root
+
+
+def _safe_index_path(
+    output_dir: Path,
+    path: Path,
+    *,
+    allow_missing: bool = True,
+) -> Path:
+    context_root = _v2_codebase_context(output_dir)
+    if context_root is None:
+        return path
+    safe_root = assert_no_linklike_components(
+        lexical_absolute(output_dir),
+        boundary=context_root,
+        allow_missing=allow_missing,
+    )
+    return assert_no_linklike_components(
+        path,
+        boundary=safe_root,
+        allow_missing=allow_missing,
+    )
+
+
+def _manifest_artifact_path(output_dir: Path, value: Any) -> Path | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if _v2_codebase_context(output_dir) is not None and not _ARTIFACT_FILE.fullmatch(value):
+        return None
+    return _safe_index_path(output_dir, output_dir / value)
 
 
 # ---------------------------------------------------------------------------
@@ -94,8 +141,10 @@ def build_codebase_index(
     A manifest at ``output_dir/index.json`` tracks mtime/size for incremental
     updates.
     """
+    output_dir = _safe_index_path(output_dir, output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = output_dir / "index.json"
+    output_dir = _safe_index_path(output_dir, output_dir, allow_missing=False)
+    manifest_path = _safe_index_path(output_dir, output_dir / "index.json")
     result = CodebaseIndexResult(mode="incremental" if incremental else "full")
 
     allowed_langs: set[str] | None = (
@@ -140,7 +189,11 @@ def build_codebase_index(
             if (
                 old_entry.get("mtime") == mtime
                 and old_entry.get("size_bytes") == size
-                and (output_dir / old_entry.get("artifact", "")).exists()
+                and (old_artifact := _manifest_artifact_path(
+                    output_dir,
+                    old_entry.get("artifact", ""),
+                )) is not None
+                and old_artifact.exists()
             ):
                 new_manifest[abs_str] = old_entry
                 result.reused += 1
@@ -172,7 +225,7 @@ def build_codebase_index(
             "symbols": symbols,
         }
 
-        artifact_path = output_dir / artifact_name
+        artifact_path = _safe_index_path(output_dir, output_dir / artifact_name)
         try:
             artifact_path.write_text(
                 json.dumps(artifact, ensure_ascii=True) + "\n", encoding="utf-8"
@@ -195,8 +248,14 @@ def build_codebase_index(
     for old_path, old_entry in old_manifest.items():
         if old_path not in seen_paths:
             result.removed += 1
-            stale = output_dir / old_entry.get("artifact", "")
+            stale = _manifest_artifact_path(
+                output_dir,
+                old_entry.get("artifact", ""),
+            )
+            if stale is None:
+                continue
             try:
+                stale = _safe_index_path(output_dir, stale, allow_missing=True)
                 stale.unlink(missing_ok=True)
             except OSError:
                 pass
@@ -232,7 +291,8 @@ def search_codebase_index(
     *language* filters to a specific language.
     *exact* requires an exact case-insensitive name match.
     """
-    manifest_path = output_dir / "index.json"
+    output_dir = _safe_index_path(output_dir, output_dir)
+    manifest_path = _safe_index_path(output_dir, output_dir / "index.json")
     if not manifest_path.exists():
         return []
 
@@ -257,7 +317,9 @@ def search_codebase_index(
         if not artifact_name:
             continue
 
-        artifact_path = output_dir / artifact_name
+        artifact_path = _manifest_artifact_path(output_dir, artifact_name)
+        if artifact_path is None:
+            continue
         try:
             data = json.loads(artifact_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
@@ -326,11 +388,20 @@ def codebase_index_dir(context_path: Path) -> Path:
     from .context_paths import resolve_mount_root
     from .models import MountType
 
+    context_root = context_path.expanduser().resolve()
+    version = detect_layout_version(context_root)
     try:
-        scratchpad = resolve_mount_root(context_path, MountType.SCRATCHPAD)
-        return scratchpad / "codebase"
+        scratchpad = resolve_mount_root(context_root, MountType.SCRATCHPAD)
     except Exception:
+        if version == LAYOUT_VERSION:
+            raise
         return context_path / "scratchpad" / "codebase"
+    output_dir = (
+        scratchpad / "common" / "codebase"
+        if version == LAYOUT_VERSION
+        else scratchpad / "codebase"
+    )
+    return _safe_index_path(output_dir, output_dir)
 
 
 # ---------------------------------------------------------------------------

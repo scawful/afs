@@ -57,6 +57,11 @@ project and `common`. Cross-project reads require an explicit
 `--all-projects` option (or its API equivalent). Supplying the central context
 path alone never grants access to every project.
 
+The shared append-only event ledger is stored at
+`history/common/events_YYYYMMDD.jsonl`; large event payloads stay beneath the
+same directory. Readers retain a link-safe transition read of pre-fix event
+files directly under `history/`, while all new writes use `history/common`.
+
 Register paths deliberately:
 
 ```bash

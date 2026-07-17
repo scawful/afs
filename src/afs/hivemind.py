@@ -12,8 +12,10 @@ from typing import Any
 
 from .agent_scope import assert_mount_allowed
 from .config import load_config_model
+from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_paths import resolve_mount_root
 from .models import MountType
+from .path_safety import assert_no_linklike_components
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -130,12 +132,32 @@ class HivemindBus:
     def __init__(self, context_path: Path, *, config: Any = None) -> None:
         assert_mount_allowed(MountType.HIVEMIND, operation="access")
         self._context_path = context_path.expanduser().resolve()
+        self._harden_paths = (
+            detect_layout_version(self._context_path) == LAYOUT_VERSION
+        )
         self._config = config or load_config_model()
         self._root = resolve_mount_root(
             self._context_path,
             MountType.HIVEMIND,
             config=self._config,
         )
+        self._safe_path(self._root)
+
+    def _safe_path(self, path: Path, *, allow_missing: bool = True) -> Path:
+        """Reject link-like v2 queue paths without changing v1 mount behavior."""
+
+        if not self._harden_paths:
+            return path
+        return assert_no_linklike_components(
+            path,
+            boundary=self._context_path,
+            allow_missing=allow_missing,
+        )
+
+    def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
+        self._safe_path(path.parent, allow_missing=False)
+        self._safe_path(path)
+        _atomic_write_text(path, json.dumps(payload, indent=2))
 
     def send(
         self,
@@ -174,9 +196,11 @@ class HivemindBus:
         )
 
         agent_dir = self._root / safe_from_agent
+        self._safe_path(agent_dir)
         agent_dir.mkdir(parents=True, exist_ok=True)
+        self._safe_path(agent_dir, allow_missing=False)
         msg_path = agent_dir / f"{msg_id}.json"
-        _atomic_write_text(msg_path, json.dumps(message.to_dict(), indent=2))
+        self._write_json(msg_path, message.to_dict())
         try:
             from .history import log_hivemind_event
 
@@ -211,18 +235,29 @@ class HivemindBus:
         now = datetime.now(timezone.utc)
 
         if agent_name is not None:
-            scan_dirs = [self._root / _validate_agent_name(agent_name)]
-        elif self._root.exists():
-            scan_dirs = sorted(
-                d for d in self._root.iterdir() if d.is_dir() and not d.name.startswith(".")
-            )
+            agent_dir = self._root / _validate_agent_name(agent_name)
+            self._safe_path(agent_dir)
+            scan_dirs = [agent_dir]
         else:
-            return []
+            self._safe_path(self._root)
+            if not self._root.exists():
+                return []
+            self._safe_path(self._root, allow_missing=False)
+            scan_dirs = []
+            for candidate in sorted(self._root.iterdir()):
+                if candidate.name.startswith("."):
+                    continue
+                self._safe_path(candidate)
+                if candidate.is_dir():
+                    scan_dirs.append(candidate)
 
         for agent_dir in scan_dirs:
+            self._safe_path(agent_dir)
             if not agent_dir.exists():
                 continue
+            self._safe_path(agent_dir)
             for msg_file in sorted(agent_dir.glob("*.json")):
+                self._safe_path(msg_file)
                 try:
                     data = json.loads(msg_file.read_text(encoding="utf-8"))
                     msg = HivemindMessage.from_dict(data)
@@ -257,7 +292,9 @@ class HivemindBus:
 
     def _subscriptions_dir(self) -> Path:
         sub_dir = self._root / ".subscriptions"
+        self._safe_path(sub_dir)
         sub_dir.mkdir(parents=True, exist_ok=True)
+        self._safe_path(sub_dir, allow_missing=False)
         return sub_dir
 
     def subscribe(
@@ -288,7 +325,7 @@ class HivemindBus:
                 ttl_hours=normalized_ttl,
             )
         sub_path = self._subscriptions_dir() / f"{safe_agent_name}.json"
-        _atomic_write_text(sub_path, json.dumps(sub.to_dict(), indent=2))
+        self._write_json(sub_path, sub.to_dict())
         try:
             from .history import log_hivemind_event
 
@@ -319,7 +356,7 @@ class HivemindBus:
                 updated_at=now,
             )
         sub_path = self._subscriptions_dir() / f"{safe_agent_name}.json"
-        _atomic_write_text(sub_path, json.dumps(sub.to_dict(), indent=2))
+        self._write_json(sub_path, sub.to_dict())
         try:
             from .history import log_hivemind_event
 
@@ -337,8 +374,10 @@ class HivemindBus:
         """Read an agent's subscription file."""
         safe_agent_name = _validate_agent_name(agent_name)
         sub_path = self._subscriptions_dir() / f"{safe_agent_name}.json"
+        self._safe_path(sub_path)
         if not sub_path.exists():
             return None
+        self._safe_path(sub_path)
         try:
             data = json.loads(sub_path.read_text(encoding="utf-8"))
             return HivemindSubscription.from_dict(data)
@@ -395,6 +434,7 @@ class HivemindBus:
 
     def cleanup_stats(self, *, max_age_hours: int = 24, dry_run: bool = False) -> dict[str, Any]:
         """Cleanup with detailed statistics. Returns removal breakdown."""
+        self._safe_path(self._root)
         if not self._root.exists():
             return {
                 "removed_count": 0,
@@ -404,6 +444,7 @@ class HivemindBus:
                 "oldest_remaining": None,
                 "per_agent": {},
             }
+        self._safe_path(self._root, allow_missing=False)
         cutoff = datetime.now(timezone.utc).timestamp() - (max_age_hours * 3600)
         now = datetime.now(timezone.utc)
         removed_count = 0
@@ -413,11 +454,15 @@ class HivemindBus:
         oldest_remaining: float | None = None
         per_agent: dict[str, dict[str, int]] = {}
         for agent_dir in self._root.iterdir():
-            if not agent_dir.is_dir() or agent_dir.name.startswith("."):
+            if agent_dir.name.startswith("."):
+                continue
+            self._safe_path(agent_dir)
+            if not agent_dir.is_dir():
                 continue
             agent_name = agent_dir.name
             agent_stats = {"removed": 0, "remaining": 0, "expired": 0, "aged_out": 0}
             for msg_file in agent_dir.glob("*.json"):
+                self._safe_path(msg_file)
                 try:
                     mtime = msg_file.stat().st_mtime
                 except OSError:
@@ -434,6 +479,7 @@ class HivemindBus:
                 if expired or aged_out:
                     if not dry_run:
                         try:
+                            self._safe_path(msg_file)
                             msg_file.unlink()
                         except OSError:
                             continue
@@ -453,6 +499,7 @@ class HivemindBus:
             per_agent[agent_name] = agent_stats
             if not dry_run and agent_dir.exists() and not any(agent_dir.iterdir()):
                 try:
+                    self._safe_path(agent_dir)
                     agent_dir.rmdir()
                 except OSError:
                     pass

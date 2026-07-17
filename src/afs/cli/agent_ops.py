@@ -715,10 +715,10 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     archive.add_argument("--json", action="store_true")
     archive.set_defaults(func=jobs_archive_command)
 
-    promote = jobs_sub.add_parser("promote", help="Promote a job review packet into scratchpad/handoffs.")
+    promote = jobs_sub.add_parser("promote", help="Promote a job review into a durable handoff.")
     _add_context_args(promote)
     promote.add_argument("job_id")
-    promote.add_argument("--to-handoff", action="store_true", help="Write a handoff markdown file.")
+    promote.add_argument("--to-handoff", action="store_true", help="Create a durable handoff.")
     promote.add_argument("--handoff-name", help="Optional handoff filename.")
     promote.add_argument("--archive", action="store_true", help="Archive the job after writing the handoff.")
     promote.add_argument("--json", action="store_true")

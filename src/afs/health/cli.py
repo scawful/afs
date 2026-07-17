@@ -7,13 +7,29 @@ import json
 import sys
 from pathlib import Path
 
+from afs.config import load_runtime_config_model
+from afs.context_layout import LAYOUT_VERSION, detect_layout_version, resolve_runtime_root
 from afs.logging_config import get_logger
+from afs.path_safety import assert_no_linklike_components
 
 from .afs_status import collect_afs_health, render_afs_health
 from .daemon import run_daemon_cli
 from .enhanced_checks import EnhancedHealthChecker, HealthCheckLevel
 
 logger = get_logger(__name__)
+
+
+def _configured_context_root(args: argparse.Namespace) -> Path:
+    """Resolve nested health commands through the normal AFS config chain."""
+
+    raw_config = getattr(args, "config", None)
+    config_path = Path(raw_config).expanduser().resolve() if raw_config else None
+    config, _resolved_path = load_runtime_config_model(
+        config_path=config_path,
+        merge_user=True,
+        start_dir=Path.cwd(),
+    )
+    return config.general.context_root.expanduser().resolve()
 
 
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
@@ -152,7 +168,7 @@ def handle_afs_summary(args: argparse.Namespace) -> int:
 
 def handle_check(args: argparse.Namespace) -> None:
     """Execute health check command."""
-    checker = EnhancedHealthChecker()
+    checker = EnhancedHealthChecker(context_root=_configured_context_root(args))
 
     result = checker.check(
         level=args.level,
@@ -187,12 +203,13 @@ def handle_monitor(args: argparse.Namespace) -> None:
         level=args.level,
         duration=args.duration,
         auto_heal=args.auto_heal,
+        context_root=_configured_context_root(args),
     )
 
 
 def handle_status(args: argparse.Namespace) -> None:
     """Execute status command."""
-    checker = EnhancedHealthChecker()
+    checker = EnhancedHealthChecker(context_root=_configured_context_root(args))
 
     # Quick health check
     result = checker.check(level=HealthCheckLevel.BASIC, save_report=False)
@@ -208,7 +225,7 @@ def handle_trend(args: argparse.Namespace) -> None:
     """Execute trend command."""
     from .daemon import HealthMonitoringDaemon
 
-    daemon = HealthMonitoringDaemon()
+    daemon = HealthMonitoringDaemon(context_root=_configured_context_root(args))
     trend = daemon.get_trend(hours=args.hours)
 
     if args.json:
@@ -230,15 +247,33 @@ def handle_trend(args: argparse.Namespace) -> None:
 
 def handle_history(args: argparse.Namespace) -> None:
     """Execute history command."""
-    context_root = Path.home() / ".context"
-    health_dir = context_root / "health"
+    context_root = _configured_context_root(args)
+    health_dir = resolve_runtime_root(
+        context_root,
+        "health",
+        legacy_relative="health",
+    )
+    harden_paths = detect_layout_version(context_root) == LAYOUT_VERSION
 
     if not health_dir.exists():
         print("No health check history found")
         return
 
     # Get recent reports
-    reports = sorted(health_dir.glob("report-*.json"), reverse=True)[: args.limit]
+    reports: list[Path] = []
+    for candidate in sorted(health_dir.glob("report-*.json"), reverse=True):
+        if harden_paths:
+            try:
+                candidate = assert_no_linklike_components(
+                    candidate,
+                    boundary=health_dir,
+                    allow_missing=False,
+                )
+            except (FileNotFoundError, ValueError):
+                continue
+        reports.append(candidate)
+        if len(reports) >= args.limit:
+            break
 
     if not reports:
         print("No health check reports found")

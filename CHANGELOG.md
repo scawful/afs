@@ -16,6 +16,8 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 - Local-first scoped hybrid search with explicit semantic opt-in, atomic index
   publication, consent-aware project coverage, and stable
   `gemini-embedding-2` defaults at 768 dimensions.
+- Session packs and prepared-client packs now require explicit `--semantic`
+  (or MCP `semantic=true`) before creating or invoking a remote query embedder.
 - Engagement primitives that keep human judgment in the loop: approvals
   approve/reject on both surfaces now require a `--because` rationale and an
   interactive human confirmation (headless approval fails closed), with

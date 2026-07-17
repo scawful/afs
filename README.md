@@ -41,8 +41,8 @@ Use the wrapper script for reliable local development and agent invocation; it s
 make check                            # lint, tests, package smoke
 ./scripts/afs setup                   # Guided setup wizard
 ./scripts/afs guide                   # Friendly workflow menu
-./scripts/afs init                    # Initialize AFS configuration
-./scripts/afs context init            # Create .context directory structure
+./scripts/afs init                    # Initialize config/v1; preserve existing v2
+./scripts/afs context init --layout-version 2 --path "$PWD"  # Create/register v2
 ./scripts/afs start --path "$PWD"      # Start with current project context
 ./scripts/afs search "next step" --path "$PWD"  # Local scoped search
 ./scripts/afs status --start-dir "$PWD"  # Show context, mount, and index health
@@ -161,10 +161,15 @@ afs layout plan --context-root ~/.context          # Manifest only; no apply
 afs status --start-dir "$PWD"         # Show mount status and index health
 afs context query "search term"       # Search the context index
 afs sources list                      # Extension-owned context source providers
-afs sources sync --provider NAME      # Preview provider records into .context/items
+afs sources sync --provider NAME      # V1-only .context/items preview; v2 fails closed
 afs context diff                      # Changes since last session
-afs session pack --model gemini       # Token-budgeted context export
+afs session pack --model gemini       # Local-first token-budgeted context export
+afs session pack "query" --semantic   # Explicitly permit remote query embeddings
 ```
+
+Context-source sync is v1-only today. Version 2 keeps provider list/status
+read-only and rejects sync before provider invocation until scoped ingestion
+can target `knowledge/projects/<project-id>/` or explicit `knowledge/common/`.
 
 ### Execution & Verification
 
@@ -196,7 +201,7 @@ afs agent-jobs create "task"          # Queue a markdown background job
 afs agent-jobs status                 # Queue, worker, run, and watchdog status
 afs agent-jobs inbox                  # Review completed, failed, stale, or blocked jobs
 afs agent-jobs review <job-id>        # Inspect one job and its linked run record
-afs agent-jobs promote <job-id> --to-handoff  # Save a job review into scratchpad/handoffs
+afs agent-jobs promote <job-id> --to-handoff  # Save a durable, readable handoff
 afs agent-jobs archive <job-id>       # Archive a handled job without deleting it
 afs agent-jobs seed                   # Idempotently queue safe maintenance jobs
 afs agent-jobs work --agent codex --command '...'  # Claim and execute queued jobs

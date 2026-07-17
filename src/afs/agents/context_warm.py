@@ -19,6 +19,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
 from ..agent_context import ContextAwareAgent
 from ..cli._utils import write_config
 from ..context_index import ContextSQLiteIndex
+from ..context_layout import LAYOUT_VERSION, detect_layout_version
 from ..context_paths import resolve_mount_root
 from ..core import resolve_context_root
 from ..discovery import discover_contexts, get_project_stats
@@ -274,6 +275,12 @@ def _refresh_embeddings(args: argparse.Namespace, config) -> tuple[list[dict], l
     for project in projects:
         if not project.enabled:
             continue
+        if detect_layout_version(context_root) == LAYOUT_VERSION:
+            notes.append(
+                f"{project.name}: legacy embedding indexes are disabled for v2; "
+                f"run `afs search --semantic --rebuild --path {project.path}`"
+            )
+            continue
         provider = args.embedding_provider or project.provider
         if not provider:
             notes.append(f"embedding disabled for {project.name}")
@@ -293,7 +300,10 @@ def _refresh_embeddings(args: argparse.Namespace, config) -> tuple[list[dict], l
             continue
 
         sources = [project.path, *project.knowledge_roots]
-        output_dir = resolve_mount_root(context_root, MountType.KNOWLEDGE, config=config) / project.name
+        output_dir = (
+            resolve_mount_root(context_root, MountType.KNOWLEDGE, config=config)
+            / project.name
+        )
         result = build_embedding_index(
             sources,
             output_dir,

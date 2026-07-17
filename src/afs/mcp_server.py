@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
@@ -23,7 +24,11 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from .agent_scope import allowed_tools, is_tool_allowed
-from .codebase_explorer import build_codebase_summary, render_codebase_summary
+from .codebase_explorer import (
+    build_codebase_summary,
+    build_scoped_codebase_summary,
+    render_codebase_summary,
+)
 from .config import load_config_model
 from .context_index import (
     DEFAULT_MAX_CONTENT_CHARS,
@@ -32,7 +37,7 @@ from .context_index import (
 )
 from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_pack import build_context_pack, render_context_pack
-from .context_paths import resolve_mount_root
+from .context_paths import load_context_metadata
 from .core import find_existing_root
 from .discovery import discover_contexts
 from .event_log import read_agent_events
@@ -71,6 +76,11 @@ from .mcp.transport import (
 )
 from .models import ContextCategory, MountType
 from .operator_digests import KIND_CHOICES, digest_operator_output
+from .path_safety import (
+    assert_no_linklike_components,
+    is_linklike,
+    lexical_absolute,
+)
 from .plugins import load_enabled_extensions
 from .profiles import resolve_active_profile
 from .project_registry import COMMON_SCOPE_ID, ProjectRegistry
@@ -83,7 +93,7 @@ from .response_schemas import (
     list_response_schema_specs,
 )
 from .schema import ContextIndexConfig
-from .scopes import ResolvedScope, resolve_scope
+from .scopes import ResolvedScope, resolve_scope, visible_scope_prefixes
 from .sensitivity import SensitivityRuleSet
 from .session_bootstrap import (
     build_session_bootstrap,
@@ -220,6 +230,12 @@ def _resolve_mcp_scope(
 
     context_path: Path
     raw_context = arguments.get("context_path")
+    raw_project = arguments.get("project_path")
+    requested_scope = arguments.get("scope_id")
+    implicit_scope = not any(
+        isinstance(value, str) and value.strip()
+        for value in (raw_context, raw_project, requested_scope)
+    )
     raw_file_path = next(
         (
             arguments.get(name)
@@ -229,7 +245,30 @@ def _resolve_mcp_scope(
         None,
     )
     configured_root = manager.config.general.context_root.expanduser().resolve()
-    if (
+    explicit_project = (
+        Path(raw_project).expanduser().resolve()
+        if isinstance(raw_project, str) and raw_project.strip()
+        else None
+    )
+    registered_configured_project = (
+        explicit_project is not None
+        and detect_layout_version(configured_root) == LAYOUT_VERSION
+        and ProjectRegistry(configured_root).resolve(explicit_project) is not None
+    )
+    inferred_project: Path | None = None
+    if implicit_scope:
+        cwd = Path.cwd().resolve()
+        if (
+            detect_layout_version(configured_root) == LAYOUT_VERSION
+            and ProjectRegistry(configured_root).resolve(cwd) is not None
+        ):
+            context_path = _assert_allowed(configured_root, manager)
+            inferred_project = cwd
+        else:
+            context_path = _resolve_context_path(arguments, manager)
+    elif registered_configured_project:
+        context_path = _assert_allowed(configured_root, manager)
+    elif (
         not (isinstance(raw_context, str) and raw_context.strip())
         and not (
             isinstance(arguments.get("project_path"), str) and arguments["project_path"].strip()
@@ -242,13 +281,7 @@ def _resolve_mcp_scope(
         context_path = _assert_allowed(configured_root, manager)
     else:
         context_path = _resolve_context_path(arguments, manager)
-    project_raw = arguments.get("project_path")
-    project_path = (
-        Path(project_raw).expanduser().resolve()
-        if isinstance(project_raw, str) and project_raw.strip()
-        else None
-    )
-    requested_scope = arguments.get("scope_id")
+    project_path = explicit_project or inferred_project
     if requested_scope is not None and not isinstance(requested_scope, str):
         raise ValueError("scope_id must be a string")
     common = isinstance(requested_scope, str) and requested_scope.strip() == COMMON_SCOPE_ID
@@ -338,7 +371,7 @@ def _resolve_context_file_path(
 
     registry = ProjectRegistry(context_path)
     if raw_path.is_absolute():
-        candidate = raw_path.resolve(strict=False)
+        candidate = lexical_absolute(raw_path)
         allowed_roots: list[Path] = []
         if scoped.scope_id == COMMON_SCOPE_ID:
             for category in ContextCategory:
@@ -351,7 +384,7 @@ def _resolve_context_file_path(
         elif scoped.requester_path is not None:
             record = registry.resolve(scoped.requester_path)
             if record is not None:
-                allowed_roots.extend(root.resolve() for root in record.roots())
+                allowed_roots.extend(lexical_absolute(root) for root in record.roots())
             for category in ContextCategory:
                 _scope, root = registry.resolve_scope_root(
                     category,
@@ -359,12 +392,24 @@ def _resolve_context_file_path(
                     scope_id=scoped.scope_id,
                 )
                 allowed_roots.append(root)
-        if not any(candidate == root or candidate.is_relative_to(root) for root in allowed_roots):
+        matching_root = next(
+            (
+                lexical_absolute(root)
+                for root in allowed_roots
+                if candidate == lexical_absolute(root)
+                or candidate.is_relative_to(lexical_absolute(root))
+            ),
+            None,
+        )
+        if matching_root is None:
             raise PermissionError(
                 f"absolute path is outside the authorized {scoped.scope_id} scope "
                 f"for {operation}: {candidate}"
             )
-        return candidate
+        return assert_no_linklike_components(
+            candidate,
+            boundary=matching_root,
+        )
 
     parts = list(raw_path.parts)
     if parts and parts[0] == ".context":
@@ -528,6 +573,12 @@ def _coerce_int(
     return value
 
 
+def _coerce_bool(value: Any) -> bool:
+    """Require a literal JSON boolean for an explicit MCP consent boundary."""
+
+    return value is True
+
+
 def _context_index_settings(manager: AFSManager) -> ContextIndexConfig:
     return manager.config.context_index
 
@@ -662,7 +713,12 @@ def _entry_blocked_by_sensitivity(entry: dict[str, Any], manager: AFSManager) ->
     return rules.blocked(absolute_path, relative_paths=(relative_path,))
 
 
-def _sync_context_index_for_path(path: Path, manager: AFSManager) -> bool:
+def _sync_context_index_for_path(
+    path: Path,
+    manager: AFSManager,
+    *,
+    scoped: ResolvedScope | None = None,
+) -> bool:
     settings = _context_index_settings(manager)
     if not settings.enabled:
         return False
@@ -672,6 +728,11 @@ def _sync_context_index_for_path(path: Path, manager: AFSManager) -> bool:
             index = ContextSQLiteIndex(manager, context_path)
             if not index.sync_absolute_path(
                 path,
+                scoped=(
+                    scoped
+                    if scoped is not None and scoped.context_root == context_path
+                    else None
+                ),
                 include_content=settings.include_content,
                 max_file_size_bytes=settings.max_file_size_bytes,
                 max_content_chars=settings.max_content_chars,
@@ -681,6 +742,22 @@ def _sync_context_index_for_path(path: Path, manager: AFSManager) -> bool:
         except Exception:
             continue
     return False
+
+
+def _resolve_optional_v2_index_scope(
+    arguments: dict[str, Any],
+    manager: AFSManager,
+) -> ResolvedScope | None:
+    """Resolve v2 sync scope without changing legacy absolute-path behavior."""
+
+    configured_root = manager.config.general.context_root.expanduser().resolve()
+    if detect_layout_version(configured_root) != LAYOUT_VERSION:
+        return None
+    try:
+        context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    except FileNotFoundError:
+        return None
+    return scoped if detect_layout_version(context_path) == LAYOUT_VERSION else None
 
 
 def _query_context_index(
@@ -697,6 +774,7 @@ def _query_context_index(
     refresh: bool = False,
     max_file_size_bytes: int | None = None,
     max_content_chars: int | None = None,
+    scoped: ResolvedScope | None = None,
 ) -> dict[str, Any]:
     settings = _context_index_settings(manager)
     limit_value = max(1, min(limit, 500))
@@ -711,20 +789,34 @@ def _query_context_index(
 
     index = ContextSQLiteIndex(manager, context_path)
     rebuild_summary: dict[str, Any] | None = None
-    should_auto_refresh = (
-        settings.enabled
-        and effective_auto_index
-        and (
-            not index.has_entries(mount_types=mount_types)
-            or (effective_auto_refresh and index.needs_refresh(mount_types=mount_types))
-        )
+    has_entries = (
+        index.has_entries_scoped(scoped, mount_types=mount_types)
+        if scoped is not None and scoped.layout_version == LAYOUT_VERSION
+        else index.has_entries(mount_types=mount_types)
     )
+    should_auto_refresh = False
+    if settings.enabled and effective_auto_index:
+        needs_refresh = False
+        if has_entries and effective_auto_refresh:
+            needs_refresh = (
+                index.needs_refresh_scoped(scoped, mount_types=mount_types)
+                if scoped is not None and scoped.layout_version == LAYOUT_VERSION
+                else index.needs_refresh(mount_types=mount_types)
+            )
+        should_auto_refresh = not has_entries or (
+            effective_auto_refresh and needs_refresh
+        )
     if refresh or should_auto_refresh:
-        summary = index.rebuild(
-            mount_types=mount_types,
-            include_content=settings.include_content,
-            max_file_size_bytes=effective_max_file_size_bytes,
-            max_content_chars=effective_max_content_chars,
+        rebuild_kwargs = {
+            "mount_types": mount_types,
+            "include_content": settings.include_content,
+            "max_file_size_bytes": effective_max_file_size_bytes,
+            "max_content_chars": effective_max_content_chars,
+        }
+        summary = (
+            index.rebuild_scoped(scoped, **rebuild_kwargs)
+            if scoped is not None and scoped.layout_version == LAYOUT_VERSION
+            else index.rebuild(**rebuild_kwargs)
         )
         rebuild_summary = summary.to_dict()
 
@@ -933,6 +1025,7 @@ def _tool_fs_write(arguments: dict[str, Any], manager: AFSManager) -> dict[str, 
     if not isinstance(path_value, str) or not isinstance(content, str):
         raise ValueError("path and content must be strings")
 
+    scoped = _resolve_optional_v2_index_scope(arguments, manager)
     path = _resolve_context_file_path(
         arguments,
         manager,
@@ -948,7 +1041,7 @@ def _tool_fs_write(arguments: dict[str, Any], manager: AFSManager) -> dict[str, 
     mode = "a" if append else "w"
     with path.open(mode, encoding="utf-8") as handle:
         handle.write(content)
-    index_updated = _sync_context_index_for_path(path, manager)
+    index_updated = _sync_context_index_for_path(path, manager, scoped=scoped)
     return {
         "path": str(path),
         "bytes": len(content.encode("utf-8")),
@@ -960,6 +1053,7 @@ def _tool_fs_write(arguments: dict[str, Any], manager: AFSManager) -> dict[str, 
 def _tool_fs_delete(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     path_value = arguments.get("path")
     recursive = bool(arguments.get("recursive", False))
+    scoped = _resolve_optional_v2_index_scope(arguments, manager)
     path = _resolve_context_file_path(
         arguments,
         manager,
@@ -984,7 +1078,7 @@ def _tool_fs_delete(arguments: dict[str, Any], manager: AFSManager) -> dict[str,
     else:
         raise OSError(f"Unsupported path type: {path}")
 
-    index_updated = _sync_context_index_for_path(path, manager)
+    index_updated = _sync_context_index_for_path(path, manager, scoped=scoped)
     return {
         "path": str(path),
         "deleted": True,
@@ -1001,6 +1095,7 @@ def _tool_fs_move(arguments: dict[str, Any], manager: AFSManager) -> dict[str, A
     if not isinstance(source_value, str) or not isinstance(destination_value, str):
         raise ValueError("source and destination must be strings")
 
+    scoped = _resolve_optional_v2_index_scope(arguments, manager)
     source = _resolve_context_file_path(
         arguments,
         manager,
@@ -1033,8 +1128,12 @@ def _tool_fs_move(arguments: dict[str, Any], manager: AFSManager) -> dict[str, A
         destination.parent.mkdir(parents=True, exist_ok=True)
 
     shutil.move(str(source), str(destination))
-    source_synced = _sync_context_index_for_path(source, manager)
-    destination_synced = _sync_context_index_for_path(destination, manager)
+    source_synced = _sync_context_index_for_path(source, manager, scoped=scoped)
+    destination_synced = _sync_context_index_for_path(
+        destination,
+        manager,
+        scoped=scoped,
+    )
 
     return {
         "source": str(source),
@@ -1051,6 +1150,15 @@ def _tool_fs_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, A
     if not isinstance(max_depth, int):
         max_depth = 1
 
+    configured_context = manager.config.general.context_root.expanduser().resolve()
+    listing_context = configured_context
+    if any(
+        isinstance(arguments.get(name), str) and str(arguments.get(name)).strip()
+        for name in ("context_path", "project_path", "scope_id")
+    ):
+        listing_context, _listing_scope = _resolve_mcp_scope(arguments, manager)
+    listing_is_v2 = detect_layout_version(listing_context) == LAYOUT_VERSION
+
     root = _resolve_context_file_path(
         arguments,
         manager,
@@ -1059,13 +1167,45 @@ def _tool_fs_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, A
     )
     _assert_sensitivity_allowed(root, manager, operation="list")
     if not root.exists():
-        if detect_layout_version(_resolve_context_path(arguments, manager)) == LAYOUT_VERSION:
+        if listing_is_v2:
             return {"path": str(root), "entries": []}
         raise FileNotFoundError(f"Path not found: {root}")
 
     entries: list[dict[str, Any]] = []
     if root.is_file():
         entries.append({"path": str(root), "is_dir": False})
+    elif listing_is_v2:
+        pending: list[tuple[Path, int]] = [(root, 0)]
+        while pending:
+            base, depth = pending.pop()
+            try:
+                with os.scandir(base) as scan:
+                    children = sorted(scan, key=lambda child: child.name)
+            except OSError:
+                continue
+            child_directories: list[Path] = []
+            for child in children:
+                try:
+                    child_stat = child.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if is_linklike(child_stat):
+                    continue
+                candidate = Path(child.path)
+                candidate_depth = depth + 1
+                if max_depth >= 0 and candidate_depth > max_depth:
+                    continue
+                if _sensitivity_block_match(candidate, manager) is not None:
+                    continue
+                child_is_dir = stat.S_ISDIR(child_stat.st_mode)
+                entries.append(
+                    {"path": str(candidate), "is_dir": child_is_dir}
+                )
+                if child_is_dir and (max_depth < 0 or candidate_depth < max_depth):
+                    child_directories.append(candidate)
+            pending.extend(
+                (path, depth + 1) for path in reversed(child_directories)
+            )
     else:
         for candidate in root.rglob("*"):
             try:
@@ -1214,15 +1354,21 @@ def _tool_context_index_rebuild(arguments: dict[str, Any], manager: AFSManager) 
         minimum=0,
     )
     index = ContextSQLiteIndex(manager, context_path)
-    summary = index.rebuild(
-        mount_types=mount_types,
-        include_content=include_content,
-        max_file_size_bytes=max_file_size_bytes,
-        max_content_chars=max_content_chars,
+    rebuild_kwargs = {
+        "mount_types": mount_types,
+        "include_content": include_content,
+        "max_file_size_bytes": max_file_size_bytes,
+        "max_content_chars": max_content_chars,
+    }
+    allow_all_projects = arguments.get("all_projects") is True
+    summary = (
+        index.rebuild(**rebuild_kwargs)
+        if scoped.layout_version != LAYOUT_VERSION or allow_all_projects
+        else index.rebuild_scoped(scoped, **rebuild_kwargs)
     )
     payload = summary.to_dict()
-    payload["mount_types"] = [mount.value for mount in (mount_types or list(MountType))]
-    payload["scope_id"] = scoped.scope_id
+    payload["mount_types"] = list(summary.by_mount_type)
+    payload["scope_id"] = "all-projects" if allow_all_projects else scoped.scope_id
     payload["project_id"] = scoped.project_id
     return payload
 
@@ -1230,6 +1376,13 @@ def _tool_context_index_rebuild(arguments: dict[str, Any], manager: AFSManager) 
 def _tool_context_query(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     context_path, scoped = _resolve_mcp_scope(arguments, manager)
     mount_types = _parse_mount_types(arguments.get("mount_types"))
+    allow_all_projects = arguments.get("all_projects") is True
+    if scoped.layout_version == LAYOUT_VERSION and not allow_all_projects:
+        mount_types = [
+            mount_type
+            for mount_type in (mount_types or list(MountType))
+            if ContextCategory.from_mount_type(mount_type) is not None
+        ]
     query_value = arguments.get("query", "")
     if query_value is None:
         query_value = ""
@@ -1262,14 +1415,14 @@ def _tool_context_query(arguments: dict[str, Any], manager: AFSManager) -> dict[
         "max_content_chars": arguments.get("max_content_chars"),
     }
     if detect_layout_version(context_path) != LAYOUT_VERSION or bool(
-        arguments.get("all_projects", False)
+        allow_all_projects
     ):
         payload = _query_context_index(
             **common_arguments,
             relative_prefix=relative_prefix,
             refresh=refresh,
         )
-        payload["scope_id"] = "all-projects" if arguments.get("all_projects") else scoped.scope_id
+        payload["scope_id"] = "all-projects" if allow_all_projects else scoped.scope_id
         payload["project_id"] = scoped.project_id
         return payload
 
@@ -1278,6 +1431,7 @@ def _tool_context_query(arguments: dict[str, Any], manager: AFSManager) -> dict[
             **common_arguments,
             relative_prefix=prefix,
             refresh=refresh if index == 0 else False,
+            scoped=scoped,
         )
         for index, prefix in enumerate(_scoped_relative_prefixes(scoped, relative_prefix))
     ]
@@ -1287,7 +1441,7 @@ def _tool_context_query(arguments: dict[str, Any], manager: AFSManager) -> dict[
 def _tool_context_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     """Search the immutable v2 hybrid index after applying scope authorization."""
     from .context_layout import resolve_system_path
-    from .hybrid_search import HybridSearchEngine
+    from .hybrid_search import HybridSearchEngine, hybrid_hit_blocked
 
     query = arguments.get("query")
     if not isinstance(query, str) or not query.strip():
@@ -1297,36 +1451,59 @@ def _tool_context_search(arguments: dict[str, Any], manager: AFSManager) -> dict
         raise ValueError("context.search requires a v2 context; use context.query for v1")
     engine = HybridSearchEngine(resolve_system_path(context_path, "search"))
     mode = str(arguments.get("mode", "text") or "text").strip().lower()
-    allow_semantic = bool(arguments.get("semantic", False))
+    allow_semantic = _coerce_bool(arguments.get("semantic", False))
+    allow_all_projects = arguments.get("all_projects") is True
     if allow_semantic:
         mode = "hybrid"
     response = engine.search(
         query,
         scope_ids=[scoped.scope_id] if scoped.scope_id != COMMON_SCOPE_ID else [],
         include_common=True,
-        all_projects=bool(arguments.get("all_projects", False)),
+        all_projects=allow_all_projects,
         mode=mode,
         top_k=_coerce_int(arguments.get("limit"), default=10, minimum=1, maximum=100),
         recreate_query_embedder=allow_semantic,
+        required_scope_ids=(
+            [record.scope_id for record in ProjectRegistry(context_path).all_records()]
+            if allow_all_projects
+            else [scoped.scope_id]
+        ),
     )
+    response.results = [
+        hit
+        for hit in response.results
+        if not hybrid_hit_blocked(
+            hit,
+            context_root=context_path,
+            patterns=[
+                *manager.config.sensitivity.never_index,
+                *manager.config.sensitivity.never_export,
+            ],
+        )
+    ]
     payload = response.to_dict()
     payload["context_path"] = str(context_path)
-    payload["scope_id"] = "all-projects" if arguments.get("all_projects") else scoped.scope_id
+    payload["scope_id"] = "all-projects" if allow_all_projects else scoped.scope_id
     payload["project_id"] = scoped.project_id
     return payload
 
 
 def _tool_context_diff(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     """Show changes between filesystem and index."""
-    context_path = _resolve_context_path(arguments, manager)
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
     mount_types = _parse_mount_types(arguments.get("mount_types"))
-    return collect_context_diff(manager, context_path, mount_types=mount_types)
+    return collect_context_diff(
+        manager,
+        context_path,
+        mount_types=mount_types,
+        scoped=scoped,
+    )
 
 
 def _tool_context_status(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     """Return a summary of the context: mounts, index health, profile."""
     context_path, scoped = _resolve_mcp_scope(arguments, manager)
-    payload = collect_context_status(manager, context_path)
+    payload = collect_context_status(manager, context_path, scoped=scoped)
     payload["scope_id"] = scoped.scope_id
     payload["project_id"] = scoped.project_id
     payload["project_name"] = scoped.project_name
@@ -1363,6 +1540,7 @@ def _tool_session_pack(arguments: dict[str, Any], manager: AFSManager) -> dict[s
         )
         or None,
         include_content=bool(arguments.get("include_content", False)),
+        semantic=_coerce_bool(arguments.get("semantic", False)),
         max_query_results=_coerce_int(
             arguments.get("max_query_results"),
             default=6,
@@ -1546,7 +1724,7 @@ def _tool_hivemind_send(arguments: dict[str, Any], manager: AFSManager) -> dict[
         context_path,
         scope_id=scoped.scope_id,
         config=manager.config,
-        all_projects=bool(arguments.get("all_projects", False)),
+        all_projects=arguments.get("all_projects") is True,
         include_legacy=scoped.layout_version != LAYOUT_VERSION,
     )
     msg = bus.send(
@@ -1575,17 +1753,18 @@ def _tool_hivemind_read(arguments: dict[str, Any], manager: AFSManager) -> dict[
     limit = _coerce_int(arguments.get("limit"), default=50, minimum=1, maximum=500)
 
     context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    allow_all_projects = arguments.get("all_projects") is True
     bus = MessageBus(
         context_path,
         scope_id=scoped.scope_id,
         config=manager.config,
-        all_projects=bool(arguments.get("all_projects", False)),
-        include_legacy=bool(arguments.get("include_legacy", False))
+        all_projects=allow_all_projects,
+        include_legacy=arguments.get("include_legacy") is True
         or scoped.layout_version != LAYOUT_VERSION,
     )
     messages = bus.read(agent_name=agent_name, msg_type=msg_type, topic=topic, limit=limit)
     return {
-        "scope_id": "all-projects" if arguments.get("all_projects") else scoped.scope_id,
+        "scope_id": "all-projects" if allow_all_projects else scoped.scope_id,
         "messages": [m.to_dict() for m in messages],
     }
 
@@ -2079,29 +2258,39 @@ def _tool_hivemind_reap(arguments: dict[str, Any], manager: AFSManager) -> dict[
     from .messages import MessageBus
 
     context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    if (
+        scoped.layout_version == LAYOUT_VERSION
+        and arguments.get("all_projects") is not True
+    ):
+        raise PermissionError(
+            "v2 hivemind cleanup is queue-wide; set all_projects=true"
+        )
     bus = MessageBus(
         context_path,
         scope_id=scoped.scope_id,
         config=manager.config,
         all_projects=True,
-        include_legacy=True,
+        include_legacy=scoped.layout_version != LAYOUT_VERSION,
     )
     max_age_hours = arguments.get("max_age_hours")
     if max_age_hours is not None:
         max_age_hours = _coerce_int(max_age_hours, default=24, minimum=1, maximum=24 * 30)
+    raw_dry_run = arguments.get("dry_run")
+    dry_run = raw_dry_run if isinstance(raw_dry_run, bool) else raw_dry_run is not None
     return bus.reap(
         max_age_hours=max_age_hours,
-        dry_run=bool(arguments.get("dry_run", False)),
+        dry_run=dry_run,
     )
 
 
 def _tool_messages_clean(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
-    if not bool(arguments.get("all_projects", False)):
+    if arguments.get("all_projects") is not True:
         raise PermissionError("message cleanup is queue-wide; set all_projects=true")
+    apply = arguments.get("apply") is True
     forwarded = dict(arguments)
-    forwarded["dry_run"] = not bool(arguments.get("apply", False))
+    forwarded["dry_run"] = not apply
     result = _tool_hivemind_reap(forwarded, manager)
-    result["applied"] = bool(arguments.get("apply", False))
+    result["applied"] = apply
     return result
 
 
@@ -2379,7 +2568,7 @@ def _tool_agent_capabilities(arguments: dict[str, Any], manager: AFSManager) -> 
 
 
 def _tool_context_freshness(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
-    context_path = _resolve_context_path(arguments, manager)
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
     index = ContextSQLiteIndex(manager, context_path)
     mount_type_str = arguments.get("mount_type")
     mount_types = None
@@ -2390,9 +2579,20 @@ def _tool_context_freshness(arguments: dict[str, Any], manager: AFSManager) -> d
             return {"error": f"unknown mount type: {mount_type_str}"}
     decay_hours = float(arguments.get("decay_hours", manager.config.context_index.decay_hours))
     threshold = float(arguments.get("threshold", 0.0))
-    return index.freshness_scores(
-        mount_types=mount_types, decay_hours=decay_hours, threshold=threshold
+    payload = index.freshness_scores(
+        mount_types=mount_types,
+        decay_hours=decay_hours,
+        threshold=threshold,
+        relative_prefixes=(
+            visible_scope_prefixes(scoped)
+            if scoped.layout_version == LAYOUT_VERSION
+            else None
+        ),
+        scoped=scoped if scoped.layout_version == LAYOUT_VERSION else None,
     )
+    payload["scope_id"] = scoped.scope_id
+    payload["project_id"] = scoped.project_id
+    return payload
 
 
 def _tool_training_antigravity_status(
@@ -2478,6 +2678,15 @@ def _resolve_embedding_index_dir(context_path: Path, manager: AFSManager) -> Pat
     except Exception:
         pass
     return None
+
+
+def _reject_legacy_retrieval_tool_in_v2(context_path: Path, *, tool_name: str) -> None:
+    """Fail closed before an unscoped legacy index can read a v2 namespace."""
+    if detect_layout_version(context_path) == LAYOUT_VERSION:
+        raise ValueError(
+            f"{tool_name} is unavailable for context v2 because its indexes are unscoped; "
+            "use context.search with an authorized project_path or scope_id"
+        )
 
 
 def _fuse_search_results(
@@ -2583,6 +2792,7 @@ def _tool_afs_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str
         context_path = _resolve_context_path(arguments, manager)
     except FileNotFoundError as exc:
         return {"error": str(exc), "results": [], "sources_used": [], "query": query}
+    _reject_legacy_retrieval_tool_in_v2(context_path, tool_name="afs.search")
 
     limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
     include_fts = bool(arguments.get("include_fts", True))
@@ -2691,6 +2901,10 @@ def _tool_afs_codebase_symbols(arguments: dict[str, Any], manager: AFSManager) -
         context_path = _resolve_context_path(arguments, manager)
     except FileNotFoundError as exc:
         return {"error": str(exc), "symbols": [], "query": query}
+    _reject_legacy_retrieval_tool_in_v2(
+        context_path,
+        tool_name="afs.codebase.symbols",
+    )
 
     idx_dir = _resolve_codebase_index_dir(context_path, manager)
     if not (idx_dir / "index.json").exists():
@@ -2732,6 +2946,10 @@ def _tool_afs_codebase_index(arguments: dict[str, Any], manager: AFSManager) -> 
         context_path = _resolve_context_path(arguments, manager)
     except FileNotFoundError as exc:
         return {"error": str(exc)}
+    _reject_legacy_retrieval_tool_in_v2(
+        context_path,
+        tool_name="afs.codebase.index",
+    )
 
     project_root_raw = arguments.get("project_path") or arguments.get("path")
     if isinstance(project_root_raw, str) and project_root_raw.strip():
@@ -3053,7 +3271,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    **_mcp_scope_properties(),
+                    **_mcp_scope_properties(include_all_projects=True),
                     "from": {"type": "string", "description": "Sending agent name."},
                     "type": {"type": "string", "default": "status"},
                     "payload": {"type": "object"},
@@ -3353,7 +3571,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    **_mcp_scope_properties(),
+                    **_mcp_scope_properties(include_all_projects=True),
                     "mount_types": {
                         "type": "array",
                         "items": {"type": "string", "enum": [mount.value for mount in MountType]},
@@ -3434,7 +3652,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "context_path": {"type": "string"},
+                    **_mcp_scope_properties(),
                     "mount_types": {
                         "type": "array",
                         "items": {"type": "string", "enum": [mount.value for mount in MountType]},
@@ -3502,6 +3720,11 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                     },
                     "token_budget": {"type": "integer", "description": "Approximate token budget."},
                     "include_content": {"type": "boolean", "default": False},
+                    "semantic": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Explicitly permit remote query embeddings.",
+                    },
                     "max_query_results": {"type": "integer", "default": 6},
                     "max_embedding_results": {"type": "integer", "default": 4},
                 },
@@ -3884,7 +4107,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
         ),
         MCPToolDefinition(
             name="agent.run.start",
-            description="Start a replayable agent run record in scratchpad/agent_runs.",
+            description="Start a replayable shared agent-run record.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -3901,7 +4124,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
         ),
         MCPToolDefinition(
             name="agent.run.list",
-            description="List replayable agent run records from scratchpad/agent_runs.",
+            description="List replayable shared agent-run records.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -4090,7 +4313,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
         ),
         MCPToolDefinition(
             name="agent.job.promote",
-            description="Promote one background job review into scratchpad/handoffs.",
+            description="Promote one background job review into a durable handoff.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -4303,11 +4526,14 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
         ),
         MCPToolDefinition(
             name="hivemind.reap",
-            description="Remove expired or stale hivemind messages and return cleanup statistics.",
+            description=(
+                "Remove expired or stale hivemind messages and return cleanup statistics; "
+                "v2 queues require explicit all_projects=true."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
-                    "context_path": {"type": "string"},
+                    **_mcp_scope_properties(include_all_projects=True),
                     "max_age_hours": {
                         "type": "integer",
                         "description": "Override retention window in hours.",
@@ -4318,6 +4544,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                         "description": "Report removals without deleting files.",
                     },
                 },
+                "required": ["all_projects"],
                 "additionalProperties": False,
             },
             handler=_tool_hivemind_reap,
@@ -4709,7 +4936,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "context_path": {"type": "string", "description": "Context path."},
+                    **_mcp_scope_properties(),
                     "mount_type": {"type": "string", "description": "Filter by mount type."},
                     "decay_hours": {
                         "type": "number",
@@ -5726,6 +5953,15 @@ def _read_resource(
     if remainder.endswith("/metadata"):
         context_path_str = remainder[: -len("/metadata")]
         context_path = _resolve_explicit_allowed_context_path(context_path_str, manager)
+        if detect_layout_version(context_path) == LAYOUT_VERSION:
+            metadata = load_context_metadata(context_path)
+            if metadata is None:  # pragma: no cover - v2 loader supplies defaults
+                raise FileNotFoundError(f"metadata not found: {context_path}")
+            return {
+                "uri": uri,
+                "mimeType": "application/json",
+                "text": json.dumps(metadata.to_dict()),
+            }
         metadata_file = context_path / "metadata.json"
         if not metadata_file.exists():
             raise FileNotFoundError(f"metadata.json not found: {metadata_file}")
@@ -5855,6 +6091,11 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                     "description": "Approximate token budget override.",
                     "required": False,
                 },
+                {
+                    "name": "semantic",
+                    "description": "Explicitly permit remote query embeddings.",
+                    "required": False,
+                },
             ],
         },
         {
@@ -5871,6 +6112,16 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                     "description": "Project path to summarize when no .context exists yet.",
                     "required": False,
                 },
+                {
+                    "name": "project_path",
+                    "description": "Registered project path to summarize from a central v2 context.",
+                    "required": False,
+                },
+                {
+                    "name": "scope_id",
+                    "description": "Optional authorized scope: common or project:<id>.",
+                    "required": False,
+                },
             ],
         },
         {
@@ -5884,7 +6135,12 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                 },
                 {
                     "name": "project_path",
-                    "description": "Registered project path used to select the current project scope.",
+                    "description": "Registered project path used to authorize its current scope.",
+                    "required": False,
+                },
+                {
+                    "name": "scope_id",
+                    "description": "Optional authorized scope: common or project:<id>.",
                     "required": False,
                 },
                 {
@@ -5928,6 +6184,11 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                     "description": "Optional pack token budget.",
                     "required": False,
                 },
+                {
+                    "name": "semantic",
+                    "description": "Explicitly permit remote query embeddings.",
+                    "required": False,
+                },
             ],
         },
         {
@@ -5937,6 +6198,16 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                 {
                     "name": "context_path",
                     "description": "Path to .context root (uses configured default if omitted)",
+                    "required": False,
+                },
+                {
+                    "name": "project_path",
+                    "description": "Registered project path used to authorize its current scope.",
+                    "required": False,
+                },
+                {
+                    "name": "scope_id",
+                    "description": "Optional authorized scope: common or project:<id>.",
                     "required": False,
                 },
                 {
@@ -5968,6 +6239,11 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                 {
                     "name": "context_path",
                     "description": "Path to .context root (uses default if omitted)",
+                    "required": False,
+                },
+                {
+                    "name": "project_path",
+                    "description": "Registered project path used to authorize its v2 scope.",
                     "required": False,
                 },
             ],
@@ -6053,6 +6329,7 @@ def _get_prompt(
                 maximum=200000,
             )
             or None,
+            semantic=_coerce_bool(arguments.get("semantic", False)),
         )
         text = render_context_pack(payload)
         return [{"role": "user", "content": {"type": "text", "text": text}}]
@@ -6069,6 +6346,9 @@ def _get_prompt(
         context_available = True
         ctx_root = None
         context_path = None
+        common_v2 = False
+        scoped_project_name = ""
+        overview_scope: ResolvedScope | None = None
         if explicit_context:
             context_path = _resolve_prompt_context_path(arguments, manager)
             ctx_root = manager.list_context(context_path=context_path)
@@ -6086,15 +6366,55 @@ def _get_prompt(
             context_path = _resolve_prompt_context_path(arguments, manager)
             ctx_root = manager.list_context(context_path=context_path)
             project_path = Path(context_path).parent
-        codebase_target = project_path if explicit_project or ctx_root is None else context_path
-        codebase = build_codebase_summary(codebase_target)
-        project_name = (
-            project_path.name if explicit_project or ctx_root is None else ctx_root.project_name
-        )
+        if (
+            ctx_root is not None
+            and context_path is not None
+            and detect_layout_version(context_path) == LAYOUT_VERSION
+        ):
+            scope_arguments = dict(arguments)
+            scope_arguments["context_path"] = str(context_path)
+            if not scope_arguments.get("project_path") and explicit_project:
+                scope_arguments["project_path"] = str(project_path)
+            _scope_root, overview_scope = _resolve_mcp_scope(scope_arguments, manager)
+            if overview_scope.requester_path is not None:
+                project_path = overview_scope.requester_path
+                scoped_project_name = overview_scope.project_name
+            else:
+                common_v2 = True
+                project_path = None
+
+        if common_v2:
+            codebase = {
+                "project_root": "(common scope; no project selected)",
+                "scan": {
+                    "files_scanned": 0,
+                    "max_scan_depth": 0,
+                    "truncated": False,
+                },
+            }
+            project_name = COMMON_SCOPE_ID
+        else:
+            if overview_scope is not None and overview_scope.requester_path is not None:
+                codebase_target = overview_scope.requester_path
+                codebase = build_scoped_codebase_summary(
+                    overview_scope.context_root,
+                    codebase_target,
+                    project_id=overview_scope.project_id,
+                )
+            else:
+                codebase_target = (
+                    project_path if explicit_project or ctx_root is None else context_path
+                )
+                codebase = build_codebase_summary(codebase_target)
+            project_name = scoped_project_name or (
+                project_path.name
+                if explicit_project or ctx_root is None
+                else ctx_root.project_name
+            )
         lines = [
             f"# AFS Context: {project_name}",
             f"Context available: {'yes' if context_available else 'no'}",
-            f"Project path: {project_path}",
+            f"Project path: {project_path or '(common scope; no project selected)'}",
         ]
         if ctx_root is not None:
             lines.extend(
@@ -6106,7 +6426,7 @@ def _get_prompt(
                     "## Mounts",
                 ]
             )
-            if project_name != ctx_root.project_name:
+            if not common_v2 and project_name != ctx_root.project_name:
                 lines.append(f"Nearest context project: {ctx_root.project_name}")
             for mount_type, mount_list in ctx_root.mounts.items():
                 lines.append(f"### {mount_type.value}")
@@ -6160,12 +6480,17 @@ def _get_prompt(
                 maximum=200000,
             )
             or None,
+            semantic=_coerce_bool(arguments.get("semantic", False)),
         )
         schema = get_response_schema(schema_name)
-        policy = load_repo_policy(start_dir=Path(context_path).parent)
+        if detect_layout_version(context_path) == LAYOUT_VERSION:
+            policy_root = scoped.requester_path or context_path
+        else:
+            policy_root = Path(context_path).parent
+        policy = load_repo_policy(start_dir=policy_root)
         policy_summary = evaluate_repo_policy(
             policy,
-            repo_root=Path(context_path).parent,
+            repo_root=policy_root,
             changed_paths=[],
         )
         lines = [
@@ -6231,15 +6556,19 @@ def _get_prompt(
         relative_prefix = arguments.get("relative_prefix")
         if relative_prefix is not None and not isinstance(relative_prefix, str):
             raise ValueError("relative_prefix must be a string")
-        context_path = _resolve_prompt_context_path(arguments, manager)
-        payload = _query_context_index(
-            context_path=context_path,
-            manager=manager,
-            query=query,
-            mount_types=mount_types,
-            relative_prefix=relative_prefix,
-            limit=_coerce_int(arguments.get("limit"), default=25, minimum=1, maximum=500),
+        query_arguments = dict(arguments)
+        if not any(
+            isinstance(query_arguments.get(name), str)
+            and str(query_arguments.get(name)).strip()
+            for name in ("context_path", "project_path")
+        ):
+            query_arguments["context_path"] = str(manager.config.general.context_root)
+        query_arguments["mount_types"] = (
+            [mount_type.value for mount_type in mount_types]
+            if mount_types is not None
+            else None
         )
+        payload = _tool_context_query(query_arguments, manager)
         entries = payload["entries"]
         if entries:
             lines = [f"# Search results for: {query}", ""]
@@ -6260,37 +6589,33 @@ def _get_prompt(
         return [{"role": "user", "content": {"type": "text", "text": "\n".join(lines)}}]
 
     if name == "afs.scratchpad.review":
-        context_path = _resolve_prompt_context_path(arguments, manager)
+        from .session_bootstrap import _collect_scratchpad
 
-        scratchpad_dir = resolve_mount_root(
+        context_path, scoped = _resolve_mcp_scope(arguments, manager)
+        scratchpad = _collect_scratchpad(
+            manager,
             context_path,
-            MountType.SCRATCHPAD,
-            config=manager.config,
+            scoped=scoped,
         )
         lines = [f"# Scratchpad Review: {context_path}", ""]
 
-        state_file = scratchpad_dir / "state.md"
-        if state_file.exists():
+        state_text = str(scratchpad.get("state_text", "")).strip()
+        if state_text:
             lines.append("## State")
-            lines.append(state_file.read_text(encoding="utf-8", errors="replace").strip())
+            lines.append(state_text)
             lines.append("")
 
-        deferred_file = scratchpad_dir / "deferred.md"
-        if deferred_file.exists():
+        deferred_text = str(scratchpad.get("deferred_text", "")).strip()
+        if deferred_text:
             lines.append("## Deferred")
-            lines.append(deferred_file.read_text(encoding="utf-8", errors="replace").strip())
+            lines.append(deferred_text)
             lines.append("")
 
-        if scratchpad_dir.exists():
-            other_files = [
-                f.name
-                for f in scratchpad_dir.iterdir()
-                if f.is_file() and f.name not in ("state.md", "deferred.md")
-            ]
-            if other_files:
-                lines.append("## Other files")
-                for name_str in sorted(other_files):
-                    lines.append(f"- {name_str}")
+        other_files = scratchpad.get("other_files") or []
+        if other_files:
+            lines.append("## Other files")
+            for name_str in sorted(str(item) for item in other_files):
+                lines.append(f"- {name_str}")
 
         return [{"role": "user", "content": {"type": "text", "text": "\n".join(lines)}}]
 

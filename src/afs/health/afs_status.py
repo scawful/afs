@@ -14,6 +14,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
     psutil = None
 
 from ..config import load_runtime_config_model
+from ..context_layout import LAYOUT_VERSION, detect_layout_version
 from ..context_paths import resolve_agent_output_root, resolve_mount_root
 from ..core import find_root, resolve_context_root
 from ..event_log import summarize_mcp_tool_usage
@@ -21,6 +22,7 @@ from ..history import iter_history_events
 from ..manager import AFSManager
 from ..mcp_server import get_mcp_status
 from ..models import MountType
+from ..path_safety import assert_no_linklike_components
 from ..plugins import discover_extension_manifests, load_enabled_extensions
 from ..profiles import merge_extension_hooks, resolve_active_profile
 from ..services.manager import ServiceManager
@@ -396,15 +398,59 @@ def _mcp_health(mcp_status: dict[str, Any], *, context_root: Path, config) -> di
     }
 
 def _maintenance_health(config, context_root: Path) -> dict[str, Any]:
-    agent_output_dir = resolve_agent_output_root(context_root, config=config)
+    layout_version = detect_layout_version(context_root)
+    safe_report_root: Path | None = None
+    if layout_version == LAYOUT_VERSION:
+        resolved_context_root = context_root.expanduser().resolve()
+        agent_output_dir = (
+            resolved_context_root / "scratchpad" / "common" / "afs_agents"
+        )
+        try:
+            agent_output_dir = resolve_agent_output_root(
+                context_root,
+                config=config,
+                scope_id="common",
+            )
+            safe_report_root = assert_no_linklike_components(
+                agent_output_dir,
+                boundary=resolved_context_root,
+                allow_missing=False,
+            )
+        except (OSError, ValueError):
+            safe_report_root = None
+    else:
+        agent_output_dir = resolve_agent_output_root(context_root, config=config)
+
     reports = {
-        "context_warm": _load_agent_report(agent_output_dir / "context_warm.json"),
-        "context_watch": _load_agent_report(agent_output_dir / "context_watch.json"),
-        "agent_supervisor": _load_agent_report(agent_output_dir / "agent_supervisor.json"),
-        "history_memory": _load_agent_report(agent_output_dir / "history_memory.json"),
-        "doctor_snapshot": _load_agent_report(agent_output_dir / "doctor_snapshot.json"),
+        "context_warm": _load_agent_report(
+            agent_output_dir / "context_warm.json",
+            safe_root=safe_report_root,
+            require_safe=layout_version == LAYOUT_VERSION,
+        ),
+        "context_watch": _load_agent_report(
+            agent_output_dir / "context_watch.json",
+            safe_root=safe_report_root,
+            require_safe=layout_version == LAYOUT_VERSION,
+        ),
+        "agent_supervisor": _load_agent_report(
+            agent_output_dir / "agent_supervisor.json",
+            safe_root=safe_report_root,
+            require_safe=layout_version == LAYOUT_VERSION,
+        ),
+        "history_memory": _load_agent_report(
+            agent_output_dir / "history_memory.json",
+            safe_root=safe_report_root,
+            require_safe=layout_version == LAYOUT_VERSION,
+        ),
+        "doctor_snapshot": _load_agent_report(
+            agent_output_dir / "doctor_snapshot.json",
+            safe_root=safe_report_root,
+            require_safe=layout_version == LAYOUT_VERSION,
+        ),
         "gemini_workspace_brief": _load_agent_report(
-            agent_output_dir / "gemini_workspace_brief.json"
+            agent_output_dir / "gemini_workspace_brief.json",
+            safe_root=safe_report_root,
+            require_safe=layout_version == LAYOUT_VERSION,
         ),
     }
     degraded_contexts = 0
@@ -426,19 +472,22 @@ def _maintenance_health(config, context_root: Path) -> dict[str, Any]:
                 if isinstance(audit, dict)
             )
 
-    service_manager = ServiceManager(config=config)
     services: dict[str, str] = {}
-    for name in (
-        "context-warm",
-        "context-watch",
-        "agent-supervisor",
-        "history-memory",
-        "gemini-workspace-brief",
-    ):
-        definition = service_manager.get_definition(name)
-        if definition is None:
-            continue
-        services[name] = service_manager.status(name).state.value
+    try:
+        service_manager = ServiceManager(config=config)
+        for name in (
+            "context-warm",
+            "context-watch",
+            "agent-supervisor",
+            "history-memory",
+            "gemini-workspace-brief",
+        ):
+            definition = service_manager.get_definition(name)
+            if definition is None:
+                continue
+            services[name] = service_manager.status(name).state.value
+    except (OSError, ValueError):
+        services = {}
 
     try:
         from ..agents.supervisor import AgentSupervisor
@@ -535,20 +584,38 @@ def _file_age_seconds(path: Path, *, now: datetime | None = None) -> float | Non
     return max((current - modified).total_seconds(), 0.0)
 
 
-def _load_agent_report(path: Path) -> dict[str, Any]:
+def _load_agent_report(
+    path: Path,
+    *,
+    safe_root: Path | None = None,
+    require_safe: bool = False,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "available": path.exists(),
+        "available": False,
         "path": str(path),
         "status": None,
         "started_at": None,
         "finished_at": None,
-        "age_seconds": _file_age_seconds(path) if path.exists() else None,
+        "age_seconds": None,
         "metrics": {},
         "notes": [],
         "payload": {},
     }
+    if require_safe:
+        if safe_root is None:
+            return payload
+        try:
+            path = assert_no_linklike_components(
+                path,
+                boundary=safe_root,
+                allow_missing=False,
+            )
+        except (OSError, ValueError):
+            return payload
     if not path.exists():
         return payload
+    payload["available"] = True
+    payload["age_seconds"] = _file_age_seconds(path)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):

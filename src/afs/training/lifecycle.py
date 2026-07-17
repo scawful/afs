@@ -13,8 +13,43 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..context_layout import LAYOUT_VERSION, detect_layout_version
 from ..models import MountType
+from ..path_safety import assert_no_linklike_components, lexical_absolute
 from ..toml_compat import tomllib
+
+
+def _v2_training_context(path: Path) -> Path | None:
+    candidate = lexical_absolute(path)
+    for ancestor in (candidate, *candidate.parents):
+        if (
+            ancestor.name == "training"
+            and ancestor.parent.name == "common"
+            and ancestor.parent.parent.name == "scratchpad"
+        ):
+            context_root = ancestor.parent.parent.parent
+            if detect_layout_version(context_root) != LAYOUT_VERSION:
+                return None
+            assert_no_linklike_components(candidate, boundary=context_root)
+            return context_root
+    return None
+
+
+def _safe_training_path(path: Path, *, allow_missing: bool = True) -> Path:
+    context_root = _v2_training_context(path)
+    if context_root is None:
+        return path
+    return assert_no_linklike_components(
+        path,
+        boundary=context_root,
+        allow_missing=allow_missing,
+    )
+
+
+def _prepare_training_directory(path: Path) -> Path:
+    path = _safe_training_path(path)
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return _safe_training_path(path, allow_missing=False)
 
 
 def now_iso() -> str:
@@ -189,12 +224,16 @@ def dataset_id_for_path(dataset_path: Path, explicit_name: str | None = None) ->
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = _safe_training_path(path)
+    _prepare_training_directory(path.parent)
+    path = _safe_training_path(path)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = _safe_training_path(path)
+    _prepare_training_directory(path.parent)
+    path = _safe_training_path(path)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload) + "\n")
 
@@ -338,7 +377,13 @@ def render_dataset_outliers_markdown(report: dict[str, Any]) -> str:
 
 def dataset_artifact_root(manager: Any, context_path: Path, dataset_id: str) -> Path:
     scratchpad_root = manager.resolve_mount_root(context_path, MountType.SCRATCHPAD)
-    return scratchpad_root / "training" / "datasets" / dataset_id
+    if detect_layout_version(context_path) != LAYOUT_VERSION:
+        return scratchpad_root / "training" / "datasets" / dataset_id
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", dataset_id):
+        raise ValueError("v2 dataset_id must be one safe filesystem segment")
+    return _safe_training_path(
+        scratchpad_root / "common" / "training" / "datasets" / dataset_id
+    )
 
 
 def write_dataset_artifacts(
@@ -348,16 +393,16 @@ def write_dataset_artifacts(
     stats: dict[str, Any] | None = None,
     outliers: dict[str, Any] | None = None,
 ) -> None:
-    artifact_root.mkdir(parents=True, exist_ok=True)
+    artifact_root = _prepare_training_directory(artifact_root)
     _write_json(artifact_root / "manifest.json", manifest)
     if stats is not None:
         _write_json(artifact_root / "stats.json", stats)
-        (artifact_root / "stats.md").write_text(
+        _safe_training_path(artifact_root / "stats.md").write_text(
             render_dataset_stats_markdown(stats), encoding="utf-8"
         )
     if outliers is not None:
         _write_json(artifact_root / "outliers.json", outliers)
-        (artifact_root / "outliers.md").write_text(
+        _safe_training_path(artifact_root / "outliers.md").write_text(
             render_dataset_outliers_markdown(outliers), encoding="utf-8"
         )
 
@@ -430,15 +475,25 @@ def normalize_run_spec(path: Path) -> dict[str, Any]:
 
 def run_root(manager: Any, context_path: Path, run_id: str) -> Path:
     scratchpad_root = manager.resolve_mount_root(context_path, MountType.SCRATCHPAD)
-    return scratchpad_root / "training" / "runs" / run_id
+    if detect_layout_version(context_path) != LAYOUT_VERSION:
+        return scratchpad_root / "training" / "runs" / run_id
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
+        raise ValueError("v2 run_id must be one safe filesystem segment")
+    return _safe_training_path(
+        scratchpad_root / "common" / "training" / "runs" / run_id
+    )
 
 
 def status_path_for_run(run_dir: Path) -> Path:
-    return run_dir / "status.json"
+    return _safe_training_path(run_dir / "status.json")
 
 
 def load_run_status(run_dir: Path) -> dict[str, Any]:
-    with status_path_for_run(run_dir).open(encoding="utf-8") as handle:
+    status_path = _safe_training_path(
+        status_path_for_run(run_dir),
+        allow_missing=False,
+    )
+    with status_path.open(encoding="utf-8") as handle:
         return json.load(handle)
 
 
@@ -506,8 +561,12 @@ def render_run_status_markdown(status: dict[str, Any]) -> str:
 
 
 def write_run_status(run_dir: Path, status: dict[str, Any]) -> None:
+    run_dir = _prepare_training_directory(run_dir)
     _write_json(run_dir / "status.json", status)
-    (run_dir / "status.md").write_text(render_run_status_markdown(status), encoding="utf-8")
+    _safe_training_path(run_dir / "status.md").write_text(
+        render_run_status_markdown(status),
+        encoding="utf-8",
+    )
 
 
 def append_run_event(run_dir: Path, event_type: str, payload: dict[str, Any]) -> None:
@@ -527,8 +586,8 @@ def start_run(manager: Any, context_path: Path, spec_path: Path) -> dict[str, An
     run_id = f"{timestamp}-{slugify(spec['name'])}"
     run_dir = run_root(manager, context_path, run_id)
     logs_dir = run_dir / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    log_path = logs_dir / "stdout.log"
+    logs_dir = _prepare_training_directory(logs_dir)
+    log_path = _safe_training_path(logs_dir / "stdout.log")
 
     env = os.environ.copy()
     env.update(spec["env"])
@@ -569,7 +628,7 @@ def start_run(manager: Any, context_path: Path, spec_path: Path) -> dict[str, An
         "process": process_snapshot(proc.pid),
     }
 
-    (run_dir / "normalized_spec.json").write_text(
+    _safe_training_path(run_dir / "normalized_spec.json").write_text(
         json.dumps(spec, indent=2) + "\n",
         encoding="utf-8",
     )

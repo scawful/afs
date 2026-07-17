@@ -5,14 +5,18 @@ import sqlite3
 from argparse import Namespace
 from pathlib import Path
 
+import pytest
+
 import afs.cli.core as cli_core_module
 import afs.config as config_module
 import afs.core as core_module
 from afs.cli._utils import AFS_DIRS
 from afs.cli.core import agents_watch_command, status_command
 from afs.context_index import ContextSQLiteIndex
+from afs.context_layout import scaffold_v2
 from afs.manager import AFSManager
 from afs.models import MountType
+from afs.project_registry import ProjectRegistry
 from afs.schema import AFSConfig, DirectoryConfig, GeneralConfig, default_directory_configs
 
 
@@ -56,6 +60,46 @@ def _build_context(tmp_path: Path) -> tuple[AFSConfig, Path]:
         include_content=True,
     )
     return config, context_root
+
+
+def test_v2_index_rejects_symlinked_default_database(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    outside = tmp_path / "outside.sqlite3"
+    outside.write_text("do not modify", encoding="utf-8")
+    db_path = context_root / ".afs" / "compat" / "global" / "context_index.sqlite3"
+    try:
+        db_path.symlink_to(outside)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"file symlinks unavailable: {exc}")
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        ContextSQLiteIndex(manager, context_root)
+    assert outside.read_text(encoding="utf-8") == "do not modify"
+
+
+def test_v2_index_rechecks_default_database_root_before_connect(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+    index = ContextSQLiteIndex(manager, context_root)
+    global_root = context_root / ".afs" / "compat" / "global"
+    global_root.rename(global_root.with_name("global-detached"))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        global_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        index.query(query="")
+    assert list(outside.iterdir()) == []
 
 
 def _clear_profile_env(monkeypatch) -> None:  # noqa: ANN001
@@ -102,6 +146,72 @@ def test_status_command_json_reports_index_and_mount_counts(
     assert "maintenance" in payload
     assert payload["discovery_path"]["steps"][0]["tool"] == "context.status"
     assert payload["discovery_path"]["routed_flows"]["human_manager"].startswith("afs manager")
+
+
+def test_status_command_uses_registered_cwd_for_default_v2_scope(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _clear_profile_env(monkeypatch)
+    context_root = tmp_path / ".context"
+    project = tmp_path / "alpha"
+    project.mkdir()
+    scaffold_v2(context_root)
+    record = ProjectRegistry(context_root).register(project)
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(config_module, "load_config_model", lambda *args, **kwargs: config)
+    monkeypatch.setattr(core_module, "find_root", lambda _start_dir=None: context_root)
+    monkeypatch.setattr(
+        core_module,
+        "resolve_context_root",
+        lambda _config, _linked_root: context_root,
+    )
+
+    assert status_command(Namespace(start_dir=None, json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scope_id"] == record.scope_id
+    assert payload["project_id"] == record.project_id
+
+
+def test_bare_status_falls_back_to_common_but_explicit_unregistered_path_fails(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _clear_profile_env(monkeypatch)
+    context_root = tmp_path / ".context"
+    project = tmp_path / "alpha"
+    unregistered = tmp_path / "outside"
+    project.mkdir()
+    unregistered.mkdir()
+    scaffold_v2(context_root)
+    record = ProjectRegistry(context_root).register(project)
+    common_root = context_root / "knowledge" / "common"
+    project_root = context_root / "knowledge" / "projects" / record.project_id
+    common_root.mkdir(parents=True, exist_ok=True)
+    project_root.mkdir(parents=True, exist_ok=True)
+    (common_root / "shared.md").write_text("common status", encoding="utf-8")
+    (project_root / "private.md").write_text("private status", encoding="utf-8")
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+    monkeypatch.chdir(unregistered)
+    monkeypatch.setattr(config_module, "load_config_model", lambda *args, **kwargs: config)
+    monkeypatch.setattr(core_module, "find_root", lambda _start_dir=None: context_root)
+    monkeypatch.setattr(
+        core_module,
+        "resolve_context_root",
+        lambda _config, _linked_root: context_root,
+    )
+
+    assert status_command(Namespace(start_dir=None, json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scope_id"] == "common"
+    assert payload["project_id"] == ""
+    assert payload["mount_counts"]["knowledge"] == 1
+
+    with pytest.raises(PermissionError, match="project is not registered"):
+        status_command(Namespace(start_dir=str(unregistered), json=True))
 
 
 def test_context_index_rebuild_is_visible_to_fresh_connections(tmp_path: Path) -> None:

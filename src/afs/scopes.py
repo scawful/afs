@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .context_layout import LAYOUT_VERSION, detect_layout_version
-from .project_registry import COMMON_SCOPE_ID, ProjectRegistry
+from .models import ContextCategory, MountType
+from .project_registry import (
+    COMMON_SCOPE_ID,
+    ProjectRegistry,
+    assert_no_linklike_components,
+)
 
 
 @dataclass(frozen=True)
@@ -59,4 +64,56 @@ def resolve_scope(
     )
 
 
-__all__ = ["ResolvedScope", "resolve_scope"]
+def visible_scope_ids(scoped: ResolvedScope) -> tuple[str, ...]:
+    """Return the only artifact scopes visible to a resolved requester."""
+
+    if scoped.layout_version != LAYOUT_VERSION:
+        return (COMMON_SCOPE_ID,)
+    if scoped.scope_id == COMMON_SCOPE_ID:
+        return (COMMON_SCOPE_ID,)
+    return (scoped.scope_id, COMMON_SCOPE_ID)
+
+
+def visible_scope_prefixes(scoped: ResolvedScope) -> tuple[str, ...]:
+    """Return category-relative prefixes visible to one requester."""
+
+    if scoped.layout_version != LAYOUT_VERSION:
+        return ("",)
+    prefixes = ["common/"]
+    if scoped.project_id:
+        prefixes.insert(0, f"projects/{scoped.project_id}/")
+    return tuple(prefixes)
+
+
+def visible_mount_roots(
+    mount_root: Path,
+    *,
+    mount_type: MountType,
+    scoped: ResolvedScope,
+) -> tuple[Path, ...]:
+    """Return mount roots that may contribute data to a requester.
+
+    Runtime-only compatibility mounts have no implicit project category in v2
+    and are therefore excluded rather than treated as globally readable.
+    """
+
+    if scoped.layout_version != LAYOUT_VERSION:
+        return (mount_root,)
+    if ContextCategory.from_mount_type(mount_type) is None:
+        return ()
+    return tuple(
+        assert_no_linklike_components(
+            mount_root / prefix.rstrip("/"),
+            boundary=scoped.context_root,
+        )
+        for prefix in visible_scope_prefixes(scoped)
+    )
+
+
+__all__ = [
+    "ResolvedScope",
+    "resolve_scope",
+    "visible_mount_roots",
+    "visible_scope_ids",
+    "visible_scope_prefixes",
+]

@@ -11,12 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from .chat_registry import load_chat_registry
-from .context_layout import LAYOUT_VERSION
+from .context_layout import LAYOUT_VERSION, _atomic_write_text, detect_layout_version
 from .context_pack import build_context_pack, write_context_pack_artifacts
 from .context_paths import resolve_agent_output_root
 from .manager import AFSManager
 from .model_profiles import profile_for_client_model
 from .model_prompts import build_model_system_prompt
+from .path_safety import assert_no_linklike_components, lexical_absolute
 from .profiles import resolve_active_profile
 from .repo_policy import evaluate_repo_policy, load_repo_policy
 from .scopes import resolve_scope
@@ -140,10 +141,16 @@ def _client_output_paths(
 ) -> dict[str, Path]:
     output_root = resolve_agent_output_root(
         context_path,
-        config=manager.config,
+        config=getattr(manager, "config", None),
         scope_id=scope_id,
     )
     output_root.mkdir(parents=True, exist_ok=True)
+    if detect_layout_version(context_path) == LAYOUT_VERSION:
+        output_root = assert_no_linklike_components(
+            output_root,
+            boundary=context_path.expanduser().resolve(),
+            allow_missing=False,
+        )
     slug = _client_slug(client)
     return {
         "payload_json": output_root / f"session_client_{slug}.json",
@@ -151,6 +158,28 @@ def _client_output_paths(
         "prompt_json": output_root / f"session_system_prompt_{slug}.json",
         "prompt_text": output_root / f"session_system_prompt_{slug}.txt",
     }
+
+
+def _write_client_artifact(
+    context_path: Path,
+    output_root: Path,
+    path: Path,
+    text: str,
+) -> None:
+    """Write a client artifact without following v2 namespace links."""
+    if detect_layout_version(context_path) != LAYOUT_VERSION:
+        path.write_text(text, encoding="utf-8")
+        return
+
+    trusted_root = assert_no_linklike_components(
+        output_root,
+        boundary=context_path.expanduser().resolve(),
+        allow_missing=False,
+    )
+    safe_path = assert_no_linklike_components(path, boundary=trusted_root)
+    if safe_path == trusted_root:
+        raise ValueError("client artifact path must name a file within its output root")
+    _atomic_write_text(safe_path, text)
 
 
 def supported_session_activity_events() -> list[dict[str, str]]:
@@ -359,16 +388,45 @@ def _load_client_session_payload(
     payload_file: str | Path | None = None,
 ) -> tuple[dict[str, Any], Path]:
     scoped = resolve_scope(context_path, requester_path=cwd)
-    payload_path = (
-        Path(payload_file).expanduser().resolve()
-        if payload_file
-        else resolve_client_session_payload_path(
-            manager,
-            context_path,
-            client=client,
-            project_path=cwd,
-        )
+    output_paths = _client_output_paths(
+        manager,
+        context_path,
+        client,
+        scope_id=scoped.scope_id,
     )
+    output_root = output_paths["payload_json"].parent
+    if payload_file:
+        if scoped.layout_version == LAYOUT_VERSION:
+            candidate = lexical_absolute(Path(payload_file))
+            try:
+                candidate.relative_to(output_root)
+            except ValueError:
+                try:
+                    candidate.relative_to(context_path.expanduser().resolve())
+                except ValueError:
+                    pass
+                else:
+                    raise PermissionError(
+                        "client payload scope does not match the requester scope"
+                    ) from None
+            payload_path = assert_no_linklike_components(
+                candidate,
+                boundary=output_root,
+            )
+            if payload_path == output_root:
+                raise ValueError(
+                    "client payload path must name a file within its authorized output root"
+                )
+        else:
+            payload_path = Path(payload_file).expanduser().resolve()
+    else:
+        payload_path = output_paths["payload_json"]
+
+    if scoped.layout_version == LAYOUT_VERSION:
+        payload_path = assert_no_linklike_components(
+            payload_path,
+            boundary=output_root,
+        )
     if payload_path.exists():
         try:
             payload = json.loads(payload_path.read_text(encoding="utf-8"))
@@ -1106,6 +1164,7 @@ def _pack_summary(
     pack_mode: str,
     token_budget: int | None,
     include_content: bool,
+    semantic: bool,
     max_query_results: int,
     max_embedding_results: int,
     write_artifacts: bool,
@@ -1123,6 +1182,7 @@ def _pack_summary(
         pack_mode=pack_mode,
         token_budget=token_budget,
         include_content=include_content,
+        semantic=semantic,
         max_query_results=max_query_results,
         max_embedding_results=max_embedding_results,
     )
@@ -1196,7 +1256,12 @@ def _skills_summary(
             scope_id=scope_id,
         )
         payload["artifact_paths"] = {"json": str(paths["skills_json"])}
-        paths["skills_json"].write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        _write_client_artifact(
+            context_path,
+            paths["skills_json"].parent,
+            paths["skills_json"],
+            json.dumps(payload, indent=2) + "\n",
+        )
     return payload
 
 
@@ -1290,8 +1355,18 @@ def _prompt_summary(
             "recommended_schema": str(structured_guidance.get("recommended_schema", "")).strip(),
             "text": prompt_text,
         }
-        paths["prompt_text"].write_text(prompt_text + "\n", encoding="utf-8")
-        paths["prompt_json"].write_text(json.dumps(prompt_payload, indent=2) + "\n", encoding="utf-8")
+        _write_client_artifact(
+            context_path,
+            paths["prompt_text"].parent,
+            paths["prompt_text"],
+            prompt_text + "\n",
+        )
+        _write_client_artifact(
+            context_path,
+            paths["prompt_json"].parent,
+            paths["prompt_json"],
+            json.dumps(prompt_payload, indent=2) + "\n",
+        )
         artifact_paths = {
             "text": str(paths["prompt_text"]),
             "json": str(paths["prompt_json"]),
@@ -1320,6 +1395,11 @@ def write_client_session_payload_artifact(
     payload_path: str | Path | None = None,
 ) -> dict[str, str]:
     """Persist the latest client-session payload for harness consumers."""
+    requester_path = (
+        Path(str(payload.get("cwd", ""))).expanduser()
+        if str(payload.get("cwd", "")).strip()
+        else None
+    )
     resolved_payload, resolved_path = _load_client_session_payload(
         manager,
         context_path,
@@ -1328,9 +1408,7 @@ def write_client_session_payload_artifact(
         config_path=Path(str(payload.get("config_path", ""))).expanduser().resolve()
         if str(payload.get("config_path", "")).strip()
         else None,
-        cwd=Path(str(payload.get("cwd", ""))).expanduser().resolve()
-        if str(payload.get("cwd", "")).strip()
-        else None,
+        cwd=requester_path.resolve() if requester_path is not None else None,
         payload_file=payload_path,
     )
     resolved_payload.update(payload)
@@ -1342,7 +1420,21 @@ def write_client_session_payload_artifact(
     if isinstance(cli_hints, dict):
         cli_hints["verify_run"] = f"afs verify run --payload-file {shlex.quote(str(resolved_path))} --json"
         cli_hints["verify_plan"] = f"afs verify plan --payload-file {shlex.quote(str(resolved_path))} --json"
-    resolved_path.write_text(json.dumps(resolved_payload, indent=2) + "\n", encoding="utf-8")
+    scoped = resolve_scope(
+        context_path,
+        requester_path=requester_path,
+    )
+    output_root = resolve_agent_output_root(
+        context_path,
+        config=getattr(manager, "config", None),
+        scope_id=scoped.scope_id,
+    )
+    _write_client_artifact(
+        context_path,
+        output_root,
+        resolved_path,
+        json.dumps(resolved_payload, indent=2) + "\n",
+    )
     payload.clear()
     payload.update(resolved_payload)
     return {"json": str(resolved_path)}
@@ -1542,6 +1634,7 @@ def build_client_session_payload(
     pack_mode: str = "focused",
     token_budget: int | None = None,
     include_content: bool = False,
+    semantic: bool = False,
     max_query_results: int = 6,
     max_embedding_results: int = 4,
     include_pack: bool = True,
@@ -1605,6 +1698,7 @@ def build_client_session_payload(
             pack_mode=pack_mode,
             token_budget=token_budget,
             include_content=include_content,
+            semantic=semantic,
             max_query_results=max_query_results,
             max_embedding_results=max_embedding_results,
             write_artifacts=write_artifacts,

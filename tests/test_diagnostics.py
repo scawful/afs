@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from afs.config import load_config_model
+from afs.context_paths import resolve_agent_output_root
 from afs.diagnostics import (
     DiagnosticResult,
     check_config,
@@ -313,3 +316,41 @@ def test_write_doctor_snapshot_writes_agent_report(tmp_path: Path) -> None:
     assert payload["status"] == "warn"
     assert payload["payload"]["context_root"] == str(context_root)
     assert payload["payload"]["checks"][0]["name"] == "config"
+
+
+@pytest.mark.parametrize("linked_component", ["root", "leaf"])
+def test_v2_doctor_snapshot_rejects_linked_common_output(
+    tmp_path: Path,
+    linked_component: str,
+) -> None:
+    context_root = tmp_path / "context"
+    project = tmp_path / "project"
+    project.mkdir()
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+    AFSManager(config=config).ensure(
+        path=project,
+        context_root=context_root,
+        layout_version=2,
+    )
+    config_path = tmp_path / "afs.toml"
+    _write_config(config_path, context_root)
+    output_root = resolve_agent_output_root(context_root, config=config, scope_id="common")
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    poison = outside / "doctor_snapshot.json"
+    poison.write_text("do-not-overwrite", encoding="utf-8")
+
+    try:
+        if linked_component == "root":
+            output_root.symlink_to(outside, target_is_directory=True)
+        else:
+            output_root.mkdir()
+            (output_root / "doctor_snapshot.json").symlink_to(poison)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link|reparse point"):
+        write_doctor_snapshot(config_path=config_path, results=[])
+
+    assert poison.read_text(encoding="utf-8") == "do-not-overwrite"

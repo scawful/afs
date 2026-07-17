@@ -16,6 +16,9 @@ requires:
 
 Durable, cross-session goals that render into every agent system prompt until
 resolved. Use missions for multi-day work; use the task queue for single items.
+In v2, canonical mission records live under
+`.context/.afs/compat/items/missions/`. Do not confuse them with the legacy
+mission-runner TOML definitions in `.context/scratchpad/missions/`.
 
 ## Commands
 

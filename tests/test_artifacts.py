@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from afs.artifacts import MarkdownArtifactCodec, NoteStore, default_artifact_root
+from afs.context_layout import scaffold_v2
 
 
 def test_markdown_artifact_roundtrip_and_filename_contract(tmp_path: Path) -> None:
@@ -106,6 +107,20 @@ def test_artifact_rejects_relative_directory_symlink_escape(tmp_path: Path) -> N
     assert list(outside.iterdir()) == []
 
 
+def test_artifact_codec_rejects_symlinked_collection_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    collection = tmp_path / "artifacts"
+    try:
+        collection.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        MarkdownArtifactCodec(collection)
+    assert list(outside.iterdir()) == []
+
+
 @pytest.mark.skipif(os.name != "posix", reason="descriptor-relative publication is POSIX-only")
 @pytest.mark.parametrize("swap_root", [False, True], ids=["intermediate", "root"])
 def test_artifact_publication_rejects_directory_swap(
@@ -160,6 +175,31 @@ def test_note_store_uses_canonical_project_scope(tmp_path: Path) -> None:
     assert note.metadata.scope_id == "project:prj_42"
     assert note.metadata.project_id == "prj_42"
     assert note.metadata.provenance == {"source": "afs.note"}
+
+
+@pytest.mark.parametrize("target_kind", ["other-project", "outside"])
+def test_note_store_rejects_symlinked_project_collection(
+    tmp_path: Path,
+    target_kind: str,
+) -> None:
+    context = tmp_path / ".context"
+    scaffold_v2(context)
+    target = (
+        context / "memory" / "projects" / "prj_beta" / "notes"
+        if target_kind == "other-project"
+        else tmp_path / "outside-notes"
+    )
+    target.mkdir(parents=True)
+    collection = context / "memory" / "projects" / "prj_alpha" / "notes"
+    collection.parent.mkdir(parents=True)
+    try:
+        collection.symlink_to(target, target_is_directory=True)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        NoteStore(context, scope_id="project:prj_alpha")
+    assert list(target.iterdir()) == []
 
 
 def test_note_store_common_scope_and_custom_resolver(tmp_path: Path) -> None:

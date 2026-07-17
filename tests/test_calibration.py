@@ -21,6 +21,7 @@ from afs.calibration import (
     record_outcome,
     record_prediction,
 )
+from afs.context_layout import scaffold_v2
 from afs.missions import MissionStore
 from afs.work_assistant import WorkAssistantStore
 
@@ -55,9 +56,236 @@ def _context(tmp_path: Path) -> Path:
     return context_root
 
 
+def _symlink_or_skip(link: Path, target: Path, *, directory: bool = False) -> None:
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # trail primitives
 # ---------------------------------------------------------------------------
+
+
+def test_v1_calibration_preserves_external_remapped_scratchpad(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    external = tmp_path / "external-scratchpad"
+    external.mkdir()
+    (context / "metadata.json").write_text(
+        json.dumps({"directories": {"scratchpad": str(external)}}),
+        encoding="utf-8",
+    )
+
+    created = record_prediction(
+        context,
+        kind="bootstrap_top_priority",
+        predicted="keep v1 remap",
+        actual="keep v1 remap",
+        match=True,
+    )
+
+    expected = external / "calibration" / "predictions.jsonl"
+    assert calibration_root(context) == external / "calibration"
+    assert expected.is_file()
+    assert load_predictions(context)[0]["id"] == created["id"]
+
+
+def test_v2_calibration_reads_pre_fix_trail_and_writes_only_common(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / ".context"
+    scaffold_v2(context)
+    canonical = context / "scratchpad" / "common" / "calibration"
+    legacy = context / "scratchpad" / "calibration"
+
+    assert calibration_root(context) == canonical
+    assert load_predictions(context) == []
+    assert not canonical.exists()
+    assert not legacy.exists()
+
+    legacy.mkdir(parents=True)
+    old_entry = {
+        "id": "pred_pre_fix",
+        "timestamp": "2026-07-16T00:00:00+00:00",
+        "kind": "bootstrap_top_priority",
+        "predicted": "old path",
+        "actual": "old path",
+        "match": True,
+    }
+    legacy_path = legacy / "predictions.jsonl"
+    legacy_path.write_text(json.dumps(old_entry) + "\n", encoding="utf-8")
+    old_outcome = {
+        "ref": "mission_pre_fix",
+        "kind": "mission",
+        "outcome": "hit",
+        "timestamp": "2026-07-16T00:00:00+00:00",
+    }
+    legacy_outcomes = legacy / "outcomes.jsonl"
+    legacy_outcomes.write_text(json.dumps(old_outcome) + "\n", encoding="utf-8")
+
+    assert [entry["id"] for entry in load_predictions(context)] == ["pred_pre_fix"]
+    assert [entry["ref"] for entry in load_outcomes(context)] == ["mission_pre_fix"]
+    assert not (legacy / "predictions.jsonl.lock").exists()
+    before = legacy_path.read_bytes()
+    outcomes_before = legacy_outcomes.read_bytes()
+
+    created = record_prediction(
+        context,
+        kind="bootstrap_top_priority",
+        predicted="new common path",
+        actual="new common path",
+        match=True,
+    )
+    score = record_outcome(context, ref="pred_pre_fix", outcome="hit")
+
+    assert (canonical / "predictions.jsonl").is_file()
+    assert (canonical / "outcomes.jsonl").is_file()
+    assert legacy_path.read_bytes() == before
+    assert legacy_outcomes.read_bytes() == outcomes_before
+    assert not (legacy / "predictions.jsonl.lock").exists()
+    assert not (legacy / "outcomes.jsonl.lock").exists()
+    assert [entry["id"] for entry in load_predictions(context)] == [
+        "pred_pre_fix",
+        created["id"],
+    ]
+    assert [entry["ref"] for entry in load_outcomes(context)] == [
+        "mission_pre_fix",
+        score["ref"],
+    ]
+
+
+def test_v2_calibration_deduplicates_copy_migrated_records(tmp_path: Path) -> None:
+    context = tmp_path / ".context"
+    scaffold_v2(context)
+    legacy = context / "scratchpad" / "calibration"
+    canonical = context / "scratchpad" / "common" / "calibration"
+    legacy.mkdir(parents=True)
+    canonical.mkdir(parents=True)
+    prediction = {
+        "id": "pred_copied",
+        "timestamp": "2026-07-16T00:00:00+00:00",
+        "kind": "bootstrap_top_priority",
+        "predicted": "copied",
+        "actual": "copied",
+        "match": True,
+    }
+    outcome = {
+        "ref": "mission_copied",
+        "kind": "mission",
+        "outcome": "hit",
+        "scored_by": "reviewer",
+        "timestamp": "2026-07-16T01:00:00+00:00",
+    }
+    for root in (legacy, canonical):
+        (root / "predictions.jsonl").write_text(
+            json.dumps(prediction) + "\n",
+            encoding="utf-8",
+        )
+        (root / "outcomes.jsonl").write_text(
+            json.dumps(outcome) + "\n",
+            encoding="utf-8",
+        )
+
+    assert [entry["id"] for entry in load_predictions(context)] == ["pred_copied"]
+    assert [entry["ref"] for entry in load_outcomes(context)] == ["mission_copied"]
+
+
+@pytest.mark.parametrize("root_kind", ["canonical", "legacy"])
+def test_v2_calibration_rejects_linked_roots(
+    tmp_path: Path,
+    root_kind: str,
+) -> None:
+    context = tmp_path / ".context"
+    scaffold_v2(context)
+    outside = tmp_path / f"outside-{root_kind}"
+    outside.mkdir()
+    outside_file = outside / "predictions.jsonl"
+    outside_file.write_text(
+        json.dumps({"id": "pred_outside", "timestamp": "2026-07-17T00:00:00+00:00"})
+        + "\n",
+        encoding="utf-8",
+    )
+    root = (
+        context / "scratchpad" / "common" / "calibration"
+        if root_kind == "canonical"
+        else context / "scratchpad" / "calibration"
+    )
+    _symlink_or_skip(root, outside, directory=True)
+    before = outside_file.read_bytes()
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        load_predictions(context)
+    if root_kind == "canonical":
+        with pytest.raises(ValueError, match="symbolic link or reparse point"):
+            record_prediction(
+                context,
+                kind="bootstrap_top_priority",
+                predicted="must not escape",
+                actual="must not escape",
+            )
+    else:
+        record_prediction(
+            context,
+            kind="bootstrap_top_priority",
+            predicted="safe canonical write",
+            actual="safe canonical write",
+        )
+    assert outside_file.read_bytes() == before
+
+
+@pytest.mark.parametrize("leaf_kind", ["jsonl", "lock"])
+@pytest.mark.parametrize("root_kind", ["canonical", "legacy"])
+def test_v2_calibration_rejects_linked_leaves(
+    tmp_path: Path,
+    leaf_kind: str,
+    root_kind: str,
+) -> None:
+    context = tmp_path / ".context"
+    scaffold_v2(context)
+    root = (
+        context / "scratchpad" / "common" / "calibration"
+        if root_kind == "canonical"
+        else context / "scratchpad" / "calibration"
+    )
+    root.mkdir(parents=True)
+    jsonl = root / "predictions.jsonl"
+    outside = tmp_path / f"outside-{leaf_kind}"
+    outside.write_text(
+        json.dumps({"id": "pred_outside", "timestamp": "2026-07-17T00:00:00+00:00"})
+        + "\n",
+        encoding="utf-8",
+    )
+    if leaf_kind == "jsonl":
+        _symlink_or_skip(jsonl, outside)
+    else:
+        jsonl.write_text(
+            json.dumps({"id": "pred_local", "timestamp": "2026-07-17T00:00:00+00:00"})
+            + "\n",
+            encoding="utf-8",
+        )
+        _symlink_or_skip(jsonl.with_suffix(".jsonl.lock"), outside)
+    before = outside.read_bytes()
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        load_predictions(context)
+    if root_kind == "canonical":
+        with pytest.raises(ValueError, match="symbolic link or reparse point"):
+            record_prediction(
+                context,
+                kind="bootstrap_top_priority",
+                predicted="must not follow leaf",
+                actual="must not follow leaf",
+            )
+    else:
+        record_prediction(
+            context,
+            kind="bootstrap_top_priority",
+            predicted="safe canonical write",
+            actual="safe canonical write",
+        )
+    assert outside.read_bytes() == before
 
 
 def test_prediction_and_outcome_round_trip(tmp_path: Path) -> None:

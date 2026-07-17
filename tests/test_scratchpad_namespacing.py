@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from afs.context_layout import scaffold_v2
 from afs.context_paths import resolve_agent_scratchpad, resolve_mount_root
 from afs.models import MountType
 
@@ -22,6 +23,35 @@ def test_resolve_agent_scratchpad_path_structure(context_with_scratchpad):
     result = resolve_agent_scratchpad(context_with_scratchpad, "my-agent")
     expected = resolve_mount_root(context_with_scratchpad, MountType.SCRATCHPAD) / "agents" / "my-agent"
     assert result == expected
+
+
+def test_resolve_agent_scratchpad_uses_v2_common_scope(tmp_path):
+    context = tmp_path / ".context"
+    scaffold_v2(context)
+
+    result = resolve_agent_scratchpad(context, "my-agent")
+
+    assert result == context / "scratchpad" / "common" / "agents" / "my-agent"
+
+
+def test_resolve_agent_scratchpad_rejects_unsafe_agent_name(tmp_path):
+    context = tmp_path / ".context"
+    scaffold_v2(context)
+
+    with pytest.raises(ValueError, match="safe filesystem segment"):
+        resolve_agent_scratchpad(context, "../escape")
+
+
+def test_resolve_agent_scratchpad_rejects_linked_v2_namespace(tmp_path):
+    context = tmp_path / ".context"
+    outside = tmp_path / "outside"
+    scaffold_v2(context)
+    outside.mkdir()
+    common = context / "scratchpad" / "common"
+    common.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        resolve_agent_scratchpad(context, "my-agent")
 
 
 def test_collect_scratchpad_includes_agent_namespaces(context_with_scratchpad, monkeypatch):

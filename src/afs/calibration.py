@@ -6,7 +6,8 @@ happen, then a periodic (typically weekly) pass resurfaces them next to what
 actually happened so the human can score their own calibration instead of
 offloading the judgment entirely to agents.
 
-Storage is append-only JSONL under ``scratchpad/calibration/``:
+Storage is append-only JSONL under ``scratchpad/common/calibration/`` in a
+version 2 context (and ``scratchpad/calibration/`` in version 1):
 
 - ``predictions.jsonl`` — predict-before-reveal entries (e.g. session
   bootstrap ``--engage``), each with the prediction and the revealed actual.
@@ -24,13 +25,17 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_paths import resolve_mount_root
 from .models import MountType
+from .path_safety import assert_no_linklike_components
 
 CALIBRATION_DIR_NAME = "calibration"
 PREDICTIONS_FILE_NAME = "predictions.jsonl"
@@ -56,19 +61,96 @@ def _parse_timestamp(value: Any) -> datetime | None:
 
 
 def calibration_root(context_path: Path, *, config: Any = None) -> Path:
-    return (
-        resolve_mount_root(context_path, MountType.SCRATCHPAD, config=config)
-        / CALIBRATION_DIR_NAME
+    """Return the canonical calibration root without creating it."""
+
+    canonical, _legacy, _boundary = _calibration_roots(
+        context_path,
+        config=config,
     )
+    return canonical
 
 
-def _append_jsonl(path: Path, entry: dict[str, Any]) -> None:
+def _calibration_roots(
+    context_path: Path,
+    *,
+    config: Any = None,
+) -> tuple[Path, Path | None, Path | None]:
+    context_root = context_path.expanduser().resolve()
+    scratchpad_root = resolve_mount_root(
+        context_root,
+        MountType.SCRATCHPAD,
+        config=config,
+    )
+    is_v2 = detect_layout_version(context_root) == LAYOUT_VERSION
+    boundary = context_root if is_v2 else None
+    canonical = (
+        scratchpad_root / "common" / CALIBRATION_DIR_NAME
+        if is_v2
+        else scratchpad_root / CALIBRATION_DIR_NAME
+    )
+    canonical = assert_no_linklike_components(canonical, boundary=boundary)
+    legacy = scratchpad_root / CALIBRATION_DIR_NAME if is_v2 else None
+    return canonical, legacy, boundary
+
+
+def _validated_store_path(
+    path: Path,
+    *,
+    boundary: Path | None,
+    allow_missing: bool,
+) -> Path:
+    safe_path = assert_no_linklike_components(
+        path,
+        boundary=boundary,
+        allow_missing=allow_missing,
+    )
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    assert_no_linklike_components(
+        lock_path,
+        boundary=boundary,
+        allow_missing=True,
+    )
+    try:
+        parent_stat = os.lstat(safe_path.parent)
+    except FileNotFoundError:
+        if allow_missing:
+            return safe_path
+        raise
+    if not stat.S_ISDIR(parent_stat.st_mode):
+        raise ValueError(f"calibration root is not a safe directory: {safe_path.parent}")
+    for candidate, label in ((safe_path, "JSONL record"), (lock_path, "lock")):
+        try:
+            candidate_stat = os.lstat(candidate)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(candidate_stat.st_mode):
+            raise ValueError(f"calibration {label} is not a safe regular file: {candidate}")
+    return safe_path
+
+
+def _append_jsonl(
+    path: Path,
+    entry: dict[str, Any],
+    *,
+    boundary: Path | None = None,
+) -> None:
     from .agents.guardrails import _file_lock
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = _validated_store_path(path, boundary=boundary, allow_missing=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = _validated_store_path(path, boundary=boundary, allow_missing=True)
     with _file_lock(path):
+        path = _validated_store_path(path, boundary=boundary, allow_missing=True)
         _repair_jsonl_tail_unlocked(path)
-        with path.open("a", encoding="utf-8") as handle:
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_APPEND
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        fd = os.open(path, flags, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -76,9 +158,22 @@ def _append_jsonl(path: Path, entry: dict[str, Any]) -> None:
 
 def _repair_jsonl_tail_unlocked(path: Path) -> None:
     """Preserve a complete final value or truncate only a torn final value."""
-    if not path.exists():
+    try:
+        path_stat = os.lstat(path)
+    except FileNotFoundError:
         return
-    with path.open("rb+") as handle:
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise ValueError(f"calibration JSONL record is not a safe regular file: {path}")
+    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "rb+") as handle:
+        opened_stat = os.fstat(handle.fileno())
+        if (
+            not stat.S_ISREG(opened_stat.st_mode)
+            or (opened_stat.st_dev, opened_stat.st_ino)
+            != (path_stat.st_dev, path_stat.st_ino)
+        ):
+            raise ValueError("calibration JSONL record changed while it was opened")
         data = handle.read()
         if not data or data.endswith(b"\n"):
             return
@@ -98,15 +193,39 @@ def _repair_jsonl_tail_unlocked(path: Path) -> None:
         os.fsync(handle.fileno())
 
 
-def _load_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
+def _load_jsonl(
+    path: Path,
+    *,
+    boundary: Path | None = None,
+    create_lock: bool = True,
+) -> list[dict[str, Any]]:
+    try:
+        path = _validated_store_path(path, boundary=boundary, allow_missing=False)
+    except FileNotFoundError:
         return []
     from .agents.guardrails import _file_lock
 
     entries: list[dict[str, Any]] = []
+    lock_context = _file_lock(path) if create_lock else nullcontext()
     try:
-        with _file_lock(path):
-            lines = path.read_text(encoding="utf-8").splitlines()
+        with lock_context:
+            path = _validated_store_path(
+                path,
+                boundary=boundary,
+                allow_missing=False,
+            )
+            path_stat = os.lstat(path)
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(path, flags)
+            with os.fdopen(fd, encoding="utf-8") as handle:
+                opened_stat = os.fstat(handle.fileno())
+                if (
+                    not stat.S_ISREG(opened_stat.st_mode)
+                    or (opened_stat.st_dev, opened_stat.st_ino)
+                    != (path_stat.st_dev, path_stat.st_ino)
+                ):
+                    raise ValueError("calibration JSONL record changed while it was opened")
+                lines = handle.read().splitlines()
     except OSError:
         return []
     for line in lines:
@@ -251,8 +370,11 @@ def _record_prediction(
         "identity_authenticated": identity_authenticated,
         "human_confirmed": human_confirmed,
     }
+    root, _legacy, boundary = _calibration_roots(context_path, config=config)
     _append_jsonl(
-        calibration_root(context_path, config=config) / PREDICTIONS_FILE_NAME, entry
+        root / PREDICTIONS_FILE_NAME,
+        entry,
+        boundary=boundary,
     )
     return entry
 
@@ -392,7 +514,13 @@ def _record_outcome(
         "human_confirmed": human_confirmed,
         "timestamp": _now().isoformat(),
     }
-    _append_jsonl(_outcomes_path_for_kind(context_path, kind, config=config), entry)
+    outcome_path = _outcomes_path_for_kind(context_path, kind, config=config)
+    boundary = (
+        None
+        if kind == "gate"
+        else _calibration_roots(context_path, config=config)[2]
+    )
+    _append_jsonl(outcome_path, entry, boundary=boundary)
     return entry
 
 
@@ -491,8 +619,10 @@ def load_outcomes(context_path: Path, *, config: Any = None) -> list[dict[str, A
     context shows as scored in every context, instead of resurfacing as
     unscored elsewhere.
     """
-    entries = _load_jsonl(
-        calibration_root(context_path, config=config) / OUTCOMES_FILE_NAME
+    entries = _load_context_jsonl(
+        context_path,
+        OUTCOMES_FILE_NAME,
+        config=config,
     )
     try:
         entries += _load_jsonl(_gate_outcomes_path())
@@ -507,8 +637,10 @@ def load_predictions(
     since: datetime | None = None,
     config: Any = None,
 ) -> list[dict[str, Any]]:
-    entries = _load_jsonl(
-        calibration_root(context_path, config=config) / PREDICTIONS_FILE_NAME
+    entries = _load_context_jsonl(
+        context_path,
+        PREDICTIONS_FILE_NAME,
+        config=config,
     )
     if since is None:
         return entries
@@ -518,6 +650,62 @@ def load_predictions(
         if stamp is not None and stamp >= since:
             kept.append(entry)
     return kept
+
+
+def _load_context_jsonl(
+    context_path: Path,
+    filename: str,
+    *,
+    config: Any = None,
+) -> list[dict[str, Any]]:
+    canonical, legacy, boundary = _calibration_roots(context_path, config=config)
+    entries: list[dict[str, Any]] = []
+    if legacy is not None:
+        entries.extend(
+            _load_jsonl(
+                legacy / filename,
+                boundary=boundary,
+                create_lock=False,
+            )
+        )
+    entries.extend(
+        _load_jsonl(
+            canonical / filename,
+            boundary=boundary,
+        )
+    )
+    return _deduplicate_context_entries(entries, filename=filename)
+
+
+def _deduplicate_context_entries(
+    entries: list[dict[str, Any]],
+    *,
+    filename: str,
+) -> list[dict[str, Any]]:
+    """Collapse copy-migrated records while preserving distinct trail events."""
+
+    result: list[dict[str, Any]] = []
+    indexes: dict[str, int] = {}
+    for entry in entries:
+        entry_id = entry.get("id") if filename == PREDICTIONS_FILE_NAME else None
+        if isinstance(entry_id, str) and entry_id.strip():
+            identity = f"prediction:{entry_id.strip()}"
+        else:
+            identity = "record:" + json.dumps(
+                entry,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        existing = indexes.get(identity)
+        if existing is None:
+            indexes[identity] = len(result)
+            result.append(entry)
+        else:
+            # Sources are loaded legacy-first and canonical-last, so the
+            # canonical copy wins if a migrated prediction was later amended.
+            result[existing] = entry
+    return result
 
 
 # Work approvals that represent a human "yes": applied/failed are approved

@@ -12,6 +12,7 @@ import base64
 import json
 import os
 import re
+import stat
 import threading
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
@@ -29,8 +30,10 @@ from .artifacts import (
     infer_scope_id,
     validate_scope_id,
 )
+from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_paths import resolve_mount_root
 from .models import MountType
+from .path_safety import assert_no_linklike_components
 
 HANDOFF_SCHEMA_VERSION = "3"
 LEGACY_HANDOFF_SCHEMA_VERSION = "2"
@@ -238,31 +241,39 @@ class HandoffStore:
         self._config = config
         self.scope_id = validate_scope_id(scope_id or infer_scope_id(self._context_path))
         resolver = root_resolver or default_artifact_root
-        self._root = (
-            resolver(
-                self._context_path,
-                scope_id=self.scope_id,
-                collection="handoffs",
-                config=config,
-            )
-            .expanduser()
-            .resolve()
+        self._root = resolver(
+            self._context_path,
+            scope_id=self.scope_id,
+            collection="handoffs",
+            config=config,
         )
-        self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._codec = MarkdownArtifactCodec(self._root)
+        self._root = self._codec.root
         self._events_path = self._root / "_events.jsonl"
 
-        # v1/v2 used scratchpad/handoffs/<session>.json.  Keep it as a
-        # read-through import surface and maintain the tiny manifest for old
-        # clients, but all new revision content lives under memory.
-        self._legacy_root = (
-            resolve_mount_root(self._context_path, MountType.SCRATCHPAD, config=config) / "handoffs"
+        # v1 used scratchpad/handoffs/<session>.json.  A v1-to-v2 migration
+        # places that content under scratchpad/common/handoffs.  Keep both as
+        # lazy read-through imports in v2. New v2 revisions remain readable
+        # Markdown only; opaque compatibility JSON is a v1 write surface and
+        # must not recreate duplicate clutter in the simplified namespace.
+        # Constructing a store must not create a legacy tree merely because a
+        # caller wants to read canonical Markdown.
+        scratchpad_root = resolve_mount_root(
+            self._context_path,
+            MountType.SCRATCHPAD,
+            config=config,
         )
+        is_v2 = detect_layout_version(self._context_path) == LAYOUT_VERSION
+        self._is_v2 = is_v2
+        self._legacy_boundary = self._context_path if is_v2 else None
+        if is_v2:
+            self._legacy_root = scratchpad_root / "common" / "handoffs"
+            self._legacy_read_roots = (self._legacy_root, scratchpad_root / "handoffs")
+        else:
+            self._legacy_root = scratchpad_root / "handoffs"
+            self._legacy_read_roots = (self._legacy_root,)
         self._manifest_path = self._legacy_root / "_manifest.json"
-        self._legacy_codec: MarkdownArtifactCodec | None = None
-        if self.scope_id == "common":
-            self._legacy_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-            self._legacy_codec = MarkdownArtifactCodec(self._legacy_root)
+        self._legacy_codecs: dict[Path, MarkdownArtifactCodec] = {}
 
     def create_revision(
         self,
@@ -421,7 +432,8 @@ class HandoffStore:
             revision_claim.close()
             packet.artifact_path = str(artifact.path)
 
-        self._update_legacy_compatibility_best_effort(packet)
+        if not self._is_v2:
+            self._update_legacy_compatibility_best_effort(packet)
         self._log_creation(packet)
         return packet
 
@@ -506,18 +518,23 @@ class HandoffStore:
                 continue
             packets[packet.revision_id] = packet
         if self.scope_id == "common":
-            legacy_ids = self._load_manifest()
-            legacy_ids.extend(
-                path.stem
-                for path in self._legacy_root.glob("*.json")
-                if path.name != self._manifest_path.name and _SAFE_ID_PATTERN.fullmatch(path.stem)
-            )
-            for legacy_id in dict.fromkeys(legacy_ids):
-                if legacy_id in packets:
-                    continue
-                packet = self._read_legacy(legacy_id)
-                if packet is not None:
-                    packets[packet.revision_id] = packet
+            for legacy_root, legacy_codec in self._legacy_sources():
+                legacy_ids = self._load_manifest_from(legacy_root, legacy_codec)
+                legacy_ids.extend(
+                    path.stem
+                    for path in legacy_root.glob("*.json")
+                    if path.name != "_manifest.json" and _SAFE_ID_PATTERN.fullmatch(path.stem)
+                )
+                for legacy_id in dict.fromkeys(legacy_ids):
+                    if legacy_id in packets:
+                        continue
+                    packet = self._read_legacy_from(
+                        legacy_root,
+                        legacy_codec,
+                        legacy_id,
+                    )
+                    if packet is not None:
+                        packets[packet.revision_id] = packet
 
         event_state = self._load_event_state()
         selected = [
@@ -804,12 +821,35 @@ class HandoffStore:
         return None
 
     def _read_legacy(self, session_id: str) -> HandoffPacket | None:
-        if self.scope_id != "common" or self._legacy_codec is None:
+        if self.scope_id != "common":
             return None
-        packet_path = self._legacy_root / f"{session_id}.json"
+        for legacy_root, legacy_codec in self._legacy_sources():
+            packet = self._read_legacy_from(
+                legacy_root,
+                legacy_codec,
+                session_id,
+            )
+            if packet is not None:
+                return packet
+        return None
+
+    def _read_legacy_from(
+        self,
+        legacy_root: Path,
+        legacy_codec: MarkdownArtifactCodec,
+        session_id: str,
+    ) -> HandoffPacket | None:
+        packet_path = legacy_root / f"{session_id}.json"
         try:
-            _, payload = self._legacy_codec._read_contained_text(packet_path)
+            packet_path = assert_no_linklike_components(
+                packet_path,
+                boundary=legacy_root,
+                allow_missing=False,
+            )
+            _, payload = legacy_codec._read_contained_text(packet_path)
             data = json.loads(payload)
+        except FileNotFoundError:
+            return None
         except (json.JSONDecodeError, OSError, ValueError):
             return None
         if not isinstance(data, dict):
@@ -817,6 +857,54 @@ class HandoffStore:
         packet = HandoffPacket.from_dict(data)
         packet.artifact_path = str(packet_path)
         return packet
+
+    def _existing_legacy_codec(self, root: Path) -> MarkdownArtifactCodec | None:
+        cached = self._legacy_codecs.get(root)
+        if cached is not None:
+            cached._assert_root_binding()
+            return cached
+        try:
+            safe_root = assert_no_linklike_components(
+                root,
+                boundary=self._legacy_boundary,
+                allow_missing=False,
+            )
+        except FileNotFoundError:
+            return None
+        root_stat = os.lstat(safe_root)
+        if not stat.S_ISDIR(root_stat.st_mode):
+            raise ValueError(f"legacy handoff root is not a safe directory: {safe_root}")
+        codec = MarkdownArtifactCodec(safe_root)
+        self._legacy_codecs[root] = codec
+        return codec
+
+    def _legacy_sources(self) -> Iterator[tuple[Path, MarkdownArtifactCodec]]:
+        if self.scope_id != "common":
+            return
+        for root in self._legacy_read_roots:
+            try:
+                codec = self._existing_legacy_codec(root)
+            except ValueError:
+                # Legacy imports are optional compatibility state.  Ignore an
+                # unsafe root without following it or disabling canonical
+                # Markdown reads and writes.
+                continue
+            if codec is not None:
+                yield root, codec
+
+    def _legacy_write_codec(self) -> MarkdownArtifactCodec | None:
+        if self.scope_id != "common":
+            return None
+        existing = self._existing_legacy_codec(self._legacy_root)
+        if existing is not None:
+            return existing
+        safe_root = assert_no_linklike_components(
+            self._legacy_root,
+            boundary=self._legacy_boundary,
+        )
+        codec = MarkdownArtifactCodec(safe_root)
+        self._legacy_codecs[self._legacy_root] = codec
+        return codec
 
     def _apply_events(self, packet: HandoffPacket, event_state: _EventState) -> HandoffPacket:
         acknowledged = list(dict.fromkeys(packet.acknowledged_by))
@@ -906,13 +994,22 @@ class HandoffStore:
                 result.append(normalized)
         return result
 
-    def _load_manifest(self) -> list[str]:
-        if self.scope_id != "common" or self._legacy_codec is None:
-            return []
+    @staticmethod
+    def _load_manifest_from(
+        legacy_root: Path,
+        legacy_codec: MarkdownArtifactCodec,
+    ) -> list[str]:
         try:
-            fd = self._legacy_codec._open_control_file("_manifest.json", os.O_RDONLY)
+            assert_no_linklike_components(
+                legacy_root / "_manifest.json",
+                boundary=legacy_root,
+                allow_missing=False,
+            )
+            fd = legacy_codec._open_control_file("_manifest.json", os.O_RDONLY)
             with os.fdopen(fd, encoding="utf-8") as handle:
                 data = json.load(handle)
+        except FileNotFoundError:
+            return []
         except (json.JSONDecodeError, OSError, ValueError):
             return []
         if isinstance(data, list):
@@ -937,10 +1034,11 @@ class HandoffStore:
             pass
 
     def _write_legacy_compatibility(self, packet: HandoffPacket) -> None:
-        if self._legacy_codec is None:  # pragma: no cover - guarded by caller
+        legacy_codec = self._legacy_write_codec()
+        if legacy_codec is None:  # pragma: no cover - guarded by caller
             return
         with _MANIFEST_LOCK:
-            lock_fd = self._legacy_codec._open_control_file(
+            lock_fd = legacy_codec._open_control_file(
                 ".manifest.lock", os.O_RDWR | os.O_CREAT
             )
             locked = False
@@ -950,41 +1048,54 @@ class HandoffStore:
                 compatibility = packet.to_dict()
                 compatibility.pop("artifact_path", None)
                 rendered_packet = json.dumps(compatibility, indent=2, allow_nan=False) + "\n"
-                legacy_fd = self._legacy_codec._open_relative_directory(None)
+                packet_path = assert_no_linklike_components(
+                    self._legacy_root / f"{packet.session_id}.json",
+                    boundary=self._legacy_root,
+                )
+                legacy_fd = legacy_codec._open_relative_directory(None)
                 try:
                     if legacy_fd is not None:
-                        self._legacy_codec._write_exclusive_at(
+                        legacy_codec._write_exclusive_at(
                             legacy_fd,
                             f"{packet.session_id}.json",
                             rendered_packet,
                         )
                     else:
-                        self._legacy_codec._write_exclusive(
-                            self._legacy_root / f"{packet.session_id}.json",
+                        legacy_codec._write_exclusive(
+                            packet_path,
                             rendered_packet,
                         )
                 finally:
                     if legacy_fd is not None:
                         os.close(legacy_fd)
 
-                manifest = self._load_manifest()
+                manifest = self._load_manifest_from(self._legacy_root, legacy_codec)
                 if packet.session_id not in manifest:
                     manifest.append(packet.session_id)
-                self._replace_legacy_manifest(manifest)
+                self._replace_legacy_manifest(manifest, legacy_codec=legacy_codec)
             finally:
                 if locked:
                     self._unlock_fd(lock_fd)
                 os.close(lock_fd)
 
-    def _replace_legacy_manifest(self, manifest: list[str]) -> None:
-        if self._legacy_codec is None:  # pragma: no cover - guarded by caller
+    def _replace_legacy_manifest(
+        self,
+        manifest: list[str],
+        *,
+        legacy_codec: MarkdownArtifactCodec,
+    ) -> None:
+        if self.scope_id != "common":  # pragma: no cover - guarded by caller
             return
+        assert_no_linklike_components(
+            self._manifest_path,
+            boundary=self._legacy_root,
+        )
         payload = json.dumps(manifest, indent=2) + "\n"
         temporary_name = f"_manifest.{uuid.uuid4().hex}.tmp"
-        legacy_fd = self._legacy_codec._open_relative_directory(None)
+        legacy_fd = legacy_codec._open_relative_directory(None)
         if legacy_fd is not None:
             try:
-                self._legacy_codec._write_exclusive_at(legacy_fd, temporary_name, payload)
+                legacy_codec._write_exclusive_at(legacy_fd, temporary_name, payload)
                 try:
                     os.replace(
                         temporary_name,
@@ -1004,7 +1115,7 @@ class HandoffStore:
             return
 
         temporary = self._legacy_root / temporary_name
-        self._legacy_codec._write_exclusive(temporary, payload)
+        legacy_codec._write_exclusive(temporary, payload)
         try:
             temporary.replace(self._manifest_path)
         except BaseException:
