@@ -127,7 +127,7 @@ def build_next_action(intent: str | None = None, *, workspace: Path | str = Path
     root, context_path = resolve_workspace_and_context(workspace)
     original_intent = (intent or "continue").strip() or "continue"
     canonical = canonicalize_intent(original_intent)
-    query_command = f"afs query {shlex.quote('recent handoff deferred current work')} --path {shlex.quote(str(root))} --mount scratchpad --limit 8 --json"
+    query_command = f"afs query {shlex.quote('recent handoff deferred current work')} --path {shlex.quote(str(root))} --mount memory --mount scratchpad --limit 8 --json"
 
     routes: dict[str, dict[str, Any]] = {
         "continue": {
@@ -194,12 +194,11 @@ def build_next_action(intent: str | None = None, *, workspace: Path | str = Path
         },
         "handoff": {
             "summary": "Create or read a concise operational handoff without packing the whole session by default.",
-            "first_step": "list scratchpad handoffs or create one markdown note",
-            "mcp_sequence": ["context.list: scratchpad/handoffs", "context.read/context.write: specific handoff only"],
+            "first_step": "list canonical handoff threads or create one immutable revision",
+            "mcp_sequence": ["handoff.list", "handoff.read: exact revision only", "handoff.create or handoff.revise: when writing"],
             "slash_command": "/afs-handoff",
             "commands": [
                 NextCommand("list-handoffs", _cmd(root, "session handoff list --json"), "if looking for existing handoff packets"),
-                NextCommand("query-handoffs", f"afs query handoff --path {shlex.quote(str(root))} --mount scratchpad --prefix handoffs --limit 8 --json", "if markdown scratchpad handoffs matter"),
             ],
             "stop_when": "The handoff names current state, changed files, verification, blockers, and the next narrow step.",
         },

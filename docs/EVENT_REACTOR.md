@@ -26,8 +26,9 @@ malformed and never reach matching.
 
 Two sources feed the reactor:
 
-- History events (`history/events_YYYYMMDD.jsonl`): kind is the event `type`,
-  detail is the `op`.
+- History events (`history/common/events_YYYYMMDD.jsonl` in layout v2): kind
+  is the event `type`, detail is the `op`. Version 1 retains its configured
+  or metadata-remapped history directory.
 - Hivemind messages: kind is `hivemind`, detail is the topic. The bus is the
   canonical source: history records of type `hivemind` (the send-op mirror of
   each bus message) are excluded so one message never yields two events.

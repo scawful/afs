@@ -17,6 +17,7 @@ from afs.agents.workspace_analyst import (
     _write_report,
     main,
 )
+from afs.context_layout import scaffold_v2
 
 
 @pytest.fixture(autouse=True)
@@ -262,3 +263,49 @@ class TestWorkspaceAnalystCLI:
         assert report.exists()
         data = json.loads(report.read_text(encoding="utf-8"))
         assert data["summary"]["total_repos"] >= 1
+
+    def test_v2_report_uses_common_agent_output_scope(
+        self,
+        git_repo: Path,
+        tmp_path: Path,
+    ) -> None:
+        context_root = tmp_path / ".context"
+        scaffold_v2(context_root)
+
+        rc = main([
+            "--scan-roots", str(git_repo.parent),
+            "--context-root", str(context_root),
+            "--stdout", "--quiet",
+        ])
+
+        assert rc == 0
+        report = (
+            context_root
+            / "scratchpad"
+            / "common"
+            / "afs_agents"
+            / "workspace_health.json"
+        )
+        assert report.is_file()
+        assert not (context_root / "scratchpad" / "afs_agents").exists()
+
+    def test_v2_report_rejects_linked_common_agent_output(
+        self,
+        git_repo: Path,
+        tmp_path: Path,
+    ) -> None:
+        context_root = tmp_path / ".context"
+        outside = tmp_path / "outside"
+        scaffold_v2(context_root)
+        outside.mkdir()
+        common = context_root / "scratchpad" / "common"
+        common.symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="symbolic link or reparse point"):
+            main([
+                "--scan-roots", str(git_repo.parent),
+                "--context-root", str(context_root),
+                "--stdout", "--quiet",
+            ])
+
+        assert list(outside.iterdir()) == []

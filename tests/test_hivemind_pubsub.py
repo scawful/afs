@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
+import pytest
+
+from afs.context_layout import scaffold_v2
 from afs.hivemind import HivemindBus, HivemindMessage, HivemindSubscription
+
+
+def _symlink_or_skip(link: Path, target: Path, *, directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"symlinks unavailable: {exc}")
 
 
 def test_message_topic_field(tmp_path: Path) -> None:
@@ -68,6 +79,34 @@ def test_subscribe_creates_file(tmp_path: Path) -> None:
     assert sub_path.exists()
 
 
+def test_subscription_updates_publish_with_atomic_replace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ctx = tmp_path / ".context"
+    ctx.mkdir()
+    (ctx / "hivemind").mkdir()
+    original_replace = os.replace
+    publishes: list[tuple[Path, Path]] = []
+
+    def _track_replace(source, target) -> None:
+        source_path = Path(source)
+        target_path = Path(target)
+        if target_path.parent.name == ".subscriptions":
+            assert source_path.exists()
+            assert source_path.suffix == ".tmp"
+            publishes.append((source_path, target_path))
+        original_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", _track_replace)
+    bus = HivemindBus(ctx)
+    bus.subscribe("agent-a", ["topic-a"])
+    bus.unsubscribe("agent-a", ["topic-a"])
+
+    assert len(publishes) == 2
+    assert all(not source.exists() and target.exists() for source, target in publishes)
+
+
 def test_subscribe_merges_topics(tmp_path: Path) -> None:
     ctx = tmp_path / ".context"
     ctx.mkdir()
@@ -124,3 +163,58 @@ def test_subscription_to_dict_from_dict() -> None:
     restored = HivemindSubscription.from_dict(d)
     assert restored.agent_name == "a"
     assert restored.topics == ["t1", "t2"]
+
+
+def test_v2_hivemind_rejects_linked_subscriptions_directory(
+    tmp_path: Path,
+) -> None:
+    ctx = tmp_path / ".context"
+    scaffold_v2(ctx)
+    outside = tmp_path / "outside-subscriptions"
+    outside.mkdir()
+    subscriptions = ctx / ".afs" / "queue" / "messages" / ".subscriptions"
+    _symlink_or_skip(subscriptions, outside, directory=True)
+    bus = HivemindBus(ctx)
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        bus.get_subscriptions("agent-a")
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        bus.subscribe("agent-a", ["private-topic"])
+
+    assert list(outside.iterdir()) == []
+
+
+def test_v2_hivemind_rejects_linked_subscription_leaf_for_read_and_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = tmp_path / ".context"
+    scaffold_v2(ctx)
+    subscriptions = ctx / ".afs" / "queue" / "messages" / ".subscriptions"
+    subscriptions.mkdir()
+    outside = tmp_path / "outside-subscription.json"
+    outside.write_text(
+        json.dumps(
+            {
+                "agent_name": "agent-a",
+                "topics": ["outside"],
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    _symlink_or_skip(subscriptions / "agent-a.json", outside)
+    bus = HivemindBus(ctx)
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        bus.get_subscriptions("agent-a")
+    # Bypass the normal read-before-write so this also pins the final publish
+    # guard rather than passing only because the linked read was rejected.
+    monkeypatch.setattr(bus, "get_subscriptions", lambda _agent_name: None)
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        bus.subscribe("agent-a", ["private-topic"])
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        bus.unsubscribe("agent-a", ["outside"])
+
+    assert json.loads(outside.read_text(encoding="utf-8"))["topics"] == ["outside"]

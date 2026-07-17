@@ -78,8 +78,10 @@ afs calibration score <ref> --outcome hit|miss|unclear [--note "..."]
 closed missions (next to their acceptance), and predictions, each with a
 ready-to-paste score command. `--markdown` emits a digest section for a
 weekly review document. `score` records outcomes to an append-only JSONL
-trail under `scratchpad/calibration/` and rejects refs that no known store
-contains — a typo'd ref cannot silently poison the trail.
+trail under `scratchpad/common/calibration/` in v2 (and the compatible
+`scratchpad/calibration/` path in v1) and rejects refs that no known store
+contains — a typo'd ref cannot silently poison the trail. V2 reads existing
+pre-fix records from `scratchpad/calibration/` without writing new state there.
 
 The score is itself a judgment: recording one requires re-typing the outcome
 on the terminal (headless callers are refused, exit 2), and each entry

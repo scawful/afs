@@ -404,6 +404,131 @@ def test_supervisor_uses_context_scoped_state_dir(tmp_path: Path) -> None:
     assert supervisor._state_dir == context_root / "scratchpad" / "afs_agents" / "supervisor"
 
 
+@pytest.mark.parametrize("linked_component", ["root", "leaf"])
+def test_v2_supervisor_rejects_linked_default_state_path(
+    tmp_path: Path,
+    monkeypatch,
+    linked_component: str,
+) -> None:
+    from afs.context_paths import resolve_agent_output_root
+
+    monkeypatch.delenv("AFS_AGENT_STATE_DIR", raising=False)
+    context_root = tmp_path / "context"
+    project = tmp_path / "project"
+    project.mkdir()
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+    from afs.manager import AFSManager
+
+    AFSManager(config=config).ensure(
+        path=project,
+        context_root=context_root,
+        layout_version=2,
+    )
+    output_root = resolve_agent_output_root(context_root, config=config, scope_id="common")
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    try:
+        if linked_component == "root":
+            output_root.symlink_to(outside, target_is_directory=True)
+        else:
+            output_root.mkdir()
+            (output_root / "supervisor").symlink_to(
+                outside,
+                target_is_directory=True,
+            )
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link|reparse point"):
+        AgentSupervisor(config=config)
+
+
+@pytest.mark.parametrize("linked_component", ["root", "leaf"])
+def test_v2_supervisor_state_io_rejects_links_added_after_initialization(
+    tmp_path: Path,
+    monkeypatch,
+    linked_component: str,
+) -> None:
+    from afs.manager import AFSManager
+
+    monkeypatch.delenv("AFS_AGENT_STATE_DIR", raising=False)
+    context_root = tmp_path / "context"
+    project = tmp_path / "project"
+    project.mkdir()
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+    AFSManager(config=config).ensure(
+        path=project,
+        context_root=context_root,
+        layout_version=2,
+    )
+    supervisor = AgentSupervisor(config=config)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    poison = outside / "poison.json"
+    poison.write_text(
+        json.dumps(RunningAgent(name="poison", state="running").to_dict()),
+        encoding="utf-8",
+    )
+
+    try:
+        if linked_component == "root":
+            supervisor._state_dir.rmdir()
+            supervisor._state_dir.symlink_to(outside, target_is_directory=True)
+        else:
+            (supervisor._state_dir / "poison.json").symlink_to(poison)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    assert supervisor.list_agents() == []
+    with pytest.raises(ValueError, match="symbolic link|reparse point"):
+        supervisor.status("poison")
+    with pytest.raises(ValueError, match="symbolic link|reparse point"):
+        supervisor._write_state(RunningAgent(name="poison", state="stopped"))
+
+    persisted = json.loads(poison.read_text(encoding="utf-8"))
+    assert persisted["state"] == "running"
+
+
+def test_v2_supervisor_state_io_round_trip(tmp_path: Path, monkeypatch) -> None:
+    from afs.manager import AFSManager
+
+    monkeypatch.delenv("AFS_AGENT_STATE_DIR", raising=False)
+    context_root = tmp_path / "context"
+    project = tmp_path / "project"
+    project.mkdir()
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+    AFSManager(config=config).ensure(
+        path=project,
+        context_root=context_root,
+        layout_version=2,
+    )
+    supervisor = AgentSupervisor(config=config)
+    expected = RunningAgent(name="safe-agent", state="stopped", launch_count=2)
+
+    supervisor._write_state(expected)
+    loaded = supervisor._read_state("safe-agent")
+
+    assert loaded is not None
+    assert loaded.name == "safe-agent"
+    assert loaded.launch_count == 2
+    assert not (supervisor._state_dir / "safe-agent.json").is_symlink()
+
+
+def test_supervisor_rejects_agent_name_path_traversal(tmp_path: Path) -> None:
+    supervisor = AgentSupervisor(state_dir=tmp_path / "state")
+    outside = tmp_path / "outside.json"
+    outside.write_text("do-not-read", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="one safe filesystem segment"):
+        supervisor.status("../../outside")
+    with pytest.raises(ValueError, match="one safe filesystem segment"):
+        supervisor.stop("../../outside")
+
+    assert outside.read_text(encoding="utf-8") == "do-not-read"
+
+
 def test_supervisor_uses_remapped_scratchpad_state_dir(tmp_path: Path) -> None:
     context_root = tmp_path / "context"
     supervisor = AgentSupervisor(

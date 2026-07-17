@@ -18,24 +18,26 @@ CSIRO Data61, or ArcBlock's AIGNE framework (the paper's reference implementatio
 
 ## Concept mapping
 
-The paper's core claim: context engineering needs a persistent, governed,
-filesystem-native substrate — "everything is a file" applied to agent context.
-AFS realises each of the paper's components as follows.
+The paper's core claim is that context engineering benefits from a persistent,
+governed, filesystem-native substrate. AFS adopts that direction, but the table
+below is a design mapping rather than a claim of complete conformance. Some
+rows are mature runtime paths; others are bounded foundations or compatibility
+surfaces.
 
 | Paper concept | AFS realisation |
 |---|---|
-| Uniform namespace with typed mounts | `.context/` roots with typed mounts: `scratchpad`, `memory`, `knowledge`, `history`, `tools`, `items`, `hivemind`, `global` (`context_fs.py`, `context_paths.py`) |
-| Persistent Context Repository | `.context/` directories plus SQLite context index (`context_index.py`) |
-| History — immutable, global source of truth | Event log and history mounts (`event_log.py`, `history.py`); lifecycle events emitted by client wrappers |
-| Memory — indexed, mutable, agent-scoped views | Memory mounts plus consolidation of history into durable entries (`memory_consolidation.py`, `llm_memory.py`) |
-| Scratchpad — transient but auditable workspace | `scratchpad/` mount; default writable working area per agent contract (`AGENTS.md`) |
-| Human input — `/context/human/` annotations | Work-assistant approval records; external writes gated behind human confirmation (`gws_policy.py`, work assistant) |
-| Context Constructor — select artefacts under a token budget, emit a manifest | Token-budgeted context packs with caching (`context_pack.py`); retrieval fuses keyword and semantic search via RRF (`context_index.py`, `embeddings.py`) |
-| Context Loader/Updater — deliver context into the model window | Session bootstrap and client harness; wrappers inject `AFS_SESSION_*` into Claude, Codex, and Gemini CLIs (`session_bootstrap.py`, `scripts/afs-*`) |
-| Context Evaluator — validate outputs, write back with lineage | Schema-validated structured responses (`schema.py`), memory consolidation write-back |
-| Mounting external services (MCP servers as mounts) | AFS MCP server exposing `context.*`, `handoff.*`, and optional tool surfaces (`mcp_server.py`) |
-| Plugin architecture for new backends | Extension system via `afs.toml` and `extension.toml` manifests (`extensions.py`); domain code lives in extension packages |
-| Traceability — every interaction logged | Event history (`events query`), agent run records (`agent_runs.py`), handoff records (`handoff.py`) |
+| Uniform namespace with typed mounts | V1 `.context/` roots use legacy `MountType` roles. Opt-in v2 uses six categories—`history`, `memory`, `scratchpad`, `knowledge`, `tools`, `human`—plus internal `.afs/` state (`context_layout.py`, `models.py`). |
+| Persistent Context Repository | Filesystem context plus rebuildable SQLite/FTS and vector indexes (`context_index.py`, `hybrid_search.py`). Project source remains in place. |
+| History | Append-only AFS event records and history storage (`event_log.py`, `history.py`). Capture covers instrumented AFS paths; it is not a claim that every host/model interaction is recorded. |
+| Memory | Durable entries, readable notes and handoffs, and an optional history-consolidation loop (`artifacts.py`, `handoff.py`, `memory_consolidation.py`). |
+| Scratchpad | Writable working state plus immutable draft notes with explicit promotion/archive (`scratchpad.py`). Other legacy subsystems still use compatibility subpaths. |
+| Human input | V2 reserves `human/`; current work-assistant and agent-gate flows store human approval/rationale state through compatibility storage (`work_assistant.py`, `agents/guardrails.py`). |
+| Context Constructor | Token-budgeted packs plus scoped hybrid retrieval. Ranking uses deterministic reciprocal-rank fusion; semantic retrieval is explicit, not mandatory (`context_pack.py`, `hybrid_search.py`). |
+| Context Loader/Updater | Session bootstrap, packs, and client wrappers deliver bounded context to Claude, Codex, Gemini, and compatible harnesses (`session_bootstrap.py`, `scripts/afs-*`). |
+| Context Evaluator | Structured-response schemas, verification plans, and optimization decision records cover selected workflows; they are not a universal output evaluator (`schema.py`, `verification.py`). |
+| Tool interoperability | The AFS MCP server exposes scoped `context.*`, `messages.*`, `note.*`, and `handoff.*` tools. It exposes AFS to MCP clients; it does not automatically mount arbitrary MCP servers as files (`mcp_server.py`). |
+| Plugin architecture | Validated extension manifests add CLI, MCP, source, and agent surfaces (`extensions.py`). |
+| Traceability | Instrumented event history, agent run records, immutable handoff revisions, and explicit lifecycle events (`agent_runs.py`, `handoff.py`). |
 
 ## Delta beyond the paper
 
@@ -45,21 +47,24 @@ Where AFS extends the abstraction rather than implementing it:
   framework (AIGNE, TypeScript). AFS treats the harness as pluggable: the same
   `.context/` state serves Claude, Codex, and Gemini through session packs and
   wrapper scripts, so context outlives any single vendor's agent runtime.
-- **Cross-language consumers over a file contract.** Non-Python clients and
-  runtime integrations can read the same context roots without depending on
-  AFS internals. This is direct evidence for the paper's thesis: when the
-  filesystem is the interface, integration needs a spec, not a mandatory SDK.
-- **Session handoffs.** Structured records of accomplished work, blockers, and
-  next steps (`handoff.create`) that the next session's bootstrap ingests —
-  cross-session continuity as a first-class protocol rather than a memory
-  side-effect.
-- **Inter-agent coordination.** The hivemind message bus and task items extend
-  the single-agent repository model to explicit multi-agent handoff.
-- **Human governance of external writes.** The paper places humans as
-  verifiers of uncertain memory. AFS additionally gates all agent writes to
-  shared external systems (docs, sheets, tickets) behind approval records
-  executed only with human confirmation.
-- **Operational tooling.** `afs doctor`, health checks, session reaping, and
+- **Central scoped namespace.** V2 separates stable project identity from a
+  checkout path, defaults reads to current-project plus `common`, and requires
+  explicit cross-project authorization. The six visible categories stay small;
+  registries, messages, and indexes live under `.afs/`.
+- **Cross-language file contract.** Non-Python integrations can consume the
+  documented files and MCP schemas without importing AFS internals. This is an
+  interoperability goal supported by current clients, not proof that every AFS
+  subsystem is language-neutral.
+- **Session handoffs.** Immutable Markdown revisions record accomplished work,
+  blockers, and next steps. Revisions link through `supersedes`; acknowledgement
+  and closure are separate append-only lifecycle state.
+- **Inter-agent coordination.** Scoped messages extend the single-agent
+  repository model. `hivemind` remains a deprecated compatibility name.
+- **Human governance of supported external-write flows.** The work assistant
+  represents supported external writes as approval records and requires human
+  confirmation before its connector execution path. This is not a security
+  sandbox and does not intercept arbitrary third-party tools.
+- **Operational tooling.** `afs doctor`, `afs health`, session reaping, and
   janitor integration — the maintenance layer a persistent context store needs
   in practice but a paper does not cover.
 

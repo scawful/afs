@@ -4,15 +4,24 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import stat
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .context_index import _iter_mount_entries
+from .context_index import INDEX_SCAN_SKIP_NAMES, _iter_mount_entries
+from .context_layout import LAYOUT_VERSION, _atomic_write_text, detect_layout_version
 from .context_paths import resolve_agent_output_root, resolve_mount_root
 from .models import MountType
+from .path_safety import (
+    assert_no_linklike_components,
+    is_linklike,
+    iter_regular_files_no_links,
+)
+from .scopes import ResolvedScope, resolve_scope, visible_mount_roots
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +31,15 @@ _DEFAULT_DECAY_HOURS = 168.0  # 1 week
 _STALE_THRESHOLD = 0.3
 
 
-def _iter_mount_files(mount_root: Path):
-    """Yield file entries for a mount, following symlinked mounted directories."""
+def _iter_mount_files(mount_root: Path, *, no_links: bool = False):
+    """Yield mount files, optionally refusing every link-like descendant."""
+    if no_links:
+        for entry in iter_regular_files_no_links(
+            mount_root,
+            skip_names=frozenset(INDEX_SCAN_SKIP_NAMES),
+        ):
+            yield entry, entry.relative_to(mount_root).as_posix()
+        return
     for entry, relative_path in _iter_mount_entries(mount_root):
         try:
             if not entry.is_file():
@@ -59,6 +75,7 @@ def mount_freshness(
     config: Any | None = None,
     decay_hours: float = _DEFAULT_DECAY_HOURS,
     stale_threshold: float = _STALE_THRESHOLD,
+    scoped: ResolvedScope | None = None,
 ) -> dict[str, MountFreshness]:
     """Compute per-mount freshness for all active mounts under a context path.
 
@@ -68,6 +85,7 @@ def mount_freshness(
     Returns a dict keyed by mount_type value (e.g. "memory", "knowledge").
     """
     context_path = context_path.expanduser().resolve()
+    scope = scoped or resolve_scope(context_path)
     decay_seconds = decay_hours * 3600.0
     now = time.time()
     result: dict[str, MountFreshness] = {}
@@ -81,18 +99,32 @@ def mount_freshness(
             continue
         if not mount_root.exists():
             continue
+        roots = visible_mount_roots(mount_root, mount_type=mount_type, scoped=scope)
+        if not roots:
+            continue
 
         file_count = 0
         newest_mtime: float | None = None
+        contributing_root: Path | None = None
 
-        for entry, _relative_path in _iter_mount_files(mount_root):
-            file_count += 1
-            try:
-                mtime = entry.stat().st_mtime
-                if newest_mtime is None or mtime > newest_mtime:
-                    newest_mtime = mtime
-            except OSError:
+        for visible_root in roots:
+            if not visible_root.exists():
                 continue
+            root_file_count = 0
+            for entry, _relative_path in _iter_mount_files(
+                visible_root,
+                no_links=scope.layout_version == LAYOUT_VERSION,
+            ):
+                file_count += 1
+                root_file_count += 1
+                try:
+                    mtime = entry.stat().st_mtime
+                    if newest_mtime is None or mtime > newest_mtime:
+                        newest_mtime = mtime
+                except OSError:
+                    continue
+            if root_file_count and contributing_root is None:
+                contributing_root = visible_root
 
         if file_count == 0:
             continue
@@ -100,7 +132,7 @@ def mount_freshness(
         score = _decay_score(now, newest_mtime, decay_seconds)
 
         result[mount_type.value] = MountFreshness(
-            mount_path=str(mount_root),
+            mount_path=str(contributing_root or roots[0]),
             mount_type=mount_type.value,
             file_count=file_count,
             newest_mtime=newest_mtime,
@@ -169,10 +201,18 @@ class ContextDiffReport:
         }
 
 
-def _snapshot_dir(context_path: Path, config: Any | None = None) -> Path:
+def _snapshot_dir(
+    context_path: Path,
+    config: Any | None = None,
+    *,
+    scope_id: str = "common",
+) -> Path:
     """Resolve the directory where context snapshots are stored."""
-    output_root = resolve_agent_output_root(context_path, config=config)
-    return output_root / _SNAPSHOT_DIR_NAME
+    output_root = resolve_agent_output_root(context_path, config=config, scope_id=scope_id)
+    snapshot_root = output_root / _SNAPSHOT_DIR_NAME
+    if detect_layout_version(context_path) == LAYOUT_VERSION:
+        return assert_no_linklike_components(snapshot_root, boundary=output_root)
+    return snapshot_root
 
 
 def _snapshot_filename(session_id: str) -> str:
@@ -186,6 +226,7 @@ def save_context_snapshot(
     session_id: str,
     *,
     config: Any | None = None,
+    scoped: ResolvedScope | None = None,
 ) -> Path:
     """Save a lightweight (path, mtime, size) snapshot of all mount files.
 
@@ -193,8 +234,19 @@ def save_context_snapshot(
     Returns the path to the saved snapshot file.
     """
     context_path = context_path.expanduser().resolve()
-    snap_dir = _snapshot_dir(context_path, config=config)
+    scope = scoped or resolve_scope(context_path)
+    snap_dir = _snapshot_dir(context_path, config=config, scope_id=scope.scope_id)
     snap_dir.mkdir(parents=True, exist_ok=True)
+    if scope.layout_version == LAYOUT_VERSION:
+        snap_dir = assert_no_linklike_components(
+            snap_dir,
+            boundary=resolve_agent_output_root(
+                context_path,
+                config=config,
+                scope_id=scope.scope_id,
+            ),
+            allow_missing=False,
+        )
 
     entries: list[dict[str, Any]] = []
     for mount_type in MountType:
@@ -206,19 +258,26 @@ def save_context_snapshot(
             continue
         if not mount_root.exists():
             continue
-
-        for entry, relative_path in _iter_mount_files(mount_root):
-            try:
-                st = entry.stat()
-                rel = f"{mount_type.value}/{relative_path}"
-                entries.append({
-                    "path": rel,
-                    "mount_type": mount_type.value,
-                    "mtime": st.st_mtime,
-                    "size": st.st_size,
-                })
-            except OSError:
+        for visible_root in visible_mount_roots(mount_root, mount_type=mount_type, scoped=scope):
+            if not visible_root.exists():
                 continue
+            prefix = visible_root.relative_to(mount_root).as_posix()
+            for entry, relative_path in _iter_mount_files(
+                visible_root,
+                no_links=scope.layout_version == LAYOUT_VERSION,
+            ):
+                try:
+                    st = entry.stat()
+                    scoped_relative = f"{prefix}/{relative_path}" if prefix != "." else relative_path
+                    rel = f"{mount_type.value}/{scoped_relative}"
+                    entries.append({
+                        "path": rel,
+                        "mount_type": mount_type.value,
+                        "mtime": st.st_mtime,
+                        "size": st.st_size,
+                    })
+                except OSError:
+                    continue
 
     payload = {
         "session_id": session_id,
@@ -229,29 +288,74 @@ def save_context_snapshot(
     }
 
     snap_path = snap_dir / _snapshot_filename(session_id)
-    snap_path.write_text(json.dumps(payload, indent=1) + "\n", encoding="utf-8")
+    if scope.layout_version == LAYOUT_VERSION:
+        snap_path = assert_no_linklike_components(snap_path, boundary=snap_dir)
+    _atomic_write_text(snap_path, json.dumps(payload, indent=1) + "\n")
 
     # Prune old snapshots, keeping newest _MAX_SNAPSHOTS
-    _prune_snapshots(snap_dir)
+    _prune_snapshots(
+        snap_dir,
+        harden=scope.layout_version == LAYOUT_VERSION,
+    )
 
     return snap_path
 
 
-def _prune_snapshots(snap_dir: Path) -> None:
+def _snapshot_candidates(
+    snap_dir: Path,
+    *,
+    harden: bool,
+) -> list[tuple[Path, float]]:
+    """Return snapshot leaves and mtimes without following v2 links."""
+
+    candidates: list[tuple[Path, float]] = []
+    for candidate in snap_dir.iterdir():
+        if not candidate.name.startswith("snapshot_"):
+            continue
+        if harden:
+            try:
+                candidate = assert_no_linklike_components(
+                    candidate,
+                    boundary=snap_dir,
+                    allow_missing=False,
+                )
+                candidate_stat = os.lstat(candidate)
+            except (OSError, ValueError):
+                continue
+            if is_linklike(candidate_stat) or not stat.S_ISREG(candidate_stat.st_mode):
+                continue
+        else:
+            try:
+                if not candidate.is_file():
+                    continue
+                candidate_stat = candidate.stat()
+            except OSError:
+                continue
+        candidates.append((candidate, candidate_stat.st_mtime))
+    return candidates
+
+
+def _prune_snapshots(snap_dir: Path, *, harden: bool = False) -> None:
     """Remove oldest snapshots beyond _MAX_SNAPSHOTS."""
     try:
         snapshots = sorted(
-            (f for f in snap_dir.iterdir() if f.is_file() and f.name.startswith("snapshot_")),
-            key=lambda f: f.stat().st_mtime,
+            _snapshot_candidates(snap_dir, harden=harden),
+            key=lambda item: item[1],
             reverse=True,
         )
     except OSError:
         return
 
-    for old in snapshots[_MAX_SNAPSHOTS:]:
+    for old, _mtime in snapshots[_MAX_SNAPSHOTS:]:
         try:
+            if harden:
+                old = assert_no_linklike_components(
+                    old,
+                    boundary=snap_dir,
+                    allow_missing=False,
+                )
             old.unlink()
-        except OSError:
+        except (OSError, ValueError):
             pass
 
 
@@ -260,14 +364,24 @@ def _load_latest_snapshot(
     session_id: str | None = None,
     *,
     config: Any | None = None,
+    scope_id: str = "common",
 ) -> dict[str, Any] | None:
     """Load a snapshot by session_id, or the most recent one if session_id is None."""
-    snap_dir = _snapshot_dir(context_path, config=config)
+    snap_dir = _snapshot_dir(context_path, config=config, scope_id=scope_id)
     if not snap_dir.exists():
         return None
 
     if session_id is not None:
         target = snap_dir / _snapshot_filename(session_id)
+        if detect_layout_version(context_path) == LAYOUT_VERSION:
+            try:
+                target = assert_no_linklike_components(
+                    target,
+                    boundary=snap_dir,
+                    allow_missing=False,
+                )
+            except (OSError, ValueError):
+                return None
         if not target.exists():
             return None
         try:
@@ -277,9 +391,10 @@ def _load_latest_snapshot(
 
     # Find the most recent snapshot
     try:
+        harden = detect_layout_version(context_path) == LAYOUT_VERSION
         snapshots = sorted(
-            (f for f in snap_dir.iterdir() if f.is_file() and f.name.startswith("snapshot_")),
-            key=lambda f: f.stat().st_mtime,
+            _snapshot_candidates(snap_dir, harden=harden),
+            key=lambda item: item[1],
             reverse=True,
         )
     except OSError:
@@ -289,8 +404,15 @@ def _load_latest_snapshot(
         return None
 
     try:
-        return json.loads(snapshots[0].read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        target = snapshots[0][0]
+        if harden:
+            target = assert_no_linklike_components(
+                target,
+                boundary=snap_dir,
+                allow_missing=False,
+            )
+        return json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
         return None
 
 
@@ -299,6 +421,7 @@ def context_diff_since_session(
     session_id: str | None = None,
     *,
     config: Any | None = None,
+    scoped: ResolvedScope | None = None,
 ) -> ContextDiffReport | None:
     """Compare the current filesystem state against a saved snapshot.
 
@@ -307,7 +430,13 @@ def context_diff_since_session(
     Returns None if no snapshot is found.
     """
     context_path = context_path.expanduser().resolve()
-    snapshot = _load_latest_snapshot(context_path, session_id, config=config)
+    scope = scoped or resolve_scope(context_path)
+    snapshot = _load_latest_snapshot(
+        context_path,
+        session_id,
+        config=config,
+        scope_id=scope.scope_id,
+    )
     if snapshot is None:
         return None
 
@@ -328,19 +457,26 @@ def context_diff_since_session(
             continue
         if not mount_root.exists():
             continue
-
-        for fentry, relative_path in _iter_mount_files(mount_root):
-            try:
-                st = fentry.stat()
-                rel = f"{mount_type.value}/{relative_path}"
-                current_entries[(mount_type.value, rel)] = {
-                    "path": rel,
-                    "mount_type": mount_type.value,
-                    "mtime": st.st_mtime,
-                    "size": st.st_size,
-                }
-            except OSError:
+        for visible_root in visible_mount_roots(mount_root, mount_type=mount_type, scoped=scope):
+            if not visible_root.exists():
                 continue
+            prefix = visible_root.relative_to(mount_root).as_posix()
+            for fentry, relative_path in _iter_mount_files(
+                visible_root,
+                no_links=scope.layout_version == LAYOUT_VERSION,
+            ):
+                try:
+                    st = fentry.stat()
+                    scoped_relative = f"{prefix}/{relative_path}" if prefix != "." else relative_path
+                    rel = f"{mount_type.value}/{scoped_relative}"
+                    current_entries[(mount_type.value, rel)] = {
+                        "path": rel,
+                        "mount_type": mount_type.value,
+                        "mtime": st.st_mtime,
+                        "size": st.st_size,
+                    }
+                except OSError:
+                    continue
 
     # Compare
     added: list[dict[str, Any]] = []

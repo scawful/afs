@@ -14,9 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_config_model
+from ..context_layout import LAYOUT_VERSION, _atomic_write_text, detect_layout_version
+from ..context_paths import resolve_agent_output_root
 from ..discovery import discover_contexts
 from ..manager import AFSManager
 from ..models import ContextRoot
+from ..path_safety import assert_no_linklike_components, lexical_absolute
 from ..schema import AFSConfig
 
 VALID_STATUSES: frozenset[str] = frozenset({"ok", "warning", "error", "skipped", "timeout"})
@@ -238,9 +241,12 @@ def emit_result(
     text = json.dumps(payload, indent=2 if pretty else None) + "\n"
 
     if output_path:
-        output_path = output_path.expanduser().resolve()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(text, encoding="utf-8")
+        output_path, is_v2_output = _resolve_result_output_path(output_path)
+        if is_v2_output:
+            _atomic_write_text(output_path, text)
+        else:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(text, encoding="utf-8")
 
     try:
         from ..agent_registry import (
@@ -299,6 +305,40 @@ def emit_result(
 
     if force_stdout or sys.stdout.isatty():
         print(text, end="")
+
+
+def _resolve_result_output_path(output_path: Path) -> tuple[Path, bool]:
+    """Authorize a report destination while retaining legacy v1 overrides."""
+    context_value = os.environ.get("AFS_CONTEXT_ROOT", "").strip()
+    config: AFSConfig | None = None
+    if context_value:
+        context_root = lexical_absolute(Path(context_value))
+    else:
+        config = load_config_model(merge_user=True)
+        context_root = config.general.context_root
+
+    if detect_layout_version(context_root) != LAYOUT_VERSION:
+        return output_path.expanduser().resolve(), False
+
+    resolved_context_root = context_root.expanduser().resolve()
+    output_root = resolve_agent_output_root(
+        resolved_context_root,
+        config=config,
+        scope_id="common",
+    )
+    output_root.mkdir(parents=True, exist_ok=True)
+    output_root = assert_no_linklike_components(
+        output_root,
+        boundary=resolved_context_root,
+        allow_missing=False,
+    )
+    candidate = assert_no_linklike_components(
+        lexical_absolute(output_path),
+        boundary=output_root,
+    )
+    if candidate == output_root:
+        raise ValueError("agent output path must name a file within the common output root")
+    return candidate, True
 
 
 def now_iso() -> str:

@@ -7,25 +7,51 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from ..context_layout import LAYOUT_VERSION, detect_layout_version, resolve_runtime_root
+from ..path_safety import assert_no_linklike_components
 
 if TYPE_CHECKING:
     from .harness import AgentResult
 
 logger = logging.getLogger(__name__)
 
-# Default paths
-DEFAULT_OUTPUT_DIR = Path.home() / ".context" / "training_pools"
+def _default_context_root() -> Path:
+    return Path.home() / ".context"
+
+
+def _training_output_dir(context_root: Path) -> Path:
+    root = context_root.expanduser().resolve()
+    training_root = resolve_runtime_root(
+        root,
+        "training",
+        legacy_relative="training_pools",
+    )
+    if detect_layout_version(root) != LAYOUT_VERSION:
+        return training_root
+    return assert_no_linklike_components(
+        training_root / "pools",
+        boundary=training_root,
+    )
+
+
+# Kept as a public compatibility constant; new HookConfig instances resolve
+# dynamically so a context scaffolded after import still gets the right path.
+DEFAULT_OUTPUT_DIR = _training_output_dir(_default_context_root())
 
 
 @dataclass
 class HookConfig:
     """Configuration for training export hook."""
 
-    output_dir: Path = field(default_factory=lambda: DEFAULT_OUTPUT_DIR)
+    output_dir: Path = field(
+        default_factory=lambda: _training_output_dir(_default_context_root())
+    )
     min_quality: float = 0.6
     domains: list[str] = field(
         default_factory=lambda: ["general", "software", "documentation"]
@@ -79,7 +105,42 @@ class TrainingExportHook:
 
     def __init__(self, config: HookConfig | None = None):
         self.config = config or HookConfig()
+        self._managed_context_root: Path | None = None
+        default_context_root = _default_context_root().expanduser().resolve()
+        if (
+            detect_layout_version(default_context_root) == LAYOUT_VERSION
+            and self.config.output_dir == _training_output_dir(default_context_root)
+        ):
+            self._managed_context_root = default_context_root
         self._scorer = None  # Lazy load
+
+    def _safe_output_path(self, *, create: bool = False) -> Path:
+        """Resolve the default v2 pool without changing explicit/v1 paths."""
+
+        if self._managed_context_root is None:
+            if create:
+                self.config.output_dir.mkdir(parents=True, exist_ok=True)
+            return self.config.output_dir
+        training_root = resolve_runtime_root(
+            self._managed_context_root,
+            "training",
+            legacy_relative="training_pools",
+            create=create,
+        )
+        expected = assert_no_linklike_components(
+            training_root / "pools",
+            boundary=training_root,
+        )
+        if self.config.output_dir != expected:
+            raise ValueError("managed training pool escaped the v2 training root")
+        if create:
+            expected.mkdir(parents=True, exist_ok=True, mode=0o700)
+            expected = assert_no_linklike_components(
+                expected,
+                boundary=training_root,
+                allow_missing=False,
+            )
+        return expected
 
     def _ensure_scorer(self):
         """Lazily load quality scorer."""
@@ -217,18 +278,30 @@ class TrainingExportHook:
     def _append_to_pool(self, sample: TrainingSample, score: float) -> None:
         """Append sample to domain-specific training pool."""
         # Ensure output directory exists
-        self.config.output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = self._safe_output_path(create=True)
 
         # Add quality score to metadata
         sample.metadata["quality_score"] = score
         sample.metadata["export_timestamp"] = datetime.now().isoformat()
 
         # Append to pool file
-        pool_path = self.config.output_dir / f"{sample.domain}_pool.jsonl"
+        pool_path = output_dir / f"{sample.domain}_pool.jsonl"
+        if self._managed_context_root is not None:
+            pool_path = assert_no_linklike_components(
+                pool_path,
+                boundary=output_dir,
+            )
 
         try:
-            with pool_path.open("a") as f:
-                f.write(json.dumps(sample.to_dict()) + "\n")
+            if self._managed_context_root is not None:
+                flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                flags |= getattr(os, "O_NOFOLLOW", 0)
+                descriptor = os.open(pool_path, flags, 0o600)
+                with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(sample.to_dict()) + "\n")
+            else:
+                with pool_path.open("a") as handle:
+                    handle.write(json.dumps(sample.to_dict()) + "\n")
 
             logger.debug(f"Appended sample to {pool_path}")
 
@@ -296,7 +369,11 @@ def create_training_hook(
         Configured TrainingExportHook
     """
     config = HookConfig(
-        output_dir=Path(output_dir) if output_dir else DEFAULT_OUTPUT_DIR,
+        output_dir=(
+            Path(output_dir)
+            if output_dir
+            else _training_output_dir(_default_context_root())
+        ),
         min_quality=min_quality,
         domains=domains or ["general", "software", "documentation"],
     )

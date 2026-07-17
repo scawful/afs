@@ -4,8 +4,43 @@ from pathlib import Path
 
 import pytest
 
+from afs.context_layout import scaffold_v2
 from afs.personal_context import load_personal_context
 from afs.work_assistant import WorkAssistantStore, enrich_logged_event
+
+
+def test_v2_store_rejects_symlinked_default_database(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    outside = tmp_path / "outside.sqlite3"
+    outside.write_text("do not modify", encoding="utf-8")
+    db_path = context_root / ".afs" / "compat" / "global" / "work_assistant.sqlite3"
+    try:
+        db_path.symlink_to(outside)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"file symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        WorkAssistantStore(context_root)
+    assert outside.read_text(encoding="utf-8") == "do not modify"
+
+
+def test_v2_store_rechecks_default_database_root_before_connect(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    store = WorkAssistantStore(context_root)
+    global_root = context_root / ".afs" / "compat" / "global"
+    global_root.rename(global_root.with_name("global-detached"))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        global_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        store.summary()
+    assert list(outside.iterdir()) == []
 
 
 def _human_authorization(

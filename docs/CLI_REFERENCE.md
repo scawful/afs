@@ -25,7 +25,57 @@ Also supported once installed into the active environment:
 - `./scripts/afs context init --path ~/src`
 - `./scripts/afs context discover --path ~/src`
 - `./scripts/afs context ensure-all --path ~/src`
+- `./scripts/afs start --path "$PWD"`
+- `./scripts/afs search "current task" --path "$PWD"`
 - `./scripts/afs graph export --path ~/src`
+
+Top-level `afs init` keeps the legacy v1 directory contract for a new root.
+When its target is an existing authorized v2 root, it preserves that scaffold
+without creating top-level `hivemind`, `global`, or `items` directories; a
+damaged v2 marker fails closed. The guided `afs setup` flow uses the same
+layout-aware initialization. To create a new v2 root explicitly, run
+`afs context init --layout-version 2 --path <project>`.
+
+## Plain-language core
+
+The short command names are the preferred entry points for normal agent and
+operator work. Existing nested commands remain available.
+
+| Command | Purpose / compatibility |
+|---|---|
+| `afs start` | Scoped session bootstrap |
+| `afs search` | Local-first search of current project plus `common` |
+| `afs files` | Alias for `afs fs` |
+| `afs notes` | Durable notes and temporary draft lifecycle |
+| `afs handoff` | Immutable cross-session handoff threads |
+| `afs messages` | Scoped inter-agent messages |
+| `afs projects` | Central v2 project registry |
+| `afs jobs` | Alias for `afs agent-jobs` |
+| `afs missions` | Alias for `afs mission` |
+| `afs check` | Alias for `afs health` |
+| `afs repair` | Alias for `afs doctor` |
+
+Common flows:
+
+```bash
+./scripts/afs start --path "$PWD"
+./scripts/afs search "cache invalidation" --path "$PWD"
+./scripts/afs files list knowledge --path "$PWD"
+./scripts/afs notes draft "Cache investigation" --body-file notes.md
+./scripts/afs notes promote <draft-id>
+./scripts/afs handoff threads --path "$PWD"
+./scripts/afs messages list --path "$PWD"
+./scripts/afs projects current --path "$PWD"
+./scripts/afs jobs status
+./scripts/afs missions list
+./scripts/afs check
+./scripts/afs repair
+```
+
+Durable `afs mission` records use `.context/.afs/compat/items/missions/` in
+v2. The separate legacy mission-runner agent still reads TOML definitions from
+`.context/scratchpad/missions/`; its v2 run output is written under
+`.context/scratchpad/common/missions/`.
 
 ## Profiles
 
@@ -109,9 +159,11 @@ Raw bypass functions are also exposed for installed wrappers, such as
 obvious destructive prompts unless the job or worker uses `--allow-destructive`.
 `agent-hooks status --path <workspace>` prints exact next commands for missing
 hook setup, watchdog status, and the agent job review inbox.
-`agent-runs` writes replayable run records under `scratchpad/agent_runs/`.
-`agent-jobs` writes markdown prompt jobs under
-`items/agent_jobs/{queue,running,done,failed,archived}/`.
+`agent-runs` writes replayable shared records under
+`scratchpad/common/agent_runs/` in v2 and `scratchpad/agent_runs/` in v1.
+`agent-jobs` writes markdown prompt jobs through the legacy `items` role:
+`items/agent_jobs/{queue,running,done,failed,archived}/` in v1 and the
+corresponding `.afs/compat/items/` subtree in v2.
 `agent-jobs status` provides a read-only watchdog summary of queue counts,
 runnable jobs, destructive opt-in blockers, stale running jobs, recent run
 failures, and LaunchAgent state. It exits successfully by default so it can be
@@ -120,8 +172,9 @@ should fail when watchdog checks need attention.
 `agent-jobs inbox` is the review surface for completed reports, failed jobs,
 stale running jobs, and destructive opt-in blockers. Use `agent-jobs review
 <job-id>` to inspect a job with its linked run record, `agent-jobs promote
-<job-id> --to-handoff` to save a useful result under `scratchpad/handoffs/`, and
-`agent-jobs archive <job-id>` after handling it.
+<job-id> --to-handoff` to create a durable common-scope handoff in v2 (or a
+v1 `scratchpad/handoffs/` compatibility file), and `agent-jobs archive
+<job-id>` after handling it.
 `agent-jobs seed` idempotently queues safe report-only background jobs. The
 `repo-maintenance` profile creates daily-deduped stale docs/reference, skill
 drift, MCP/tool drift, TODO/FIXME, verification suggestion, and uncommitted
@@ -206,6 +259,7 @@ aliases, colors, and zsh completion without routing AI harness commands;
 
 ```bash
 ./scripts/afs context init
+./scripts/afs context init --layout-version 2 --path "$PWD"
 ./scripts/afs context ensure
 ./scripts/afs context list
 ./scripts/afs context overview --path "<afs-root>"
@@ -216,7 +270,20 @@ aliases, colors, and zsh completion without routing AI harness commands;
 ./scripts/afs context mount knowledge ~/src/docs --alias docs
 ./scripts/afs context unmount knowledge docs
 ./scripts/afs index rebuild --mount scratchpad
+./scripts/afs projects register "$PWD"
+./scripts/afs layout audit --context-root ~/.context --json
+./scripts/afs layout plan --context-root ~/.context --json
 ```
+
+An explicitly marked version 2 root uses six human-facing categories:
+`history`, `memory`, `scratchpad`, `knowledge`, `tools`, and `human`. Project
+records, messages, and indexes are internal state under `.afs/`. Normal v2
+access is limited to the current registered project plus `common`; a central
+context path by itself does not authorize every project.
+
+`layout audit` is read-only. `layout plan` writes a hash-bound copy/verify plan
+and optional rollback manifest, but does not move data. There is intentionally
+no layout apply command.
 
 Indexed query usage:
 
@@ -228,6 +295,11 @@ Indexed query usage:
 - Use `--prefix` to keep search under a relative subtree like `docs/sqlite/` or `public/`.
 - `--include-content --json` returns full indexed content for each hit; plain text mode shows a compact excerpt.
 - JSON output includes `count`, `entries`, and `index_rebuild` when the command auto-built or auto-refreshed the SQLite index.
+- In v2, query, freshness, and index rebuild scan only the current registered
+  project plus `common`. Cross-project query or rebuild requires the explicit
+  `--all-projects` flag; an ordinary scoped refresh preserves other projects'
+  existing index rows without traversing their directories. Use `--common`
+  when operating directly from the central context root without a project.
 
 Examples:
 
@@ -236,7 +308,28 @@ Examples:
 ./scripts/afs context query sqlite --path "<afs-root>" --mount scratchpad --mount knowledge
 ./scripts/afs context query sqlite --path "<afs-root>" --prefix docs/sqlite/ --limit 10 --include-content --json
 ./scripts/afs index rebuild --path "<afs-root>" --mount scratchpad
+./scripts/afs index rebuild --path "$PWD" --mount knowledge --all-projects
 ```
+
+For version 2 scoped hybrid retrieval, prefer `afs search`:
+
+```bash
+./scripts/afs search "release checklist" --path "$PWD"
+./scripts/afs search "parser symbol" --path "$PWD" --mode symbol
+./scripts/afs search "similar failure" --path "$PWD" --semantic --rebuild
+./scripts/afs search "shared convention" --path "$PWD" --all-projects
+```
+
+The default is local text/symbol retrieval. `--semantic` explicitly enables
+embeddings for the rebuild/query; the default provider is Gemini, stable model
+`gemini-embedding-2`, at 768 dimensions. `--all-projects` is the explicit
+cross-project authorization boundary.
+
+Readable notes and handoffs use immutable filenames of the form
+`YYYY-MM-DDTHHMMSSZ--slug--10charid.md`. `notes promote` copies a draft into
+durable memory with provenance and leaves the draft in place; `notes archive`
+explicitly moves it out of the active scratchpad. `handoff revise` appends a
+superseding revision, while `ack` and `close` record lifecycle state separately.
 
 ## Review
 
@@ -263,7 +356,9 @@ works when `project-a` can be resolved from configured
 `work` manages non-technical work-assistant state in the active context:
 people, project relationships, review routes, communication samples, approval
 requests, and activity.
-This state is native to AFS and backed by `.context/global/work_assistant.sqlite3`.
+This state is native to AFS and backed by the legacy `global` role:
+`.context/global/work_assistant.sqlite3` in v1 and
+`.context/.afs/compat/global/work_assistant.sqlite3` in v2.
 It is intentionally not exposed as a broad MCP CRUD surface.
 
 ```bash
@@ -351,9 +446,11 @@ user's behalf.
 
 `memory consolidate` is the canonical history-to-memory step. It reads new
 metadata-first history events, writes durable summaries into
-`memory/entries.jsonl`, writes markdown summaries into
-`memory/history_consolidation/`, and checkpoints incremental progress under
-`.context/scratchpad/afs_agents/history_memory_checkpoint.json`.
+`memory/common/entries.jsonl`, writes markdown summaries into
+`memory/common/history_consolidation/`, and checkpoints incremental progress
+under `.context/scratchpad/common/afs_agents/history_memory_checkpoint.json`
+in v2. Version 1 retains the paths directly under `memory/` and
+`.context/scratchpad/afs_agents/`.
 
 ## Journal Agent
 
@@ -383,6 +480,7 @@ See `docs/JOURNAL_AGENT.md` for full argument reference and JSON output shape.
 ./scripts/afs session pack "sqlite indexing" --model gemini
 ./scripts/afs session pack "sqlite indexing" --model gemini --workflow scan_fast --task "Find the three most relevant SQLite files"
 ./scripts/afs session pack "sprite" --model gemini --pack-mode retrieval
+./scripts/afs session pack "sprite" --model gemini --semantic  # explicit remote query embedding
 ./scripts/afs session pack --model gemini --pack-mode full_slice
 ./scripts/afs session pack "runtime bug" --model codex --token-budget 12000 --json
 ```
@@ -393,31 +491,40 @@ See `docs/JOURNAL_AGENT.md` for full argument reference and JSON output shape.
 - `context.diff`
 - cheap codebase orientation from `context overview`
 - scratchpad state and deferred notes
-- queued tasks from `items/`
+- queued tasks from the legacy `items` storage role
 - work-assistant people, activity, and pending approval-gated external writes
-- recent `hivemind/` messages
+- recent scoped messages
 - latest durable memory summary
 - bounded bodies for skills matched by `--skills-prompt`, or by the current
   handoff, active missions, and open tasks when no explicit focus is supplied
 
-It also refreshes:
+In v2 it also refreshes these files under the active scoped agent artifact
+directory, `.context/scratchpad/projects/<project-id>/afs_agents/` (or
+`.context/scratchpad/common/afs_agents/` for explicit common scope):
 
-- `.context/scratchpad/afs_agents/session_bootstrap.json`
-- `.context/scratchpad/afs_agents/session_bootstrap.md`
+- `session_bootstrap.json`
+- `session_bootstrap.md`
 
 `session pack` is the explicit follow-on surface when an agent needs a bounded
 working set for Gemini, Claude, Codex, or a generic client. It builds a
-token-budgeted packet from bootstrap state, scratchpad, queued tasks, hivemind,
+token-budgeted packet from bootstrap state, scratchpad, queued tasks, messages,
 durable memory, and indexed retrieval hits, then writes or reuses:
 
-- `.context/scratchpad/afs_agents/session_pack_<model>.json`
-- `.context/scratchpad/afs_agents/session_pack_<model>.md`
+- `session_pack_<model>.json`
+- `session_pack_<model>.md`
+
+Version 1 retains `.context/scratchpad/afs_agents/` for all session artifacts.
 
 `never_index`/`never_export` sensitivity rules are applied to indexed content
 included in the pack, and `never_embed` is applied to embedding hits, so blocked
 paths do not leak into session exports. When the bootstrap snapshot, pack
 inputs, and sensitivity rules have not changed, repeated calls reuse the stored
 artifact instead of rebuilding from scratch.
+
+Session packs are local keyword retrieval by default. `--semantic` is the
+explicit permission boundary for sending the pack query to the configured
+embedding provider. The same opt-in is available on `session prepare-client`;
+without it, neither command creates or invokes a remote query embedder.
 
 Rendered packs keep model-control guidance as a single top-level block instead
 of duplicating it as a normal section. The selectable section budget accounts
@@ -434,6 +541,8 @@ generic session boilerplate when a query is present.
 - `--pack-mode` to choose `focused`, `retrieval`, or `full_slice` context
   shaping depending on whether Gemini needs a narrow query-first pack or a
   broader long-context slice
+- `--semantic` to explicitly permit remote query embeddings; default is local
+  retrieval only
 
 The rendered pack guidance now points at the human CLI surfaces too:
 
@@ -458,8 +567,12 @@ or different model tiers without AFS owning the turn loop.
 ./scripts/afs events replay --session-id "$AFS_SESSION_ID"
 ./scripts/afs session event user_prompt_submit --client codex --session-id "$AFS_SESSION_ID" --prompt "current task"
 ./scripts/afs-session-notify task_progress --task-id bg-1 --summary "Indexing symbols"
-./scripts/afs hivemind reap --dry-run --json
+./scripts/afs messages clean --all-projects --json
 ```
+
+`messages clean` is a dry-run unless `--apply` is supplied. The legacy
+`afs hivemind ...` command remains available for one compatibility cycle; new
+automation should use `afs messages ...`.
 
 `events` reads the active context history log with the same config/context
 resolution as the rest of the CLI. `events analytics` summarizes recent tool
@@ -583,6 +696,7 @@ verification commands are scheduled for removal in AFS `0.4.0`.
 ./scripts/afs training run start ./training/jobs/qwen35-tools-local.toml
 ./scripts/afs training run status <run-id>
 ./scripts/afs training run stop <run-id>
+./scripts/afs training memory-export --path ~/src/project-a --output ./memory.jsonl
 
 ./scripts/afs training freshness-gate --path ~/src/project-a
 ./scripts/afs training freshness-gate --path ~/src/project-a --warn-only --json
@@ -600,13 +714,20 @@ role counts, and tool-call counts.
 operators and agents can prune disruptive samples before launching a run.
 
 `training run start` launches a detached job from a JSON/TOML spec and writes
-status, event, artifact, and log paths under `scratchpad/training/runs/<run-id>`.
+status, event, artifact, and log paths under
+`.context/scratchpad/common/training/runs/<run-id>/` in v2. Version 1 retains
+`.context/scratchpad/training/runs/<run-id>/`.
 
 See `docs/examples/training_run.example.toml` for a minimal spec layout.
 
 `training run status` refreshes the stored status snapshot against the live
 process table. `training run stop` terminates the recorded process group and
 updates the run artifact.
+
+In v2, `training memory-export` requires `--path` (or the current directory) to
+resolve to a registered project and exports only that project's memory plus
+common memory. `--memory-root` is an explicit administrative override that
+bypasses project scope; v1 retains its recursive memory-root behavior.
 
 `training freshness-gate` checks per-mount context freshness before training and
 returns a blocking or warning-only readiness report.
@@ -667,6 +788,12 @@ and `AFS_PREFER_REPO_CONFIG=1` so Claude uses the repo-local AFS config.
 ## Embeddings
 
 ```bash
+# Recommended scoped retrieval (local by default)
+./scripts/afs search "sprite RAM tables" --path "$PWD"
+
+# Explicit semantic rebuild/query with stable Gemini embeddings
+./scripts/afs search "how to debug a sprite" --path "$PWD" --semantic --rebuild
+
 # Index with keyword-only (no embedding provider needed)
 ./scripts/afs embeddings index --knowledge-path ~/.context/knowledge --provider none --include "*.md"
 
@@ -690,6 +817,12 @@ and `AFS_PREFER_REPO_CONFIG=1` so Claude uses the repo-local AFS config.
 
 Embedding providers: `none` (keyword-only), `ollama`, `hf` (HuggingFace), `openai`, `gemini`.
 
+`afs search` is the version 2 user-facing API. It filters scope before ranking,
+uses local retrieval unless `--semantic` is present, and defaults semantic
+Gemini collections to stable `gemini-embedding-2` at 768 dimensions. The
+`afs embeddings ...` commands remain the lower-level collection and evaluation
+API.
+
 For Gemini, the system auto-selects the correct task type: `RETRIEVAL_DOCUMENT` for
 indexing, `RETRIEVAL_QUERY` for search queries (asymmetric retrieval). Override with
 `--gemini-task-type`.
@@ -704,7 +837,11 @@ indexing, `RETRIEVAL_QUERY` for search queries (asymmetric retrieval). Override 
 ```
 
 Context-source providers are extension-owned and provider-neutral. See
-`docs/CONTEXT_SOURCES.md`.
+`docs/CONTEXT_SOURCES.md`. `sources sync` materializes only in v1 under
+`.context/items/sources/`. In v2 it fails before provider invocation until
+scoped ingestion can route project records to
+`knowledge/projects/<project-id>/` or, with an explicit shared choice,
+`knowledge/common/`. Provider `list` and `status` remain available in v2.
 
 ## Antigravity CLI
 
@@ -819,11 +956,15 @@ AFS heuristic for avoiding explicit cache creation on tiny prefixes.
 Useful Gemini-oriented MCP operations:
 
 - `afs.session.bootstrap` for the full session-start packet
-- `context.query` for indexed path/content search
+- `context.search` for scoped local-first hybrid retrieval
+- `context.query` for SQLite path/content search
 - `context.status` for mount counts, mount health, profile, and index health
 - `context.read`, `context.write`, and `context.list` for context file access
+- `messages.send` and `messages.read` for scoped coordination
+- `note.create`, `note.read`, and `note.list` for durable Markdown notes
+- `handoff.create`, `handoff.read`, and `handoff.list` for immutable revisions
 
-The default MCP `tools/list` response is deliberately tiny so models do not
+The default MCP `tools/list` response is deliberately focused so models do not
 have to choose among every administrative surface. Use the CLI/framework for
 session packs, work preflight, approvals, repair, handoff, verification,
 training, and diagnostics. Set `AFS_MCP_TOOL_CATALOG=full` or pass
@@ -878,8 +1019,9 @@ not a wall-clock morning schedule, and starting the supervisor remains an
 explicit operator action.
 
 The supervisor stores state under
-`.context/scratchpad/afs_agents/supervisor/` by default, so repo- or
-context-scoped configs do not get shadowed by a single global PID cache.
+`.context/scratchpad/common/afs_agents/supervisor/` in v2 and
+`.context/scratchpad/afs_agents/supervisor/` in v1, so repo- or context-scoped
+configs do not get shadowed by a single global PID cache.
 
 If you want background services to stay pinned to a repo-local config and
 `.context`, start them with `--config`:
@@ -936,7 +1078,7 @@ Client launch wrappers:
 
 These wrappers prefer repo-local config, refresh the session bootstrap packet,
 and export the bootstrap artifact paths before launching the client. They also
-export a shared `AFS_SESSION_ID`, so MCP tool calls, embeddings, hivemind
+export a shared `AFS_SESSION_ID`, so MCP tool calls, embeddings, message
 traffic, and CLI actions can be replayed later with `afs events replay`.
 Set `AFS_GEMINI_MCP_ALLOWED_ROOTS` or `AFS_CLIENT_MCP_ALLOWED_ROOTS` if you want
 wrapper-local path defaults without exporting `AFS_MCP_ALLOWED_ROOTS` globally.
@@ -971,9 +1113,10 @@ full `doctor` run and skips operator-only checks like service registration
 state.
 
 `context-warm` and `context-watch` now write
-`.context/scratchpad/afs_agents/doctor_snapshot.json` so `afs health` can
-surface the latest maintenance-time diagnosis even when you have not run the
-doctor manually.
+`.context/scratchpad/common/afs_agents/doctor_snapshot.json` in v2 (or
+`.context/scratchpad/afs_agents/doctor_snapshot.json` in v1) so `afs health`
+can surface the latest maintenance-time diagnosis even when you have not run
+the doctor manually.
 
 ## Health
 

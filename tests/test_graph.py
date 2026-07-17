@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
-from afs.graph import build_graph
+import pytest
+
+from afs.cli.context import graph_export_command
+from afs.context_layout import audit_layout, scaffold_v2
+from afs.graph import build_graph, default_graph_path, write_graph
 from afs.manager import AFSManager
 from afs.schema import AFSConfig, GeneralConfig, WorkspaceDirectory
 
@@ -71,3 +76,70 @@ def test_build_graph_includes_source_bucket_and_project_nodes(tmp_path: Path) ->
     assert (project_id, project_section_id, "contains") in edges
     assert (mount_dir_id, source_path_id, "source") in edges
     assert (mount_id, source_path_id, "source") in edges
+
+
+def test_v2_default_graph_export_stays_in_managed_runtime_state(
+    tmp_path: Path,
+) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+
+    output = default_graph_path(config)
+    write_graph({"nodes": [], "edges": []}, output, context_root=context_root)
+
+    assert output == context_root / ".afs" / "graph" / "afs_graph.json"
+    assert output.is_file()
+    assert not (context_root / "index").exists()
+    assert audit_layout(context_root).valid is True
+
+
+def test_graph_export_command_uses_v2_default_without_raw_index(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+
+    monkeypatch.setattr("afs.config.load_config_model", lambda **_kwargs: config)
+    monkeypatch.setattr("afs.discovery.discover_contexts", lambda **_kwargs: [object()])
+    monkeypatch.setattr(
+        "afs.graph.build_graph",
+        lambda **_kwargs: {"nodes": [], "edges": []},
+    )
+    args = argparse.Namespace(
+        config=None,
+        path=[str(tmp_path)],
+        ignore=None,
+        max_depth=3,
+        output=None,
+    )
+
+    assert graph_export_command(args) == 0
+    assert (context_root / ".afs" / "graph" / "afs_graph.json").is_file()
+    assert not (context_root / "index").exists()
+    assert audit_layout(context_root).valid is True
+
+
+def test_v1_default_graph_path_remains_index(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+
+    assert default_graph_path(config) == context_root / "index" / "afs_graph.json"
+
+
+def test_v2_default_graph_path_rejects_linked_runtime_root(tmp_path: Path) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    graph_root = context_root / ".afs" / "graph"
+    try:
+        graph_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"symlinks unavailable: {exc}")
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        default_graph_path(config)

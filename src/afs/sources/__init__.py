@@ -8,6 +8,7 @@ from .models import (
     SourceSyncResult,
 )
 from .registry import (
+    assert_source_materialization_supported,
     discover_source_provider_specs,
     load_source_provider,
     load_source_providers,
@@ -20,6 +21,7 @@ __all__ = [
     "ContextSourceRecord",
     "SourceProviderSpec",
     "SourceSyncResult",
+    "assert_source_materialization_supported",
     "discover_source_provider_specs",
     "load_source_provider",
     "load_source_providers",

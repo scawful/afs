@@ -9,6 +9,7 @@ from typing import Any
 
 from ..manager import AFSManager
 from ..sources import (
+    assert_source_materialization_supported,
     discover_source_provider_specs,
     load_source_providers,
     materialize_source_records,
@@ -75,6 +76,11 @@ def _sources_status(args: argparse.Namespace) -> int:
 
 def _sources_sync(args: argparse.Namespace) -> int:
     config, _manager, context_path = _load_manager_and_context(args)
+    try:
+        assert_source_materialization_supported(context_path)
+    except ValueError as exc:
+        print(str(exc))
+        return 2
     providers = load_source_providers(config=config)
     provider = providers.get(args.provider)
     if provider is None:
@@ -96,7 +102,10 @@ def _sources_sync(args: argparse.Namespace) -> int:
     action = "would write" if result.dry_run else "wrote"
     print(f"{action} {len(result.records)} record(s) under {result.target_dir}")
     if result.dry_run:
-        print("Dry run only. Re-run with --apply to write .context/items source files.")
+        print(
+            "Dry run only. Re-run with --apply to write v1 "
+            ".context/items/sources files."
+        )
     return 0
 
 
@@ -116,13 +125,20 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     status_parser.add_argument("--json", action="store_true", help="Print JSON.")
     status_parser.set_defaults(func=_sources_status)
 
-    sync_parser = sub.add_parser("sync", help="Sync records from a source provider into .context/items.")
+    sync_parser = sub.add_parser(
+        "sync",
+        help="Sync provider records into v1 .context/items (v2 scoped ingestion pending).",
+    )
     sync_parser.add_argument("--provider", required=True, help="Provider name.")
     sync_parser.add_argument("--query", default="", help="Provider query/filter.")
     sync_parser.add_argument("--limit", type=int, default=50, help="Maximum records to request.")
     sync_parser.add_argument("--path", help="Workspace/project path.")
     sync_parser.add_argument("--context-root", help="Context root override.")
     sync_parser.add_argument("--context-dir", help="Context dir name override.")
-    sync_parser.add_argument("--apply", action="store_true", help="Write records to .context/items.")
+    sync_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write records to v1 .context/items (unavailable for v2).",
+    )
     sync_parser.add_argument("--json", action="store_true", help="Print JSON.")
     sync_parser.set_defaults(func=_sources_sync)

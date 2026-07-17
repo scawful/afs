@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -13,13 +14,17 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_config_model
+from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_paths import resolve_mount_root
 from .core import find_root, resolve_context_root
+from .index_storage import fsync_directory
 from .models import MountType
+from .path_safety import assert_no_linklike_components, lexical_absolute
 
 SENSITIVE_MARKERS = ("key", "token", "secret", "password")
 EVENT_FILE_PREFIX = "events"
 DEFAULT_MAX_INLINE_CHARS = 4000
+SAFE_HISTORY_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 # Structured event type constants
 EVENT_MCP_TOOL = "mcp_tool"
@@ -66,6 +71,19 @@ class HistoryEvent:
         return payload
 
 
+@dataclass(frozen=True)
+class _HistoryRouting:
+    """Resolved storage roots for one history namespace."""
+
+    write_root: Path
+    context_root: Path | None = None
+    legacy_root: Path | None = None
+
+    @property
+    def is_v2(self) -> bool:
+        return self.context_root is not None
+
+
 def _should_redact(arg: str) -> bool:
     lowered = arg.lower()
     return any(marker in lowered for marker in SENSITIVE_MARKERS)
@@ -105,13 +123,287 @@ def _resolve_context_root(start_dir: Path | None = None) -> Path | None:
         return None
 
 
+def _assert_v2_context_root(context_root: Path) -> Path:
+    """Validate the v2 namespace root itself without following a replacement."""
+
+    root = lexical_absolute(context_root)
+    return assert_no_linklike_components(
+        root,
+        boundary=root.parent,
+        allow_missing=False,
+    )
+
+
+def _v2_routing_for_context(context_root: Path) -> _HistoryRouting | None:
+    """Return fixed v2 history routing, or ``None`` for a genuine v1 root."""
+
+    lexical_root = lexical_absolute(context_root)
+    if detect_layout_version(lexical_root) != LAYOUT_VERSION:
+        return None
+    safe_context = _assert_v2_context_root(lexical_root)
+    legacy_root = assert_no_linklike_components(
+        safe_context / "history",
+        boundary=safe_context,
+    )
+    write_root = assert_no_linklike_components(
+        legacy_root / "common",
+        boundary=safe_context,
+    )
+    return _HistoryRouting(
+        write_root=write_root,
+        context_root=safe_context,
+        legacy_root=legacy_root,
+    )
+
+
+def _v2_routing_for_history_root(history_root: Path) -> _HistoryRouting | None:
+    """Recognize either the v2 category root or its canonical common ledger."""
+
+    root = lexical_absolute(history_root)
+    candidates: list[Path] = []
+    if root.name == "history":
+        candidates.append(root.parent)
+    if root.name == "common" and root.parent.name == "history":
+        candidates.append(root.parent.parent)
+
+    for context_root in candidates:
+        routing = _v2_routing_for_context(context_root)
+        if routing is None:
+            continue
+        if root in {routing.legacy_root, routing.write_root}:
+            return routing
+    return None
+
+
+def resolve_history_root(
+    context_root: Path,
+    *,
+    config: Any | None = None,
+) -> Path:
+    """Resolve the live event ledger, using ``history/common`` for v2.
+
+    Version 1 keeps its metadata/config remapping behavior, including external
+    history roots.  Version 2 is intentionally fixed beneath the central
+    namespace and cannot be redirected through compatibility metadata.
+    """
+
+    routing = _v2_routing_for_context(context_root)
+    if routing is not None:
+        return routing.write_root
+    return resolve_mount_root(
+        context_root,
+        MountType.HISTORY,
+        config=config,
+    )
+
+
+def _routing_for_history_root(history_root: Path) -> _HistoryRouting:
+    routing = _v2_routing_for_history_root(history_root)
+    if routing is not None:
+        return routing
+    return _HistoryRouting(write_root=history_root.expanduser())
+
+
+def _ensure_history_root(routing: _HistoryRouting) -> Path:
+    root = routing.write_root
+    if not routing.is_v2:
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    assert routing.context_root is not None
+    assert_no_linklike_components(root, boundary=routing.context_root)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return assert_no_linklike_components(
+        root,
+        boundary=routing.context_root,
+        allow_missing=False,
+    )
+
+
+def _safe_v2_leaf(
+    path: Path,
+    routing: _HistoryRouting,
+    *,
+    allow_missing: bool,
+    boundary: Path | None = None,
+) -> Path:
+    assert routing.context_root is not None
+    _assert_v2_context_root(routing.context_root)
+    trusted_boundary = boundary or routing.context_root
+    assert_no_linklike_components(
+        trusted_boundary,
+        boundary=routing.context_root,
+        allow_missing=allow_missing,
+    )
+    return assert_no_linklike_components(
+        path,
+        boundary=trusted_boundary,
+        allow_missing=allow_missing,
+    )
+
+
+def _open_text_no_follow(path: Path, flags: int, *, mode: int = 0o600):
+    """Open a text file without following its leaf link where supported."""
+
+    descriptor = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), mode)
+    return os.fdopen(descriptor, "r" if flags == os.O_RDONLY else "w", encoding="utf-8")
+
+
+def _seed_v2_legacy_log(routing: _HistoryRouting, legacy_path: Path) -> None:
+    """Publish one byte-identical legacy log into the canonical ledger once.
+
+    Existing positional reactor offsets are keyed by the daily filename.  A
+    byte-identical copy therefore lets an initialized pre-v2 reactor resume at
+    the exact unread byte after the layout upgrade instead of pruning its
+    checkpoint when ``history/common`` first appears.
+    """
+
+    assert routing.is_v2
+    assert routing.context_root is not None
+    assert routing.legacy_root is not None
+    legacy_path = _safe_v2_leaf(
+        legacy_path,
+        routing,
+        allow_missing=False,
+        boundary=routing.legacy_root,
+    )
+    if not legacy_path.is_file():
+        return
+    canonical_path = _safe_v2_leaf(
+        routing.write_root / legacy_path.name,
+        routing,
+        allow_missing=True,
+        boundary=routing.write_root,
+    )
+    if canonical_path.exists():
+        _safe_v2_leaf(
+            canonical_path,
+            routing,
+            allow_missing=False,
+            boundary=routing.write_root,
+        )
+        return
+
+    temp_path = _safe_v2_leaf(
+        routing.write_root / f".{legacy_path.name}.{uuid.uuid4().hex}.tmp",
+        routing,
+        allow_missing=True,
+        boundary=routing.write_root,
+    )
+    source_fd = os.open(legacy_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    destination_fd: int | None = None
+    try:
+        destination_fd = os.open(
+            temp_path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_fd, view)
+                view = view[written:]
+        os.fsync(destination_fd)
+        os.close(destination_fd)
+        destination_fd = None
+        try:
+            os.link(temp_path, canonical_path, follow_symlinks=False)
+            fsync_directory(routing.write_root)
+        except FileExistsError:
+            _safe_v2_leaf(
+                canonical_path,
+                routing,
+                allow_missing=False,
+                boundary=routing.write_root,
+            )
+    finally:
+        os.close(source_fd)
+        if destination_fd is not None:
+            os.close(destination_fd)
+        temp_path.unlink(missing_ok=True)
+
+
+def prepare_history_reactor_root(
+    context_root: Path,
+    *,
+    config: Any | None = None,
+) -> Path:
+    """Return the live ledger after safely seeding pre-fix v2 daily logs."""
+
+    routing = _v2_routing_for_context(context_root)
+    if routing is None:
+        return resolve_mount_root(
+            context_root,
+            MountType.HISTORY,
+            config=config,
+        )
+    _ensure_history_root(routing)
+    assert routing.legacy_root is not None
+    for legacy_path in sorted(
+        routing.legacy_root.glob(f"{EVENT_FILE_PREFIX}_*.jsonl")
+    ):
+        _seed_v2_legacy_log(routing, legacy_path)
+    return routing.write_root
+
+
+def _write_text(path: Path, text: str, *, append: bool, routing: _HistoryRouting) -> None:
+    if not routing.is_v2:
+        with path.open("a" if append else "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return
+
+    _safe_v2_leaf(path, routing, allow_missing=True)
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else os.O_TRUNC)
+    with _open_text_no_follow(path, flags) as handle:
+        handle.write(text)
+
+
+def _read_text(path: Path, *, routing: _HistoryRouting) -> str:
+    if not routing.is_v2:
+        return path.read_text(encoding="utf-8")
+    _safe_v2_leaf(path, routing, allow_missing=False)
+    with _open_text_no_follow(path, os.O_RDONLY) as handle:
+        return handle.read()
+
+
+def _open_text_reader(path: Path, *, routing: _HistoryRouting):
+    if not routing.is_v2:
+        return path.open("r", encoding="utf-8")
+    _safe_v2_leaf(path, routing, allow_missing=False)
+    return _open_text_no_follow(path, os.O_RDONLY)
+
+
 def _history_log_path(context_root: Path | None) -> Path | None:
     if context_root is None:
         return None
-    history_dir = resolve_mount_root(context_root, MountType.HISTORY)
-    history_dir.mkdir(parents=True, exist_ok=True)
+    history_dir = resolve_history_root(context_root)
+    routing = _routing_for_history_root(history_dir)
+    history_dir = _ensure_history_root(routing)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
-    return history_dir / f"{EVENT_FILE_PREFIX}_{stamp}.jsonl"
+    path = history_dir / f"{EVENT_FILE_PREFIX}_{stamp}.jsonl"
+    if routing.is_v2:
+        assert routing.legacy_root is not None
+        legacy_path = _safe_v2_leaf(
+            routing.legacy_root / path.name,
+            routing,
+            allow_missing=True,
+            boundary=routing.legacy_root,
+        )
+        if legacy_path.exists():
+            _seed_v2_legacy_log(routing, legacy_path)
+        path = _safe_v2_leaf(
+            path,
+            routing,
+            allow_missing=True,
+            boundary=history_dir,
+        )
+    return path
 
 
 def _parse_timestamp(timestamp: str | None) -> datetime:
@@ -135,9 +427,27 @@ def _current_session_id() -> str | None:
 
 
 def _history_log_path_for_root(history_root: Path, event_time: datetime) -> Path:
-    history_root.mkdir(parents=True, exist_ok=True)
+    routing = _routing_for_history_root(history_root)
+    history_root = _ensure_history_root(routing)
     stamp = event_time.strftime("%Y%m%d")
-    return history_root / f"{EVENT_FILE_PREFIX}_{stamp}.jsonl"
+    path = history_root / f"{EVENT_FILE_PREFIX}_{stamp}.jsonl"
+    if routing.is_v2:
+        assert routing.legacy_root is not None
+        legacy_path = _safe_v2_leaf(
+            routing.legacy_root / path.name,
+            routing,
+            allow_missing=True,
+            boundary=routing.legacy_root,
+        )
+        if legacy_path.exists():
+            _seed_v2_legacy_log(routing, legacy_path)
+        path = _safe_v2_leaf(
+            path,
+            routing,
+            allow_missing=True,
+            boundary=history_root,
+        )
+    return path
 
 
 def _history_payload_path(
@@ -146,10 +456,45 @@ def _history_payload_path(
     event_id: str,
     timestamp: str,
 ) -> Path:
+    routing = _routing_for_history_root(history_dir)
+    history_dir = _ensure_history_root(routing)
+    if routing.is_v2 and not SAFE_HISTORY_NAME.fullmatch(payload_dir_name):
+        raise ValueError(
+            "v2 history payload_dir_name must be one safe filesystem segment"
+        )
+    if routing.is_v2 and not SAFE_HISTORY_NAME.fullmatch(event_id):
+        raise ValueError("v2 history event_id contains unsafe filesystem characters")
     payload_dir = history_dir / payload_dir_name
-    payload_dir.mkdir(parents=True, exist_ok=True)
-    stamp = timestamp.replace(":", "").replace("-", "")
-    return payload_dir / f"{stamp}_{event_id}.json"
+    if routing.is_v2:
+        payload_dir = _safe_v2_leaf(
+            payload_dir,
+            routing,
+            allow_missing=True,
+            boundary=history_dir,
+        )
+        payload_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        payload_dir = _safe_v2_leaf(
+            payload_dir,
+            routing,
+            allow_missing=False,
+            boundary=history_dir,
+        )
+    else:
+        payload_dir.mkdir(parents=True, exist_ok=True)
+    stamp = (
+        _parse_timestamp(timestamp).strftime("%Y%m%dT%H%M%S%fZ")
+        if routing.is_v2
+        else timestamp.replace(":", "").replace("-", "")
+    )
+    path = payload_dir / f"{stamp}_{event_id}.json"
+    if routing.is_v2:
+        path = _safe_v2_leaf(
+            path,
+            routing,
+            allow_missing=True,
+            boundary=payload_dir,
+        )
+    return path
 
 
 def _normalize_payload(payload: Any) -> dict[str, Any]:
@@ -229,6 +574,7 @@ def append_history_event(
 
     event_time = _parse_timestamp(timestamp)
     log_path = _history_log_path_for_root(history_root, event_time)
+    routing = _routing_for_history_root(log_path.parent)
 
     event_id = event_id or uuid.uuid4().hex[:12]
     timestamp_value = timestamp or event_time.isoformat()
@@ -258,7 +604,12 @@ def append_history_event(
                 event_id,
                 timestamp_value,
             )
-            payload_path.write_text(serialized, encoding="utf-8")
+            _write_text(
+                payload_path,
+                serialized,
+                append=False,
+                routing=routing,
+            )
             payload_ref = str(payload_path.relative_to(history_dir))
             payload_preview = serialized[:max_inline]
             payload_sha256 = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -266,7 +617,7 @@ def append_history_event(
             payload_data = normalized
             payload_sha256 = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
-    context_value = context_root
+    context_value = context_root or routing.context_root
     if context_value is None:
         candidate_context = history_root.parent
         if history_root == resolve_mount_root(candidate_context, MountType.HISTORY, config=config):
@@ -287,8 +638,12 @@ def append_history_event(
     )
 
     event_payload = event.to_dict()
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event_payload, ensure_ascii=False) + "\n")
+    _write_text(
+        log_path,
+        json.dumps(event_payload, ensure_ascii=False) + "\n",
+        append=True,
+        routing=routing,
+    )
 
     _maybe_enrich_work_assistant(context_value, event_payload)
 
@@ -321,6 +676,7 @@ def log_event(
     log_path = _history_log_path(resolved_root)
     if log_path is None:
         return None
+    routing = _routing_for_history_root(log_path.parent)
 
     event_id = uuid.uuid4().hex[:12]
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -361,7 +717,12 @@ def log_event(
                 event_id,
                 timestamp,
             )
-            payload_path.write_text(serialized, encoding="utf-8")
+            _write_text(
+                payload_path,
+                serialized,
+                append=False,
+                routing=routing,
+            )
             payload_ref = str(payload_path.relative_to(history_dir))
             payload_preview = serialized[:max_inline]
             payload_sha256 = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -384,8 +745,12 @@ def log_event(
     )
 
     event_payload = event.to_dict()
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event_payload, ensure_ascii=False) + "\n")
+    _write_text(
+        log_path,
+        json.dumps(event_payload, ensure_ascii=False) + "\n",
+        append=True,
+        routing=routing,
+    )
 
     _maybe_enrich_work_assistant(resolved_root, event_payload)
 
@@ -414,12 +779,67 @@ def iter_history_events(
     include_payloads: bool = True,
 ) -> Iterable[dict[str, Any]]:
     """Iterate history events from a history root."""
-    if not history_root.exists():
-        return
+    routing = _routing_for_history_root(history_root)
+    if routing.is_v2:
+        assert routing.context_root is not None
+        roots = tuple(
+            dict.fromkeys(
+                root
+                for root in (routing.legacy_root, routing.write_root)
+                if root is not None
+            )
+        )
+        safe_roots: list[Path] = []
+        for root in roots:
+            try:
+                safe_root = _safe_v2_leaf(root, routing, allow_missing=True)
+            except (OSError, ValueError):
+                continue
+            if safe_root.is_dir():
+                safe_roots.append(safe_root)
+        log_paths: list[tuple[str, int, Path, Path]] = []
+        for priority, root in enumerate(safe_roots):
+            for path in root.glob(f"{EVENT_FILE_PREFIX}_*.jsonl"):
+                try:
+                    path = _safe_v2_leaf(path, routing, allow_missing=False)
+                except (OSError, ValueError):
+                    continue
+                if path.is_file():
+                    log_paths.append((path.name, priority, path, root))
+        ordered_paths = [
+            (path, root)
+            for _, _, path, root in sorted(log_paths, key=lambda item: (item[0], item[1]))
+        ]
+        canonical_event_ids: set[str] = set()
+        for path, root in ordered_paths:
+            if root != routing.write_root:
+                continue
+            try:
+                with _open_text_reader(path, routing=routing) as handle:
+                    for line in handle:
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(event, dict):
+                            event_id = str(event.get("id", "")).strip()
+                            if event_id:
+                                canonical_event_ids.add(event_id)
+            except (OSError, ValueError):
+                continue
+    else:
+        if not history_root.exists():
+            return
+        ordered_paths = [
+            (path, history_root)
+            for path in sorted(history_root.glob(f"{EVENT_FILE_PREFIX}_*.jsonl"))
+        ]
+        canonical_event_ids = set()
 
-    for path in sorted(history_root.glob(f"{EVENT_FILE_PREFIX}_*.jsonl")):
+    seen_event_ids: set[str] = set()
+    for path, source_root in ordered_paths:
         try:
-            with path.open("r", encoding="utf-8") as handle:
+            with _open_text_reader(path, routing=routing) as handle:
                 for line in handle:
                     line = line.strip()
                     if not line:
@@ -428,15 +848,43 @@ def iter_history_events(
                         event = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(event, dict):
+                        continue
                     event_type = str(event.get("type", ""))
                     if event_types and event_type not in event_types:
                         continue
+                    event_id = str(event.get("id", "")).strip()
+                    if routing.is_v2 and event_id:
+                        if (
+                            source_root == routing.legacy_root
+                            and event_id in canonical_event_ids
+                        ):
+                            continue
+                        if event_id in seen_event_ids:
+                            continue
+                        seen_event_ids.add(event_id)
                     if include_payloads:
-                        payload = load_history_payload(event, history_root)
+                        payload = _load_history_payload_from_root(
+                            event,
+                            source_root,
+                            routing=routing,
+                        )
+                        if (
+                            payload is None
+                            and routing.is_v2
+                            and source_root == routing.write_root
+                            and routing.legacy_root is not None
+                        ):
+                            payload = _load_history_payload_from_root(
+                                event,
+                                routing.legacy_root,
+                                routing=routing,
+                                require_sha256=True,
+                            )
                         if payload is not None:
                             event["payload"] = payload
                     yield event
-        except OSError:
+        except (OSError, ValueError):
             continue
 
 
@@ -578,17 +1026,71 @@ def log_session_event(
     )
 
 
-def load_history_payload(event: dict[str, Any], history_root: Path) -> dict[str, Any] | None:
-    """Load a payload referenced by a history event."""
+def _load_history_payload_from_root(
+    event: dict[str, Any],
+    source_root: Path,
+    *,
+    routing: _HistoryRouting,
+    require_sha256: bool = False,
+) -> dict[str, Any] | None:
     if "payload" in event and isinstance(event["payload"], dict):
         return event["payload"]
     payload_ref = event.get("payload_ref")
-    if not payload_ref:
+    if not isinstance(payload_ref, str) or not payload_ref:
         return None
     payload_path = Path(payload_ref)
-    if not payload_path.is_absolute():
-        payload_path = history_root / payload_ref
+    if routing.is_v2:
+        if payload_path.is_absolute():
+            return None
+        try:
+            payload_path = assert_no_linklike_components(
+                source_root / payload_path,
+                boundary=source_root,
+                allow_missing=False,
+            )
+        except (OSError, ValueError):
+            return None
+    elif not payload_path.is_absolute():
+        payload_path = source_root / payload_ref
     try:
-        return json.loads(payload_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw_payload = _read_text(payload_path, routing=routing)
+        if require_sha256:
+            expected_sha256 = event.get("payload_sha256")
+            if (
+                not isinstance(expected_sha256, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
+                or hashlib.sha256(raw_payload.encode("utf-8")).hexdigest()
+                != expected_sha256
+            ):
+                return None
+        payload = json.loads(raw_payload)
+    except (OSError, ValueError, json.JSONDecodeError):
         return None
+    return payload
+
+
+def load_history_payload(event: dict[str, Any], history_root: Path) -> dict[str, Any] | None:
+    """Load a payload referenced by a history event."""
+
+    routing = _routing_for_history_root(history_root)
+    if not routing.is_v2:
+        return _load_history_payload_from_root(
+            event,
+            history_root,
+            routing=routing,
+        )
+
+    # Prefer the canonical ledger, while retaining a safe read-through for
+    # payload references attached to pre-v2-fix events at ``history/``.
+    for index, source_root in enumerate((routing.write_root, routing.legacy_root)):
+        if source_root is None:
+            continue
+        payload = _load_history_payload_from_root(
+            event,
+            source_root,
+            routing=routing,
+            require_sha256=index > 0,
+        )
+        if payload is not None:
+            return payload
+    return None

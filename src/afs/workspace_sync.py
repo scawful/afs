@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .schema import AFSConfig, WorkspaceDirectory
+from .toml_compat import tomllib
 
 
 def load_workspace_entries(
@@ -121,10 +122,6 @@ def _dedupe_entries(entries: Iterable[WorkspaceDirectory]) -> list[WorkspaceDire
 
 def _load_toml(path: Path) -> dict:
     if not path.exists():
-        return {}
-    try:
-        import tomllib
-    except ImportError:
         return {}
     try:
         with path.open("rb") as handle:

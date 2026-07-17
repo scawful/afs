@@ -13,8 +13,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_paths import resolve_mount_root
 from .models import MountType
+from .path_safety import assert_no_linklike_components
 from .schema import AFSConfig
 
 DEFAULT_DB_FILENAME = "work_assistant.sqlite3"
@@ -258,18 +260,52 @@ class WorkAssistantStore:
         db_path: Path | None = None,
     ) -> None:
         self.context_root = context_root.expanduser().resolve()
+        self._managed_v2_db_root: Path | None = None
         if db_path is None:
             global_root = resolve_mount_root(self.context_root, MountType.GLOBAL, config=config)
-            db_path = global_root / DEFAULT_DB_FILENAME
-        self.db_path = db_path.expanduser().resolve()
+            if detect_layout_version(self.context_root) == LAYOUT_VERSION:
+                self._managed_v2_db_root = global_root
+                db_path = assert_no_linklike_components(
+                    global_root / DEFAULT_DB_FILENAME,
+                    boundary=global_root,
+                )
+            else:
+                db_path = (global_root / DEFAULT_DB_FILENAME).resolve()
+        else:
+            # An explicit db_path is an administrative override and retains
+            # its historical external-database behavior.
+            db_path = db_path.expanduser().resolve()
+        self.db_path = db_path
+        self._assert_managed_db_safe()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._assert_managed_db_safe(require_parent=True)
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
+        self._assert_managed_db_safe(require_parent=True)
         connection = sqlite3.connect(self.db_path, timeout=5.0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    def _assert_managed_db_safe(self, *, require_parent: bool = False) -> None:
+        """Reject redirected default v2 database and SQLite sidecar paths."""
+
+        root = self._managed_v2_db_root
+        if root is None:
+            return
+        assert_no_linklike_components(
+            self.db_path.parent,
+            boundary=self.context_root,
+            allow_missing=not require_parent,
+        )
+        for candidate in (
+            self.db_path,
+            Path(f"{self.db_path}-journal"),
+            Path(f"{self.db_path}-shm"),
+            Path(f"{self.db_path}-wal"),
+        ):
+            assert_no_linklike_components(candidate, boundary=self.context_root)
 
     def _ensure_schema(self) -> None:
         with self._connect() as connection:

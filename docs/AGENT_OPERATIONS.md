@@ -77,7 +77,8 @@ Doctor:
 
 ## Run Recorder
 
-Agent runs are stored under `scratchpad/agent_runs/` in the active context.
+Agent runs use `scratchpad/common/agent_runs/` in a v2 context and retain the
+v1 `scratchpad/agent_runs/` path for compatibility.
 
 ```bash
 run_id="$(./scripts/afs agent-runs start "Fix settings drift" --harness codex)"
@@ -128,7 +129,8 @@ watchdog warnings.
 Use `agent-jobs inbox` for review. It shows completed reports, failed jobs,
 stale running jobs, and queued jobs blocked on destructive opt-in, with exact
 `agent-jobs review <job-id>` commands. Use `agent-jobs promote <job-id>
---to-handoff` to save a useful report under `scratchpad/handoffs/`, then
+--to-handoff` to create a durable common-scope handoff (or the v1
+`scratchpad/handoffs/` compatibility file), then
 `agent-jobs archive <job-id>` when the output has been handled.
 
 Use `agent-jobs seed` to queue safe report-only maintenance jobs. The
@@ -175,7 +177,8 @@ afs services start agent-supervisor
 afs agents ps --all
 ```
 
-State lives under `.context/scratchpad/afs_agents/supervisor/`.
+State lives under `.context/scratchpad/common/afs_agents/supervisor/` in v2;
+version 1 retains `.context/scratchpad/afs_agents/supervisor/`.
 
 ### Start Conditions
 
@@ -203,7 +206,7 @@ implicitly.
 | `context-warm` | `daily` | Audit workspace contexts, without repair or network calls. |
 | `index-rebuild` | `watch_paths` on the knowledge + memory mounts | Rebuild the context SQLite index. |
 | `skills-mine` | `weekly` | Mine repeated session traces into reviewable skill candidates. |
-| `morning-briefing` | `daily` | Write a briefing digest under `scratchpad/briefings/`. |
+| `morning-briefing` | `daily` | Write a briefing digest under `scratchpad/common/briefings/` in v2 (`scratchpad/briefings/` in v1). |
 
 Disable the set with `[agents] default_set = false` in `afs.toml`, or
 per-environment with `AFS_DEFAULT_AGENTS=off` (`on` force-enables; an

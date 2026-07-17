@@ -14,8 +14,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..context_paths import resolve_mount_root
-from ..models import MountType
+from ..context_layout import LAYOUT_VERSION, detect_layout_version
+from ..models import ContextCategory
+from ..path_safety import assert_no_linklike_components, lexical_absolute
+from ..scopes import resolve_scope, visible_scope_prefixes
+from ..scratchpad import ScratchpadStore
 
 logger = logging.getLogger(__name__)
 
@@ -130,18 +133,49 @@ async def read_context_handler(args: dict[str, Any]) -> ToolResult:
         return ToolResult(success=False, content="", error="No path provided")
 
     # Resolve relative to context root
-    context_root = Path(args.get("context_root", DEFAULT_CONTEXT_ROOT))
-    full_path = context_root / path
+    context_root = Path(args.get("context_root", DEFAULT_CONTEXT_ROOT)).expanduser().resolve()
 
-    # Security: ensure path is under context root
     try:
-        full_path = full_path.resolve()
-        if not str(full_path).startswith(str(context_root.resolve())):
-            return ToolResult(
-                success=False,
-                content="",
-                error="Path escapes context root",
+        raw_path = Path(str(path)).expanduser()
+        full_path = raw_path if raw_path.is_absolute() else context_root / raw_path
+        if detect_layout_version(context_root) == LAYOUT_VERSION:
+            requester_raw = str(args.get("_requester_path", "")).strip()
+            if not requester_raw:
+                raise PermissionError(
+                    "context v2 reads require a registered current project"
+                )
+            requester = Path(requester_raw).expanduser().resolve()
+            scoped = resolve_scope(context_root, requester_path=requester)
+            candidate = lexical_absolute(full_path)
+            authorized_root: Path | None = None
+            for category in ContextCategory:
+                for prefix in visible_scope_prefixes(scoped):
+                    allowed = assert_no_linklike_components(
+                        context_root / category.value / prefix.rstrip("/"),
+                        boundary=context_root,
+                    )
+                    if candidate == allowed or candidate.is_relative_to(allowed):
+                        authorized_root = allowed
+                        break
+                if authorized_root is not None:
+                    break
+            if authorized_root is None:
+                raise PermissionError("Path is outside the authorized project scope")
+            full_path = assert_no_linklike_components(
+                candidate,
+                boundary=authorized_root,
+                allow_missing=False,
             )
+        else:
+            full_path = full_path.resolve()
+            try:
+                full_path.relative_to(context_root)
+            except ValueError:
+                return ToolResult(
+                    success=False,
+                    content="",
+                    error="Path escapes context root",
+                )
     except Exception as e:
         return ToolResult(success=False, content="", error=str(e))
 
@@ -164,28 +198,54 @@ async def read_context_handler(args: dict[str, Any]) -> ToolResult:
 
 
 async def write_scratchpad_handler(args: dict[str, Any]) -> ToolResult:
-    """Write to scratchpad for working memory."""
-    filename = args.get("filename", "")
-    content = args.get("content", "")
+    """Create an immutable, uniquely named scratchpad draft."""
+    filename = str(args.get("filename", "")).strip()
+    content = str(args.get("content", ""))
 
     if not filename:
         return ToolResult(success=False, content="", error="No filename provided")
-
-    # Security: sanitize filename
-    filename = Path(filename).name  # Strip any path components
+    if Path(filename).name != filename or filename in {".", ".."}:
+        return ToolResult(
+            success=False,
+            content="",
+            error="Filename must be a contained basename",
+        )
 
     context_root = Path(args.get("context_root", DEFAULT_CONTEXT_ROOT))
-    scratchpad_dir = resolve_mount_root(context_root, MountType.SCRATCHPAD)
-    scratchpad_dir.mkdir(parents=True, exist_ok=True)
-
-    full_path = scratchpad_dir / filename
 
     try:
-        full_path.write_text(content)
+        scope_id = "common"
+        if detect_layout_version(context_root) == LAYOUT_VERSION:
+            requester_raw = str(args.get("_requester_path", "")).strip()
+            if not requester_raw:
+                raise PermissionError(
+                    "context v2 scratchpad writes require a registered current project"
+                )
+            scoped = resolve_scope(
+                context_root,
+                requester_path=Path(requester_raw).expanduser().resolve(),
+            )
+            scope_id = scoped.scope_id
+        draft = ScratchpadStore(context_root, scope_id=scope_id).create(
+            title=Path(filename).stem or filename,
+            body=content,
+            agent_name=str(args.get("agent_name", "")),
+            author_kind="agent",
+            provenance={
+                "source": "afs.agent.write_scratchpad",
+                "requested_filename": filename,
+            },
+        )
         return ToolResult(
             success=True,
-            content=f"Wrote {len(content)} bytes to {filename}",
-            metadata={"path": str(full_path)},
+            content=f"Created scratchpad draft {draft.path.name}",
+            metadata={
+                "path": str(draft.path),
+                "artifact_id": draft.metadata.artifact_id,
+                "title": draft.metadata.title,
+                "requested_filename": filename,
+                "size": len(content),
+            },
         )
     except Exception as e:
         return ToolResult(success=False, content="", error=str(e))
@@ -443,18 +503,26 @@ async def alttp_knowledge_handler(args: dict[str, Any]) -> ToolResult:
 # ============================================================================
 
 
-def create_afs_tools(context_root: Path | None = None) -> list[Tool]:
+def create_afs_tools(
+    context_root: Path | None = None,
+    *,
+    project_path: Path | None = None,
+) -> list[Tool]:
     """Create AFS context access tools."""
     root = context_root or DEFAULT_CONTEXT_ROOT
 
     # Inject context_root into handlers via closure
     async def _read_context(args):
-        args["context_root"] = str(root)
-        return await read_context_handler(args)
+        forwarded = dict(args)
+        forwarded["context_root"] = str(root)
+        forwarded["_requester_path"] = str(project_path or Path.cwd())
+        return await read_context_handler(forwarded)
 
     async def _write_scratchpad(args):
-        args["context_root"] = str(root)
-        return await write_scratchpad_handler(args)
+        forwarded = dict(args)
+        forwarded["context_root"] = str(root)
+        forwarded["_requester_path"] = str(project_path or Path.cwd())
+        return await write_scratchpad_handler(forwarded)
 
     return [
         Tool(
@@ -474,13 +542,13 @@ def create_afs_tools(context_root: Path | None = None) -> list[Tool]:
         ),
         Tool(
             name="write_scratchpad",
-            description="Write to scratchpad for working memory",
+            description="Create an immutable, uniquely named scratchpad draft",
             parameters={
                 "type": "object",
                 "properties": {
                     "filename": {
                         "type": "string",
-                        "description": "Filename to write (in scratchpad directory)",
+                        "description": "Readable basename used as the draft title hint",
                     },
                     "content": {
                         "type": "string",

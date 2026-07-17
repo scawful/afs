@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from ..agent_context import ContextAwareAgent
+from ..context_layout import LAYOUT_VERSION, _atomic_write_text, detect_layout_version
+from ..context_paths import resolve_agent_output_root
+from ..path_safety import assert_no_linklike_components
 from .base import (
     AgentResult,
     build_base_parser,
@@ -56,7 +59,7 @@ def _resolve_default_scan_roots() -> list[Path]:
     try:
         from ..config import load_config_model
 
-        model, _ = load_config_model()
+        model = load_config_model()
         ws_dirs = getattr(model.general, "workspace_directories", []) or []
         roots = [getattr(ws, "path", None) for ws in ws_dirs]
         return [Path(p).expanduser() for p in roots if p]
@@ -199,9 +202,22 @@ def _find_repos(scan_roots: list[Path], max_depth: int = 3) -> list[Path]:
 def _write_report(
     results: list[RepoHealth],
     output_dir: Path,
+    *,
+    v2_boundary: Path | None = None,
 ) -> Path:
     """Write health report to scratchpad."""
+    if v2_boundary is not None:
+        output_dir = assert_no_linklike_components(
+            output_dir,
+            boundary=v2_boundary,
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
+    if v2_boundary is not None:
+        output_dir = assert_no_linklike_components(
+            output_dir,
+            boundary=v2_boundary,
+            allow_missing=False,
+        )
     report_path = output_dir / "workspace_health.json"
 
     report = {
@@ -223,7 +239,15 @@ def _write_report(
         ],
     }
 
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    rendered = json.dumps(report, indent=2)
+    if v2_boundary is None:
+        report_path.write_text(rendered, encoding="utf-8")
+    else:
+        report_path = assert_no_linklike_components(
+            report_path,
+            boundary=output_dir,
+        )
+        _atomic_write_text(report_path, rendered + "\n")
     return report_path
 
 
@@ -378,17 +402,32 @@ def run(args) -> int:
         logger.info("Drift detected: %s", "; ".join(drift_notes))
 
     # Write report — resolve context_root from CLI, then config, then default.
+    context_config = None
     if args.context_root:
         context_root = Path(args.context_root).expanduser()
     else:
         try:
             from ..config import load_config_model
 
-            model, _ = load_config_model()
-            context_root = Path(model.general.context_root).expanduser()
+            context_config = load_config_model()
+            context_root = Path(context_config.general.context_root).expanduser()
         except Exception:  # noqa: BLE001
             context_root = Path.home() / ".context"
-    report_path = _write_report(results, context_root / "scratchpad" / "afs_agents")
+    context_root = context_root.resolve()
+    report_root = resolve_agent_output_root(
+        context_root,
+        config=context_config,
+        scope_id="common",
+    )
+    report_path = _write_report(
+        results,
+        report_root,
+        v2_boundary=(
+            context_root
+            if detect_layout_version(context_root) == LAYOUT_VERSION
+            else None
+        ),
+    )
 
     emit_progress(AGENT_NAME, "scan_complete", f"Analyzed {len(results)} repos")
 

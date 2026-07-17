@@ -633,7 +633,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     finish.add_argument("--json", action="store_true")
     finish.set_defaults(func=runs_finish_command)
 
-    jobs = subparsers.add_parser("agent-jobs", help="Manage markdown background agent jobs.")
+    jobs = subparsers.add_parser(
+        "agent-jobs",
+        aliases=["jobs"],
+        help="Manage markdown background jobs (friendly alias: jobs).",
+    )
     jobs_sub = jobs.add_subparsers(dest="agent_jobs_command")
 
     create = jobs_sub.add_parser("create", help="Create a queued markdown job.")
@@ -711,10 +715,10 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     archive.add_argument("--json", action="store_true")
     archive.set_defaults(func=jobs_archive_command)
 
-    promote = jobs_sub.add_parser("promote", help="Promote a job review packet into scratchpad/handoffs.")
+    promote = jobs_sub.add_parser("promote", help="Promote a job review into a durable handoff.")
     _add_context_args(promote)
     promote.add_argument("job_id")
-    promote.add_argument("--to-handoff", action="store_true", help="Write a handoff markdown file.")
+    promote.add_argument("--to-handoff", action="store_true", help="Create a durable handoff.")
     promote.add_argument("--handoff-name", help="Optional handoff filename.")
     promote.add_argument("--archive", action="store_true", help="Archive the job after writing the handoff.")
     promote.add_argument("--json", action="store_true")

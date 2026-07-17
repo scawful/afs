@@ -13,6 +13,12 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from ..context_layout import LAYOUT_VERSION, detect_layout_version
+from ..context_paths import resolve_agent_output_root, resolve_mount_root
+from ..missions import MissionStore
+from ..models import MountType
+from ..path_safety import assert_no_linklike_components
+from ..schema import AFSConfig
 from .base import (
     AgentResult,
     build_base_parser,
@@ -44,24 +50,37 @@ DEFAULT_SCRATCHPAD_ROOT = Path("~/.context/scratchpad/afs_agents")
 DEFAULT_MISSIONS_ROOT = Path("~/.context/scratchpad/missions")
 
 
-def _read_json(path: Path) -> Any:
+def _read_json(path: Path, *, safe_root: Path | None = None) -> Any:
     """Read and parse a JSON file, returning None on any error."""
-    resolved = path.expanduser().resolve()
-    if not resolved.exists():
-        return None
     try:
+        resolved = (
+            assert_no_linklike_components(
+                path,
+                boundary=safe_root,
+                allow_missing=False,
+            )
+            if safe_root is not None
+            else path.expanduser().resolve()
+        )
+        if not resolved.exists():
+            return None
         return json.loads(resolved.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, json.JSONDecodeError):
         return None
 
 
 def _read_supervisor_audit(
     agent_output_root: Path,
     scratchpad_root: Path,
+    *,
+    safe_scratchpad_root: Path | None = None,
 ) -> dict[str, Any]:
     """Read the latest supervisor audit data."""
     # Try scratchpad agent_supervisor.json first (most recent full run)
-    data = _read_json(scratchpad_root / "agent_supervisor.json")
+    data = _read_json(
+        scratchpad_root / "agent_supervisor.json",
+        safe_root=safe_scratchpad_root,
+    )
     if isinstance(data, dict):
         audit = data.get("payload", {}).get("audit", {})
         if audit:
@@ -71,7 +90,10 @@ def _read_supervisor_audit(
             return data
 
     # Try supervisor_last_run.json
-    data = _read_json(scratchpad_root / "supervisor_last_run.json")
+    data = _read_json(
+        scratchpad_root / "supervisor_last_run.json",
+        safe_root=safe_scratchpad_root,
+    )
     if isinstance(data, dict):
         audit = data.get("payload", {}).get("audit", {})
         if audit:
@@ -82,9 +104,13 @@ def _read_supervisor_audit(
     return {}
 
 
-def _read_workspace_health(scratchpad_root: Path) -> dict[str, Any]:
+def _read_workspace_health(
+    scratchpad_root: Path,
+    *,
+    safe_root: Path | None = None,
+) -> dict[str, Any]:
     """Read workspace health report summary."""
-    data = _read_json(scratchpad_root / "workspace_health.json")
+    data = _read_json(scratchpad_root / "workspace_health.json", safe_root=safe_root)
     if not isinstance(data, dict):
         return {}
     return data.get("summary", data)
@@ -106,10 +132,25 @@ def _read_approvals(agent_output_root: Path) -> list[dict[str, Any]]:
     return []
 
 
-def _scan_missions(missions_root: Path) -> dict[str, int]:
+def _scan_missions(
+    missions_root: Path,
+    *,
+    safe_root: Path | None = None,
+) -> dict[str, int]:
     """Count missions by status from TOML files in the missions directory."""
-    resolved = missions_root.expanduser().resolve()
     counts: dict[str, int] = {"active": 0, "completed": 0, "blocked": 0}
+    try:
+        resolved = (
+            assert_no_linklike_components(
+                missions_root,
+                boundary=safe_root,
+                allow_missing=False,
+            )
+            if safe_root is not None
+            else missions_root.expanduser().resolve()
+        )
+    except (OSError, ValueError):
+        return counts
     if not resolved.is_dir():
         return counts
 
@@ -126,8 +167,17 @@ def _scan_missions(missions_root: Path) -> dict[str, int]:
 
     for toml_path in sorted(resolved.glob("*.toml")):
         try:
-            data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
-        except Exception:
+            safe_path = (
+                assert_no_linklike_components(
+                    toml_path,
+                    boundary=resolved,
+                    allow_missing=False,
+                )
+                if safe_root is not None
+                else toml_path
+            )
+            data = tomllib.loads(safe_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, tomllib.TOMLDecodeError):
             continue
         mission = data.get("mission", data)
         status = str(mission.get("status", "pending")).lower()
@@ -138,6 +188,21 @@ def _scan_missions(missions_root: Path) -> dict[str, int]:
         else:
             counts["active"] += 1
 
+    return counts
+
+
+def _mission_store_counts(store: MissionStore) -> dict[str, int]:
+    """Count canonical mission records without bypassing store path checks."""
+
+    counts: dict[str, int] = {"active": 0, "completed": 0, "blocked": 0}
+    for mission in store.list(limit=100_000):
+        status = mission.status.lower()
+        if status in ("completed", "done", "finished"):
+            counts["completed"] += 1
+        elif status in ("blocked", "failed", "error"):
+            counts["blocked"] += 1
+        else:
+            counts["active"] += 1
     return counts
 
 
@@ -214,20 +279,73 @@ def _build_alerts(
 
 def build_dashboard(
     *,
+    config: AFSConfig | None = None,
     agent_output_root: Path | None = None,
     scratchpad_root: Path | None = None,
     missions_root: Path | None = None,
 ) -> dict[str, Any]:
     """Build the unified dashboard payload."""
     aor = (agent_output_root or DEFAULT_AGENT_OUTPUT_ROOT).expanduser().resolve()
-    spr = (scratchpad_root or DEFAULT_SCRATCHPAD_ROOT).expanduser().resolve()
-    msr = (missions_root or DEFAULT_MISSIONS_ROOT).expanduser().resolve()
+    managed_scratchpad_root: Path | None = None
+    mission_store: MissionStore | None = None
+    context_root = config.general.context_root if config is not None else None
+    is_v2 = (
+        context_root is not None
+        and detect_layout_version(context_root) == LAYOUT_VERSION
+    )
+    if scratchpad_root is not None:
+        spr = scratchpad_root.expanduser().resolve()
+    elif config is not None:
+        spr = resolve_agent_output_root(
+            config.general.context_root,
+            config=config,
+            scope_id="common",
+        )
+        if is_v2:
+            managed_scratchpad_root = spr
+    else:
+        spr = DEFAULT_SCRATCHPAD_ROOT.expanduser().resolve()
+    if missions_root is not None:
+        msr = missions_root.expanduser().resolve()
+    elif config is not None:
+        msr = (
+            resolve_mount_root(
+                config.general.context_root,
+                MountType.ITEMS,
+                config=config,
+            )
+            / "missions"
+        )
+        if is_v2:
+            try:
+                mission_store = MissionStore(context_root, config=config)
+            except (OSError, ValueError):
+                mission_store = None
+    else:
+        msr = DEFAULT_MISSIONS_ROOT.expanduser().resolve()
 
-    audit = _read_supervisor_audit(aor, spr)
-    workspace_raw = _read_workspace_health(spr)
+    audit = _read_supervisor_audit(
+        aor,
+        spr,
+        safe_scratchpad_root=managed_scratchpad_root,
+    )
+    workspace_raw = _read_workspace_health(
+        spr,
+        safe_root=managed_scratchpad_root,
+    )
     quota = _read_quota(aor)
     approvals = _read_approvals(aor)
-    missions = _scan_missions(msr)
+    if is_v2 and missions_root is None:
+        try:
+            missions = (
+                _mission_store_counts(mission_store)
+                if mission_store is not None
+                else {"active": 0, "completed": 0, "blocked": 0}
+            )
+        except (OSError, ValueError):
+            missions = {"active": 0, "completed": 0, "blocked": 0}
+    else:
+        missions = _scan_missions(msr)
 
     counts = audit.get("counts", {})
     running = int(counts.get("running", 0))
@@ -328,11 +446,11 @@ def build_parser():
     )
     parser.add_argument(
         "--scratchpad-root",
-        help="Override scratchpad root (default: ~/.context/scratchpad/afs_agents).",
+        help="Override agent report root (default: layout-aware common agent output).",
     )
     parser.add_argument(
         "--missions-root",
-        help="Override missions root (default: ~/.context/scratchpad/missions).",
+        help="Override missions root (default: layout-aware mission store).",
     )
     parser.add_argument(
         "--dashboard-path",
@@ -347,12 +465,13 @@ def build_parser():
 
 def run(args) -> int:
     configure_logging(args.quiet)
-    _config = load_agent_config(args.config)
+    config = load_agent_config(args.config)
 
     started_at = now_iso()
     start = time.monotonic()
 
     dashboard = build_dashboard(
+        config=config,
         agent_output_root=Path(args.agent_output_root) if args.agent_output_root else None,
         scratchpad_root=Path(args.scratchpad_root) if args.scratchpad_root else None,
         missions_root=Path(args.missions_root) if args.missions_root else None,
