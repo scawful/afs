@@ -30,6 +30,20 @@ def _atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
+def _validate_agent_name(agent_name: str) -> str:
+    """Return an agent name that is safe to use as one path component."""
+    if (
+        not isinstance(agent_name, str)
+        or not agent_name
+        or agent_name in {".", ".."}
+        or "/" in agent_name
+        or "\\" in agent_name
+        or "\x00" in agent_name
+    ):
+        raise ValueError("agent name must be a non-empty single path component")
+    return agent_name
+
+
 @dataclass
 class HivemindMessage:
     id: str
@@ -134,6 +148,7 @@ class HivemindBus:
         ttl_hours: int | None = None,
         scope_id: str = "",
     ) -> HivemindMessage:
+        safe_from_agent = _validate_agent_name(from_agent)
         now = datetime.now(timezone.utc)
         msg_id = f"{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
         effective_ttl = _normalize_ttl_hours(ttl_hours)
@@ -148,7 +163,7 @@ class HivemindBus:
         )
         message = HivemindMessage(
             id=msg_id,
-            from_agent=from_agent,
+            from_agent=safe_from_agent,
             to=to,
             msg_type=msg_type,
             payload=payload or {},
@@ -158,7 +173,7 @@ class HivemindBus:
             scope_id=scope_id.strip(),
         )
 
-        agent_dir = self._root / from_agent
+        agent_dir = self._root / safe_from_agent
         agent_dir.mkdir(parents=True, exist_ok=True)
         msg_path = agent_dir / f"{msg_id}.json"
         _atomic_write_text(msg_path, json.dumps(message.to_dict(), indent=2))
@@ -167,7 +182,7 @@ class HivemindBus:
 
             log_hivemind_event(
                 "send",
-                from_agent,
+                safe_from_agent,
                 msg_id=msg_id,
                 metadata={
                     "to": to,
@@ -195,8 +210,8 @@ class HivemindBus:
         messages: list[HivemindMessage] = []
         now = datetime.now(timezone.utc)
 
-        if agent_name:
-            scan_dirs = [self._root / agent_name]
+        if agent_name is not None:
+            scan_dirs = [self._root / _validate_agent_name(agent_name)]
         elif self._root.exists():
             scan_dirs = sorted(
                 d for d in self._root.iterdir() if d.is_dir() and not d.name.startswith(".")
@@ -253,8 +268,9 @@ class HivemindBus:
         ttl_hours: int | None = None,
     ) -> HivemindSubscription:
         """Merge topics into an agent's subscription file."""
+        safe_agent_name = _validate_agent_name(agent_name)
         now = datetime.now(timezone.utc).isoformat()
-        existing = self.get_subscriptions(agent_name)
+        existing = self.get_subscriptions(safe_agent_name)
         normalized_topics = _merge_topics(existing.topics if existing else [], topics)
         normalized_ttl = _normalize_ttl_hours(ttl_hours)
         if existing:
@@ -265,20 +281,20 @@ class HivemindBus:
             sub = existing
         else:
             sub = HivemindSubscription(
-                agent_name=agent_name,
+                agent_name=safe_agent_name,
                 topics=normalized_topics,
                 created_at=now,
                 updated_at=now,
                 ttl_hours=normalized_ttl,
             )
-        sub_path = self._subscriptions_dir() / f"{agent_name}.json"
-        sub_path.write_text(json.dumps(sub.to_dict(), indent=2), encoding="utf-8")
+        sub_path = self._subscriptions_dir() / f"{safe_agent_name}.json"
+        _atomic_write_text(sub_path, json.dumps(sub.to_dict(), indent=2))
         try:
             from .history import log_hivemind_event
 
             log_hivemind_event(
                 "subscribe",
-                agent_name,
+                safe_agent_name,
                 metadata={"topics": sub.topics, "ttl_hours": sub.ttl_hours},
                 context_root=self._context_path,
             )
@@ -288,27 +304,28 @@ class HivemindBus:
 
     def unsubscribe(self, agent_name: str, topics: list[str]) -> HivemindSubscription:
         """Remove topics from an agent's subscription."""
+        safe_agent_name = _validate_agent_name(agent_name)
         now = datetime.now(timezone.utc).isoformat()
-        existing = self.get_subscriptions(agent_name)
+        existing = self.get_subscriptions(safe_agent_name)
         if existing:
             existing.topics = [t for t in existing.topics if t not in set(topics)]
             existing.updated_at = now
             sub = existing
         else:
             sub = HivemindSubscription(
-                agent_name=agent_name,
+                agent_name=safe_agent_name,
                 topics=[],
                 created_at=now,
                 updated_at=now,
             )
-        sub_path = self._subscriptions_dir() / f"{agent_name}.json"
-        sub_path.write_text(json.dumps(sub.to_dict(), indent=2), encoding="utf-8")
+        sub_path = self._subscriptions_dir() / f"{safe_agent_name}.json"
+        _atomic_write_text(sub_path, json.dumps(sub.to_dict(), indent=2))
         try:
             from .history import log_hivemind_event
 
             log_hivemind_event(
                 "unsubscribe",
-                agent_name,
+                safe_agent_name,
                 metadata={"topics": list(topics), "remaining_topics": sub.topics},
                 context_root=self._context_path,
             )
@@ -318,7 +335,8 @@ class HivemindBus:
 
     def get_subscriptions(self, agent_name: str) -> HivemindSubscription | None:
         """Read an agent's subscription file."""
-        sub_path = self._subscriptions_dir() / f"{agent_name}.json"
+        safe_agent_name = _validate_agent_name(agent_name)
+        sub_path = self._subscriptions_dir() / f"{safe_agent_name}.json"
         if not sub_path.exists():
             return None
         try:
