@@ -135,6 +135,8 @@ class HybridBuildResult:
     vector_count: int = 0
     vector_dimension: int | None = None
     semantic_status: str = "disabled"
+    intended_scope_ids: list[str] = field(default_factory=list)
+    embedded_scope_ids: list[str] = field(default_factory=list)
     capped_sources: list[str] = field(default_factory=list)
     denied: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -322,6 +324,7 @@ class HybridSearchEngine:
         expected_dimension = _embedding_dimension(embed_fn, collection)
         semantic_attempts = 0
         semantic_failures = 0
+        embedded_scope_ids: set[str] = set()
         next_row_id = 1
         budgets: dict[str, _ScopeBudget] = {}
         registered_sources = sorted(sources, key=lambda item: (item.scope_id, str(item.path)))
@@ -393,6 +396,7 @@ class HybridSearchEngine:
                         if vector is not None:
                             vector_row = len(vectors)
                             vectors.append(vector)
+                            embedded_scope_ids.add(source.scope_id)
 
                     doc_id = _document_id(source, root, relative_path, chunk_index)
                     documents.append(
@@ -429,6 +433,14 @@ class HybridSearchEngine:
         result.semantic_status = semantic_status
         result.vector_count = len(vectors)
         result.vector_dimension = expected_dimension
+        result.intended_scope_ids = sorted(
+            {
+                source.scope_id
+                for source in registered_sources
+                if embed_fn is not None and source.embed_allowed
+            }
+        )
+        result.embedded_scope_ids = sorted(embedded_scope_ids)
 
         resolved_collection = _collection_metadata(
             embed_fn,
@@ -687,6 +699,10 @@ class HybridSearchEngine:
                     "vectors": VECTOR_FILENAME,
                 },
                 "collection": collection.to_dict(),
+                "scope_coverage": {
+                    "intended_scope_ids": result.intended_scope_ids,
+                    "embedded_scope_ids": result.embedded_scope_ids,
+                },
                 "stats": {
                     "files": result.indexed_files,
                     "chunks": result.chunks_written,

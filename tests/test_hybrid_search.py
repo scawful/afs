@@ -217,6 +217,10 @@ def test_hybrid_layout_uses_normalized_float32_vectors_and_is_discoverable(
     assert np.allclose(np.linalg.norm(matrix, axis=1), 1.0)
     assert metadata["collection"]["dimension"] == 3
     assert metadata["collection"]["normalized"] is True
+    assert metadata["scope_coverage"] == {
+        "embedded_scope_ids": ["project:alpha"],
+        "intended_scope_ids": ["project:alpha"],
+    }
     assert HybridSearchEngine.discover(tmp_path) == [index_root]
 
 

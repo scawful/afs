@@ -54,6 +54,7 @@ def _search_sources(
     *,
     semantic: bool,
     all_projects: bool,
+    previously_consented_scopes: frozenset[str] = frozenset(),
 ) -> tuple[list[Any], str, str]:
     from ..hybrid_search import HybridSource
 
@@ -77,7 +78,8 @@ def _search_sources(
                     project_id=record.project_id,
                     project_terms=(record.name,),
                     active=active,
-                    embed_allowed=semantic and (active or all_projects),
+                    embed_allowed=semantic
+                    and (active or all_projects or record.scope_id in previously_consented_scopes),
                 )
             )
             for category in ContextCategory:
@@ -90,7 +92,12 @@ def _search_sources(
                             project_id=record.project_id,
                             project_terms=(record.name, category.value),
                             active=active,
-                            embed_allowed=semantic and (active or all_projects),
+                            embed_allowed=semantic
+                            and (
+                                active
+                                or all_projects
+                                or record.scope_id in previously_consented_scopes
+                            ),
                         )
                     )
         for category in ContextCategory:
@@ -127,18 +134,36 @@ def _search_sources(
     return sources, current_scope, current_project_id
 
 
+def _scope_coverage(metadata: dict[str, Any], field: str) -> frozenset[str]:
+    coverage = metadata.get("scope_coverage", {})
+    if not isinstance(coverage, dict):
+        return frozenset()
+    values = coverage.get(field, [])
+    if not isinstance(values, list):
+        return frozenset()
+    return frozenset(value for value in values if isinstance(value, str) and value.strip())
+
+
+def _required_semantic_scopes(
+    sources: list[Any],
+    *,
+    current_scope: str,
+    all_projects: bool,
+) -> frozenset[str]:
+    if all_projects:
+        return frozenset(source.scope_id for source in sources if source.path.exists())
+    required = {current_scope}
+    if any(source.scope_id == COMMON_SCOPE_ID and source.path.exists() for source in sources):
+        required.add(COMMON_SCOPE_ID)
+    return frozenset(required)
+
+
 def search_command(args: argparse.Namespace) -> int:
     """Run local-first scoped retrieval with explicit semantic opt-in."""
     from ..embeddings import DEFAULT_GEMINI_MODEL, create_embed_fn
     from ..hybrid_search import HybridSearchEngine
 
     _manager, project, context = _manager_context(args)
-    sources, scope_id, project_id = _search_sources(
-        context,
-        project,
-        semantic=bool(args.semantic),
-        all_projects=bool(args.all_projects),
-    )
     index_root = resolve_system_path(context, "search")
     engine = HybridSearchEngine(index_root)
     has_index = engine.current_path.is_file() or engine.metadata_path.is_file()
@@ -147,10 +172,40 @@ def search_command(args: argparse.Namespace) -> int:
     requested_model = args.model or (
         DEFAULT_GEMINI_MODEL if args.provider == "gemini" else "nomic-embed-text"
     )
+    previous_metadata: dict[str, Any] = {}
+    previously_consented_scopes: frozenset[str] = frozenset()
+    if args.semantic and has_index:
+        try:
+            previous_metadata = json.loads(engine.metadata_path.read_text(encoding="utf-8"))
+            collection = previous_metadata.get("collection", {})
+            if (
+                isinstance(collection, dict)
+                and collection.get("provider") == args.provider
+                and collection.get("model") == requested_model
+            ):
+                previously_consented_scopes = _scope_coverage(
+                    previous_metadata, "intended_scope_ids"
+                )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            previous_metadata = {}
+    sources, scope_id, project_id = _search_sources(
+        context,
+        project,
+        semantic=bool(args.semantic),
+        all_projects=bool(args.all_projects),
+        previously_consented_scopes=previously_consented_scopes,
+    )
+    required_semantic_scopes = _required_semantic_scopes(
+        sources,
+        current_scope=scope_id,
+        all_projects=bool(args.all_projects),
+    )
     semantic_index_ready = False
     if args.semantic and has_index:
         try:
-            metadata = json.loads(engine.metadata_path.read_text(encoding="utf-8"))
+            metadata = previous_metadata or json.loads(
+                engine.metadata_path.read_text(encoding="utf-8")
+            )
             collection = metadata.get("collection", {})
             stats = metadata.get("stats", {})
             semantic_index_ready = (
@@ -158,6 +213,9 @@ def search_command(args: argparse.Namespace) -> int:
                 and collection.get("provider") == args.provider
                 and collection.get("model") == requested_model
                 and int(stats.get("vectors", 0) or 0) > 0
+                and required_semantic_scopes.issubset(
+                    _scope_coverage(metadata, "intended_scope_ids")
+                )
             )
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             semantic_index_ready = False
@@ -176,6 +234,8 @@ def search_command(args: argparse.Namespace) -> int:
             "vector_count": build.vector_count,
             "vector_dimension": build.vector_dimension,
             "semantic_status": build.semantic_status,
+            "intended_scope_ids": build.intended_scope_ids,
+            "embedded_scope_ids": build.embedded_scope_ids,
             "capped_sources": build.capped_sources,
             "denied": build.denied,
             "errors": build.errors,
