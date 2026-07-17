@@ -216,12 +216,16 @@ no_implicit_optional = true
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-# numpy >=2.4 ships stubs using PEP 695 syntax that cannot parse under
-# python_version = "3.10"; skip them so results don't depend on which
-# numpy the resolver picks per Python version. numpy becomes Any, like
-# other unfollowed third-party libraries.
+# numpy >=2.5 ships stubs using PEP 695 `type` statements that cannot
+# parse under python_version = "3.10"; skip them so results don't depend
+# on which numpy the resolver picks per Python version. numpy becomes
+# Any, like other unfollowed third-party libraries. NOTE:
+# follow_imports_for_stubs is required — without it mypy ignores
+# follow_imports for packages that ship .pyi stubs and parses them anyway
+# (verified against numpy 2.5.1 + mypy 1.11.2 on Python 3.12).
 module = "numpy.*"
 follow_imports = "skip"
+follow_imports_for_stubs = true
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
