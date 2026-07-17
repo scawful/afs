@@ -167,6 +167,7 @@ def render_afs_health(snapshot: dict[str, Any]) -> str:
     lines.append(
         "embeddings: "
         f"indices={embeddings['count']} stale={embeddings['stale_count']} "
+        f"unhealthy={embeddings['unhealthy_count']} "
         f"newest={_format_age(embeddings['newest_age_seconds'])}"
     )
 
@@ -268,6 +269,7 @@ def _embedding_index_health(knowledge_mounts: list[Path]) -> dict[str, Any]:
     ages: list[float] = []
     now = datetime.now(timezone.utc)
     stale = 0
+    unhealthy = 0
     for index in indices:
         age = _file_age_seconds(index, now=now)
         if age is None:
@@ -275,12 +277,23 @@ def _embedding_index_health(knowledge_mounts: list[Path]) -> dict[str, Any]:
         ages.append(age)
         if age > EMBEDDINGS_STALE_SECONDS:
             stale += 1
+        try:
+            payload = json.loads(index.read_text(encoding="utf-8"))
+            metadata = payload.get("_metadata", {}) if isinstance(payload, dict) else {}
+            collection = metadata.get("collection", {}) if isinstance(metadata, dict) else {}
+            if not isinstance(payload, dict) or (
+                isinstance(collection, dict) and collection.get("health") == "unhealthy"
+            ):
+                unhealthy += 1
+        except (OSError, json.JSONDecodeError):
+            unhealthy += 1
 
     newest = min(ages) if ages else None
     oldest = max(ages) if ages else None
     return {
         "count": len(indices),
         "stale_count": stale,
+        "unhealthy_count": unhealthy,
         "newest_age_seconds": newest,
         "oldest_age_seconds": oldest,
         "paths": [str(path) for path in indices],

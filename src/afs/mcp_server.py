@@ -2551,6 +2551,8 @@ def _tool_afs_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str
 
     fts_entries: list[dict[str, Any]] = []
     emb_entries: list[dict[str, Any]] = []
+    semantic_status = "not_requested"
+    semantic_reason: str | None = None
     sym_entries: list[dict[str, Any]] = []
     sources_used: list[str] = []
 
@@ -2578,22 +2580,35 @@ def _tool_afs_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str
             provider = arguments.get("provider")
             model = arguments.get("model")
             try:
-                from .embeddings import create_embed_fn, search_embedding_index
-
+                from .embeddings import create_embed_fn, search_embedding_index_detailed
                 embed_fn = None
                 if isinstance(provider, str) and provider.strip():
                     kwargs: dict[str, Any] = {}
                     if isinstance(model, str) and model.strip():
                         kwargs["model"] = model.strip()
                     embed_fn = create_embed_fn(provider.strip(), **kwargs)
-                emb_results = search_embedding_index(
-                    emb_dir, query, embed_fn=embed_fn, top_k=min(limit, 15), min_score=0.2
+                emb_response = search_embedding_index_detailed(
+                    emb_dir,
+                    query,
+                    embed_fn=embed_fn,
+                    recreate_query_embedder=embed_fn is None,
+                    top_k=min(limit, 15),
+                    min_score=0.2,
                 )
+                semantic_status = emb_response.semantic_status
+                semantic_reason = emb_response.semantic_reason
+                emb_results = emb_response.results
                 emb_entries = [r.to_dict() for r in emb_results]
                 if emb_entries:
-                    sources_used.append("embedding")
-            except Exception:
-                pass
+                    sources_used.append(
+                        "semantic" if semantic_status == "ready" else "indexed_text"
+                    )
+            except Exception as exc:
+                semantic_status = "fallback"
+                semantic_reason = f"embedding search unavailable: {exc}"
+        else:
+            semantic_status = "unavailable"
+            semantic_reason = "no embedding index was discovered"
 
     # Symbol leg
     if include_symbols:
@@ -2615,6 +2630,8 @@ def _tool_afs_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str
         "query": query,
         "context_path": str(context_path),
         "sources_used": sources_used,
+        "semantic_status": semantic_status,
+        "semantic_reason": semantic_reason,
         "total": len(results),
         "results": results,
     }

@@ -338,6 +338,7 @@ def check_embedding_indexes(config_path: Path | None = None) -> DiagnosticResult
 
     total_indexes = 0
     stale_indexes = 0
+    unhealthy_indexes: list[str] = []
     missing_indexes: list[str] = []
     import time
 
@@ -351,11 +352,19 @@ def check_embedding_indexes(config_path: Path | None = None) -> DiagnosticResult
             continue
         total_indexes += 1
         try:
+            payload = json.loads(index_file.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                unhealthy_indexes.append(f"{index_file} (invalid root)")
+            else:
+                metadata = payload.get("_metadata", {})
+                collection = metadata.get("collection", {}) if isinstance(metadata, dict) else {}
+                if isinstance(collection, dict) and collection.get("health") == "unhealthy":
+                    unhealthy_indexes.append(str(index_file))
             age = time.time() - index_file.stat().st_mtime
             if age > 7 * 24 * 3600:  # 7 days
                 stale_indexes += 1
-        except OSError:
-            pass
+        except (OSError, json.JSONDecodeError) as exc:
+            unhealthy_indexes.append(f"{index_file} ({exc})")
 
     if missing_indexes:
         return DiagnosticResult(
@@ -363,6 +372,16 @@ def check_embedding_indexes(config_path: Path | None = None) -> DiagnosticResult
             status="warn",
             message=f"Missing embedding indexes in: {', '.join(missing_indexes)}",
             fix_description="Run: afs embeddings index --knowledge-path <path> --provider none --include '*.md'",
+        )
+
+    if unhealthy_indexes:
+        return DiagnosticResult(
+            name="embeddings",
+            status="warn",
+            message=f"Unhealthy embedding indexes: {', '.join(unhealthy_indexes)}",
+            fix_description=(
+                "Rebuild the listed collection; AFS will use keyword fallback until it is healthy"
+            ),
         )
 
     if stale_indexes:

@@ -15,7 +15,7 @@ from typing import Any
 
 from .context_index import ContextSQLiteIndex
 from .context_paths import load_context_metadata, resolve_agent_output_root, resolve_mount_root
-from .embeddings import search_embedding_index
+from .embeddings import search_embedding_index_detailed
 from .manager import AFSManager
 from .models import MountType
 from .sensitivity import SensitivityRuleSet
@@ -1126,18 +1126,22 @@ def _embedding_section(
                 candidates.append(child)
 
     hits: list[tuple[float, str, str]] = []
+    semantic_ready = False
     rules = _pack_embedding_rules(manager)
     search_limit = 500 if rules.enabled else max(1, max_results)
     for index_root in candidates:
         try:
-            results = search_embedding_index(
+            response = search_embedding_index_detailed(
                 index_root,
                 query,
+                recreate_query_embedder=True,
                 top_k=search_limit,
                 min_score=0.15,
             )
         except (FileNotFoundError, ValueError):
             continue
+        semantic_ready = semantic_ready or response.semantic_status == "ready"
+        results = response.results
         for result in results:
             source_path = str(result.source_path)
             source = Path(source_path)
@@ -1172,7 +1176,11 @@ def _embedding_section(
         if len(sources) >= max_results:
             break
     return ContextPackSection(
-        title="Embedding Hits",
+        title=(
+            "Semantic Hits"
+            if semantic_ready
+            else "Indexed Text Hits"
+        ),
         body="\n".join(lines),
         priority=_embedding_section_priority(pack_mode),
         sources=sources,
@@ -1274,7 +1282,11 @@ def _fused_retrieval_section(
         for section in query_sections
         if getattr(section, "sources", None)
     ]
-    cosine_paths = list(embedding_section.sources) if embedding_section else []
+    cosine_paths = (
+        list(embedding_section.sources)
+        if embedding_section and embedding_section.title == "Semantic Hits"
+        else []
+    )
     if not bm25_paths or not cosine_paths:
         return None
 

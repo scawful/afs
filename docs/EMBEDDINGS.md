@@ -24,7 +24,7 @@ afs embeddings search \
 | Provider | Flag | Default Model | Requires |
 |----------|------|---------------|----------|
 | None (keyword) | `--provider none` | — | Nothing |
-| Gemini | `--provider gemini` | `gemini-embedding-001` | `GEMINI_API_KEY` + `google-genai` or `httpx` |
+| Gemini | `--provider gemini` | `gemini-embedding-2` | `GEMINI_API_KEY` + `google-genai` or `httpx` |
 | Ollama | `--provider ollama` | `nomic-embed-text` | Local Ollama server |
 | OpenAI | `--provider openai` | `text-embedding-3-small` | `OPENAI_API_KEY` + `httpx` |
 | HuggingFace | `--provider hf` | `nomic-embed-text` | `torch` + `transformers` |
@@ -143,8 +143,7 @@ afs gemini context   # dump full knowledge INDEX.md
 
 | Model | Dimensions | Notes |
 |-------|-----------|-------|
-| `gemini-embedding-001` | 3072 | Default, production-ready |
-| `gemini-embedding-2-preview` | 3072 | Preview, may have improved quality |
+| `gemini-embedding-2` | 768 by default | Stable default; output dimensionality is stored in collection metadata |
 
 ### Environment Variables
 
@@ -199,11 +198,11 @@ The embedding system uses a registry-based provider architecture:
 from afs.embeddings import create_embed_fn
 
 # Create an embedding function
-embed = create_embed_fn("gemini", model="gemini-embedding-001")
+embed = create_embed_fn("gemini", model="gemini-embedding-2")
 
 # Use it
 vector = embed("How to write an ASM hook")
-print(f"Dimensions: {len(vector)}")  # 3072
+print(f"Dimensions: {len(vector)}")  # 768
 ```
 
 Custom providers can be registered:
@@ -221,3 +220,51 @@ register_embedding_backend("custom", my_embed_factory)
 ```
 
 Registered backends: `ollama`, `hf`, `openai`, `gemini`.
+
+## Versioned Collections and Honest Fallback
+
+New `embedding_index.json` files carry a versioned `_metadata.collection` block
+with the provider, model, vector dimension, document instruction, query
+instruction, normalization flag, and health. Query callers can recreate the
+matching query-side embedder with `create_query_embed_fn_from_index()`; Gemini
+collections automatically use `RETRIEVAL_DOCUMENT` while indexing and
+`RETRIEVAL_QUERY` while searching.
+
+Use `search_embedding_index_detailed()` when reporting results to a user. Its
+`semantic_status` distinguishes real vector retrieval from keyword fallback.
+An embedding failure, missing payload, or dimension mismatch makes the
+collection unhealthy and fails closed to keyword retrieval rather than mixing
+in a partial or incompatible vector set. The original
+`search_embedding_index()` list-returning API remains available for legacy
+callers.
+
+Index discovery is deliberately bounded. `discover_embedding_indexes(root)`
+checks only `root`, `root/.afs/search`, `root/knowledge`, and direct project
+children under those locations; it never recursively crawls a home directory.
+Full and incremental rebuilds garbage-collect payload JSON that is no longer
+reachable from the current manifest.
+
+## Scoped Hybrid Search Foundation
+
+`afs.hybrid_search.HybridSearchEngine` is the v2 retrieval foundation used by
+new CLI and MCP surfaces. Its rebuildable layout is:
+
+```text
+<index-root>/
+├── hybrid_index.json  # version, layout, collection metadata, health
+├── search.sqlite3     # scoped documents and FTS5 keyword associations
+└── vectors.npy        # L2-normalized float32 vectors
+```
+
+Each `HybridSource` requires a `scope_id`. Search applies the current/common
+scope filter in SQLite before FTS, path, symbol, project, or vector ranking.
+Ranked lists are combined deterministically with reciprocal-rank fusion
+(`k=60`), and every hit records its contributing signal ranks and raw scores.
+Cross-project retrieval requires the explicit `all_projects=True` option.
+
+Remote embedding is opt-in per source with `embed_allowed=True`. Hard safety
+rules always exclude credential filenames, secret-like text, VCS internals,
+dependencies, build output, binaries, ignored files, and symlinks escaping the
+registered root. Inactive sources default to at most 5,000 files and 50 MiB;
+active sources default to 10,000 files and 100 MiB. A per-source `max_files`
+can lower either cap. Tests use injected local functions and never call Gemini.
