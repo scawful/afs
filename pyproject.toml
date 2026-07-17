@@ -197,6 +197,9 @@ ignore = ["E501", "B008", "C901"]
 
 [tool.mypy]
 python_version = "3.10"
+# Analyze as Linux so local runs (often macOS) reproduce CI exactly;
+# platform-conditional stdlib APIs (kqueue etc.) get reasoned ignores.
+platform = "linux"
 mypy_path = "src"
 exclude = [
     "^build/",

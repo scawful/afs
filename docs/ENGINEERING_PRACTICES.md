@@ -100,6 +100,11 @@ contract, not an approximation. `.env*` means `.envrc` too.
   check per variable and raise on failure. *Evidence: a bulk-`all()`
   guard added three baseline errors that a per-field guard avoids.*
 - `# type: ignore` takes an error code and a reason, or it doesn't merge.
+- mypy is pinned to `platform = "linux"` so results are identical on any
+  dev machine and in CI. Platform-conditional stdlib APIs (kqueue and
+  friends) therefore need reasoned ignores even when your machine has
+  them. *Evidence: a macOS-validated baseline shipped green locally and
+  failed CI on five kqueue attributes the Linux stubs don't define.*
 
 ## Tests
 
