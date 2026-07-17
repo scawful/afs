@@ -4,6 +4,8 @@ import json
 import stat
 from pathlib import Path
 
+import pytest
+
 from afs.cli.layout import register_parsers
 from afs.context_layout import (
     LAYOUT_VERSION,
@@ -19,7 +21,13 @@ from afs.context_paths import resolve_mount_root
 from afs.manager import AFSManager
 from afs.models import ContextCategory, MountType
 from afs.project_registry import ProjectRegistry
-from afs.schema import AFSConfig, GeneralConfig
+from afs.schema import (
+    AFSConfig,
+    CognitiveConfig,
+    GeneralConfig,
+    ProfileConfig,
+    ProfilesConfig,
+)
 
 
 def test_context_categories_are_paper_aligned_and_legacy_safe() -> None:
@@ -79,6 +87,104 @@ def test_manager_explicit_v2_uses_central_root_and_compat_resolution(tmp_path: P
     assert resolve_mount_root(root, MountType.HIVEMIND) == root / ".afs" / "queue" / "messages"
 
 
+@pytest.mark.parametrize("operation", ["ensure", "init"])
+def test_manager_v2_scopes_cognitive_files_and_skips_legacy_profile_mounts(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    root = tmp_path / "home" / ".context"
+    project = tmp_path / "src" / "demo"
+    profile_source = tmp_path / "shared-knowledge"
+    project.mkdir(parents=True)
+    profile_source.mkdir()
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=root),
+            profiles=ProfilesConfig(
+                active_profile="work",
+                auto_apply=True,
+                profiles={
+                    "work": ProfileConfig(knowledge_mounts=[profile_source]),
+                },
+            ),
+            cognitive=CognitiveConfig(
+                enabled=True,
+                record_emotions=True,
+                record_metacognition=True,
+                record_goals=True,
+                record_epistemic=True,
+            ),
+        )
+    )
+
+    context = getattr(manager, operation)(path=project, layout_version=2, profile="work")
+    record = ProjectRegistry(root).resolve(project)
+
+    assert context.layout_version == 2
+    assert record is not None
+    for category in ContextCategory:
+        category_root = root / category.value
+        direct_entries = list(category_root.iterdir())
+        assert {entry.name for entry in direct_entries} <= {"common", "projects"}
+        assert all(entry.is_dir() and not entry.is_symlink() for entry in direct_entries)
+
+    project_scratchpad = root / "scratchpad" / "projects" / record.project_id
+    assert {path.name for path in project_scratchpad.iterdir()} == {
+        "deferred.md",
+        "emotions.json",
+        "epistemic.json",
+        "goals.json",
+        "metacognition.json",
+        "state.md",
+    }
+    assert (root / "memory" / "projects" / record.project_id).is_dir()
+    assert not (root / "scratchpad" / "state.md").exists()
+    assert not any(path.is_symlink() for path in root.joinpath("knowledge").rglob("*"))
+    health = manager.context_health(root, profile_name="work")
+    assert health["healthy"] is True
+    assert health["profile"]["mounts_supported"] is False
+    assert len(health["profile"]["unsupported_mounts"]) == 1
+    assert "replace v1 profile mounts with scoped context sources" in health[
+        "suggested_actions"
+    ]
+
+    with pytest.raises(ValueError, match="not supported for layout v2"):
+        manager.apply_profile(root, profile_name="work")
+
+
+def test_manager_v1_keeps_legacy_cognitive_and_profile_mount_layout(tmp_path: Path) -> None:
+    root = tmp_path / "project" / ".context"
+    project = root.parent
+    profile_source = tmp_path / "shared-knowledge"
+    project.mkdir()
+    profile_source.mkdir()
+    manager = AFSManager(
+        config=AFSConfig(
+            profiles=ProfilesConfig(
+                active_profile="work",
+                profiles={
+                    "work": ProfileConfig(knowledge_mounts=[profile_source]),
+                },
+            ),
+            cognitive=CognitiveConfig(enabled=True),
+        )
+    )
+
+    context = manager.ensure(path=project, context_root=root, profile="work")
+
+    assert context.layout_version == 1
+    assert (root / "scratchpad" / "state.md").is_file()
+    assert (root / "scratchpad" / "deferred.md").is_file()
+    mounts = [
+        path
+        for path in (root / "knowledge").iterdir()
+        if path.name.startswith("profile-knowledge-work")
+    ]
+    assert len(mounts) == 1
+    assert mounts[0].is_symlink()
+    assert mounts[0].resolve() == profile_source.resolve()
+
+
 def test_audit_and_plan_are_read_only_and_route_legacy_messages(tmp_path: Path) -> None:
     root = tmp_path / ".context"
     (root / "hivemind").mkdir(parents=True)
@@ -128,4 +234,3 @@ def test_layout_cli_audit_and_plan_register(tmp_path: Path) -> None:
 
     audit_args = parser.parse_args(["layout", "audit", "--context-root", str(root), "--json"])
     assert audit_args.func(audit_args) == 0
-

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .agent_defaults import merge_default_agent_configs
+from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .extensions import load_extensions
 from .models import MountType
 from .schema import AFSConfig, AgentConfig, ProfileConfig
@@ -328,6 +329,11 @@ def apply_profile_mounts(
     """Apply profile-managed mounts into an existing context."""
     context_path = context_path.expanduser().resolve()
     specs = list_profile_mount_specs(profile)
+    if detect_layout_version(context_path) == LAYOUT_VERSION and specs:
+        raise ValueError(
+            "profile filesystem mounts are not supported for layout v2; "
+            "use scoped context sources instead"
+        )
 
     knowledge_mounted, missing_knowledge = _mount_profile_paths(
         manager,
