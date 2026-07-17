@@ -52,8 +52,10 @@ afs embeddings index \
   [--include-hidden]
 ```
 
-The index is stored at `<knowledge-path>/embedding_index.json` with per-document
-embedding files in `<knowledge-path>/embeddings/`.
+The index is stored at `<knowledge-path>/embedding_index.json` with immutable,
+generation-qualified per-document payloads in `<knowledge-path>/embeddings/`.
+The manifest is the atomic publication pointer: readers see either the complete
+previous generation or the complete replacement, never a mixture of both.
 
 Each indexed document stores:
 - `id`: unique document identifier (`<root>::<relative_path>`)
@@ -66,8 +68,11 @@ Each indexed document stores:
 
 ### Re-indexing
 
-Re-running `index` overwrites the existing index. This is safe — the index is
-derived data and can always be rebuilt.
+Re-running `index` stages a new payload generation, fsyncs it, then atomically
+replaces the manifest. Builders are serialized and searches hold a read lock
+until all referenced payloads have been read. Unreachable payloads are removed
+only after publication while the write lock is held. Legacy manifests with
+payloads directly under `embeddings/` remain readable.
 
 ## Searching
 
@@ -242,7 +247,9 @@ Index discovery is deliberately bounded. `discover_embedding_indexes(root)`
 checks only `root`, `root/.afs/search`, `root/knowledge`, and direct project
 children under those locations; it never recursively crawls a home directory.
 Full and incremental rebuilds garbage-collect payload JSON that is no longer
-reachable from the current manifest.
+reachable from the current manifest. Generated index files are excluded when
+the output directory is inside an indexed source, including the common
+output-equals-source layout.
 
 ## Scoped Hybrid Search Foundation
 
@@ -251,10 +258,21 @@ new CLI and MCP surfaces. Its rebuildable layout is:
 
 ```text
 <index-root>/
-├── hybrid_index.json  # version, layout, collection metadata, health
-├── search.sqlite3     # scoped documents and FTS5 keyword associations
-└── vectors.npy        # L2-normalized float32 vectors
+├── CURRENT                       # atomically replaced generation id
+├── generations/
+│   └── <generation-id>/
+│       ├── hybrid_index.json     # version, collection metadata, health
+│       ├── search.sqlite3        # scoped documents and FTS5 associations
+│       └── vectors.npy           # normalized float32 vectors
+├── .hybrid-build.lock            # serializes builders
+└── .hybrid-publication.lock      # protects publication and active readers
 ```
+
+A rebuild writes and fsyncs an immutable generation before replacing `CURRENT`.
+Search resolves `CURRENT` once under a shared lock; publication and generation
+garbage collection use the exclusive side of that lock. The previous
+generation is retained for recovery. Pre-generation top-level layouts remain
+readable when `CURRENT` is absent.
 
 Each `HybridSource` requires a `scope_id`. Search applies the current/common
 scope filter in SQLite before FTS, path, symbol, project, or vector ranking.
@@ -266,5 +284,7 @@ Remote embedding is opt-in per source with `embed_allowed=True`. Hard safety
 rules always exclude credential filenames, secret-like text, VCS internals,
 dependencies, build output, binaries, ignored files, and symlinks escaping the
 registered root. Inactive sources default to at most 5,000 files and 50 MiB;
-active sources default to 10,000 files and 100 MiB. A per-source `max_files`
-can lower either cap. Tests use injected local functions and never call Gemini.
+active sources default to 10,000 files and 100 MiB. These are aggregate caps
+across every source registered for the same project (or scope when no project
+id is present). A per-source `max_files` can lower the file cap but cannot raise
+it. Tests use injected local functions and never call Gemini.
