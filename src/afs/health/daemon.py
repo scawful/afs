@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from afs.context_layout import resolve_runtime_root
 from afs.logging_config import get_logger
 
 from .enhanced_checks import EnhancedHealthChecker, HealthCheckLevel
@@ -36,14 +37,18 @@ class HealthMonitoringDaemon:
             alert_threshold: Alert on score drop >N (0.0-1.0)
             auto_heal: Enable automatic healing
         """
-        self.context_root = context_root or Path.home() / ".context"
-        self.health_dir = self.context_root / "health"
-        self.health_dir.mkdir(parents=True, exist_ok=True)
+        self.context_root = (context_root or Path.home() / ".context").expanduser().resolve()
+        self.health_dir = resolve_runtime_root(
+            self.context_root,
+            "health",
+            legacy_relative="health",
+            create=True,
+        )
 
         self.check_interval_s = check_interval_s
         self.alert_threshold = alert_threshold
         self.auto_heal = auto_heal
-        self.checker = EnhancedHealthChecker(context_root=context_root)
+        self.checker = EnhancedHealthChecker(context_root=self.context_root)
 
         self.running = False
         self.last_score: float | None = None
@@ -195,9 +200,11 @@ def run_daemon_cli(
     level: str = "standard",
     duration: int | None = None,
     auto_heal: bool = False,
+    context_root: Path | None = None,
 ) -> None:
     """Run health monitoring daemon from CLI."""
     daemon = HealthMonitoringDaemon(
+        context_root=context_root,
         check_interval_s=interval,
         alert_threshold=0.1,
         auto_heal=auto_heal,

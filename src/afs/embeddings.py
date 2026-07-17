@@ -7,14 +7,80 @@ import hashlib
 import json
 import math
 import os
+import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .index_storage import atomic_write_text, fsync_directory, index_file_lock
+
 EmbeddingFactory = Callable[..., Callable[[str], list[float]]]
 _EMBEDDING_BACKENDS: dict[str, EmbeddingFactory] = {}
+
+EMBEDDING_INDEX_VERSION = 2
+DEFAULT_GEMINI_MODEL = "gemini-embedding-2"
+DEFAULT_GEMINI_DIMENSION = 768
+GEMINI_DOCUMENT_TASK = "RETRIEVAL_DOCUMENT"
+GEMINI_QUERY_TASK = "RETRIEVAL_QUERY"
+EMBEDDING_BUILD_LOCK = ".embedding-build.lock"
+EMBEDDING_PUBLICATION_LOCK = ".embedding-publication.lock"
+EMBEDDING_GENERATIONS_DIR = "generations"
+
+
+@dataclass(frozen=True)
+class EmbeddingCollectionMetadata:
+    """Versioned contract for vectors stored in an embedding collection."""
+
+    version: int = EMBEDDING_INDEX_VERSION
+    provider: str = "none"
+    model: str = ""
+    dimension: int | None = None
+    document_instruction: str = ""
+    query_instruction: str = ""
+    normalized: bool = False
+    health: str = "keyword_only"
+
+    @classmethod
+    def from_index(cls, payload: dict[str, Any]) -> EmbeddingCollectionMetadata:
+        raw = payload.get("_metadata", {})
+        collection = raw.get("collection", {}) if isinstance(raw, dict) else {}
+        if not isinstance(collection, dict):
+            collection = {}
+        dimension = collection.get("dimension")
+        return cls(
+            version=_coerce_positive_int(collection.get("version"), default=1),
+            provider=str(collection.get("provider") or "none"),
+            model=str(collection.get("model") or ""),
+            dimension=_coerce_positive_int(dimension, default=None),
+            document_instruction=str(collection.get("document_instruction") or ""),
+            query_instruction=str(collection.get("query_instruction") or ""),
+            normalized=bool(collection.get("normalized", False)),
+            health=str(collection.get("health") or "legacy"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "provider": self.provider,
+            "model": self.model,
+            "dimension": self.dimension,
+            "document_instruction": self.document_instruction,
+            "query_instruction": self.query_instruction,
+            "normalized": self.normalized,
+            "health": self.health,
+        }
+
+
+@dataclass
+class EmbeddingSearchResponse:
+    """Search results plus an honest account of semantic retrieval state."""
+
+    results: list[SearchResult] = field(default_factory=list)
+    semantic_status: str = "not_requested"
+    semantic_reason: str | None = None
+    collection: EmbeddingCollectionMetadata | None = None
 
 
 @dataclass
@@ -24,7 +90,9 @@ class EmbeddingIndexResult:
     skipped: int = 0
     reused: int = 0
     removed: int = 0
+    orphans_removed: int = 0
     chunks_written: int = 0
+    semantic_status: str = "keyword_only"
     mode: str = "full"
     errors: list[str] = field(default_factory=list)
 
@@ -35,8 +103,11 @@ class EmbeddingIndexResult:
         ]
         if self.mode == "incremental":
             parts.append(f"reused={self.reused} removed={self.removed}")
+        if self.orphans_removed:
+            parts.append(f"orphans_removed={self.orphans_removed}")
         if self.chunks_written:
             parts.append(f"chunks={self.chunks_written}")
+        parts.append(f"semantic={self.semantic_status}")
         return " ".join(parts)
 
 
@@ -113,7 +184,38 @@ def create_embed_fn(provider: str, **kwargs) -> Callable[[str], list[float]]:
     factory = _EMBEDDING_BACKENDS.get(normalized)
     if not factory:
         raise ValueError(f"Unknown embedding provider: {provider}")
-    return factory(**kwargs)
+    embed_fn = factory(**kwargs)
+    provider_defaults: dict[str, tuple[str, str, int | None]] = {
+        "gemini": (DEFAULT_GEMINI_MODEL, GEMINI_DOCUMENT_TASK, DEFAULT_GEMINI_DIMENSION),
+        "ollama": ("nomic-embed-text", "", None),
+    }
+    default_model, default_task, default_dimension = provider_defaults.get(
+        normalized, ("", "", None)
+    )
+    model = str(kwargs.get("model") or default_model)
+    task_type = str(kwargs.get("task_type") or default_task)
+    dimension = _coerce_positive_int(
+        kwargs.get("output_dimensionality") or kwargs.get("dimension"),
+        default=default_dimension,
+    )
+    # Functions are intentionally annotated instead of wrapped so provider
+    # implementations retain their normal exception and tracing behavior.
+    try:
+        embed_fn._afs_embedding_provider = normalized  # type: ignore[attr-defined]
+        embed_fn._afs_embedding_model = model  # type: ignore[attr-defined]
+        embed_fn._afs_embedding_dimension = dimension  # type: ignore[attr-defined]
+        embed_fn._afs_embedding_instruction = task_type  # type: ignore[attr-defined]
+    except (AttributeError, TypeError):
+        backend = embed_fn
+
+        def embed_fn(text: str) -> list[float]:
+            return backend(text)
+
+        embed_fn._afs_embedding_provider = normalized  # type: ignore[attr-defined]
+        embed_fn._afs_embedding_model = model  # type: ignore[attr-defined]
+        embed_fn._afs_embedding_dimension = dimension  # type: ignore[attr-defined]
+        embed_fn._afs_embedding_instruction = task_type  # type: ignore[attr-defined]
+    return embed_fn
 
 
 def create_ollama_embed_fn(
@@ -178,25 +280,24 @@ def create_openai_embed_fn(
 
 
 def create_gemini_embed_fn(
-    model: str = "gemini-embedding-001",
+    model: str = DEFAULT_GEMINI_MODEL,
     *,
     api_key: str | None = None,
-    task_type: str = "RETRIEVAL_DOCUMENT",
+    task_type: str = GEMINI_DOCUMENT_TASK,
+    output_dimensionality: int = DEFAULT_GEMINI_DIMENSION,
 ) -> Callable[[str], list[float]]:
     """Create a Gemini embeddings backend.
 
     Uses the ``google-genai`` SDK when available, falling back to a
     plain HTTP request against the Gemini REST API otherwise.
 
-    Available models (as of 2026-03):
-      - gemini-embedding-001
-      - gemini-embedding-2-preview
+    The stable ``gemini-embedding-2`` collection defaults to 768 dimensions.
+    Document and query callers must use their respective retrieval task type.
     """
     resolved_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not resolved_key:
         raise RuntimeError(
-            "Missing API key for Gemini embeddings. "
-            "Set GEMINI_API_KEY or pass --gemini-api-key."
+            "Missing API key for Gemini embeddings. Set GEMINI_API_KEY or pass --gemini-api-key."
         )
 
     # Normalize model name — SDK expects "models/" prefix
@@ -212,7 +313,10 @@ def create_gemini_embed_fn(
             result = client.models.embed_content(
                 model=qualified_model,
                 contents=text,
-                config={"task_type": task_type},
+                config={
+                    "task_type": task_type,
+                    "output_dimensionality": output_dimensionality,
+                },
             )
             values = result.embeddings[0].values
             return [float(v) for v in values]
@@ -244,6 +348,7 @@ def create_gemini_embed_fn(
             "model": qualified_model,
             "content": {"parts": [{"text": text}]},
             "taskType": task_type,
+            "outputDimensionality": output_dimensionality,
         }
         if hasattr(_http_mod, "post"):
             resp = _http_mod.post(url, json=body, timeout=30.0)  # type: ignore[union-attr]
@@ -327,6 +432,130 @@ def create_hf_embed_fn(
     return embed
 
 
+def load_embedding_collection_metadata(index_root: Path) -> EmbeddingCollectionMetadata:
+    """Load collection metadata while preserving legacy index readability."""
+    with index_file_lock(index_root / EMBEDDING_PUBLICATION_LOCK, shared=True):
+        return _load_embedding_collection_metadata_unlocked(index_root)
+
+
+def _load_embedding_collection_metadata_unlocked(
+    index_root: Path,
+) -> EmbeddingCollectionMetadata:
+    index_path = index_root / "embedding_index.json"
+    try:
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Index not found: {index_path}") from None
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid index: {index_path}") from exc
+    if not isinstance(payload, dict):
+        # Very early indexes were occasionally emitted as JSON arrays. They
+        # contain no usable provider contract but remain discoverable/readable.
+        return EmbeddingCollectionMetadata(version=1, health="legacy")
+    return EmbeddingCollectionMetadata.from_index(payload)
+
+
+def discover_embedding_indexes(root: Path, *, max_depth: int = 2) -> list[Path]:
+    """Discover documented embedding index roots in a bounded, stable order.
+
+    AFS checks the supplied directory, ``.afs/search``, ``knowledge``, and
+    their direct project children. It intentionally does not recursively scan
+    an entire home directory.
+    """
+    resolved = root.expanduser().resolve()
+    candidates = [resolved, resolved / ".afs" / "search", resolved / "knowledge"]
+    found: dict[str, Path] = {}
+    for candidate in candidates:
+        _record_embedding_index(candidate, found)
+        if max_depth <= 0 or not candidate.is_dir():
+            continue
+        try:
+            children = sorted(candidate.iterdir(), key=lambda path: path.name)
+        except OSError:
+            continue
+        for child in children:
+            if child.is_dir():
+                _record_embedding_index(child, found)
+    return [found[key] for key in sorted(found)]
+
+
+def create_query_embed_fn_from_index(
+    index_root: Path,
+    *,
+    api_key: str | None = None,
+) -> Callable[[str], list[float]]:
+    """Recreate the query-side embedder declared by a versioned collection."""
+    metadata = load_embedding_collection_metadata(index_root)
+    return _create_query_embed_fn_from_metadata(metadata, api_key=api_key)
+
+
+def _create_query_embed_fn_from_metadata(
+    metadata: EmbeddingCollectionMetadata,
+    *,
+    api_key: str | None = None,
+) -> Callable[[str], list[float]]:
+    if metadata.version < EMBEDDING_INDEX_VERSION:
+        raise ValueError("Legacy embedding index has no query embedder contract")
+    if metadata.provider in {"", "none", "custom"} or not metadata.model:
+        raise ValueError(
+            f"Embedding provider {metadata.provider!r} cannot be recreated from metadata"
+        )
+    kwargs: dict[str, Any] = {
+        "model": metadata.model,
+        "task_type": metadata.query_instruction,
+        "dimension": metadata.dimension,
+    }
+    if metadata.provider == "gemini":
+        kwargs.update(
+            task_type=metadata.query_instruction or GEMINI_QUERY_TASK,
+            output_dimensionality=metadata.dimension or DEFAULT_GEMINI_DIMENSION,
+            api_key=api_key,
+        )
+    elif api_key is not None:
+        kwargs["api_key"] = api_key
+    return create_embed_fn(metadata.provider, **kwargs)
+
+
+def _record_embedding_index(path: Path, found: dict[str, Path]) -> None:
+    index_path = path / "embedding_index.json"
+    if index_path.is_file():
+        found[str(path)] = path
+
+
+def _coerce_positive_int(value: object, *, default: int | None) -> int | None:
+    if isinstance(value, bool):
+        return default
+    try:
+        resolved = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return resolved if resolved > 0 else default
+
+
+def _embed_fn_collection_metadata(
+    embed_fn: Callable[[str], list[float]] | None,
+) -> dict[str, Any]:
+    if embed_fn is None:
+        return {
+            "provider": "none",
+            "model": "",
+            "dimension": None,
+            "document_instruction": "",
+            "query_instruction": "",
+        }
+    provider = str(getattr(embed_fn, "_afs_embedding_provider", "custom"))
+    instruction = str(getattr(embed_fn, "_afs_embedding_instruction", ""))
+    return {
+        "provider": provider,
+        "model": str(getattr(embed_fn, "_afs_embedding_model", "callable")),
+        "dimension": _coerce_positive_int(
+            getattr(embed_fn, "_afs_embedding_dimension", None), default=None
+        ),
+        "document_instruction": instruction,
+        "query_instruction": GEMINI_QUERY_TASK if provider == "gemini" else instruction,
+    }
+
+
 def _load_existing_index(output_dir: Path) -> tuple[dict[str, str], dict[str, dict]]:
     """Load existing index and per-doc metadata (size_bytes, modified_at)."""
     index_path = output_dir / "embedding_index.json"
@@ -353,6 +582,86 @@ def _load_existing_index(output_dir: Path) -> tuple[dict[str, str], dict[str, di
         except (json.JSONDecodeError, OSError):
             pass
     return old_index, old_meta
+
+
+def _referenced_entry_files(embeddings_dir: Path, filename: str) -> set[str]:
+    """Return a legacy entry and any chunk payloads it references."""
+    referenced = {filename}
+    try:
+        payload = json.loads((embeddings_dir / filename).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return referenced
+    if isinstance(payload, dict) and payload.get("chunked"):
+        referenced.update(name for name in payload.get("chunks", []) if isinstance(name, str))
+    return referenced
+
+
+def _gc_embedding_payloads(
+    embeddings_root: Path,
+    referenced_files: set[str],
+    result: EmbeddingIndexResult,
+) -> None:
+    """Delete unreachable immutable payloads while publication is write-locked."""
+    for payload_path in embeddings_root.rglob("*.json"):
+        try:
+            relative = payload_path.relative_to(embeddings_root).as_posix()
+        except ValueError:
+            continue
+        if relative in referenced_files:
+            continue
+        try:
+            payload_path.unlink()
+            result.orphans_removed += 1
+        except OSError as exc:
+            result.errors.append(f"{payload_path}: orphan cleanup failed ({exc})")
+    directories = sorted(
+        (path for path in embeddings_root.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for directory in directories:
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+
+
+def _index_vectors_are_compatible(
+    index: dict[str, Any], embeddings_dir: Path, expected_dimension: int
+) -> bool:
+    """Fail closed when a supposedly semantic collection is partial."""
+    vector_count = 0
+    for doc_id, filename in index.items():
+        if doc_id == "_metadata":
+            continue
+        if not isinstance(filename, str):
+            return False
+        try:
+            payload = json.loads((embeddings_dir / filename).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        rows: list[dict[str, Any]] = []
+        if isinstance(payload, dict) and payload.get("chunked"):
+            for chunk_name in payload.get("chunks", []):
+                if not isinstance(chunk_name, str):
+                    return False
+                try:
+                    chunk = json.loads((embeddings_dir / chunk_name).read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    return False
+                if not isinstance(chunk, dict):
+                    return False
+                rows.append(chunk)
+        elif isinstance(payload, dict):
+            rows.append(payload)
+        else:
+            return False
+        for row in rows:
+            vector = row.get("embedding")
+            if not isinstance(vector, list) or len(vector) != expected_dimension:
+                return False
+            vector_count += 1
+    return vector_count > 0
 
 
 def _file_changed(path: Path, old_size: int, old_mtime: str | None) -> bool:
@@ -415,26 +724,99 @@ def build_embedding_index(
     chunk_size: int | None = None,
     chunk_overlap: int = 200,
 ) -> EmbeddingIndexResult:
+    """Serialize builders and publish an immutable payload generation atomically."""
+    output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    embeddings_dir = output_dir / "embeddings"
+    with index_file_lock(output_dir / EMBEDDING_BUILD_LOCK):
+        return _build_embedding_index_locked(
+            sources,
+            output_dir,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+            max_files=max_files,
+            preview_chars=preview_chars,
+            embed_chars=embed_chars,
+            max_bytes=max_bytes,
+            embed_fn=embed_fn,
+            include_hidden=include_hidden,
+            skip_path=skip_path,
+            incremental=incremental,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+
+
+def _build_embedding_index_locked(
+    sources: Iterable[Path],
+    output_dir: Path,
+    *,
+    include_patterns: Iterable[str] | None = None,
+    exclude_patterns: Iterable[str] | None = None,
+    max_files: int | None = 10000,
+    preview_chars: int = 1000,
+    embed_chars: int = 2000,
+    max_bytes: int | None = 2_000_000,
+    embed_fn: Callable[[str], list[float]] | None = None,
+    include_hidden: bool = False,
+    skip_path: Callable[[Path, Path], bool] | None = None,
+    incremental: bool = False,
+    chunk_size: int | None = None,
+    chunk_overlap: int = 200,
+) -> EmbeddingIndexResult:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    embeddings_root = output_dir / "embeddings"
+    generation_id = uuid.uuid4().hex
+    generation_rel = Path(EMBEDDING_GENERATIONS_DIR) / generation_id
+    embeddings_dir = embeddings_root / generation_rel
     embeddings_dir.mkdir(parents=True, exist_ok=True)
     index_path = output_dir / "embedding_index.json"
+
+    def storage_name(filename: str) -> str:
+        return (generation_rel / filename).as_posix()
 
     index: dict[str, str] = {}
     result = EmbeddingIndexResult()
     result.mode = "incremental" if incremental else "full"
+    collection = _embed_fn_collection_metadata(embed_fn)
+    expected_dimension = _coerce_positive_int(collection.get("dimension"), default=None)
+    semantic_attempts = 0
+    semantic_failures = 0
+    referenced_files: set[str] = set()
 
     old_index: dict[str, str] = {}
     old_meta: dict[str, dict] = {}
+    previous_collection: EmbeddingCollectionMetadata | None = None
     if incremental:
         old_index, old_meta = _load_existing_index(output_dir)
+        try:
+            previous_collection = load_embedding_collection_metadata(output_dir)
+        except (OSError, ValueError):
+            previous_collection = None
+        if previous_collection and previous_collection.version >= EMBEDDING_INDEX_VERSION:
+            current_identity = (collection["provider"], collection["model"], expected_dimension)
+            previous_identity = (
+                previous_collection.provider,
+                previous_collection.model,
+                previous_collection.dimension,
+            )
+            if current_identity != previous_identity:
+                # Reusing vectors from a different collection would make
+                # cosine scores meaningless. Treat this incremental request
+                # as a clean rebuild instead.
+                old_index = {}
+                old_meta = {}
 
     include = list(include_patterns) if include_patterns else []
     exclude = list(exclude_patterns) if exclude_patterns else []
 
     seen_doc_ids: set[str] = set()
     for source_root, path in _iter_source_files(
-        sources, include, exclude, max_files, include_hidden
+        sources,
+        include,
+        exclude,
+        max_files,
+        include_hidden,
+        output_dir=output_dir,
     ):
         result.total_files += 1
         if skip_path is not None and skip_path(source_root, path):
@@ -450,6 +832,7 @@ def build_embedding_index(
             meta = old_meta[doc_id]
             if not _file_changed(path, meta.get("size_bytes", 0), meta.get("modified_at")):
                 index[doc_id] = old_index[doc_id]
+                referenced_files.update(_referenced_entry_files(embeddings_root, old_index[doc_id]))
                 result.reused += 1
                 continue
 
@@ -470,9 +853,7 @@ def build_embedding_index(
             except OSError:
                 stat = None
         size_bytes = stat.st_size if stat else 0
-        modified_at = (
-            datetime.fromtimestamp(stat.st_mtime).isoformat() if stat else None
-        )
+        modified_at = datetime.fromtimestamp(stat.st_mtime).isoformat() if stat else None
 
         # --- Chunked mode ---
         if chunk_size is not None and len(text) > chunk_size:
@@ -483,15 +864,35 @@ def build_embedding_index(
             for chunk_idx, (char_start, char_end, chunk_text) in enumerate(chunks):
                 chunk_doc_id = f"{doc_id}::chunk:{chunk_idx}"
                 chunk_filename = f"{base_hash}_c{chunk_idx}.json"
+                chunk_storage_name = storage_name(chunk_filename)
                 chunk_preview = chunk_text[:preview_chars].strip()
                 chunk_embedding: list[float] = []
                 if embed_fn:
+                    semantic_attempts += 1
+                    embed_failed = False
                     try:
                         chunk_embedding = embed_fn(chunk_text[:embed_chars])
                     except Exception as exc:
                         result.errors.append(f"{path} chunk {chunk_idx}: embed failed ({exc})")
+                        semantic_failures += 1
+                        embed_failed = True
+                    if chunk_embedding:
+                        if expected_dimension is None:
+                            expected_dimension = len(chunk_embedding)
+                        elif len(chunk_embedding) != expected_dimension:
+                            result.errors.append(
+                                f"{path} chunk {chunk_idx}: embedding dimension "
+                                f"{len(chunk_embedding)} != collection dimension "
+                                f"{expected_dimension}"
+                            )
+                            chunk_embedding = []
+                            semantic_failures += 1
+                    elif not embed_failed:
+                        semantic_failures += 1
                 line_start = _count_lines_before(text, char_start)
-                line_end = _count_lines_before(text, char_end - 1) if char_end > char_start else line_start
+                line_end = (
+                    _count_lines_before(text, char_end - 1) if char_end > char_start else line_start
+                )
                 chunk_payload = {
                     "id": chunk_doc_id,
                     "parent_doc_id": doc_id,
@@ -508,11 +909,12 @@ def build_embedding_index(
                     "modified_at": modified_at,
                 }
                 try:
-                    (embeddings_dir / chunk_filename).write_text(
+                    atomic_write_text(
+                        embeddings_dir / chunk_filename,
                         json.dumps(chunk_payload, ensure_ascii=True) + "\n",
-                        encoding="utf-8",
                     )
-                    chunk_filenames.append(chunk_filename)
+                    chunk_filenames.append(chunk_storage_name)
+                    referenced_files.add(chunk_storage_name)
                     result.chunks_written += 1
                 except OSError as exc:
                     result.errors.append(f"{path} chunk {chunk_idx}: write failed ({exc})")
@@ -520,10 +922,12 @@ def build_embedding_index(
                     break
 
             if not chunk_ok:
+                referenced_files.difference_update(chunk_filenames)
                 result.skipped += 1
                 continue
 
             manifest_filename = f"{base_hash}_chunks.json"
+            manifest_storage_name = storage_name(manifest_filename)
             chunk_manifest = {
                 "id": doc_id,
                 "source_path": str(path),
@@ -534,15 +938,17 @@ def build_embedding_index(
                 "chunks": chunk_filenames,
             }
             try:
-                (embeddings_dir / manifest_filename).write_text(
+                atomic_write_text(
+                    embeddings_dir / manifest_filename,
                     json.dumps(chunk_manifest, ensure_ascii=True) + "\n",
-                    encoding="utf-8",
                 )
             except OSError as exc:
+                referenced_files.difference_update(chunk_filenames)
                 result.skipped += 1
                 result.errors.append(f"{path}: chunk manifest write failed ({exc})")
                 continue
-            index[doc_id] = manifest_filename
+            index[doc_id] = manifest_storage_name
+            referenced_files.add(manifest_storage_name)
             result.indexed += 1
             continue
 
@@ -551,11 +957,26 @@ def build_embedding_index(
         embed_text = text[:embed_chars]
         embedding: list[float] = []
         if embed_fn:
+            semantic_attempts += 1
+            embed_failed = False
             try:
                 embedding = embed_fn(embed_text)
             except Exception as exc:
                 result.errors.append(f"{path}: embed failed ({exc})")
                 embedding = []
+                embed_failed = True
+            if embedding:
+                if expected_dimension is None:
+                    expected_dimension = len(embedding)
+                elif len(embedding) != expected_dimension:
+                    result.errors.append(
+                        f"{path}: embedding dimension {len(embedding)} != "
+                        f"collection dimension {expected_dimension}"
+                    )
+                    embedding = []
+                    semantic_failures += 1
+            elif not embed_failed:
+                semantic_failures += 1
 
         payload = {
             "id": doc_id,
@@ -567,58 +988,88 @@ def build_embedding_index(
             "modified_at": modified_at,
         }
         try:
-            (embeddings_dir / filename).write_text(
+            atomic_write_text(
+                embeddings_dir / filename,
                 json.dumps(payload, ensure_ascii=True) + "\n",
-                encoding="utf-8",
             )
         except OSError as exc:
             result.skipped += 1
             result.errors.append(f"{path}: write failed ({exc})")
             continue
-        index[doc_id] = filename
+        stored_filename = storage_name(filename)
+        index[doc_id] = stored_filename
+        referenced_files.add(stored_filename)
         result.indexed += 1
 
     # Detect deletions in incremental mode
     if incremental:
-        for old_doc_id, old_filename in old_index.items():
+        for old_doc_id in old_index:
             if old_doc_id not in seen_doc_ids:
                 result.removed += 1
-                stale_path = embeddings_dir / old_filename
-                try:
-                    stale_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+
+    if embed_fn is None:
+        collection_health = "keyword_only"
+    elif (
+        semantic_attempts == 0
+        and result.reused
+        and previous_collection is not None
+        and previous_collection.health == "healthy"
+    ):
+        collection_health = "healthy"
+    elif semantic_attempts == 0 or semantic_failures or result.errors:
+        collection_health = "unhealthy"
+    else:
+        collection_health = "healthy"
+    collection.update(
+        version=EMBEDDING_INDEX_VERSION,
+        dimension=expected_dimension,
+        normalized=False,
+        health=collection_health,
+    )
+    result.semantic_status = collection_health
 
     # Write _metadata block into index
     metadata_block: dict[str, Any] = {
-        "indexed_at": datetime.now().isoformat(),
+        "generation_id": generation_id,
+        "indexed_at": datetime.now(timezone.utc).isoformat(),
         "mode": result.mode,
+        "collection": collection,
         "stats": {
             "total_files": result.total_files,
             "reused": result.reused,
             "re_embedded": result.indexed,
             "removed": result.removed,
+            "orphans_removed": result.orphans_removed,
+            "semantic_attempts": semantic_attempts,
+            "semantic_failures": semantic_failures,
         },
     }
     index_with_meta: dict[str, Any] = {"_metadata": metadata_block}
     index_with_meta.update(index)
 
-    index_path.write_text(
-        json.dumps(index_with_meta, indent=2, ensure_ascii=True) + "\n",
-        encoding="utf-8",
-    )
+    manifest_text = json.dumps(index_with_meta, indent=2, ensure_ascii=True) + "\n"
+    fsync_directory(embeddings_dir)
+    fsync_directory(embeddings_dir.parent)
+    fsync_directory(embeddings_root)
+    with index_file_lock(output_dir / EMBEDDING_PUBLICATION_LOCK):
+        atomic_write_text(index_path, manifest_text)
+        _gc_embedding_payloads(embeddings_root, referenced_files, result)
     try:
         from .history import log_embedding_event
-        log_embedding_event("index_build", metadata={
-            "output_dir": str(output_dir),
-            "total_files": result.total_files,
-            "indexed": result.indexed,
-            "skipped": result.skipped,
-            "reused": result.reused,
-            "removed": result.removed,
-            "mode": result.mode,
-            "errors_count": len(result.errors),
-        })
+
+        log_embedding_event(
+            "index_build",
+            metadata={
+                "output_dir": str(output_dir),
+                "total_files": result.total_files,
+                "indexed": result.indexed,
+                "skipped": result.skipped,
+                "reused": result.reused,
+                "removed": result.removed,
+                "mode": result.mode,
+                "errors_count": len(result.errors),
+            },
+        )
     except Exception:
         pass
     return result
@@ -629,9 +1080,60 @@ def search_embedding_index(
     query: str,
     *,
     embed_fn: Callable[[str], list[float]] | None = None,
+    recreate_query_embedder: bool = False,
     top_k: int = 5,
     min_score: float = 0.3,
 ) -> list[SearchResult]:
+    """Search a legacy or versioned embedding index.
+
+    This compatibility wrapper preserves the historic list return value. New
+    callers should use :func:`search_embedding_index_detailed` so fallback is
+    visible rather than mislabeled as semantic retrieval.
+    """
+    return search_embedding_index_detailed(
+        index_root,
+        query,
+        embed_fn=embed_fn,
+        recreate_query_embedder=recreate_query_embedder,
+        top_k=top_k,
+        min_score=min_score,
+    ).results
+
+
+def search_embedding_index_detailed(
+    index_root: Path,
+    query: str,
+    *,
+    embed_fn: Callable[[str], list[float]] | None = None,
+    recreate_query_embedder: bool = False,
+    top_k: int = 5,
+    min_score: float = 0.3,
+) -> EmbeddingSearchResponse:
+    """Search one atomically published generation under a shared lock."""
+    if not query.strip():
+        raise ValueError("query cannot be empty")
+    index_root = index_root.expanduser().resolve()
+    with index_file_lock(index_root / EMBEDDING_PUBLICATION_LOCK, shared=True):
+        return _search_embedding_index_detailed_locked(
+            index_root,
+            query,
+            embed_fn=embed_fn,
+            recreate_query_embedder=recreate_query_embedder,
+            top_k=top_k,
+            min_score=min_score,
+        )
+
+
+def _search_embedding_index_detailed_locked(
+    index_root: Path,
+    query: str,
+    *,
+    embed_fn: Callable[[str], list[float]] | None = None,
+    recreate_query_embedder: bool = False,
+    top_k: int = 5,
+    min_score: float = 0.3,
+) -> EmbeddingSearchResponse:
+    """Search with strict vector compatibility and explicit fallback state."""
     index_path = index_root / "embedding_index.json"
     embeddings_dir = index_root / "embeddings"
     if not index_path.exists():
@@ -641,13 +1143,51 @@ def search_embedding_index(
         index = json.loads(index_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid index: {index_path}") from exc
+    if not isinstance(index, dict):
+        raise ValueError(f"Invalid index object: {index_path}")
+
+    collection = EmbeddingCollectionMetadata.from_index(index)
+    semantic_requested = embed_fn is not None or recreate_query_embedder
+    semantic_status = "not_requested"
+    semantic_reason: str | None = None
+
+    if semantic_requested and collection.health == "unhealthy":
+        semantic_status = "fallback"
+        semantic_reason = "embedding collection is unhealthy"
+        embed_fn = None
+    elif recreate_query_embedder and embed_fn is None:
+        try:
+            embed_fn = _create_query_embed_fn_from_metadata(collection)
+        except (OSError, RuntimeError, ValueError) as exc:
+            semantic_status = "fallback"
+            semantic_reason = f"query embedder unavailable: {exc}"
 
     query_embedding: list[float] | None = None
     if embed_fn:
         try:
             query_embedding = embed_fn(query)
-        except Exception:
+        except Exception as exc:
             query_embedding = None
+            semantic_status = "fallback"
+            semantic_reason = f"query embedding failed: {exc}"
+        if query_embedding:
+            expected_dimension = collection.dimension
+            if expected_dimension and len(query_embedding) != expected_dimension:
+                semantic_status = "fallback"
+                semantic_reason = (
+                    f"query dimension {len(query_embedding)} != collection dimension "
+                    f"{expected_dimension}"
+                )
+                query_embedding = None
+            elif not _index_vectors_are_compatible(index, embeddings_dir, len(query_embedding)):
+                semantic_status = "fallback"
+                semantic_reason = "embedding collection contains missing or incompatible vectors"
+                query_embedding = None
+            else:
+                semantic_status = "ready"
+        elif semantic_status == "not_requested":
+            semantic_status = "fallback"
+            semantic_reason = "query embedder returned no vector"
 
     results: list[SearchResult] = []
     for doc_id, filename in index.items():
@@ -716,7 +1256,12 @@ def search_embedding_index(
             )
 
     results.sort(key=lambda r: r.score, reverse=True)
-    return results[:top_k]
+    return EmbeddingSearchResponse(
+        results=results[:top_k],
+        semantic_status=semantic_status,
+        semantic_reason=semantic_reason,
+        collection=collection,
+    )
 
 
 def load_embedding_eval_cases(path: Path) -> list[EmbeddingEvalCase]:
@@ -809,6 +1354,8 @@ def _iter_source_files(
     exclude_patterns: list[str],
     max_files: int | None,
     include_hidden: bool,
+    *,
+    output_dir: Path,
 ) -> Iterable[tuple[Path, Path]]:
     count = 0
     for source in sources:
@@ -816,24 +1363,72 @@ def _iter_source_files(
         if not root.exists():
             continue
         if root.is_file():
-            if _matches_patterns(
+            if not _is_embedding_output_path(root, root.parent, output_dir) and _matches_patterns(
                 root, root.parent, include_patterns, exclude_patterns, include_hidden
             ):
                 yield root.parent, root
                 count += 1
         else:
             for base, dirs, files in os.walk(root):
+                dirs[:] = sorted(
+                    directory
+                    for directory in dirs
+                    if not _is_embedding_output_path(Path(base) / directory, root, output_dir)
+                )
                 if not include_hidden:
                     dirs[:] = [d for d in dirs if not d.startswith(".")]
-                for name in files:
+                for name in sorted(files):
                     path = Path(base) / name
-                    if _matches_patterns(path, root, include_patterns, exclude_patterns, include_hidden):
+                    if not _is_embedding_output_path(path, root, output_dir) and _matches_patterns(
+                        path, root, include_patterns, exclude_patterns, include_hidden
+                    ):
                         yield root, path
                         count += 1
                         if max_files and count >= max_files:
                             return
         if max_files and count >= max_files:
             return
+
+
+def _is_embedding_output_path(path: Path, source_root: Path, output_dir: Path) -> bool:
+    resolved_path = path.resolve()
+    resolved_root = source_root.resolve()
+    resolved_output = output_dir.resolve()
+    if resolved_root != resolved_output and _path_is_within(resolved_output, resolved_root):
+        try:
+            resolved_path.relative_to(resolved_output)
+            return True
+        except ValueError:
+            return False
+    if resolved_root != resolved_output:
+        try:
+            source_relative = resolved_root.relative_to(resolved_output)
+        except ValueError:
+            return False
+        return bool(source_relative.parts) and source_relative.parts[0] in {
+            "embedding_index.json",
+            "embeddings",
+        }
+    try:
+        relative = resolved_path.relative_to(resolved_root)
+    except ValueError:
+        return False
+    if not relative.parts:
+        return False
+    return relative.parts[0] in {
+        "embedding_index.json",
+        "embeddings",
+        EMBEDDING_BUILD_LOCK,
+        EMBEDDING_PUBLICATION_LOCK,
+    }
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _parse_eval_case(payload: dict) -> EmbeddingEvalCase | None:
@@ -973,9 +1568,9 @@ def _hash_doc_id(doc_id: str) -> str:
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    if not a or not b:
+    if not a or not b or len(a) != len(b):
         return 0.0
-    size = min(len(a), len(b))
+    size = len(a)
     if size == 0:
         return 0.0
     dot = sum(a[i] * b[i] for i in range(size))
@@ -1036,7 +1631,13 @@ register_embedding_backend(
 )
 register_embedding_backend(
     "hf",
-    lambda model, device=None, max_tokens=512, pooling="mean", normalize=True, token=None, **_: create_hf_embed_fn(
+    lambda model,
+    device=None,
+    max_tokens=512,
+    pooling="mean",
+    normalize=True,
+    token=None,
+    **_: create_hf_embed_fn(
         model=model,
         device=device,
         max_tokens=max_tokens,
@@ -1047,7 +1648,11 @@ register_embedding_backend(
 )
 register_embedding_backend(
     "openai",
-    lambda model, base_url="https://api.openai.com/v1", api_key=None, timeout=30.0, **_: create_openai_embed_fn(
+    lambda model,
+    base_url="https://api.openai.com/v1",
+    api_key=None,
+    timeout=30.0,
+    **_: create_openai_embed_fn(
         model=model,
         base_url=base_url,
         api_key=api_key,
@@ -1056,9 +1661,14 @@ register_embedding_backend(
 )
 register_embedding_backend(
     "gemini",
-    lambda model="gemini-embedding-001", api_key=None, task_type="RETRIEVAL_DOCUMENT", **_: create_gemini_embed_fn(
+    lambda model=DEFAULT_GEMINI_MODEL,
+    api_key=None,
+    task_type=GEMINI_DOCUMENT_TASK,
+    output_dimensionality=DEFAULT_GEMINI_DIMENSION,
+    **_: create_gemini_embed_fn(
         model=model,
         api_key=api_key,
         task_type=task_type,
+        output_dimensionality=output_dimensionality,
     ),
 )

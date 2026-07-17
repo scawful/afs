@@ -215,10 +215,11 @@ duration_s = 60                # Test duration
 
 ## Health Reports
 
-Reports are saved to `~/.context/health/`:
+Reports are saved to `~/.context/.afs/health/` for context layout v2. Legacy
+v1 contexts retain `~/.context/health/`:
 
 ```
-~/.context/health/
+~/.context/.afs/health/
 ├── report-2024-01-14T10:30:00.json  # Individual check reports
 ├── report-2024-01-14T10:29:00.json
 ├── trends.json                       # Historical trend data
@@ -312,7 +313,8 @@ afs health trend --hours 168
 Check that:
 1. `--auto-heal` flag is enabled
 2. Sufficient file permissions exist
-3. Check logs: `~/.context/health/daemon.log`
+3. Check logs: `~/.context/.afs/health/daemon.log` (v2) or
+   `~/.context/health/daemon.log` (v1)
 
 ## Architecture
 

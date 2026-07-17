@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import json
+import shutil
 from argparse import Namespace
+from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 import afs.cli.core as cli_core_module
 from afs.agent_jobs import AgentJobQueue
 from afs.agent_runs import AgentRunStore
 from afs.cli.core import session_bootstrap_command
 from afs.context_index import ContextSQLiteIndex
+from afs.context_layout import scaffold_v2
 from afs.hivemind import HivemindBus
 from afs.manager import AFSManager
 from afs.models import MountType
+from afs.project_registry import ProjectRegistry
 from afs.schema import (
     AFSConfig,
     DirectoryConfig,
@@ -22,6 +28,310 @@ from afs.schema import (
 )
 from afs.tasks import TaskQueue
 from afs.work_assistant import WorkAssistantStore
+
+
+def test_v2_bootstrap_does_not_append_through_linked_daily_history_log(
+    tmp_path: Path,
+) -> None:
+    from afs.session_bootstrap import build_session_bootstrap
+
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    common = context_root / "history" / "common"
+    common.mkdir()
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text("do not append\n", encoding="utf-8")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    try:
+        (common / f"events_{stamp}.jsonl").symlink_to(outside)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"file symlinks unavailable: {exc}")
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+
+    summary = build_session_bootstrap(manager, context_root)
+
+    assert summary["context_path"] == str(context_root)
+    assert outside.read_text(encoding="utf-8") == "do not append\n"
+
+
+def test_v2_bootstrap_rejects_symlinked_work_assistant_database(tmp_path: Path) -> None:
+    from afs.session_bootstrap import build_session_bootstrap
+
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    outside = tmp_path / "outside.sqlite3"
+    outside.write_text("do not modify", encoding="utf-8")
+    db_path = context_root / ".afs" / "compat" / "global" / "work_assistant.sqlite3"
+    try:
+        db_path.symlink_to(outside)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"file symlinks unavailable: {exc}")
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+
+    summary = build_session_bootstrap(manager, context_root, record_event=False)
+
+    assert "symbolic link or reparse point" in summary["work_assistant"]["error"]
+    assert outside.read_text(encoding="utf-8") == "do not modify"
+
+
+def test_v2_bootstrap_rejects_symlinked_compat_metadata(tmp_path: Path) -> None:
+    from afs.session_bootstrap import build_session_bootstrap
+
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    outside = tmp_path / "metadata.json"
+    outside.write_text(
+        json.dumps({"description": "outside-private-metadata"}),
+        encoding="utf-8",
+    )
+    metadata_path = context_root / ".afs" / "compat" / "metadata.json"
+    try:
+        metadata_path.symlink_to(outside)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"file symlinks unavailable: {exc}")
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        build_session_bootstrap(manager, context_root, record_event=False)
+    assert "outside-private-metadata" in outside.read_text(encoding="utf-8")
+
+
+def test_v2_bootstrap_ignores_compat_metadata_directory_redirects(tmp_path: Path) -> None:
+    from afs.session_bootstrap import build_session_bootstrap
+
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("outside-directory-private", encoding="utf-8")
+    metadata_path = context_root / ".afs" / "compat" / "metadata.json"
+    metadata_path.write_text(
+        json.dumps({"directories": {"scratchpad": str(outside)}}),
+        encoding="utf-8",
+    )
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+
+    summary = build_session_bootstrap(manager, context_root, record_event=False)
+
+    assert "outside-directory-private" not in json.dumps(summary)
+    assert manager.resolve_mount_root(context_root, MountType.SCRATCHPAD) == (
+        context_root / "scratchpad"
+    )
+
+
+def test_v2_bootstrap_status_diff_freshness_and_scratchpad_are_scope_isolated(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from afs.session_bootstrap import build_session_bootstrap
+
+    context_root = tmp_path / ".context"
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    scaffold_v2(context_root)
+    registry = ProjectRegistry(context_root)
+    alpha_record = registry.register(alpha)
+    beta_record = registry.register(beta)
+    manager = AFSManager(config=AFSConfig(general=GeneralConfig(context_root=context_root)))
+
+    for scope_path, marker in (
+        (Path("common"), "common-visible"),
+        (Path("projects") / alpha_record.project_id, "alpha-visible"),
+        (Path("projects") / beta_record.project_id, "beta-private"),
+    ):
+        for category in ("scratchpad", "knowledge", "memory"):
+            root = context_root / category / scope_path
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "state.md").write_text(marker, encoding="utf-8")
+
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.SCRATCHPAD, MountType.KNOWLEDGE, MountType.MEMORY],
+        include_content=True,
+    )
+    common_reports = context_root / "scratchpad" / "common" / "afs_agents"
+    beta_reports = (
+        context_root
+        / "scratchpad"
+        / "projects"
+        / beta_record.project_id
+        / "afs_agents"
+    )
+    common_reports.mkdir(parents=True)
+    beta_reports.mkdir(parents=True)
+    (common_reports / "context_warm.json").write_text(
+        '{"status":"common-report-visible"}', encoding="utf-8"
+    )
+    (beta_reports / "context_warm.json").write_text(
+        '{"status":"beta-report-private"}', encoding="utf-8"
+    )
+    alpha_scratchpad = (
+        context_root / "scratchpad" / "projects" / alpha_record.project_id
+    )
+    beta_scratchpad = context_root / "scratchpad" / "projects" / beta_record.project_id
+    beta_memory = context_root / "memory" / "projects" / beta_record.project_id
+    alpha_memory = context_root / "memory" / "projects" / alpha_record.project_id
+    (beta_memory / "entries.jsonl").write_text(
+        '{"id":"beta-memory-linked","domain":"private"}\n', encoding="utf-8"
+    )
+    alpha_reports = alpha_scratchpad / "afs_agents"
+    alpha_reports.mkdir(parents=True)
+    (alpha_scratchpad / "deferred.md").write_text(
+        "alpha-visible", encoding="utf-8"
+    )
+    (beta_reports / "context_watch.json").write_text(
+        '{"status":"beta-report-linked"}', encoding="utf-8"
+    )
+    (alpha_scratchpad / "state.md").unlink()
+    try:
+        (alpha_scratchpad / "state.md").symlink_to(beta_scratchpad / "state.md")
+        (alpha_memory / "entries.jsonl").symlink_to(beta_memory / "entries.jsonl")
+        (alpha_reports / "context_watch.json").symlink_to(
+            beta_reports / "context_watch.json"
+        )
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    monkeypatch.setenv("AFS_SESSION_ID", "alpha-scope-test")
+    first = build_session_bootstrap(manager, context_root, project_path=alpha)
+    first_text = json.dumps(first)
+    assert "alpha-visible" in first_text
+    assert "common-visible" in first_text
+    assert "common-report-visible" in first_text
+    assert "beta-private" not in first_text
+    assert "beta-report-private" not in first_text
+    assert "beta-memory-linked" not in first_text
+    assert "beta-report-linked" not in first_text
+    assert first["status"]["mount_counts"]["knowledge"] == 2
+    assert first["mount_freshness"]["knowledge"]["file_count"] == 2
+
+    alpha_file = context_root / "knowledge" / "projects" / alpha_record.project_id / "state.md"
+    beta_file = context_root / "knowledge" / "projects" / beta_record.project_id / "state.md"
+    alpha_file.write_text("alpha-visible changed", encoding="utf-8")
+    beta_file.write_text("beta-private changed", encoding="utf-8")
+
+    second = build_session_bootstrap(
+        manager,
+        context_root,
+        project_path=alpha,
+        record_event=False,
+    )
+    second_text = json.dumps(second)
+    assert any(
+        item["relative_path"] == f"projects/{alpha_record.project_id}/state.md"
+        for item in second["diff"]["modified"]
+    )
+    assert "beta-private" not in second_text
+    assert all(
+        beta_record.project_id not in str(item)
+        for key in ("added", "modified", "deleted")
+        for item in second["diff"][key]
+    )
+    assert beta_record.project_id not in json.dumps(second["session_changes"])
+
+
+def test_v2_bootstrap_rejects_a_linked_project_scope_root(tmp_path: Path) -> None:
+    from afs.session_bootstrap import build_session_bootstrap
+
+    context_root = tmp_path / ".context"
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    scaffold_v2(context_root)
+    registry = ProjectRegistry(context_root)
+    alpha_record = registry.register(alpha)
+    beta_record = registry.register(beta)
+    beta_root = context_root / "scratchpad" / "projects" / beta_record.project_id
+    beta_root.mkdir(parents=True)
+    (beta_root / "state.md").write_text("beta-root-private", encoding="utf-8")
+    alpha_root = context_root / "scratchpad" / "projects" / alpha_record.project_id
+    try:
+        alpha_root.symlink_to(beta_root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+
+    with pytest.raises(ValueError, match="symbolic link|reparse point"):
+        build_session_bootstrap(
+            manager,
+            context_root,
+            project_path=alpha,
+            record_event=False,
+        )
+
+
+def test_v2_bootstrap_artifacts_and_snapshots_reject_linked_output_roots(
+    tmp_path: Path,
+) -> None:
+    from afs.context_freshness import save_context_snapshot
+    from afs.context_paths import resolve_agent_output_root
+    from afs.scopes import resolve_scope
+    from afs.session_bootstrap import (
+        build_session_bootstrap,
+        write_session_bootstrap_artifacts,
+    )
+
+    context_root = tmp_path / ".context"
+    alpha = tmp_path / "alpha"
+    outside = tmp_path / "outside"
+    alpha.mkdir()
+    outside.mkdir()
+    scaffold_v2(context_root)
+    record = ProjectRegistry(context_root).register(alpha)
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+    summary = build_session_bootstrap(
+        manager,
+        context_root,
+        project_path=alpha,
+        record_event=False,
+    )
+    output_root = resolve_agent_output_root(
+        context_root,
+        config=manager.config,
+        scope_id=record.scope_id,
+    )
+    if output_root.exists():
+        shutil.rmtree(output_root)
+    else:
+        output_root.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        output_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link|reparse point"):
+        write_session_bootstrap_artifacts(manager, context_root, summary)
+    assert list(outside.iterdir()) == []
+
+    output_root.unlink()
+    output_root.mkdir()
+    snapshot_outside = tmp_path / "snapshot-outside"
+    snapshot_outside.mkdir()
+    (output_root / "context_snapshots").symlink_to(
+        snapshot_outside,
+        target_is_directory=True,
+    )
+    with pytest.raises(ValueError, match="symbolic link|reparse point"):
+        save_context_snapshot(
+            context_root,
+            "linked-output",
+            config=manager.config,
+            scoped=resolve_scope(context_root, requester_path=alpha),
+        )
+    assert list(snapshot_outside.iterdir()) == []
 
 
 def _remap_directories(**overrides: str) -> list[DirectoryConfig]:
@@ -197,6 +507,94 @@ def test_build_session_bootstrap_does_not_mutate_hivemind_or_memory(
     assert not (context_root / "memory" / "entries.jsonl").exists()
 
 
+def test_v2_bootstrap_reads_only_current_and_common_scopes(tmp_path: Path) -> None:
+    from afs.context_layout import scaffold_v2
+    from afs.handoff import HandoffStore
+    from afs.messages import MessageBus
+    from afs.project_registry import ProjectRegistry
+    from afs.scratchpad import ScratchpadStore
+    from afs.session_bootstrap import build_session_bootstrap, render_session_bootstrap
+
+    context_root = tmp_path / ".context"
+    alpha = tmp_path / "alpha"
+    alpha_alias = tmp_path / "alpha-alias"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    alpha_alias.mkdir()
+    beta.mkdir()
+    alpha_subdir = alpha / "src"
+    alpha_subdir.mkdir()
+    scaffold_v2(context_root)
+    registry = ProjectRegistry(context_root)
+    alpha_record = registry.register(alpha)
+    registry.add_alias(
+        alpha_record.project_id,
+        alpha_alias,
+        requester_path=alpha,
+    )
+    beta_record = registry.register(beta)
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+    manager = AFSManager(config=config)
+
+    MessageBus(context_root, scope_id=alpha_record.scope_id, config=config).send(
+        "alpha-agent", "status", {"detail": "alpha-visible"}
+    )
+    MessageBus(context_root, scope_id=beta_record.scope_id, config=config).send(
+        "beta-agent", "status", {"detail": "beta-hidden"}
+    )
+    MessageBus(context_root, scope_id="common", config=config).send(
+        "common-agent", "status", {"detail": "common-visible"}
+    )
+    ScratchpadStore(
+        context_root, scope_id=alpha_record.scope_id, config=config
+    ).create(title="Alpha draft", body="alpha")
+    ScratchpadStore(
+        context_root, scope_id=beta_record.scope_id, config=config
+    ).create(title="Beta draft", body="beta")
+    HandoffStore(context_root, scope_id=alpha_record.scope_id, config=config).create_revision(
+        title="Alpha handoff", agent_name="alpha-agent"
+    )
+    HandoffStore(context_root, scope_id=beta_record.scope_id, config=config).create_revision(
+        title="Beta handoff", agent_name="beta-agent"
+    )
+    run_store = AgentRunStore(context_root)
+    run_store.start("Common run", prompt="common-visible-run")
+    run_store.start("Alpha run", workspace=str(alpha), prompt="alpha-visible-run")
+    run_store.start("Alpha alias run", workspace=str(alpha_alias))
+    run_store.start("Beta run", workspace=str(beta), prompt="beta-hidden-run")
+
+    summary = build_session_bootstrap(
+        manager,
+        context_root,
+        project_path=alpha_subdir,
+        record_event=False,
+    )
+
+    assert summary["scope_id"] == alpha_record.scope_id
+    assert summary["layout_version"] == 2
+    assert summary["project"] == "alpha"
+    assert {item["from"] for item in summary["hivemind"]["messages"]} == {
+        "alpha-agent",
+        "common-agent",
+    }
+    assert [item["title"] for item in summary["scratchpad"]["drafts"]] == [
+        "Alpha draft"
+    ]
+    assert summary["handoff"]["title"] == "Alpha handoff"
+    assert {item["task"] for item in summary["agent_runs"]["items"]} == {
+        "Alpha alias run",
+        "Alpha run",
+        "Common run",
+    }
+    assert "beta-hidden-run" not in json.dumps(summary["agent_runs"])
+    assert any("afs search" in step for step in summary["startup_sequence"])
+    assert not any("afs context query" in step for step in summary["startup_sequence"])
+    assert any("afs search" in action for action in summary["recommended_actions"])
+    rendered = render_session_bootstrap(summary)
+    assert "## Messages" in rendered
+    assert "Hivemind" not in rendered
+
+
 def test_build_session_bootstrap_ignores_volatile_index_drift(
     tmp_path: Path,
 ) -> None:
@@ -265,6 +663,43 @@ def test_build_session_bootstrap_includes_codebase_summary(
     rendered = render_session_bootstrap(summary)
     assert "## Codebase" in rendered
     assert "source_roots: src" in rendered
+
+
+def test_v2_session_bootstrap_prunes_nested_project_and_visible_context(
+    tmp_path: Path,
+) -> None:
+    from afs.context_layout import scaffold_v2
+    from afs.project_registry import ProjectRegistry
+    from afs.session_bootstrap import build_session_bootstrap
+
+    alpha = tmp_path / "workspace"
+    beta = alpha / "nested-beta"
+    context_root = alpha / "central-context"
+    beta.mkdir(parents=True)
+    scaffold_v2(context_root)
+    registry = ProjectRegistry(context_root)
+    registry.register(alpha)
+    registry.register(beta)
+    (alpha / "alpha_safe.py").write_text("ALPHA_SAFE = True\n", encoding="utf-8")
+    (beta / "beta_confidential_canary.py").write_text(
+        "BETA_PRIVATE = True\n",
+        encoding="utf-8",
+    )
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+
+    summary = build_session_bootstrap(
+        manager,
+        context_root,
+        project_path=alpha,
+    )
+    rendered = json.dumps(summary["codebase"])
+
+    assert "alpha_safe.py" in rendered
+    assert "nested-beta" not in rendered
+    assert "beta_confidential_canary" not in rendered
+    assert "central-context" not in rendered
 
 
 def test_session_bootstrap_delivers_explicitly_matched_skill_body(

@@ -10,6 +10,7 @@ session can see what is already in flight.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -17,13 +18,23 @@ from pathlib import Path
 from typing import Any
 
 from .atomic_io import atomic_write_text
+from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_paths import resolve_mount_root
 from .models import MountType
+from .path_safety import assert_no_linklike_components
 
 MISSION_SCHEMA_VERSION = "1"
 VALID_MISSION_STATUSES = ("active", "blocked", "done", "abandoned")
 # States that represent work still in flight (surfaced into session context).
 OPEN_MISSION_STATUSES = ("active", "blocked")
+_MISSION_ID_PATTERN = re.compile(r"^mission_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+
+
+def _validate_mission_id(mission_id: str) -> str:
+    normalized = str(mission_id).strip()
+    if not _MISSION_ID_PATTERN.fullmatch(normalized):
+        raise ValueError("mission id must be a safe 'mission_<id>' path segment")
+    return normalized
 
 
 def _now() -> str:
@@ -143,6 +154,9 @@ class MissionStore:
 
     def __init__(self, context_path: Path, *, config: Any = None) -> None:
         self._context_path = context_path.expanduser().resolve()
+        self._harden_paths = (
+            detect_layout_version(self._context_path) == LAYOUT_VERSION
+        )
         # Construction is READ-ONLY: never create the mission directory here. Session
         # bootstrap constructs a store just to read active missions, and that read path
         # must not dirty a repo or an external mount. The directory is created lazily on
@@ -150,7 +164,27 @@ class MissionStore:
         self._root = resolve_mount_root(
             self._context_path, MountType.ITEMS, config=config
         ) / "missions"
-        self._manifest_path = self._root / "_manifest.json"
+        self._safe_path(self._root)
+        self._manifest_path = self._safe_path(self._root / "_manifest.json")
+
+    def _safe_path(self, path: Path, *, allow_missing: bool = True) -> Path:
+        """Reject link-like v2 store paths without changing v1 mount behavior."""
+
+        if not self._harden_paths:
+            return path
+        assert_no_linklike_components(
+            self._root,
+            boundary=self._context_path,
+            allow_missing=allow_missing,
+        )
+        return assert_no_linklike_components(
+            path,
+            boundary=self._root,
+            allow_missing=allow_missing,
+        )
+
+    def _lock_path(self, path: Path) -> Path:
+        return self._safe_path(path.with_suffix(path.suffix + ".lock"))
 
     def human_acceptance_scope(
         self, decision: str, record_subject: str, acceptance: str
@@ -158,6 +192,7 @@ class MissionStore:
         """Return the broker scope for acceptance in this exact store."""
         from .human_provenance import decision_scope_parts
 
+        self._safe_path(self._root)
         return decision_scope_parts(
             "mission-acceptance",
             decision,
@@ -169,25 +204,47 @@ class MissionStore:
     # -- persistence helpers -------------------------------------------------
     def _ensure_root(self) -> None:
         """Create the mission directory. Called only from write paths."""
+        self._safe_path(self._root)
         self._root.mkdir(parents=True, exist_ok=True)
+        self._safe_path(self._root, allow_missing=False)
 
     def _mission_path(self, mission_id: str) -> Path:
-        return self._root / f"{mission_id}.json"
+        safe_id = _validate_mission_id(mission_id)
+        return self._safe_path(self._root / f"{safe_id}.json")
 
     def _load_manifest(self) -> list[str]:
+        self._safe_path(self._manifest_path)
         if not self._manifest_path.exists():
             return []
+        self._safe_path(self._manifest_path)
         try:
             data = json.loads(self._manifest_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return []
-        return [str(item) for item in data] if isinstance(data, list) else []
+        if not isinstance(data, list):
+            return []
+        mission_ids: list[str] = []
+        for item in data:
+            try:
+                mission_ids.append(_validate_mission_id(str(item)))
+            except ValueError:
+                continue
+        return mission_ids
 
     def _disk_mission_ids(self) -> list[str]:
         """Mission ids present on disk, independent of the manifest."""
+        self._safe_path(self._root)
         if not self._root.exists():
             return []
-        return sorted(path.stem for path in self._root.glob("mission_*.json"))
+        self._safe_path(self._root)
+        mission_ids: list[str] = []
+        for path in self._root.glob("mission_*.json"):
+            self._safe_path(path)
+            try:
+                mission_ids.append(_validate_mission_id(path.stem))
+            except ValueError:
+                continue
+        return sorted(mission_ids)
 
     def _reconciled_ids(self) -> list[str]:
         """Manifest order plus any on-disk mission the manifest is missing.
@@ -204,9 +261,11 @@ class MissionStore:
         return manifest + extras
 
     def _append_manifest(self, mission_id: str) -> None:
+        mission_id = _validate_mission_id(mission_id)
         self._ensure_root()
         from .agents.guardrails import _file_lock
 
+        self._lock_path(self._manifest_path)
         with _file_lock(self._manifest_path):
             manifest = self._load_manifest()
             if mission_id not in manifest:
@@ -216,6 +275,7 @@ class MissionStore:
                 )
 
     def _write(self, mission: Mission) -> None:
+        mission.mission_id = _validate_mission_id(mission.mission_id)
         self._ensure_root()
         atomic_write_text(
             self._mission_path(mission.mission_id),
@@ -270,6 +330,11 @@ class MissionStore:
             tags=list(tags or []),
             metadata=dict(metadata or {}),
         )
+        # A create publishes both a record and its manifest entry.  Reject a
+        # redirected manifest (or lock) before publishing the record so a
+        # failed manifest update cannot leave a partial v2 write behind.
+        self._safe_path(self._manifest_path)
+        self._lock_path(self._manifest_path)
         self._write(mission)
         self._append_manifest(mission.mission_id)
         self._log_event("mission_created", mission)
@@ -320,12 +385,17 @@ class MissionStore:
             }
 
     def get(self, mission_id: str) -> Mission | None:
-        path = self._mission_path(mission_id)
+        safe_id = _validate_mission_id(mission_id)
+        path = self._mission_path(safe_id)
         if not path.exists():
             return None
+        self._safe_path(path)
         try:
-            return Mission.from_dict(json.loads(path.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, OSError):
+            mission = Mission.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            if _validate_mission_id(mission.mission_id) != safe_id:
+                return None
+            return mission
+        except (json.JSONDecodeError, OSError, ValueError):
             return None
 
     def list(
@@ -377,7 +447,9 @@ class MissionStore:
         from .agents.guardrails import _file_lock
 
         self._ensure_root()
-        with _file_lock(self._mission_path(mission_id)):
+        mission_path = self._mission_path(mission_id)
+        self._lock_path(mission_path)
+        with _file_lock(mission_path):
             mission = self.get(mission_id)
             if mission is None:
                 raise MissionNotFoundError(mission_id)

@@ -179,17 +179,37 @@ In Antigravity, open `MCP Servers -> Manage MCP Servers -> View raw config`, the
 
 ## Tools
 
-Default `tools/list` is intentionally tiny. It exposes only the core context
-and skill bridge; everything else should come from prompts, CLI hints, or an explicit
-full-catalog/debug launch:
+Default `tools/list` is deliberately focused. It exposes normal scoped context,
+message, note, handoff, and skill work; administration remains in prompts, CLI
+hints, or an explicit full-catalog/debug launch:
 
 - `context.status`
 - `context.query`
+- `context.search`
 - `context.read`
 - `context.write`
 - `context.list`
+- `messages.send`
+- `messages.read`
+- `note.create`
+- `note.read`
+- `note.list`
+- `handoff.create`
+- `handoff.read`
+- `handoff.list`
 - `skill.match`
 - `skill.read`
+
+In a version 2 central context, `project_path` authorizes the registered
+current-project scope. Normal reads include that scope plus `common`.
+`context_path` alone does not grant project access, and cross-project search
+requires `all_projects=true`.
+
+`context.search` reads the version 2 hybrid index and filters scope before
+ranking. It is local text/symbol retrieval by default. `semantic=true`
+explicitly permits the configured embedding provider for the query; build the
+index with `afs search --semantic --rebuild` first. The default Gemini
+collection uses stable `gemini-embedding-2` at 768 dimensions.
 
 `skill.match` ranks configured, profile-eligible skills against a task prompt.
 Prompts are capped at 8,000 characters and `top_k` must be from 1 through 10.
@@ -201,15 +221,14 @@ report truncation explicitly. Discovery rejects skill files over 64,000
 characters, names over 256 characters, and metadata lists over 16 entries of
 256 characters each, so safety metadata is not silently clipped.
 
-When `AFS_MCP_TOOL_NAME_STYLE=claude` is set, these are advertised as
-`context_status`, `context_query`, `context_read`, `context_write`, and
-`context_list`, plus `skill_match` and `skill_read`, to satisfy Claude's
-stricter tool-name schema. Calls using
-either the underscore aliases or canonical dotted names are accepted.
+When `AFS_MCP_TOOL_NAME_STYLE=claude` is set, advertised dotted names use
+underscore aliases (for example, `context_search`, `messages_send`, and
+`handoff_create`) to satisfy Claude's stricter tool-name schema. Calls using
+either underscore aliases or canonical dotted names are accepted.
 
 `afs.session.bootstrap`, `afs.session.pack`, and `afs.scratchpad.review` remain
 available as prompts from `prompts/list`, not as tools. Work preflight,
-approvals, repair, handoff, and verification should normally route through the
+approvals, repair, and verification should normally route through the
 AFS CLI/framework hints rather than the default MCP tool catalog. For debugging,
 migration, or a client that really needs every registered tool, start the MCP
 server with the full catalog:
@@ -260,13 +279,24 @@ Optional tools for explicit workflows:
 - `events.tail`
 - `events.analytics`
 - `events.replay`
-- `hivemind.subscribe`
-- `hivemind.unsubscribe`
-- `hivemind.reap`
-- `handoff.read`
-- `handoff.list`
+- `messages.subscribe`
+- `messages.unsubscribe`
+- `messages.clean`
+- `handoff.revise`
+- `handoff.threads`
+- `handoff.ack`
+- `handoff.close`
 - `embeddings.index`
 - `training.antigravity.status`
+
+The public coordination surface is `messages.*`. Legacy `hivemind.*` tools
+remain accepted in the full catalog for one compatibility cycle; new clients
+should not discover or generate them.
+
+`note.create/read/list` operates on immutable Markdown notes in the authorized
+scope. Handoff content is also immutable: `handoff.revise` publishes a new
+revision with a supersedes link, while `handoff.ack` and `handoff.close` append
+separate lifecycle state.
 
 `context.query` uses a SQLite index with FTS ranking when available, and falls
 back to `LIKE` matching if FTS is unavailable on the host SQLite build.
@@ -278,6 +308,10 @@ matching paths or file contents.
 fresh without a full rebuild. With `auto_index=true` (default),
 `context.query` also auto-refreshes when it detects stale path/content metadata
 via mount fingerprints, including external renames that keep file counts stable.
+In a v2 central context, `context.query` auto-indexing and
+`context.index.rebuild` traverse and replace only the authorized current-project
+and `common` prefixes. Queue-wide indexing is available only when the caller
+sets the explicit `all_projects: true` administration boundary.
 
 Work-context MCP tools stay deliberately narrow. `work.communication.preflight`
 combines stored tone/style evidence, optional opt-in personal context, pending
@@ -308,7 +342,7 @@ Gemini-facing MCP resources:
 
 `afs.session.bootstrap` is the recommended first call in a new session. It
 packages health, cheap codebase orientation, drift, scratchpad notes, task
-queue state, recent hivemind messages, and the latest durable memory summary
+queue state, recent scoped messages, and the latest durable memory summary
 into one startup packet. Its optional `skills_prompt` and `skills_top_k`
 arguments select bounded skill bodies explicitly. When no prompt is supplied,
 bootstrap uses a bounded continuation signal from handoff next steps, active
@@ -336,6 +370,9 @@ control while AFS still suggests narrower retries, schema-bound reruns, or
 model escalation paths. Guidance is rendered once as fixed pack overhead, not
 again as a selectable section, so query/embedding hits can displace generic
 session boilerplate in tight budgets.
+Both the `session.pack` tool and `afs.session.pack` prompt expose an optional
+`semantic` boolean. It defaults to `false`; only an explicit true value permits
+the configured provider to receive the pack query.
 
 `afs://schemas/<name>` exposes compact response contracts for structured agent
 workflows. Built-in names currently include:
@@ -559,8 +596,9 @@ it falls back to polling.
 
 `agent-supervisor` is the companion service for profile-defined background
 agents. It reconciles `auto_start`, interval `schedule`, and `watch_paths`
-settings and keeps state under `.context/scratchpad/afs_agents/supervisor/` by
-default.
+settings and keeps state under
+`.context/scratchpad/common/afs_agents/supervisor/` in v2 or
+`.context/scratchpad/afs_agents/supervisor/` in v1 by default.
 
 If you want maintenance services to stay on a repo-local config instead of the
 user config, start them with `--config`. The service layer preserves that
@@ -586,7 +624,9 @@ includes maintenance report/service state for `context-warm`, `context-watch`,
 {
   "name": "context.read",
   "arguments": {
-    "path": "~/.context/scratchpad/notes.md"
+    "context_path": "~/.context",
+    "project_path": "~/src/project-a",
+    "path": "notes/investigation.md"
   }
 }
 ```
@@ -598,6 +638,7 @@ Rebuild and query the SQLite context index:
   "name": "context.query",
   "arguments": {
     "context_path": "~/.context",
+    "project_path": "~/src/project-a",
     "mount_types": ["scratchpad", "knowledge"],
     "query": "Gemini",
     "limit": 20,
@@ -606,13 +647,72 @@ Rebuild and query the SQLite context index:
 }
 ```
 
-Prompt-oriented search for Gemini clients:
+Search the scoped v2 hybrid index without remote embeddings:
+
+```json
+{
+  "name": "context.search",
+  "arguments": {
+    "context_path": "~/.context",
+    "project_path": "~/src/project-a",
+    "query": "cache invalidation",
+    "mode": "symbol",
+    "semantic": false,
+    "limit": 10
+  }
+}
+```
+
+Create scoped human-readable records:
+
+```json
+{
+  "name": "note.create",
+  "arguments": {
+    "context_path": "~/.context",
+    "project_path": "~/src/project-a",
+    "title": "Cache decision",
+    "body": "Keep invalidation local to the repository boundary."
+  }
+}
+```
+
+```json
+{
+  "name": "handoff.create",
+  "arguments": {
+    "context_path": "~/.context",
+    "project_path": "~/src/project-a",
+    "title": "Cache cleanup",
+    "agent_name": "codex",
+    "accomplished": ["Added scoped invalidation"],
+    "next_steps": ["Run the integration suite"]
+  }
+}
+```
+
+Send a current-project message:
+
+```json
+{
+  "name": "messages.send",
+  "arguments": {
+    "context_path": "~/.context",
+    "project_path": "~/src/project-a",
+    "from": "codex",
+    "topic": "status",
+    "payload": {"summary": "integration suite passed"}
+  }
+}
+```
+
+The older prompt-oriented search remains for version 1 clients:
 
 ```json
 {
   "name": "afs.query.search",
   "arguments": {
-    "context_path": "~/.context",
+    "context_path": "~/src/project-a/.context",
     "query": "Gemini",
     "mount_types": "scratchpad,knowledge",
     "relative_prefix": "work",
@@ -620,3 +720,9 @@ Prompt-oriented search for Gemini clients:
   }
 }
 ```
+
+That prompt uses the SQLite compatibility index and does not accept v2 project
+scope arguments. New central-context clients should call `context.search`
+instead. The older full-catalog `afs.search`, `afs.codebase.index`, and
+`afs.codebase.symbols` tools are likewise unavailable in v2 because their
+legacy index formats carry no project-scope authorization metadata.

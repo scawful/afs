@@ -30,6 +30,36 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .context_layout import LAYOUT_VERSION, detect_layout_version, resolve_runtime_root
+from .path_safety import assert_no_linklike_components
+
+
+def _default_context_root() -> Path:
+    return Path.home() / ".context"
+
+
+def _default_log_dir(*, create: bool = False) -> tuple[Path, Path | None]:
+    context_root = _default_context_root().expanduser().resolve()
+    logs_root = resolve_runtime_root(
+        context_root,
+        "logs",
+        legacy_relative="logs/afs",
+        create=create,
+    )
+    if detect_layout_version(context_root) != LAYOUT_VERSION:
+        return logs_root, None
+    log_dir = assert_no_linklike_components(
+        logs_root / "afs",
+        boundary=logs_root,
+    )
+    if create:
+        log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        log_dir = assert_no_linklike_components(
+            log_dir,
+            boundary=logs_root,
+            allow_missing=False,
+        )
+    return log_dir, context_root
 
 class JSONFormatter(logging.Formatter):
     """Format logs as JSON for structured logging."""
@@ -106,7 +136,8 @@ def setup_logging(
     Args:
         name: Logger name
         level: Logging level
-        log_dir: Directory for log files (default: ~/.context/logs/)
+        log_dir: Explicit log directory. The default is layout-aware:
+            ``~/.context/.afs/logs/afs`` for v2, ``~/.context/logs/afs`` for v1.
         enable_json: Use JSON formatter
         enable_console: Log to console
         enable_rotation: Enable log rotation
@@ -121,9 +152,20 @@ def setup_logging(
     logger.handlers.clear()
 
     # Setup log directory
+    managed_context_root: Path | None = None
     if log_dir is None:
-        log_dir = Path("~/.context/logs/afs").expanduser()
-    log_dir.mkdir(parents=True, exist_ok=True)
+        log_dir, managed_context_root = _default_log_dir(create=True)
+    else:
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+    def managed_log_path(filename: str) -> Path:
+        path = log_dir / filename
+        if managed_context_root is None:
+            return path
+        return assert_no_linklike_components(
+            path,
+            boundary=log_dir,
+        )
 
     # Formatter
     if enable_json:
@@ -149,7 +191,7 @@ def setup_logging(
 
     # File handler with rotation
     if enable_rotation:
-        log_file = log_dir / f"{name}.log"
+        log_file = managed_log_path(f"{name}.log")
         file_handler = logging.handlers.RotatingFileHandler(
             log_file,
             maxBytes=10 * 1024 * 1024,  # 10MB
@@ -161,7 +203,7 @@ def setup_logging(
 
     # JSON file handler for structured logs
     if enable_json:
-        json_log_file = log_dir / f"{name}.json.log"
+        json_log_file = managed_log_path(f"{name}.json.log")
         json_handler = logging.handlers.RotatingFileHandler(
             json_log_file,
             maxBytes=10 * 1024 * 1024,

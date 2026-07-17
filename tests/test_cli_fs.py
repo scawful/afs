@@ -6,10 +6,14 @@ import argparse
 import json
 from pathlib import Path
 
+import pytest
+
 from afs.cli.fs import register_parsers
 from afs.context_index import ContextSQLiteIndex
+from afs.context_layout import scaffold_v2
 from afs.manager import AFSManager
 from afs.models import MountType
+from afs.project_registry import ProjectRecord, ProjectRegistry
 from afs.schema import AFSConfig, GeneralConfig
 
 
@@ -28,6 +32,29 @@ def _make_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
     register_parsers(subparsers)
     return parser
+
+
+def _make_v2_manager(
+    tmp_path: Path,
+) -> tuple[AFSManager, Path, Path, ProjectRecord, ProjectRecord]:
+    context_root = tmp_path / "central-context"
+    scaffold_v2(context_root)
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+    alpha_path = tmp_path / "alpha"
+    beta_path = tmp_path / "beta"
+    alpha_path.mkdir()
+    beta_path.mkdir()
+    registry = ProjectRegistry(context_root)
+    alpha = registry.register(alpha_path, name="alpha")
+    beta = registry.register(beta_path, name="beta")
+    return manager, alpha_path, beta_path, alpha, beta
+
+
+def _run(parser: argparse.ArgumentParser, argv: list[str]) -> int:
+    args = parser.parse_args(argv)
+    return args.func(args)
 
 
 def test_fs_registers_delete_and_move_parsers() -> None:
@@ -132,3 +159,502 @@ def test_fs_move_supports_cross_mount_moves_and_rebuilds_index(
     assert scratchpad_entries == []
     assert len(knowledge_entries) == 1
     assert knowledge_entries[0]["relative_path"] == "docs/after.md"
+
+
+def test_v2_files_scope_all_operations_and_isolates_projects(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    manager, alpha_path, _beta_path, alpha, beta = _make_v2_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    alpha_root = context_root / "scratchpad" / "projects" / alpha.project_id
+    beta_root = context_root / "scratchpad" / "projects" / beta.project_id
+    alpha_root.mkdir(parents=True)
+    beta_root.mkdir(parents=True)
+    (alpha_root / "same.md").write_text("alpha", encoding="utf-8")
+    (beta_root / "same.md").write_text("beta", encoding="utf-8")
+    (beta_root / "private.md").write_text("private", encoding="utf-8")
+
+    monkeypatch.setattr("afs.cli.fs.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+    base = ["--path", str(alpha_path), "--context-root", str(context_root)]
+
+    assert _run(parser, ["files", "read", "scratchpad", "same.md", *base]) == 0
+    assert capsys.readouterr().out == "alpha"
+
+    assert (
+        _run(
+            parser,
+            [
+                "files",
+                "read",
+                "scratchpad",
+                f"../{beta.project_id}/private.md",
+                *base,
+            ],
+        )
+        == 1
+    )
+    assert "escapes mount root" in capsys.readouterr().out
+
+    assert (
+        _run(
+            parser,
+            [
+                "files",
+                "write",
+                "scratchpad",
+                "drafts/new.md",
+                "--content",
+                "new content",
+                "--mkdirs",
+                "--json",
+                *base,
+            ],
+        )
+        == 0
+    )
+    write_payload = json.loads(capsys.readouterr().out)
+    assert write_payload["scope_id"] == alpha.scope_id
+    assert write_payload["path"] == "drafts/new.md"
+    assert (alpha_root / "drafts" / "new.md").read_text() == "new content"
+    index = ContextSQLiteIndex(manager, context_root)
+    scratchpad_entries = index.query(
+        query="new content", mount_types=[MountType.SCRATCHPAD]
+    )
+    assert [entry["relative_path"] for entry in scratchpad_entries] == [
+        f"projects/{alpha.project_id}/drafts/new.md"
+    ]
+
+    assert (
+        _run(
+            parser,
+            [
+                "files",
+                "info",
+                "scratchpad",
+                "drafts/new.md",
+                "--json",
+                *base,
+            ],
+        )
+        == 0
+    )
+    info_payload = json.loads(capsys.readouterr().out)
+    assert info_payload["path"] == "drafts/new.md"
+    assert info_payload["relative_path"] == "drafts/new.md"
+    assert info_payload["scope_id"] == alpha.scope_id
+    assert alpha.project_id not in info_payload["path"]
+
+    assert (
+        _run(
+            parser,
+            [
+                "files",
+                "list",
+                "scratchpad",
+                "--files-only",
+                "--max-depth",
+                "3",
+                "--json",
+                *base,
+            ],
+        )
+        == 0
+    )
+    list_payload = json.loads(capsys.readouterr().out)
+    assert list_payload["scope_id"] == alpha.scope_id
+    assert {entry["relative_path"] for entry in list_payload["entries"]} == {
+        "same.md",
+        "drafts/new.md",
+    }
+    assert all(entry["scope_id"] == alpha.scope_id for entry in list_payload["entries"])
+
+    assert (
+        _run(
+            parser,
+            [
+                "files",
+                "move",
+                "scratchpad",
+                "drafts/new.md",
+                "knowledge",
+                "moved.md",
+                "--json",
+                *base,
+            ],
+        )
+        == 0
+    )
+    move_payload = json.loads(capsys.readouterr().out)
+    destination = context_root / "knowledge" / "projects" / alpha.project_id / "moved.md"
+    assert move_payload["source"] == "drafts/new.md"
+    assert move_payload["destination"] == "moved.md"
+    assert destination.read_text() == "new content"
+
+    knowledge_entries = index.query(
+        query="new content", mount_types=[MountType.KNOWLEDGE]
+    )
+    assert [entry["relative_path"] for entry in knowledge_entries] == [
+        f"projects/{alpha.project_id}/moved.md"
+    ]
+
+    assert (
+        _run(
+            parser,
+            [
+                "files",
+                "delete",
+                "knowledge",
+                "moved.md",
+                "--json",
+                *base,
+            ],
+        )
+        == 0
+    )
+    delete_payload = json.loads(capsys.readouterr().out)
+    assert delete_payload["relative_path"] == "moved.md"
+    assert delete_payload["rows_deleted"] == 1
+    assert not destination.exists()
+    assert (beta_root / "private.md").read_text() == "private"
+
+
+def test_v2_files_empty_scope_list_does_not_create_directories(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    manager, alpha_path, _beta_path, alpha, _beta = _make_v2_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    scoped_root = context_root / "human" / "projects" / alpha.project_id
+    assert not scoped_root.exists()
+
+    monkeypatch.setattr("afs.cli.fs.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+    status = _run(
+        parser,
+        [
+            "files",
+            "list",
+            "human",
+            "--path",
+            str(alpha_path),
+            "--context-root",
+            str(context_root),
+            "--json",
+        ],
+    )
+
+    assert status == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scope_id"] == alpha.scope_id
+    assert payload["entries"] == []
+    assert not scoped_root.exists()
+
+    scoped_root.mkdir(parents=True)
+    (scoped_root / "intent.md").write_text("human intent", encoding="utf-8")
+    status = _run(
+        parser,
+        [
+            "files",
+            "read",
+            "human",
+            "intent.md",
+            "--path",
+            str(alpha_path),
+            "--context-root",
+            str(context_root),
+            "--json",
+        ],
+    )
+    assert status == 0
+    read_payload = json.loads(capsys.readouterr().out)
+    assert read_payload["content"] == "human intent"
+    assert read_payload["path"] == "intent.md"
+
+
+def test_v2_files_list_skips_cross_scope_and_outside_links(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    manager, alpha_path, _beta_path, alpha, beta = _make_v2_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    alpha_root = context_root / "scratchpad" / "projects" / alpha.project_id
+    beta_root = context_root / "scratchpad" / "projects" / beta.project_id
+    alpha_root.mkdir(parents=True)
+    beta_root.mkdir(parents=True)
+    (alpha_root / "alpha.md").write_text("alpha", encoding="utf-8")
+    (beta_root / "beta-private.md").write_text("beta", encoding="utf-8")
+    outside = tmp_path / "outside-poison.md"
+    outside.write_text("outside poison metadata", encoding="utf-8")
+    try:
+        (alpha_root / "beta-link").symlink_to(beta_root, target_is_directory=True)
+        (alpha_root / "outside-link.md").symlink_to(outside)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    monkeypatch.setattr("afs.cli.fs.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+    status = _run(
+        parser,
+        [
+            "files",
+            "list",
+            "scratchpad",
+            "--files-only",
+            "--max-depth",
+            "3",
+            "--json",
+            "--path",
+            str(alpha_path),
+            "--context-root",
+            str(context_root),
+        ],
+    )
+
+    assert status == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [entry["relative_path"] for entry in payload["entries"]] == [
+        "alpha.md"
+    ]
+    assert all(entry["size_bytes"] != outside.stat().st_size for entry in payload["entries"])
+
+
+@pytest.mark.parametrize("target_kind", ["file", "directory"])
+def test_v2_files_delete_rejects_linklike_source_and_preserves_target(
+    target_kind: str,
+    capsys,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    manager, alpha_path, _beta_path, alpha, _beta = _make_v2_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    alpha_root = context_root / "scratchpad" / "projects" / alpha.project_id
+    alpha_root.mkdir(parents=True)
+    target = alpha_root / f"real-{target_kind}"
+    if target_kind == "directory":
+        target.mkdir()
+        (target / "keep.md").write_text("keep", encoding="utf-8")
+    else:
+        target.write_text("keep", encoding="utf-8")
+    link = alpha_root / f"{target_kind}-link"
+    try:
+        link.symlink_to(target, target_is_directory=target_kind == "directory")
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    monkeypatch.setattr("afs.cli.fs.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+    status = _run(
+        parser,
+        [
+            "files",
+            "delete",
+            "scratchpad",
+            link.name,
+            "--recursive",
+            "--path",
+            str(alpha_path),
+            "--context-root",
+            str(context_root),
+        ],
+    )
+
+    assert status == 1
+    assert "symbolic link or reparse point" in capsys.readouterr().out
+    assert link.is_symlink()
+    assert target.exists()
+    if target_kind == "directory":
+        assert (target / "keep.md").read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize("target_kind", ["file", "directory"])
+def test_v2_files_move_rejects_linklike_source_and_preserves_target(
+    target_kind: str,
+    capsys,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    manager, alpha_path, _beta_path, alpha, _beta = _make_v2_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    alpha_root = context_root / "scratchpad" / "projects" / alpha.project_id
+    alpha_root.mkdir(parents=True)
+    target = alpha_root / f"real-{target_kind}"
+    if target_kind == "directory":
+        target.mkdir()
+        (target / "keep.md").write_text("keep", encoding="utf-8")
+    else:
+        target.write_text("keep", encoding="utf-8")
+    link = alpha_root / f"{target_kind}-link"
+    destination = alpha_root / f"moved-{target_kind}"
+    try:
+        link.symlink_to(target, target_is_directory=target_kind == "directory")
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    monkeypatch.setattr("afs.cli.fs.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+    status = _run(
+        parser,
+        [
+            "files",
+            "move",
+            "scratchpad",
+            link.name,
+            "scratchpad",
+            destination.name,
+            "--path",
+            str(alpha_path),
+            "--context-root",
+            str(context_root),
+        ],
+    )
+
+    assert status == 1
+    assert "symbolic link or reparse point" in capsys.readouterr().out
+    assert link.is_symlink()
+    assert target.exists()
+    assert not destination.exists()
+    if target_kind == "directory":
+        assert (target / "keep.md").read_text(encoding="utf-8") == "keep"
+
+
+def test_v2_directory_move_rebuilds_only_current_and_common_index_scope(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    manager, alpha_path, _beta_path, alpha, beta = _make_v2_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    alpha_root = context_root / "scratchpad" / "projects" / alpha.project_id
+    beta_root = context_root / "scratchpad" / "projects" / beta.project_id
+    (alpha_root / "drafts").mkdir(parents=True)
+    (alpha_root / "drafts" / "alpha.md").write_text("alpha move", encoding="utf-8")
+    beta_root.mkdir(parents=True)
+    (beta_root / "private.md").write_text("beta private", encoding="utf-8")
+    index = ContextSQLiteIndex(manager, context_root)
+    index.rebuild(mount_types=[MountType.SCRATCHPAD], include_content=True)
+
+    real_iterdir = Path.iterdir
+
+    def guarded_iterdir(path: Path):
+        if path == beta_root:
+            raise AssertionError("beta scope was traversed")
+        return real_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
+    monkeypatch.setattr("afs.cli.fs.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+    status = _run(
+        parser,
+        [
+            "files",
+            "move",
+            "scratchpad",
+            "drafts",
+            "knowledge",
+            "archive",
+            "--mkdirs",
+            "--path",
+            str(alpha_path),
+            "--context-root",
+            str(context_root),
+            "--json",
+        ],
+    )
+
+    assert status == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scope_id"] == alpha.scope_id
+    assert index.count_entries(
+        mount_types=[MountType.SCRATCHPAD],
+        relative_prefixes=[f"projects/{beta.project_id}/"],
+    ) >= 1
+
+
+def test_v2_files_common_scope_is_explicit(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    manager, _alpha_path, _beta_path, alpha, _beta = _make_v2_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    unregistered_path = tmp_path / "unregistered"
+    unregistered_path.mkdir()
+    project_root = context_root / "scratchpad" / "projects" / alpha.project_id
+    common_root = context_root / "scratchpad" / "common"
+    project_root.mkdir(parents=True)
+    common_root.mkdir(parents=True)
+    (project_root / "scope.md").write_text("project", encoding="utf-8")
+    (common_root / "scope.md").write_text("common", encoding="utf-8")
+
+    monkeypatch.setattr("afs.cli.fs.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+    status = _run(
+        parser,
+        [
+            "files",
+            "read",
+            "scratchpad",
+            "scope.md",
+            "--path",
+            str(unregistered_path),
+            "--common",
+            "--json",
+        ],
+    )
+
+    assert status == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["content"] == "common"
+    assert payload["scope_id"] == "common"
+    assert payload["path"] == "scope.md"
+
+
+def test_v2_files_rejects_internal_mounts(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    manager, alpha_path, _beta_path, _alpha, _beta = _make_v2_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    monkeypatch.setattr("afs.cli.fs.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+
+    status = _run(
+        parser,
+        [
+            "files",
+            "list",
+            "hivemind",
+            "--path",
+            str(alpha_path),
+            "--context-root",
+            str(context_root),
+        ],
+    )
+
+    assert status == 1
+    assert "internal v2 mount" in capsys.readouterr().out
+
+
+def test_v1_files_preserves_legacy_mount_paths(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    manager, project_path = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    monkeypatch.setattr("afs.cli.fs.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+
+    status = _run(
+        parser,
+        [
+            "files",
+            "write",
+            "scratchpad",
+            "legacy.md",
+            "--content",
+            "legacy",
+            "--path",
+            str(project_path),
+            "--context-root",
+            str(context_root),
+        ],
+    )
+
+    assert status == 0
+    target = context_root / "scratchpad" / "legacy.md"
+    assert target.read_text() == "legacy"
+    assert capsys.readouterr().out.strip() == f"wrote: {target}"
+    assert not (context_root / "scratchpad" / "common").exists()

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from afs.context_layout import audit_layout, scaffold_v2
 from afs.registry import (
     EvaluationScores,
     LineageTracker,
@@ -14,6 +15,13 @@ from afs.registry import (
     ModelVersion,
     VersionStatus,
 )
+
+
+def _symlink_or_skip(link: Path, target: Path, *, directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"symlinks unavailable: {exc}")
 
 
 class TestModelVersion:
@@ -267,6 +275,51 @@ class TestModelRegistry:
         versions = reg2.list_versions("test")
         assert len(versions) == 1
 
+    def test_v2_default_registry_uses_managed_training_root(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        context_root = tmp_path / ".context"
+        scaffold_v2(context_root)
+
+        registry = ModelRegistry(context_root=context_root)
+        registry.register_model(model_name="test", base_model="base")
+
+        assert registry.registry_path == (
+            context_root / ".afs" / "training" / "registry.json"
+        )
+        assert registry.registry_path.is_file()
+        assert not (context_root / "training").exists()
+        assert audit_layout(context_root).valid is True
+
+    def test_v1_default_registry_keeps_training_directory(self, tmp_path: Path) -> None:
+        context_root = tmp_path / ".context"
+
+        registry = ModelRegistry(context_root=context_root)
+        registry.register_model(model_name="test", base_model="base")
+
+        assert registry.registry_path == context_root / "training" / "registry.json"
+        assert registry.registry_path.is_file()
+
+    def test_v2_default_registry_rejects_linked_training_root(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        context_root = tmp_path / ".context"
+        scaffold_v2(context_root)
+        outside = tmp_path / "outside-training"
+        outside.mkdir()
+        _symlink_or_skip(
+            context_root / ".afs" / "training",
+            outside,
+            directory=True,
+        )
+
+        with pytest.raises(ValueError, match="symbolic link or reparse point"):
+            ModelRegistry(context_root=context_root)
+
+        assert list(outside.iterdir()) == []
+
 
 class TestLineageTracker:
     """Tests for LineageTracker."""
@@ -358,6 +411,32 @@ class TestLineageTracker:
         tracker2 = LineageTracker(temp_lineage)
         history = tracker2.get_training_history("test")
         assert len(history) == 1
+
+    def test_v2_default_lineage_uses_managed_training_root(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        context_root = tmp_path / ".context"
+        scaffold_v2(context_root)
+
+        tracker = LineageTracker(context_root=context_root)
+        tracker.add_version(model_name="test", version="v1")
+
+        assert tracker.lineage_path == (
+            context_root / ".afs" / "training" / "lineage.json"
+        )
+        assert tracker.lineage_path.is_file()
+        assert not (context_root / "training").exists()
+        assert audit_layout(context_root).valid is True
+
+    def test_v1_default_lineage_keeps_training_directory(self, tmp_path: Path) -> None:
+        context_root = tmp_path / ".context"
+
+        tracker = LineageTracker(context_root=context_root)
+        tracker.add_version(model_name="test", version="v1")
+
+        assert tracker.lineage_path == context_root / "training" / "lineage.json"
+        assert tracker.lineage_path.is_file()
 
 
 class TestIntegration:

@@ -25,13 +25,13 @@ When unsure, start with
 
 | Area | Commands |
 |------|----------|
-| Setup | `init`, `setup`, `status`, `profile`, `bundle`, `workspace` |
-| Search | `query`, `context query`, `index rebuild`, `embeddings`, `watch` |
-| Files | `fs read/write/list/move/delete`, `context mount/unmount/list` |
-| Health | `health check/status/trend`, `doctor`, `context repair --dry-run`, `context validate` |
-| Sessions | `session bootstrap/pack/prepare-client/handoff/replay`, `cache` |
-| Coordination | `tasks`, `hivemind`, `mission`, `approvals`, `work`, `calibration` |
-| Agents | `agents list/ps/run/watch`, `agent-jobs`, `agent-runs`, `agent-hooks`, `agent-manifest` |
+| Setup | `start`, `projects`, `init`, `profile`, `bundle`, `workspace` |
+| Search | `search`, `query` (v1), `index rebuild`, `embeddings`, `watch` |
+| Files | `files read/write/list/move/delete`, `notes`, `context mount/unmount/list` |
+| Health | `check`, `repair`, `context validate` |
+| Sessions | `start`, `session pack/prepare-client/replay`, `handoff`, `cache` |
+| Coordination | `messages`, `tasks`, `missions`, `approvals`, `work`, `calibration` |
+| Agents | `agents list/ps/run/watch`, `jobs`, `agent-runs`, `agent-hooks`, `agent-manifest` |
 | Quality | `verify plan/run`, `schema list/show/validate`, `review`, `optimize decide`, `execution inspect` |
 | Knowledge | `memory consolidate/status/search`, `skills list/match/mine/promote`, `events`, `graph`, `sources` |
 | Serving | `mcp serve`, `plugins`, `services`, `orchestrator` |

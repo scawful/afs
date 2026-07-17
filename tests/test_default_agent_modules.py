@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 from afs.agents import briefing_agent, default_context_warm, index_rebuild, skills_mine
 from afs.context_index import IndexSummary
+from afs.context_layout import scaffold_v2
 from afs.models import MountType
 from afs.schema import (
     AFSConfig,
@@ -181,3 +182,59 @@ def test_briefing_uses_remapped_scratchpad_without_network_or_tasks(
     target = Path(emitted[0].payload["path"])
     assert target.parent == context_root / "daily-notes" / "briefings"
     assert target.read_text(encoding="utf-8") == "briefing\n"
+
+
+def test_briefing_uses_v2_common_scope(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    config = _config(context_root)
+    emitted = []
+    monkeypatch.setattr(briefing_agent, "load_agent_config", lambda _path: config)
+    monkeypatch.setattr(
+        "afs.cli.briefing._build_briefing",
+        lambda **_kwargs: {"date": "2026-07-16"},
+    )
+    monkeypatch.setattr("afs.cli.briefing._render_text", lambda _briefing: "briefing")
+    monkeypatch.setattr(
+        briefing_agent,
+        "emit_result",
+        lambda result, **_kwargs: emitted.append(result),
+    )
+
+    assert briefing_agent.main([]) == 0
+    target = Path(emitted[0].payload["path"])
+    assert target.parent == context_root / "scratchpad" / "common" / "briefings"
+    assert target.read_text(encoding="utf-8") == "briefing\n"
+
+
+def test_briefing_rejects_v2_symlinked_output_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    config = _config(context_root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    common = context_root / "scratchpad" / "common"
+    common.mkdir()
+    try:
+        (common / "briefings").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        import pytest
+
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+    emitted = []
+    monkeypatch.setattr(briefing_agent, "load_agent_config", lambda _path: config)
+    monkeypatch.setattr(
+        briefing_agent,
+        "emit_result",
+        lambda result, **_kwargs: emitted.append(result),
+    )
+
+    assert briefing_agent.main([]) == 1
+    assert emitted[0].status == "error"
+    assert list(outside.iterdir()) == []

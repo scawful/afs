@@ -161,21 +161,26 @@ def training_registry_compare_command(args: argparse.Namespace) -> int:
 def training_memory_export_command(args: argparse.Namespace) -> int:
     """Export memory entries to TrainingSample JSONL."""
     from ..config import load_config_model
-    from ..context_paths import resolve_mount_root
-    from ..models import MountType
-    from ..training import export_memory_to_dataset
+    from ..training_export_scope import resolve_memory_export_tree
 
-    config = load_config_model(config_path=Path(args.config) if args.config else None)
+    raw_requester_path = getattr(args, "path", None)
+    requester_path = (
+        Path(raw_requester_path).expanduser().resolve()
+        if raw_requester_path
+        else Path.cwd().resolve()
+    )
+    config = load_config_model(
+        config_path=Path(args.config) if args.config else None,
+        start_dir=requester_path,
+    )
     memory_cfg = config.memory_export
     context_root = (
         Path(args.context_root).expanduser().resolve()
         if args.context_root
         else config.general.context_root
     )
-    memory_root = (
-        Path(args.memory_root).expanduser().resolve()
-        if args.memory_root
-        else resolve_mount_root(Path(context_root), MountType.MEMORY, config=config)
+    memory_root_override = (
+        Path(args.memory_root).expanduser().resolve() if args.memory_root else None
     )
     output_path = Path(args.output).expanduser().resolve()
 
@@ -185,28 +190,45 @@ def training_memory_export_command(args: argparse.Namespace) -> int:
     elif args.no_require_quality is True:
         require_quality = False
 
-    result = export_memory_to_dataset(
-        memory_root,
-        output_path,
-        default_domain=args.domain,
-        allow_raw=args.allow_raw or memory_cfg.allow_raw,
-        allow_raw_tags=args.allow_raw_tag or memory_cfg.allow_raw_tags,
-        default_instruction=args.default_instruction or memory_cfg.default_instruction,
-        include_tags=args.include_tag,
-        exclude_tags=args.exclude_tag,
-        limit=args.limit if args.limit is not None else (memory_cfg.limit or None),
-        require_quality=require_quality,
-        min_quality_score=(
-            args.min_quality_score
-            if args.min_quality_score is not None
-            else memory_cfg.min_quality_score
-        ),
-        score_profile=args.score_profile or memory_cfg.score_profile,
-        enable_asar=args.enable_asar or memory_cfg.enable_asar,
-        redact=not args.no_redact,
-    )
+    try:
+        with resolve_memory_export_tree(
+            Path(context_root),
+            config=config,
+            requester_path=requester_path,
+            memory_root_override=memory_root_override,
+            sensitivity_patterns=config.sensitivity.never_export,
+        ) as export_tree:
+            from ..training import export_memory_to_dataset
+
+            result = export_memory_to_dataset(
+                export_tree.export_root,
+                output_path,
+                default_domain=args.domain,
+                allow_raw=args.allow_raw or memory_cfg.allow_raw,
+                allow_raw_tags=args.allow_raw_tag or memory_cfg.allow_raw_tags,
+                default_instruction=args.default_instruction
+                or memory_cfg.default_instruction,
+                include_tags=args.include_tag,
+                exclude_tags=args.exclude_tag,
+                limit=args.limit
+                if args.limit is not None
+                else (memory_cfg.limit or None),
+                require_quality=require_quality,
+                min_quality_score=(
+                    args.min_quality_score
+                    if args.min_quality_score is not None
+                    else memory_cfg.min_quality_score
+                ),
+                score_profile=args.score_profile or memory_cfg.score_profile,
+                enable_asar=args.enable_asar or memory_cfg.enable_asar,
+                redact=not args.no_redact,
+            )
+    except PermissionError as exc:
+        print(f"memory export refused: {exc}", file=sys.stderr)
+        return 2
 
     print(result.summary())
+    print(f"scope: {export_tree.scope_id}")
     print(f"output: {output_path}")
     return 0
 
@@ -991,7 +1013,14 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     train_memory.add_argument("--config", help="Config path.")
     train_memory.add_argument("--context-root", help="Context root override.")
-    train_memory.add_argument("--memory-root", help="Memory directory override.")
+    train_memory.add_argument(
+        "--path",
+        help="Registered project path for v2 scope authorization (default: cwd).",
+    )
+    train_memory.add_argument(
+        "--memory-root",
+        help="Administrative memory directory override (bypasses v2 project scope).",
+    )
     train_memory.add_argument("--output", required=True, help="Output JSONL path.")
     train_memory.add_argument("--domain", default="memory", help="Default domain.")
     train_memory.add_argument(

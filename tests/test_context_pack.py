@@ -4,10 +4,14 @@ import json
 from argparse import Namespace
 from pathlib import Path
 
+import pytest
+
 import afs.cli.core as cli_core_module
 from afs.cli.core import session_pack_command
 from afs.context_index import ContextSQLiteIndex
 from afs.context_pack import (
+    _mount_fingerprint,
+    _scoped_health_for_pack,
     build_context_pack,
     estimate_tokens,
     render_context_pack,
@@ -36,6 +40,211 @@ def _make_manager(tmp_path: Path) -> AFSManager:
 
 def _section_bodies(pack: dict) -> str:
     return "\n".join(section["body"] for section in pack["sections"])
+
+
+def test_v2_pack_isolates_project_content_artifacts_and_caches(tmp_path: Path) -> None:
+    from afs.context_layout import scaffold_v2
+    from afs.handoff import HandoffStore
+    from afs.hybrid_search import HybridSearchEngine, HybridSource
+    from afs.messages import MessageBus
+    from afs.project_registry import ProjectRegistry
+    from afs.schema import SessionPackCacheConfig
+    from afs.scratchpad import ScratchpadStore
+
+    context_root = tmp_path / ".context"
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    scaffold_v2(context_root)
+    registry = ProjectRegistry(context_root)
+    alpha_record = registry.register(alpha)
+    beta_record = registry.register(beta)
+    config = AFSConfig(
+        general=GeneralConfig(context_root=context_root),
+        session_pack_cache=SessionPackCacheConfig(cache_dir=tmp_path / "pack-cache"),
+    )
+    manager = AFSManager(config=config)
+
+    for scope_id, marker in (
+        ("common", "common-visible-marker"),
+        (alpha_record.scope_id, "alpha-visible-marker"),
+        (beta_record.scope_id, "beta-private-marker"),
+    ):
+        scope_dir = (
+            Path("common")
+            if scope_id == "common"
+            else Path("projects") / scope_id.removeprefix("project:")
+        )
+        knowledge = context_root / "knowledge" / scope_dir
+        knowledge.mkdir(parents=True)
+        (knowledge / "scope.md").write_text(
+            f"shared-query {marker}",
+            encoding="utf-8",
+        )
+
+    ScratchpadStore(
+        context_root,
+        scope_id=alpha_record.scope_id,
+        config=config,
+    ).create(title="Alpha draft", body="alpha-visible-marker")
+    ScratchpadStore(
+        context_root,
+        scope_id=beta_record.scope_id,
+        config=config,
+    ).create(title="Beta draft", body="beta-private-marker")
+    HandoffStore(
+        context_root,
+        scope_id=alpha_record.scope_id,
+        config=config,
+    ).create_revision(title="Alpha handoff", agent_name="alpha")
+    HandoffStore(
+        context_root,
+        scope_id=beta_record.scope_id,
+        config=config,
+    ).create_revision(title="Beta handoff", agent_name="beta")
+    MessageBus(
+        context_root,
+        scope_id=alpha_record.scope_id,
+        config=config,
+    ).send("alpha", "status", {"marker": "alpha-visible-marker"})
+    MessageBus(
+        context_root,
+        scope_id=beta_record.scope_id,
+        config=config,
+    ).send("beta", "status", {"marker": "beta-private-marker"})
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE],
+        include_content=True,
+    )
+    HybridSearchEngine(context_root / ".afs" / "search").build(
+        [
+            HybridSource(
+                context_root / "knowledge" / "common",
+                scope_id="common",
+            ),
+            HybridSource(
+                context_root / "knowledge" / "projects" / alpha_record.project_id,
+                scope_id=alpha_record.scope_id,
+                project_id=alpha_record.project_id,
+            ),
+            HybridSource(
+                context_root / "knowledge" / "projects" / beta_record.project_id,
+                scope_id=beta_record.scope_id,
+                project_id=beta_record.project_id,
+            ),
+        ]
+    )
+
+    kwargs = {
+        "query": "shared-query",
+        "task": "Review the scoped context.",
+        "model": "codex",
+        "pack_mode": "full_slice",
+        "token_budget": 4000,
+        "include_content": True,
+        "semantic": True,
+    }
+    alpha_pack = build_context_pack(
+        manager,
+        context_root,
+        project_path=alpha,
+        **kwargs,
+    )
+    alpha_text = json.dumps(alpha_pack)
+    assert alpha_pack["scope_id"] == alpha_record.scope_id
+    assert "alpha-visible-marker" in alpha_text
+    assert "common-visible-marker" in alpha_text
+    assert "beta-private-marker" not in alpha_text
+    assert "Beta draft" not in alpha_text
+    assert "Beta handoff" not in alpha_text
+    assert "Recent Messages" in {section["title"] for section in alpha_pack["sections"]}
+    hybrid_sources = {
+        source
+        for section in alpha_pack["sections"]
+        if section["title"] == "Indexed Text Hits"
+        for source in section["sources"]
+    }
+    assert hybrid_sources
+    assert all(beta_record.project_id not in source for source in hybrid_sources)
+
+    alpha_artifacts = write_context_pack_artifacts(manager, context_root, alpha_pack)
+    beta_pack = build_context_pack(
+        manager,
+        context_root,
+        project_path=beta,
+        **kwargs,
+    )
+    beta_artifacts = write_context_pack_artifacts(manager, context_root, beta_pack)
+    assert alpha_pack["cache"]["key"] != beta_pack["cache"]["key"]
+    assert alpha_artifacts["json"] != beta_artifacts["json"]
+    assert alpha_record.project_id in alpha_artifacts["json"]
+    assert beta_record.project_id in beta_artifacts["json"]
+    (
+        context_root
+        / "knowledge"
+        / "projects"
+        / beta_record.project_id
+        / "scope.md"
+    ).write_text("shared-query beta-changed-marker", encoding="utf-8")
+
+    cached_alpha = build_context_pack(
+        manager,
+        context_root,
+        project_path=alpha,
+        **kwargs,
+    )
+    assert cached_alpha["cache"]["hit"] is True
+    assert cached_alpha["scope_id"] == alpha_record.scope_id
+    assert "beta-private-marker" not in json.dumps(cached_alpha)
+
+
+def test_v2_pack_rejects_hybrid_generation_for_another_project(
+    tmp_path: Path,
+) -> None:
+    from afs.context_layout import scaffold_v2
+    from afs.hybrid_search import (
+        HybridScopeCoverageError,
+        HybridSearchEngine,
+        HybridSource,
+    )
+    from afs.project_registry import ProjectRegistry
+
+    context_root = tmp_path / ".context"
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    scaffold_v2(context_root)
+    registry = ProjectRegistry(context_root)
+    registry.register(alpha)
+    beta_record = registry.register(beta)
+    beta_knowledge = (
+        context_root / "knowledge" / "projects" / beta_record.project_id
+    )
+    beta_knowledge.mkdir(parents=True)
+    (beta_knowledge / "note.md").write_text("beta-only marker", encoding="utf-8")
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+    HybridSearchEngine(context_root / ".afs" / "search").build(
+        [
+            HybridSource(
+                beta_knowledge,
+                scope_id=beta_record.scope_id,
+                project_id=beta_record.project_id,
+            )
+        ]
+    )
+
+    with pytest.raises(HybridScopeCoverageError, match="rebuild the index"):
+        build_context_pack(
+            manager,
+            context_root,
+            project_path=alpha,
+            query="marker",
+            semantic=True,
+        )
 
 
 def test_build_context_pack_respects_sensitivity_and_budget(tmp_path: Path) -> None:
@@ -181,11 +390,12 @@ def test_embedding_hits_respect_never_embed_rules(tmp_path: Path) -> None:
         task="Check embedding sensitivity.",
         model="codex",
         token_budget=1400,
+        semantic=True,
         max_embedding_results=1,
     )
 
     rendered = render_context_pack(pack)
-    assert "Embedding Hits" in rendered
+    assert "Indexed Text Hits" in rendered
     assert "embed-only public marker" in rendered
     assert "embed-only secret marker" not in rendered
     assert "private/secret.md" not in rendered
@@ -217,13 +427,34 @@ def test_embedding_hits_trim_previews_for_tight_packs(tmp_path: Path) -> None:
         model="codex",
         pack_mode="retrieval",
         token_budget=1200,
+        semantic=True,
         max_embedding_results=1,
     )
 
     rendered = render_context_pack(pack)
-    assert "Embedding Hits" in rendered
+    assert "Indexed Text Hits" in rendered
     assert "TAIL_MARKER" not in rendered
     assert pack["estimated_tokens"] <= 1200
+
+
+def test_context_pack_never_enters_semantic_path_without_explicit_opt_in(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = _make_manager(tmp_path)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("semantic retrieval requires explicit consent")
+
+    monkeypatch.setattr("afs.context_pack._embedding_section", forbidden)
+    pack = build_context_pack(
+        manager,
+        manager.config.general.context_root,
+        query="local-only query",
+        model="codex",
+    )
+
+    assert pack["semantic"] is False
 
 
 def test_session_pack_command_outputs_json_and_writes_artifacts(
@@ -633,12 +864,13 @@ def test_retrieval_pack_mode_prioritizes_indexed_hits(tmp_path: Path) -> None:
         query="service guide",
         model="gemini",
         pack_mode="retrieval",
-        token_budget=700,
+        token_budget=1400,
     )
 
     titles = [section["title"] for section in pack["sections"]]
     assert pack["pack_mode"] == "retrieval"
     assert "Indexed Hit 1" in titles
+    assert "Scratchpad State" in titles
     assert titles.index("Indexed Hit 1") < titles.index("Scratchpad State")
 
 
@@ -661,3 +893,207 @@ def test_full_slice_pack_mode_adds_knowledge_slice_without_query(tmp_path: Path)
     assert pack["pack_mode"] == "full_slice"
     assert "Knowledge Slice" in titles
     assert "Broader long-context slice" in pack["pack_mode_summary"]
+
+
+def test_v2_full_slice_skips_linked_cross_project_index(tmp_path: Path) -> None:
+    from afs.context_layout import scaffold_v2
+    from afs.project_registry import ProjectRegistry
+
+    context_root = tmp_path / ".context"
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    scaffold_v2(context_root)
+    registry = ProjectRegistry(context_root)
+    alpha_record = registry.register(alpha)
+    beta_record = registry.register(beta)
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+    alpha_root = context_root / "knowledge" / "projects" / alpha_record.project_id
+    beta_root = context_root / "knowledge" / "projects" / beta_record.project_id
+    alpha_root.mkdir(parents=True)
+    beta_root.mkdir(parents=True)
+    (alpha_root / "safe.md").write_text("alpha-safe-slice", encoding="utf-8")
+    beta_index = beta_root / "INDEX.md"
+    beta_index.write_text("beta-private-slice", encoding="utf-8")
+    try:
+        (alpha_root / "INDEX.md").symlink_to(beta_index)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    pack = build_context_pack(
+        manager,
+        context_root,
+        project_path=alpha,
+        pack_mode="full_slice",
+        token_budget=1600,
+    )
+
+    rendered = render_context_pack(pack)
+    assert "alpha-safe-slice" not in rendered  # non-INDEX files remain metadata-only
+    assert "safe.md" in rendered
+    assert "beta-private-slice" not in rendered
+
+
+def test_v2_pack_fingerprint_and_health_skip_linked_descendants(
+    tmp_path: Path,
+) -> None:
+    import os
+
+    from afs.context_layout import scaffold_v2
+    from afs.project_registry import ProjectRegistry
+    from afs.scopes import resolve_scope
+
+    context_root = tmp_path / ".context"
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    outside = tmp_path / "outside"
+    alpha.mkdir()
+    beta.mkdir()
+    outside.mkdir()
+    scaffold_v2(context_root)
+    registry = ProjectRegistry(context_root)
+    alpha_record = registry.register(alpha)
+    beta_record = registry.register(beta)
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+    alpha_root = context_root / "knowledge" / "projects" / alpha_record.project_id
+    beta_root = context_root / "knowledge" / "projects" / beta_record.project_id
+    common_root = context_root / "knowledge" / "common"
+    alpha_root.mkdir(parents=True)
+    beta_root.mkdir(parents=True)
+    common_root.mkdir(parents=True, exist_ok=True)
+    (alpha_root / "safe.md").write_text("alpha safe", encoding="utf-8")
+    (common_root / "shared.md").write_text("common safe", encoding="utf-8")
+    beta_secret = beta_root / "secret.md"
+    beta_secret.write_text("beta private", encoding="utf-8")
+    outside_secret = outside / "secret.md"
+    outside_secret.write_text("outside private", encoding="utf-8")
+    try:
+        (alpha_root / "linked-file.md").symlink_to(beta_secret)
+        (alpha_root / "linked-dir").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    scope = resolve_scope(context_root, requester_path=alpha)
+    before = _mount_fingerprint(context_root, config=manager.config, scoped=scope)
+    status, _diff = _scoped_health_for_pack(
+        manager,
+        context_root,
+        status={"mount_counts": {"knowledge": 99}, "total_files": 99},
+        diff={"added": [], "modified": [], "deleted": []},
+        scoped=scope,
+    )
+    assert status["mount_counts"]["knowledge"] == 2
+    assert status["total_files"] == 2
+
+    future = beta_secret.stat().st_mtime + 10
+    beta_secret.write_text("beta private changed", encoding="utf-8")
+    outside_secret.write_text("outside private changed", encoding="utf-8")
+    os.utime(beta_secret, (future, future))
+    os.utime(outside_secret, (future, future))
+    after = _mount_fingerprint(context_root, config=manager.config, scoped=scope)
+    assert after == before
+
+
+def test_v2_pack_health_counts_complete_scoped_index_over_500_rows(
+    tmp_path: Path,
+) -> None:
+    from afs.context_layout import scaffold_v2
+    from afs.project_registry import ProjectRegistry
+    from afs.scopes import resolve_scope
+
+    context_root = tmp_path / ".context"
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    scaffold_v2(context_root)
+    registry = ProjectRegistry(context_root)
+    alpha_record = registry.register(alpha)
+    beta_record = registry.register(beta)
+    alpha_root = context_root / "knowledge" / "projects" / alpha_record.project_id
+    beta_root = context_root / "knowledge" / "projects" / beta_record.project_id
+    alpha_root.mkdir(parents=True)
+    beta_root.mkdir(parents=True)
+    for index in range(501):
+        (alpha_root / f"note-{index:03d}.md").write_text("alpha", encoding="utf-8")
+    (beta_root / "private.md").write_text("beta", encoding="utf-8")
+
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+    context_index = ContextSQLiteIndex(manager, context_root)
+    context_index.rebuild(mount_types=[MountType.KNOWLEDGE])
+    scope = resolve_scope(context_root, requester_path=alpha)
+    expected = context_index.count_entries_scoped(scope)
+    assert expected > 500
+    assert expected < context_index.total_entries
+
+    status, _diff = _scoped_health_for_pack(
+        manager,
+        context_root,
+        status={"index": {"enabled": True, "total_entries": 9999}},
+        diff={"added": [], "modified": [], "deleted": []},
+        scoped=scope,
+    )
+
+    assert status["index"]["total_entries"] == expected
+
+
+def test_v2_pack_auto_index_never_traverses_another_project(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from afs.context_layout import scaffold_v2
+    from afs.project_registry import ProjectRegistry
+
+    context_root = tmp_path / ".context"
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    scaffold_v2(context_root)
+    registry = ProjectRegistry(context_root)
+    alpha_record = registry.register(alpha)
+    beta_record = registry.register(beta)
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+    knowledge = context_root / "knowledge"
+    alpha_root = knowledge / "projects" / alpha_record.project_id
+    beta_root = knowledge / "projects" / beta_record.project_id
+    common_root = knowledge / "common"
+    for root, marker in (
+        (alpha_root, "pack-auto-index alpha-visible"),
+        (beta_root, "pack-auto-index beta-private"),
+        (common_root, "pack-auto-index common-visible"),
+    ):
+        root.mkdir(parents=True)
+        (root / "note.md").write_text(marker, encoding="utf-8")
+
+    real_iterdir = Path.iterdir
+
+    def guarded_iterdir(path: Path):
+        if path == beta_root:
+            raise AssertionError("beta scope was traversed")
+        return real_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
+    pack = build_context_pack(
+        manager,
+        context_root,
+        project_path=alpha,
+        query="pack-auto-index",
+        task="Build a scoped pack",
+        pack_mode="full_slice",
+        token_budget=2000,
+        include_content=True,
+    )
+
+    rendered = json.dumps(pack)
+    assert "alpha-visible" in rendered
+    assert "common-visible" in rendered
+    assert "beta-private" not in rendered

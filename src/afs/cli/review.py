@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..history import log_event
+from ..context_layout import LAYOUT_VERSION, _atomic_write_text, detect_layout_version
+from ..history import log_event, resolve_history_root
 from ..models import MountType
+from ..path_safety import assert_no_linklike_components
 from ._utils import load_manager, resolve_context_paths
 
 REVIEW_CATEGORIES = ("plans", "walkthroughs", "automated_reports")
@@ -167,8 +171,27 @@ def _resolve_context_for_review(
 
 
 def _queue_roots(manager, context_path: Path) -> list[Path]:
-    scratchpad_review = manager.resolve_mount_root(context_path, MountType.SCRATCHPAD) / "review"
+    scratchpad_root = manager.resolve_mount_root(context_path, MountType.SCRATCHPAD)
+    scratchpad_review = scratchpad_root / "review"
     legacy_review = context_path / "review"
+    if detect_layout_version(context_path) == LAYOUT_VERSION:
+        canonical = assert_no_linklike_components(
+            context_path / "human" / "common" / "review",
+            boundary=context_path,
+        )
+        migrated = assert_no_linklike_components(
+            scratchpad_root / "common" / "review",
+            boundary=context_path,
+        )
+        pre_fix = assert_no_linklike_components(
+            scratchpad_review,
+            boundary=context_path,
+        )
+        legacy = assert_no_linklike_components(
+            legacy_review,
+            boundary=context_path,
+        )
+        return list(dict.fromkeys((canonical, migrated, pre_fix, legacy)))
     roots = [scratchpad_review]
     if legacy_review != scratchpad_review:
         roots.append(legacy_review)
@@ -182,17 +205,41 @@ def _collect_review_entries(
     category: str | None = None,
 ) -> list[ReviewEntry]:
     entries: list[ReviewEntry] = []
+    seen: set[tuple[str, str]] = set()
     categories = [category] if category else list(REVIEW_CATEGORIES)
+    is_v2 = detect_layout_version(context_path) == LAYOUT_VERSION
     for queue_root in _queue_roots(manager, context_path):
         if not queue_root.exists():
             continue
+        if is_v2:
+            queue_root = assert_no_linklike_components(
+                queue_root,
+                boundary=context_path,
+                allow_missing=False,
+            )
         for review_category in categories:
             category_root = queue_root / review_category
             if not category_root.exists():
                 continue
+            if is_v2:
+                category_root = assert_no_linklike_components(
+                    category_root,
+                    boundary=context_path,
+                    allow_missing=False,
+                )
             for path in sorted(category_root.iterdir()):
+                if is_v2:
+                    path = assert_no_linklike_components(
+                        path,
+                        boundary=context_path,
+                        allow_missing=False,
+                    )
                 if not path.is_file() or path.name.startswith(".") or path.name.endswith(".reason"):
                     continue
+                identity = (review_category, path.name)
+                if identity in seen:
+                    continue
+                seen.add(identity)
                 entries.append(
                     ReviewEntry(
                         category=review_category,
@@ -229,14 +276,71 @@ def _find_review_entry(
 def _approved_destination(manager, context_path: Path, entry: ReviewEntry) -> Path:
     if entry.category == "plans":
         mount_root = manager.resolve_mount_root(context_path, MountType.MEMORY)
-        return mount_root / "reviewed" / entry.category / entry.filename
-    mount_root = manager.resolve_mount_root(context_path, MountType.HISTORY)
-    return mount_root / "reviewed" / entry.category / entry.filename
+        if detect_layout_version(context_path) == LAYOUT_VERSION:
+            mount_root = mount_root / "common"
+    else:
+        mount_root = (
+            resolve_history_root(context_path, config=manager.config)
+            if detect_layout_version(context_path) == LAYOUT_VERSION
+            else manager.resolve_mount_root(context_path, MountType.HISTORY)
+        )
+    destination = mount_root / "reviewed" / entry.category / entry.filename
+    if detect_layout_version(context_path) == LAYOUT_VERSION:
+        destination = assert_no_linklike_components(
+            destination,
+            boundary=context_path,
+        )
+    return destination
 
 
 def _rejected_destination(manager, context_path: Path, entry: ReviewEntry) -> Path:
-    mount_root = manager.resolve_mount_root(context_path, MountType.HISTORY)
-    return mount_root / "rejected" / entry.category / entry.filename
+    mount_root = (
+        resolve_history_root(context_path, config=manager.config)
+        if detect_layout_version(context_path) == LAYOUT_VERSION
+        else manager.resolve_mount_root(context_path, MountType.HISTORY)
+    )
+    destination = mount_root / "rejected" / entry.category / entry.filename
+    if detect_layout_version(context_path) == LAYOUT_VERSION:
+        destination = assert_no_linklike_components(
+            destination,
+            boundary=context_path,
+        )
+    return destination
+
+
+def _move_review_entry(
+    entry: ReviewEntry,
+    destination: Path,
+    *,
+    context_path: Path,
+) -> None:
+    """Move a reviewed file without following v2 queue or destination links."""
+
+    if detect_layout_version(context_path) != LAYOUT_VERSION:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            raise FileExistsError(f"Destination already exists: {destination}")
+        shutil.move(str(entry.path), str(destination))
+        return
+
+    source = assert_no_linklike_components(
+        entry.path,
+        boundary=context_path,
+        allow_missing=False,
+    )
+    source_stat = os.lstat(source)
+    if not stat.S_ISREG(source_stat.st_mode):
+        raise ValueError(f"review source is not a safe regular file: {source}")
+    assert_no_linklike_components(destination.parent, boundary=context_path)
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    assert_no_linklike_components(
+        destination.parent,
+        boundary=context_path,
+        allow_missing=False,
+    )
+    if os.path.lexists(destination):
+        raise FileExistsError(f"Destination already exists: {destination}")
+    source.replace(destination)
 
 
 def _render_list_payload(context_path: Path, entries: list[ReviewEntry]) -> dict[str, object]:
@@ -292,10 +396,7 @@ def handle_approve(args):
         category=getattr(args, "category", None),
     )
     destination = _approved_destination(manager, context_path, entry)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        raise FileExistsError(f"Destination already exists: {destination}")
-    shutil.move(str(entry.path), str(destination))
+    _move_review_entry(entry, destination, context_path=context_path)
 
     log_event(
         "review",
@@ -338,15 +439,22 @@ def handle_reject(args):
         category=getattr(args, "category", None),
     )
     destination = _rejected_destination(manager, context_path, entry)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        raise FileExistsError(f"Destination already exists: {destination}")
-    shutil.move(str(entry.path), str(destination))
-
     reason_path = None
     if getattr(args, "reason", None):
         reason_path = destination.with_name(f"{destination.name}.reason.txt")
-        reason_path.write_text(args.reason, encoding="utf-8")
+        if detect_layout_version(context_path) == LAYOUT_VERSION:
+            reason_path = assert_no_linklike_components(
+                reason_path,
+                boundary=context_path,
+            )
+
+    _move_review_entry(entry, destination, context_path=context_path)
+
+    if reason_path is not None:
+        if detect_layout_version(context_path) == LAYOUT_VERSION:
+            _atomic_write_text(reason_path, args.reason)
+        else:
+            reason_path.write_text(args.reason, encoding="utf-8")
 
     log_event(
         "review",

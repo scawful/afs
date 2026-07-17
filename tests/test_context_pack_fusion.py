@@ -46,7 +46,7 @@ def test_fused_section_requires_both_signals() -> None:
 
     # Only embedding hits, no keyword sections -> no fused section.
     embedding = ContextPackSection(
-        title="Embedding Hits", body="hits", priority=4, sources=["/repo/b.py"]
+        title="Semantic Hits", body="hits", priority=4, sources=["/repo/b.py"]
     )
     assert _fused_retrieval_section([], embedding, pack_mode="focused", max_results=5) is None
 
@@ -57,7 +57,7 @@ def test_fused_section_annotates_signal_provenance() -> None:
         _section("Indexed Hit 2", "/repo/shared.py"),
     ]
     embedding = ContextPackSection(
-        title="Embedding Hits",
+        title="Semantic Hits",
         body="hits",
         priority=4,
         sources=["/repo/shared.py", "/repo/c.py"],
@@ -75,3 +75,17 @@ def test_fused_section_annotates_signal_provenance() -> None:
     # keyword-only / semantic-only docs are still present with a single signal tag.
     assert "/repo/a.py" in section.body
     assert "/repo/c.py" in section.body
+
+
+def test_fused_section_rejects_keyword_fallback_mislabeled_as_semantic() -> None:
+    query_sections = [_section("Indexed Hit 1", "/repo/a.py")]
+    fallback = ContextPackSection(
+        title="Indexed Text Hits", body="hits", priority=4, sources=["/repo/a.py"]
+    )
+
+    assert (
+        _fused_retrieval_section(
+            query_sections, fallback, pack_mode="focused", max_results=5
+        )
+        is None
+    )

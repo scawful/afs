@@ -6,23 +6,142 @@ import argparse
 import json
 import shutil
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from ..context_fs import ContextFileSystem
+from ..context_fs import ContextEntry, ContextFileSystem, FileMountType
 from ..context_index import ContextSQLiteIndex
+from ..context_layout import LAYOUT_VERSION, detect_layout_version
+from ..models import ContextCategory, MountType
+from ..project_registry import COMMON_SCOPE_ID, ProjectRegistry
+from ..scopes import ResolvedScope, resolve_scope
 from ._utils import load_manager, parse_mount_type, resolve_context_paths
+
+
+@dataclass(frozen=True)
+class _FileAccess:
+    """Resolved CLI filesystem boundary and presentation metadata."""
+
+    fs: ContextFileSystem
+    context_path: Path
+    scope_id: str
+    layout_version: int
+    resolved_scope: ResolvedScope
+
+    @property
+    def scoped(self) -> bool:
+        return self.layout_version == LAYOUT_VERSION
+
+    def entry_payload(self, entry: ContextEntry) -> dict[str, object]:
+        payload = entry.to_dict()
+        if self.scoped:
+            payload["path"] = entry.relative_path
+        payload["scope_id"] = self.scope_id
+        return payload
+
+    def display_path(self, target: Path, mount_type: FileMountType) -> str:
+        if not self.scoped:
+            return str(target)
+        return target.relative_to(self.fs.resolve_mount_root(mount_type)).as_posix()
+
+
+def _resolve_file_access(
+    args: argparse.Namespace,
+    manager: Any,
+    mount_types: tuple[FileMountType, ...],
+) -> _FileAccess:
+    """Resolve the current/common v2 scope without exposing internal mounts."""
+
+    try:
+        project_path, context_path, _context_root, _context_dir = resolve_context_paths(
+            args, manager
+        )
+    except FileNotFoundError:
+        configured_root = manager.config.general.context_root.expanduser().resolve()
+        if not bool(getattr(args, "common", False)) or (
+            detect_layout_version(configured_root) != LAYOUT_VERSION
+        ):
+            raise
+        project_path = (
+            Path(args.path).expanduser().resolve() if args.path else Path.cwd().resolve()
+        )
+        context_path = configured_root
+
+    version = detect_layout_version(context_path)
+    if version != LAYOUT_VERSION:
+        if any(not isinstance(mount_type, MountType) for mount_type in mount_types):
+            raise PermissionError("'human' is available only in a v2 context")
+        resolved = resolve_scope(context_path, requester_path=project_path)
+        return _FileAccess(
+            ContextFileSystem(manager, context_path),
+            context_path,
+            COMMON_SCOPE_ID,
+            version,
+            resolved,
+        )
+
+    categories: dict[FileMountType, ContextCategory] = {}
+    for mount_type in mount_types:
+        category = (
+            mount_type
+            if isinstance(mount_type, ContextCategory)
+            else ContextCategory.from_mount_type(mount_type)
+        )
+        if category is None:
+            raise PermissionError(
+                f"{mount_type.value!r} is an internal v2 mount and is not available "
+                "through `afs files`; choose one of history, memory, scratchpad, "
+                "knowledge, tools, or human"
+            )
+        categories[mount_type] = category
+
+    resolved = resolve_scope(
+        context_path,
+        requester_path=project_path,
+        common=bool(getattr(args, "common", False)),
+    )
+    registry = ProjectRegistry(context_path)
+    requester_path = resolved.requester_path
+    if requester_path is None:
+        raise PermissionError("v2 file access requires a requester path")
+    scoped_roots = {}
+    for mount_type, category in categories.items():
+        _scope_id, root = registry.resolve_scope_root(
+            category,
+            requester_path=requester_path,
+            scope_id=resolved.scope_id,
+        )
+        scoped_roots[mount_type] = root
+    return _FileAccess(
+        ContextFileSystem(
+            manager,
+            context_path,
+            scoped_mount_roots=scoped_roots,
+        ),
+        context_path,
+        resolved.scope_id,
+        version,
+        resolved,
+    )
+
+
+def _parse_file_mount(value: str) -> FileMountType:
+    """Parse a legacy mount or the v2-only human category."""
+
+    if value == ContextCategory.HUMAN.value:
+        return ContextCategory.HUMAN
+    return parse_mount_type(value)
 
 
 def fs_read_command(args: argparse.Namespace) -> int:
     """Read a file from a context mount."""
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
-    fs = ContextFileSystem(manager, context_path)
-    mount_type = parse_mount_type(args.mount_type)
+    mount_type = _parse_file_mount(args.mount_type)
     try:
+        access = _resolve_file_access(args, manager, (mount_type,))
+        fs = access.fs
         content = fs.read_text(
             mount_type,
             args.relative_path,
@@ -35,10 +154,12 @@ def fs_read_command(args: argparse.Namespace) -> int:
         return 1
 
     if args.json:
-        payload = entry.to_dict()
+        payload = access.entry_payload(entry)
         payload.update(
             {
                 "mount_type": mount_type.value,
+                "context_path": str(access.context_path),
+                "layout_version": access.layout_version,
                 "content": content,
             }
         )
@@ -53,11 +174,7 @@ def fs_write_command(args: argparse.Namespace) -> int:
     """Write a file into a context mount."""
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
-    fs = ContextFileSystem(manager, context_path)
-    mount_type = parse_mount_type(args.mount_type)
+    mount_type = _parse_file_mount(args.mount_type)
 
     if args.content is not None and args.input:
         print("Provide only one of --content or --input.")
@@ -77,6 +194,8 @@ def fs_write_command(args: argparse.Namespace) -> int:
         content = sys.stdin.read()
 
     try:
+        access = _resolve_file_access(args, manager, (mount_type,))
+        fs = access.fs
         target = fs.write_text(
             mount_type,
             args.relative_path,
@@ -89,7 +208,26 @@ def fs_write_command(args: argparse.Namespace) -> int:
         print(str(exc))
         return 1
 
-    print(f"wrote: {target}")
+    relative_path = access.display_path(target, mount_type)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "mount_type": mount_type.value,
+                    "context_path": str(access.context_path),
+                    "layout_version": access.layout_version,
+                    "scope_id": access.scope_id,
+                    "path": relative_path,
+                    "relative_path": relative_path,
+                    "written": True,
+                    "append": bool(args.append),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    print(f"wrote: {relative_path}")
     return 0
 
 
@@ -97,23 +235,26 @@ def fs_list_command(args: argparse.Namespace) -> int:
     """List files in a context mount."""
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
-    fs = ContextFileSystem(manager, context_path)
-    mount_type = parse_mount_type(args.mount_type)
+    mount_type = _parse_file_mount(args.mount_type)
 
     include_files = not args.dirs_only
     include_dirs = not args.files_only
     try:
-        entries = fs.list_entries(
-            mount_type,
-            relative_path=args.relative,
-            max_depth=args.max_depth,
-            glob_patterns=args.glob,
-            include_files=include_files,
-            include_dirs=include_dirs,
-        )
+        access = _resolve_file_access(args, manager, (mount_type,))
+        fs = access.fs
+        if access.scoped and not fs.resolve_mount_root(mount_type).exists():
+            # Validate the requested subpath even though there is nothing to list.
+            fs.resolve_path(mount_type, args.relative)
+            entries = []
+        else:
+            entries = fs.list_entries(
+                mount_type,
+                relative_path=args.relative,
+                max_depth=args.max_depth,
+                glob_patterns=args.glob,
+                include_files=include_files,
+                include_dirs=include_dirs,
+            )
     except (OSError, ValueError, PermissionError) as exc:
         print(str(exc))
         return 1
@@ -122,7 +263,9 @@ def fs_list_command(args: argparse.Namespace) -> int:
         payload = {
             "mount_type": mount_type.value,
             "context_path": str(fs.context_path),
-            "entries": [entry.to_dict() for entry in entries],
+            "layout_version": access.layout_version,
+            "scope_id": access.scope_id,
+            "entries": [access.entry_payload(entry) for entry in entries],
         }
         print(json.dumps(payload, indent=2))
         return 0
@@ -137,21 +280,25 @@ def fs_info_command(args: argparse.Namespace) -> int:
     """Show metadata for a context path."""
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
-    fs = ContextFileSystem(manager, context_path)
-    mount_type = parse_mount_type(args.mount_type)
+    mount_type = _parse_file_mount(args.mount_type)
 
     try:
+        access = _resolve_file_access(args, manager, (mount_type,))
+        fs = access.fs
         entry = fs.stat_entry(mount_type, args.relative_path)
     except (OSError, ValueError, PermissionError) as exc:
         print(str(exc))
         return 1
 
     if args.json:
-        payload = entry.to_dict()
-        payload["mount_type"] = mount_type.value
+        payload = access.entry_payload(entry)
+        payload.update(
+            {
+                "mount_type": mount_type.value,
+                "context_path": str(access.context_path),
+                "layout_version": access.layout_version,
+            }
+        )
         print(json.dumps(payload, indent=2))
         return 0
 
@@ -166,13 +313,11 @@ def fs_delete_command(args: argparse.Namespace) -> int:
     """Delete a file or directory from a context mount."""
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
-    fs = ContextFileSystem(manager, context_path)
-    mount_type = parse_mount_type(args.mount_type)
+    mount_type = _parse_file_mount(args.mount_type)
 
     try:
+        access = _resolve_file_access(args, manager, (mount_type,))
+        fs = access.fs
         target, root = fs.resolve_path(mount_type, args.relative_path)
     except (OSError, ValueError, PermissionError) as exc:
         print(str(exc))
@@ -188,6 +333,9 @@ def fs_delete_command(args: argparse.Namespace) -> int:
     is_symlink = target.is_symlink()
     is_dir = target.is_dir() and not is_symlink
     relative_path = target.relative_to(root).as_posix()
+    canonical_relative_path = fs.canonical_relative_path(
+        mount_type, args.relative_path
+    )
 
     try:
         if is_symlink or target.is_file():
@@ -203,11 +351,18 @@ def fs_delete_command(args: argparse.Namespace) -> int:
         print(str(exc))
         return 1
 
-    index = ContextSQLiteIndex(manager, context_path)
-    if is_dir:
-        rows_deleted = index.delete_relative_prefix(mount_type, relative_path)
+    index = ContextSQLiteIndex(manager, access.context_path)
+    index_mount_type = _as_index_mount_type(mount_type)
+    if index_mount_type is None:
+        rows_deleted = 0
+    elif is_dir:
+        rows_deleted = index.delete_relative_prefix(
+            index_mount_type, canonical_relative_path
+        )
     else:
-        rows_deleted = index.delete_relative_path(mount_type, relative_path)
+        rows_deleted = index.delete_relative_path(
+            index_mount_type, canonical_relative_path
+        )
 
     if args.json:
         print(
@@ -215,7 +370,9 @@ def fs_delete_command(args: argparse.Namespace) -> int:
                 {
                     "mount_type": mount_type.value,
                     "context_path": str(fs.context_path),
-                    "path": str(target),
+                    "layout_version": access.layout_version,
+                    "scope_id": access.scope_id,
+                    "path": relative_path if access.scoped else str(target),
                     "relative_path": relative_path,
                     "deleted": True,
                     "recursive": bool(args.recursive),
@@ -226,7 +383,7 @@ def fs_delete_command(args: argparse.Namespace) -> int:
         )
         return 0
 
-    print(f"deleted: {target}")
+    print(f"deleted: {relative_path if access.scoped else target}")
     return 0
 
 
@@ -234,15 +391,19 @@ def fs_move_command(args: argparse.Namespace) -> int:
     """Move or rename a path within the context filesystem."""
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
-    fs = ContextFileSystem(manager, context_path)
-    source_mount_type = parse_mount_type(args.source_mount_type)
-    destination_mount_type = parse_mount_type(args.destination_mount_type)
+    source_mount_type = _parse_file_mount(args.source_mount_type)
+    destination_mount_type = _parse_file_mount(args.destination_mount_type)
 
     try:
-        source, _source_root = fs.resolve_path(source_mount_type, args.source_relative_path)
+        access = _resolve_file_access(
+            args,
+            manager,
+            (source_mount_type, destination_mount_type),
+        )
+        fs = access.fs
+        source, source_root = fs.resolve_path(
+            source_mount_type, args.source_relative_path
+        )
         destination, destination_root = fs.resolve_path(
             destination_mount_type, args.destination_relative_path
         )
@@ -252,6 +413,9 @@ def fs_move_command(args: argparse.Namespace) -> int:
 
     if not source.exists() and not source.is_symlink():
         print(f"Path not found: {source}")
+        return 1
+    if access.scoped and source == source_root:
+        print("Refusing to move an entire scope root.")
         return 1
     if destination.exists() or destination.is_symlink():
         print(f"Destination already exists: {destination}")
@@ -264,6 +428,8 @@ def fs_move_command(args: argparse.Namespace) -> int:
         else:
             print("Destination cannot be inside source directory.")
             return 1
+    if access.scoped and not destination_root.exists():
+        destination_root.mkdir(parents=True, exist_ok=True)
     if not destination.parent.exists():
         if not args.mkdirs:
             print(f"Parent directory missing: {destination.parent}")
@@ -279,13 +445,30 @@ def fs_move_command(args: argparse.Namespace) -> int:
         print(str(exc))
         return 1
 
-    index = ContextSQLiteIndex(manager, context_path)
-    mounts_to_rebuild = list({source_mount_type, destination_mount_type})
-    summary = index.rebuild(
-        mount_types=mounts_to_rebuild,
-        include_content=manager.config.context_index.include_content,
-        max_file_size_bytes=manager.config.context_index.max_file_size_bytes,
-        max_content_chars=manager.config.context_index.max_content_chars,
+    index = ContextSQLiteIndex(manager, access.context_path)
+    mounts_to_rebuild = list(
+        {
+            mount_type
+            for candidate in (source_mount_type, destination_mount_type)
+            if (mount_type := _as_index_mount_type(candidate)) is not None
+        }
+    )
+    index_settings = manager.config.context_index
+    summary = (
+        index.rebuild_scoped(
+            access.resolved_scope,
+            mount_types=mounts_to_rebuild,
+            include_content=index_settings.include_content,
+            max_file_size_bytes=index_settings.max_file_size_bytes,
+            max_content_chars=index_settings.max_content_chars,
+        )
+        if access.scoped
+        else index.rebuild(
+            mount_types=mounts_to_rebuild,
+            include_content=index_settings.include_content,
+            max_file_size_bytes=index_settings.max_file_size_bytes,
+            max_content_chars=index_settings.max_content_chars,
+        )
     )
 
     if args.json:
@@ -293,10 +476,14 @@ def fs_move_command(args: argparse.Namespace) -> int:
             json.dumps(
                 {
                     "context_path": str(fs.context_path),
+                    "layout_version": access.layout_version,
+                    "scope_id": access.scope_id,
                     "source_mount_type": source_mount_type.value,
                     "destination_mount_type": destination_mount_type.value,
-                    "source": str(source),
-                    "destination": str(destination),
+                    "source": access.display_path(source, source_mount_type),
+                    "destination": access.display_path(
+                        destination, destination_mount_type
+                    ),
                     "index_rebuild": summary.to_dict(),
                 },
                 indent=2,
@@ -304,7 +491,11 @@ def fs_move_command(args: argparse.Namespace) -> int:
         )
         return 0
 
-    print(f"moved: {source} -> {destination}")
+    print(
+        "moved: "
+        f"{access.display_path(source, source_mount_type)} -> "
+        f"{access.display_path(destination, destination_mount_type)}"
+    )
     return 0
 
 
@@ -312,15 +503,27 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register filesystem command parsers."""
     from ..models import MountType
 
-    fs_parser = subparsers.add_parser("fs", help="Agentic filesystem operations.")
+    fs_parser = subparsers.add_parser(
+        "fs",
+        aliases=["files"],
+        help="Read and manage context files (friendly alias: files).",
+    )
     fs_sub = fs_parser.add_subparsers(dest="fs_command")
-    mount_choices = [mount.value for mount in MountType]
+    mount_choices = sorted(
+        {mount.value for mount in MountType}
+        | {category.value for category in ContextCategory}
+    )
 
     def add_context_args(parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--config", help="Config path.")
         parser.add_argument("--path", help="Project path.")
         parser.add_argument("--context-root", help="Context root override.")
         parser.add_argument("--context-dir", help="Context directory name.")
+        parser.add_argument(
+            "--common",
+            action="store_true",
+            help="Use the shared common scope in a v2 context.",
+        )
 
     def add_encoding_args(parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--encoding", default="utf-8", help="Text encoding.")
@@ -343,6 +546,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     fs_write.add_argument("--input", help="Read content from file.")
     fs_write.add_argument("--append", action="store_true", help="Append to file.")
     fs_write.add_argument("--mkdirs", action="store_true", help="Create parent dirs.")
+    fs_write.add_argument("--json", action="store_true", help="Output JSON.")
     fs_write.set_defaults(func=fs_write_command)
 
     fs_list = fs_sub.add_parser("list", help="List files in context.")
@@ -389,3 +593,14 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     fs_move.add_argument("--mkdirs", action="store_true", help="Create parent dirs.")
     fs_move.add_argument("--json", action="store_true", help="Output JSON.")
     fs_move.set_defaults(func=fs_move_command)
+
+
+def _as_index_mount_type(mount_type: FileMountType) -> MountType | None:
+    """Return the indexable legacy role for a file mount, if one exists."""
+
+    if isinstance(mount_type, MountType):
+        return mount_type
+    try:
+        return MountType(mount_type.value)
+    except ValueError:
+        return None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -136,13 +137,19 @@ def infer_project_root(context_path: Path) -> Path:
 def build_codebase_summary(
     context_path: Path,
     *,
+    infer_root: bool = True,
     max_scan_files: int = _DEFAULT_MAX_SCAN_FILES,
     max_scan_depth: int = _DEFAULT_MAX_SCAN_DEPTH,
     max_sample_paths: int = _DEFAULT_MAX_SAMPLE_PATHS,
     max_top_level: int = _DEFAULT_MAX_TOP_LEVEL,
+    excluded_roots: Iterable[Path] = (),
 ) -> dict[str, Any]:
     """Build a lightweight codebase structure summary from a context path."""
-    project_root = infer_project_root(context_path)
+    project_root = (
+        infer_project_root(context_path)
+        if infer_root
+        else context_path.expanduser().resolve()
+    )
     summary: dict[str, Any] = {
         "project_root": str(project_root),
         "has_git": False,
@@ -168,6 +175,30 @@ def build_codebase_summary(
     if not project_root.is_dir():
         return summary
 
+    normalized_exclusions = tuple(
+        sorted(
+            {
+                path.expanduser().resolve()
+                for path in excluded_roots
+                if path.expanduser().resolve() == project_root
+                or path.expanduser().resolve().is_relative_to(project_root)
+            },
+            key=str,
+        )
+    )
+    if project_root in normalized_exclusions:
+        return summary
+
+    def excluded(path: Path) -> bool:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return True
+        return any(
+            resolved == denied or resolved.is_relative_to(denied)
+            for denied in normalized_exclusions
+        )
+
     summary["has_git"] = (project_root / ".git").exists()
 
     try:
@@ -182,6 +213,8 @@ def build_codebase_summary(
 
     for child in children:
         name = child.name
+        if excluded(child):
+            continue
         if child.is_dir():
             if _should_skip_dir(name):
                 continue
@@ -216,12 +249,18 @@ def build_codebase_summary(
     truncated = False
 
     for current_root, dirs, files in os.walk(project_root):
-        rel_root = Path(current_root).resolve().relative_to(project_root)
+        current_path = Path(current_root)
+        if current_path != project_root and excluded(current_path):
+            dirs[:] = []
+            continue
+        rel_root = current_path.resolve().relative_to(project_root)
         depth = len(rel_root.parts)
         dirs[:] = [
             name
             for name in sorted(dirs, key=_dir_rank)
-            if not _should_skip_dir(name) and depth < max_scan_depth
+            if not _should_skip_dir(name)
+            and not excluded(current_path / name)
+            and depth < max_scan_depth
         ]
 
         for filename in sorted(files, key=str.lower):
@@ -232,6 +271,8 @@ def build_codebase_summary(
 
             rel_path = rel_root / filename if rel_root.parts else Path(filename)
             rel_text = rel_path.as_posix()
+            if excluded(current_path / filename):
+                continue
             files_scanned += 1
 
             ecosystem = _MANIFEST_ECOSYSTEMS.get(filename)
@@ -264,6 +305,39 @@ def build_codebase_summary(
         "truncated": truncated,
     }
     return summary
+
+
+def build_scoped_codebase_summary(
+    context_root: Path,
+    requester_path: Path,
+    *,
+    project_id: str,
+    max_scan_files: int = _DEFAULT_MAX_SCAN_FILES,
+    max_scan_depth: int = _DEFAULT_MAX_SCAN_DEPTH,
+    max_sample_paths: int = _DEFAULT_MAX_SAMPLE_PATHS,
+    max_top_level: int = _DEFAULT_MAX_TOP_LEVEL,
+) -> dict[str, Any]:
+    """Summarize one exact registered v2 project without crossing boundaries."""
+
+    # Import locally so the generic explorer stays independent of the v2
+    # registry while all v2 callers share one authorization boundary.
+    from .project_registry import ProjectRegistry
+
+    project_root, excluded_roots = ProjectRegistry(
+        context_root
+    ).resolve_codebase_boundaries(
+        requester_path,
+        project_id=project_id,
+    )
+    return build_codebase_summary(
+        project_root,
+        infer_root=False,
+        max_scan_files=max_scan_files,
+        max_scan_depth=max_scan_depth,
+        max_sample_paths=max_sample_paths,
+        max_top_level=max_top_level,
+        excluded_roots=excluded_roots,
+    )
 
 
 def render_codebase_summary(summary: dict[str, Any]) -> str:

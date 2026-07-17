@@ -111,7 +111,9 @@ Avoid overriding core names. Prefer extension-prefixed names such as `example.lo
 
 ## Context source providers
 
-Use `[[context_sources]]` for provider-neutral records that can be synced into `.context/items`.
+Use `[[context_sources]]` for provider-neutral records. Core materialization is
+currently v1-only and writes `.context/items/sources/`; v2 `sources sync`
+fails closed before provider invocation until scoped ingestion exists.
 
 ```toml
 [[context_sources]]
@@ -120,7 +122,12 @@ module = "afs_example.sources"
 factory = "register_ticket_source"
 ```
 
-Providers should normalize remote records before writing into AFS. Keep the original external system as provenance, not as a required runtime dependency for every user.
+Providers should normalize remote records before writing into AFS. Keep the
+original external system as provenance, not as a required runtime dependency
+for every user. Future v2 ingestion will route project records to
+`knowledge/projects/<project-id>/` and require an explicit choice for shared
+`knowledge/common/` records; extensions must not write unscoped v2 `items`
+records themselves.
 
 ## Manager actions
 

@@ -11,7 +11,9 @@ from typing import Any
 from .agent_job_worker import job_needs_destructive_opt_in
 from .agent_jobs import JOB_STATES, AgentJob, AgentJobQueue
 from .agent_runs import AgentRunStore
+from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_paths import resolve_mount_root
+from .handoff import HandoffPacket, HandoffStore
 from .models import MountType
 
 
@@ -121,11 +123,27 @@ def promote_agent_job_to_handoff(
     *,
     handoff_name: str = "",
 ) -> dict[str, Any]:
-    """Write a job review packet to scratchpad/handoffs for future agents."""
+    """Promote a job review into the durable handoff surface."""
 
     review = review_agent_job(context_path, job_id)
     job = review["job"]
     run = review.get("run")
+    if detect_layout_version(context_path) == LAYOUT_VERSION:
+        packet = _promote_v2_handoff(
+            context_path,
+            review,
+            handoff_name=handoff_name,
+        )
+        return {
+            "context_path": review["context_path"],
+            "path": packet.artifact_path,
+            "handoff": packet.to_dict(),
+            "job": job,
+            "run": run,
+            "commands": review["commands"],
+        }
+
+    # Preserve the v1 filename and Markdown contract for existing clients.
     scratchpad_root = resolve_mount_root(context_path, MountType.SCRATCHPAD)
     handoff_root = scratchpad_root / "handoffs"
     handoff_root.mkdir(parents=True, exist_ok=True)
@@ -139,6 +157,64 @@ def promote_agent_job_to_handoff(
         "run": run,
         "commands": review["commands"],
     }
+
+
+def _promote_v2_handoff(
+    context_path: Path,
+    review: dict[str, Any],
+    *,
+    handoff_name: str,
+) -> HandoffPacket:
+    job = review["job"]
+    run = review.get("run") or {}
+    commands = review.get("commands") or {}
+    title = _v2_handoff_title(handoff_name, job=job)
+    result = str(job.get("result", "")).strip()
+    run_summary = str(run.get("summary", "")).strip()
+    status = str(job.get("status", "")).strip()
+    accomplished = [f"Promoted agent job {job.get('id', '')}: {job.get('title', '')}"]
+    if result and status != "failed":
+        accomplished.append(f"Job result: {result}")
+    if run_summary:
+        accomplished.append(f"Run summary: {run_summary}")
+    blocked = (
+        [f"Job failed: {result or job.get('title', job.get('id', ''))}"]
+        if status == "failed"
+        else []
+    )
+    next_steps = [
+        f"Review the source job: {commands.get('review', '')}",
+        f"Archive it after review: {commands.get('archive', '')}",
+    ]
+    priority_value = job.get("priority")
+    priority = "normal"
+    if isinstance(priority_value, int):
+        if priority_value <= 1:
+            priority = "high"
+        elif priority_value >= 4:
+            priority = "low"
+    return HandoffStore(context_path, scope_id="common").create_revision(
+        title=title,
+        agent_name=str(job.get("assigned_to") or job.get("created_by") or "agent-job-inbox"),
+        accomplished=accomplished,
+        blocked=blocked,
+        next_steps=next_steps,
+        context_snapshot={"job": job, "run": run},
+        metadata={
+            "source": "afs.agent_job_inbox",
+            "job_id": str(job.get("id", "")),
+        },
+        priority=priority,
+    )
+
+
+def _v2_handoff_title(value: str, *, job: dict[str, Any]) -> str:
+    if not value.strip():
+        return f"Agent Job: {job.get('title') or job.get('id', '')}"
+    title = re.sub(r"\.md$", "", value.strip(), flags=re.IGNORECASE)
+    title = re.sub(r"[-_]+", " ", title)
+    title = re.sub(r"\s+", " ", title).strip(" .")
+    return title or f"Agent Job: {job.get('title') or job.get('id', '')}"
 
 
 def format_agent_job_inbox(payload: dict[str, Any]) -> str:

@@ -7,7 +7,11 @@ import json
 from pathlib import Path
 
 from afs.cli.context import register_parsers
+from afs.context_index import ContextSQLiteIndex
+from afs.context_layout import scaffold_v2
 from afs.manager import AFSManager
+from afs.models import MountType
+from afs.project_registry import ProjectRegistry
 from afs.schema import AFSConfig, GeneralConfig
 
 
@@ -28,6 +32,24 @@ def _make_local_context_manager(tmp_path: Path) -> tuple[AFSManager, Path, Path]
     project_path.mkdir()
     manager.ensure(path=project_path)
     return manager, project_path, project_path / ".context"
+
+
+def _make_v2_manager(
+    tmp_path: Path,
+) -> tuple[AFSManager, Path, Path, str, str]:
+    context_root = tmp_path / "central-context"
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    scaffold_v2(context_root)
+    registry = ProjectRegistry(context_root)
+    alpha_record = registry.register(alpha)
+    beta_record = registry.register(beta)
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+    return manager, alpha, context_root, alpha_record.project_id, beta_record.project_id
 
 
 def _make_parser() -> argparse.ArgumentParser:
@@ -102,6 +124,204 @@ def test_context_query_auto_indexes_and_returns_entries(
     assert "index_rebuild" in payload
 
 
+def test_v2_context_query_auto_indexes_only_current_and_common_scope(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    manager, alpha, context_root, alpha_id, beta_id = _make_v2_manager(tmp_path)
+    knowledge = context_root / "knowledge"
+    alpha_root = knowledge / "projects" / alpha_id
+    beta_root = knowledge / "projects" / beta_id
+    common_root = knowledge / "common"
+    for root, marker in (
+        (alpha_root, "alpha-search-marker"),
+        (beta_root, "beta-private-marker"),
+        (common_root, "common-search-marker"),
+    ):
+        root.mkdir(parents=True)
+        (root / "note.md").write_text(marker, encoding="utf-8")
+
+    index = ContextSQLiteIndex(manager, context_root)
+    index.rebuild(mount_types=[MountType.KNOWLEDGE], include_content=True)
+    index.delete_relative_prefix(MountType.KNOWLEDGE, f"projects/{alpha_id}")
+    index.delete_relative_prefix(MountType.KNOWLEDGE, "common")
+
+    real_iterdir = Path.iterdir
+
+    def guarded_iterdir(path: Path):
+        if path == beta_root:
+            raise AssertionError("beta scope was traversed")
+        return real_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
+    monkeypatch.setattr("afs.cli.context.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+    args = parser.parse_args(
+        [
+            "context",
+            "query",
+            "search-marker",
+            "--mount",
+            "knowledge",
+            "--path",
+            str(alpha),
+            "--context-root",
+            str(context_root),
+            "--json",
+        ]
+    )
+
+    assert args.func(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scope_id"] == f"project:{alpha_id}"
+    assert {entry["relative_path"] for entry in payload["entries"]} == {
+        f"projects/{alpha_id}/note.md",
+        "common/note.md",
+    }
+    assert index.count_entries(
+        mount_types=[MountType.KNOWLEDGE],
+        relative_prefixes=[f"projects/{beta_id}/"],
+    ) >= 1
+
+
+def test_v2_context_index_rebuild_requires_all_projects_for_other_scopes(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    manager, alpha, context_root, alpha_id, beta_id = _make_v2_manager(tmp_path)
+    for project_id, marker in (
+        (alpha_id, "alpha-index"),
+        (beta_id, "beta-index"),
+    ):
+        path = context_root / "knowledge" / "projects" / project_id / "note.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(marker, encoding="utf-8")
+
+    monkeypatch.setattr("afs.cli.context.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+    base = [
+        "index",
+        "rebuild",
+        "--mount",
+        "knowledge",
+        "--path",
+        str(alpha),
+        "--context-root",
+        str(context_root),
+        "--json",
+    ]
+    scoped_args = parser.parse_args(base)
+    assert scoped_args.func(scoped_args) == 0
+    scoped_payload = json.loads(capsys.readouterr().out)
+    assert scoped_payload["scope_id"] == f"project:{alpha_id}"
+    index = ContextSQLiteIndex(manager, context_root)
+    assert index.count_entries(
+        mount_types=[MountType.KNOWLEDGE],
+        relative_prefixes=[f"projects/{beta_id}/"],
+    ) == 0
+
+    all_args = parser.parse_args([*base[:-1], "--all-projects", "--json"])
+    assert all_args.func(all_args) == 0
+    all_payload = json.loads(capsys.readouterr().out)
+    assert all_payload["scope_id"] == "all-projects"
+    assert index.count_entries(
+        mount_types=[MountType.KNOWLEDGE],
+        relative_prefixes=[f"projects/{beta_id}/"],
+    ) >= 1
+
+
+def test_v2_context_freshness_does_not_traverse_other_projects(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    manager, alpha, context_root, alpha_id, beta_id = _make_v2_manager(tmp_path)
+    alpha_root = context_root / "knowledge" / "projects" / alpha_id
+    beta_root = context_root / "knowledge" / "projects" / beta_id
+    for root, marker in ((alpha_root, "alpha"), (beta_root, "beta")):
+        root.mkdir(parents=True)
+        (root / "note.md").write_text(marker, encoding="utf-8")
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.KNOWLEDGE],
+        include_content=True,
+    )
+
+    real_iterdir = Path.iterdir
+
+    def guarded_iterdir(path: Path):
+        if path == beta_root:
+            raise AssertionError("beta scope was traversed")
+        return real_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
+    monkeypatch.setattr("afs.cli.context.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+    args = parser.parse_args(
+        [
+            "context",
+            "freshness",
+            "--mount",
+            "knowledge",
+            "--path",
+            str(alpha),
+            "--context-root",
+            str(context_root),
+            "--json",
+        ]
+    )
+
+    assert args.func(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    paths = {
+        entry["relative_path"] for entry in payload["files"]["knowledge"]
+    }
+    assert f"projects/{alpha_id}/note.md" in paths
+    assert f"projects/{beta_id}/note.md" not in paths
+
+
+def test_v2_central_cli_common_scope_is_explicit_and_usable(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    manager, _alpha, context_root, alpha_id, _beta_id = _make_v2_manager(tmp_path)
+    common_note = context_root / "knowledge" / "common" / "shared.md"
+    alpha_note = context_root / "knowledge" / "projects" / alpha_id / "private.md"
+    common_note.parent.mkdir(parents=True)
+    alpha_note.parent.mkdir(parents=True)
+    common_note.write_text("common-only-marker", encoding="utf-8")
+    alpha_note.write_text("project-private-marker", encoding="utf-8")
+
+    monkeypatch.setattr("afs.cli.context.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+    base = [
+        "--path",
+        str(context_root),
+        "--context-root",
+        str(context_root),
+        "--common",
+        "--json",
+    ]
+    rebuild = parser.parse_args(
+        ["index", "rebuild", "--mount", "knowledge", *base]
+    )
+    assert rebuild.func(rebuild) == 0
+    assert json.loads(capsys.readouterr().out)["scope_id"] == "common"
+
+    query = parser.parse_args(
+        ["context", "query", "marker", "--mount", "knowledge", *base]
+    )
+    assert query.func(query) == 0
+    query_payload = json.loads(capsys.readouterr().out)
+    assert {entry["relative_path"] for entry in query_payload["entries"]} == {
+        "common/shared.md"
+    }
+
+    freshness = parser.parse_args(
+        ["context", "freshness", "--mount", "knowledge", *base]
+    )
+    assert freshness.func(freshness) == 0
+    freshness_payload = json.loads(capsys.readouterr().out)
+    assert {
+        entry["relative_path"]
+        for entry in freshness_payload["files"]["knowledge"]
+    } == {"common/shared.md"}
+
+
 def test_context_query_resolves_parent_context_for_nested_path(
     capsys, monkeypatch, tmp_path: Path
 ) -> None:
@@ -171,6 +391,49 @@ def test_context_overview_outputs_codebase_summary(
     assert "tests" in payload["codebase"]["test_roots"]
     assert "docs" in payload["codebase"]["docs_roots"]
     assert payload["codebase"]["language_hints"]["python"] >= 2
+
+
+def test_v2_context_overview_prunes_nested_project_and_visible_context(
+    capsys,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    alpha = tmp_path / "workspace"
+    beta = alpha / "nested-beta"
+    context_root = alpha / "central-context"
+    beta.mkdir(parents=True)
+    scaffold_v2(context_root)
+    registry = ProjectRegistry(context_root)
+    registry.register(alpha)
+    registry.register(beta)
+    (alpha / "alpha_safe.py").write_text("ALPHA_SAFE = True\n", encoding="utf-8")
+    (beta / "beta_confidential_canary.py").write_text(
+        "BETA_PRIVATE = True\n",
+        encoding="utf-8",
+    )
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+    monkeypatch.setattr("afs.cli.context.load_manager", lambda _path: manager)
+    args = _make_parser().parse_args(
+        [
+            "context",
+            "overview",
+            "--path",
+            str(alpha),
+            "--context-root",
+            str(context_root),
+            "--json",
+        ]
+    )
+
+    assert args.func(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rendered = json.dumps(payload["codebase"])
+    assert "alpha_safe.py" in rendered
+    assert "nested-beta" not in rendered
+    assert "beta_confidential_canary" not in rendered
+    assert "central-context" not in rendered
 
 
 def test_context_overview_supports_raw_project_without_context(

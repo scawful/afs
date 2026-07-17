@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
 
+from afs.context_layout import audit_layout, scaffold_v2
+from afs.health import cli as health_cli
 from afs.health.daemon import HealthMonitoringDaemon
 from afs.health.enhanced_checks import (
     EnhancedHealthChecker,
@@ -173,6 +177,26 @@ class TestEnhancedHealthChecker:
         assert "scores" in result_dict
         assert "checks" in result_dict
 
+    def test_v2_data_integrity_uses_configured_runtime_training_root(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        context_root = tmp_path / "central"
+        scaffold_v2(context_root)
+        training_root = context_root / ".afs" / "training"
+        training_root.mkdir()
+        (training_root / "sample.jsonl").write_text("{}\n", encoding="utf-8")
+
+        checker = EnhancedHealthChecker(context_root=context_root)
+
+        assert checker._check_data_integrity() == 1.0
+        assert not (home / ".context").exists()
+        assert not (context_root / "training_data").exists()
+
     @patch("afs.health.enhanced_checks.psutil")
     def test_system_health_check(self, mock_psutil, checker):
         """Test system health check."""
@@ -265,6 +289,65 @@ class TestEnhancedHealthChecker:
                 saved_data = json.load(f)
                 assert saved_data["overall_score"] == result.overall_score
 
+    def test_v2_checker_routes_reports_to_managed_health_root(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        context_root = tmp_path / ".context"
+        scaffold_v2(context_root)
+
+        checker = EnhancedHealthChecker(context_root=context_root)
+
+        assert checker.health_dir == context_root / ".afs" / "health"
+        assert checker.health_dir.is_dir()
+        assert not (context_root / "health").exists()
+        assert audit_layout(context_root).valid is True
+
+    def test_v2_checker_rejects_linked_health_root(self, tmp_path: Path) -> None:
+        context_root = tmp_path / ".context"
+        scaffold_v2(context_root)
+        outside = tmp_path / "outside-health"
+        outside.mkdir()
+        try:
+            (context_root / ".afs" / "health").symlink_to(
+                outside,
+                target_is_directory=True,
+            )
+        except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        with pytest.raises(ValueError, match="symbolic link or reparse point"):
+            EnhancedHealthChecker(context_root=context_root)
+
+        assert list(outside.iterdir()) == []
+
+    def test_v2_checker_does_not_write_through_linked_report(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        context_root = tmp_path / ".context"
+        scaffold_v2(context_root)
+        checker = EnhancedHealthChecker(context_root=context_root)
+        timestamp = datetime(2026, 7, 17)
+        outside = tmp_path / "outside-report.json"
+        outside.write_text("outside\n", encoding="utf-8")
+        try:
+            (checker.health_dir / f"report-{timestamp.isoformat()}.json").symlink_to(
+                outside
+            )
+        except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+            pytest.skip(f"symlinks unavailable: {exc}")
+        result = HealthCheckResult(
+            check_level=HealthCheckLevel.BASIC,
+            timestamp=timestamp,
+            overall_score=1.0,
+            overall_status=HealthStatus.EXCELLENT,
+        )
+
+        checker._save_report(result)
+
+        assert outside.read_text(encoding="utf-8") == "outside\n"
+
 
 class TestHealthMonitoringDaemon:
     """Test HealthMonitoringDaemon class."""
@@ -291,6 +374,17 @@ class TestHealthMonitoringDaemon:
             assert daemon.check_interval_s == 30
             assert daemon.alert_threshold == 0.2
             assert daemon.auto_heal is True
+
+    def test_v2_daemon_uses_same_managed_health_root(self, tmp_path: Path) -> None:
+        context_root = tmp_path / ".context"
+        scaffold_v2(context_root)
+
+        daemon = HealthMonitoringDaemon(context_root=context_root)
+
+        assert daemon.health_dir == context_root / ".afs" / "health"
+        assert daemon.checker.health_dir == daemon.health_dir
+        assert not (context_root / "health").exists()
+        assert audit_layout(context_root).valid is True
 
     def test_trend_calculation(self):
         """Test trend calculation."""
@@ -331,6 +425,100 @@ class TestHealthCheckLevels:
 
         with pytest.raises(ValueError):
             HealthCheckLevel("invalid")
+
+
+def test_health_history_reads_v2_managed_reports(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    config_path = tmp_path / "afs.toml"
+    config_path.write_text(
+        "[general]\n"
+        f'context_root = "{context_root}"\n',
+        encoding="utf-8",
+    )
+    checker = EnhancedHealthChecker(context_root=context_root)
+    report = checker.health_dir / "report-2026-07-17T00:00:00.json"
+    report.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-07-17T00:00:00",
+                "check_level": "basic",
+                "overall_score": 1.0,
+                "overall_status": "excellent",
+            }
+        ),
+        encoding="utf-8",
+    )
+    health_cli.handle_history(
+        argparse.Namespace(config=str(config_path), limit=10, json=True)
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["overall_status"] == "excellent"
+    assert not (context_root / "health").exists()
+    assert audit_layout(context_root).valid is True
+
+
+def test_nested_health_status_honors_configured_v2_root_without_shadow_context(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    context_root = tmp_path / "central"
+    scaffold_v2(context_root)
+    config_path = tmp_path / "afs.toml"
+    config_path.write_text(
+        "[general]\n"
+        f'context_root = "{context_root}"\n',
+        encoding="utf-8",
+    )
+
+    health_cli.handle_status(argparse.Namespace(config=str(config_path), json=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["check_level"] == "basic"
+    assert (context_root / ".afs" / "health").is_dir()
+    assert not (context_root / "health").exists()
+    assert not (home / ".context").exists()
+    assert audit_layout(context_root).valid is True
+
+
+def test_nested_health_monitor_passes_configured_context_to_daemon(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context_root = tmp_path / "central"
+    scaffold_v2(context_root)
+    config_path = tmp_path / "afs.toml"
+    config_path.write_text(
+        "[general]\n"
+        f'context_root = "{context_root}"\n',
+        encoding="utf-8",
+    )
+    observed: dict[str, object] = {}
+
+    def fake_run_daemon_cli(**kwargs) -> None:  # noqa: ANN003
+        observed.update(kwargs)
+
+    monkeypatch.setattr(health_cli, "run_daemon_cli", fake_run_daemon_cli)
+
+    health_cli.handle_monitor(
+        argparse.Namespace(
+            config=str(config_path),
+            interval=30,
+            level="basic",
+            duration=1,
+            auto_heal=False,
+        )
+    )
+
+    assert observed["context_root"] == context_root.resolve()
 
 
 class TestHealthAutoHealing:

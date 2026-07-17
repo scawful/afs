@@ -1,77 +1,95 @@
 # AFS Memory and Context Layout
 
-## Overview
+## Two supported layouts
 
-AFS stores long-lived agent context in a filesystem tree rooted at `.context`.
+AFS reads both context generations:
 
-Each mount role has a dedicated directory with policy-aware access.
+- **Version 1** is an unmarked, usually project-local `.context` with legacy
+  mount roles such as `hivemind`, `global`, and `items`.
+- **Version 2** is an explicitly marked central namespace, normally
+  `~/.context`, with six human-facing categories and stable project scopes.
 
-## Default Layout
+Version 2 is opt-in. AFS never treats a non-empty v1 root as v2 merely because
+it has similarly named directories. See [Central Context Layout
+v2](CONTEXT_LAYOUT_V2.md) for the exact marker and migration guardrails.
+
+## Version 2 layout
 
 ```text
-.context/
-  memory/
-  knowledge/
-  tools/
-  scratchpad/
-  history/
-  hivemind/
-  global/
-  items/
-  monorepo/
-  metadata.json
+~/.context/
+├── history/       # chronology and provenance
+├── memory/        # durable learned context, notes, and handoffs
+├── scratchpad/    # temporary work and drafts
+├── knowledge/     # reference material
+├── tools/         # trusted skills and executable resources
+├── human/         # human intent, decisions, and approvals
+└── .afs/          # internal registries, queues, indexes, and health
 ```
 
-## Directory Roles
+`.afs` is not user context. In particular:
 
-- `memory`: durable notes and snapshots
-- `knowledge`: reference corpora and indexes
-- `tools`: executable utilities and skill packs
-- `scratchpad`: writable working area
-- `history`: immutable event logs
-- `hivemind`: shared multi-agent coordination files
-- `global`: cross-project shared state
-- `items`: structured artifacts
-- `monorepo`: workspace bridge metadata (`active_workspace.toml`)
+- `.afs/projects/` holds stable project records.
+- `.afs/queue/messages/` holds the inter-agent message queue.
+- `.afs/search/` holds rebuildable hybrid-search generations.
 
-## Metadata
+Within each human category, new scoped data uses `common/` or
+`projects/<project-id>/`. The current project plus `common` is the default
+visibility boundary. Project source stays in its checkout and is indexed from
+there rather than copied into the central root.
 
-`metadata.json` stores project-level metadata, including mount directory mapping.
-That mapping is authoritative for built-in subsystems too: task queues, hivemind
-messages, history logs, MCP prompts/tools, and background-agent reports resolve
-their mount roots by role, not by hardcoded directory name.
+## Durable memory and temporary notes
 
-History is metadata-first by default. Full payload capture is opt-in through
-`[history].include_payloads = true` or explicit per-event calls, and filesystem
-read/write events record content hashes and sizes instead of raw file contents.
+Human-facing artifacts are Markdown with TOML front matter and immutable,
+sortable filenames:
 
-## Canonical Lifecycle
+```text
+YYYY-MM-DDTHHMMSSZ--readable-title-up-to-60-chars--10charid.md
+```
 
-AFS now has a first-class history-to-memory consolidation loop:
-
-- `history/` remains the append-only event ledger
-- `memory/entries.jsonl` stores durable summarized memories
-- `memory/history_consolidation/` stores human-readable markdown summaries
-- `.context/scratchpad/afs_agents/history_memory_checkpoint.json` tracks the
-  last consolidated event for incremental runs
-
-Run it manually:
+Use the lifecycle rather than editing generated files in place:
 
 ```bash
-./scripts/afs memory consolidate --path ~/src/project-a
-./scripts/afs memory consolidate --path ~/src/project-a --json
+afs notes create "Release rationale" --body-file rationale.md
+afs notes draft "Investigate flaky test" --body "Initial observations"
+afs notes promote <draft-id>
+afs notes archive <draft-id>
 ```
 
-Run it continuously:
+`create` writes a durable note to `memory/<scope>/notes`. `draft` writes to
+`scratchpad/<scope>/notes`. `promote` copies the draft into durable memory with
+source provenance and is idempotent; the source remains active until an
+explicit `archive` moves it under the scoped scratchpad archive.
+
+Handoffs use the same artifact format under `memory/<scope>/handoffs`, but add
+logical thread and revision IDs. `handoff revise` appends a superseding
+revision. Acknowledgement and closure are separate append-only state, not
+content edits.
+
+## History-to-memory consolidation
+
+AFS also has a legacy-compatible event consolidation loop:
+
+- `history/common/` is the v2 shared append-only event ledger.
+- `memory/common/entries.jsonl` stores v2 summarized memory entries.
+- `memory/common/history_consolidation/` stores readable v2 summaries.
+- `scratchpad/common/afs_agents/history_memory_checkpoint.json` stores the v2
+  incremental checkpoint.
+
+Version 1 keeps the corresponding paths directly under `.context/history/`,
+`.context/memory/`, and `.context/scratchpad/afs_agents/`.
+
+Run it manually or through the maintenance agent:
 
 ```bash
-./scripts/afs agents run history-memory --stdout
-./scripts/afs services start history-memory
+afs memory consolidate --path ~/src/project-a
+afs agents run history-memory --stdout
+afs services start history-memory
 ```
 
-The built-in consolidator is intentionally low-sensitivity. By default it
-summarizes `context`, `fs`, `hook`, `review`, and `agent_progress` events into
-compact durable entries without copying raw history payloads into memory.
+The default consolidator is intentionally low-sensitivity. It summarizes
+selected event metadata and does not copy raw history payloads unless payload
+capture was explicitly enabled. Pre-fix v2 entries at the memory category root
+remain readable but all new writes use the explicit shared scope.
 
 Optional config:
 
@@ -85,41 +103,51 @@ max_events_per_entry = 50
 write_markdown = true
 ```
 
-## Access Patterns
+## Access and retrieval
 
-Use the context filesystem CLI for scoped operations:
-
-```bash
-afs fs list scratchpad --path ~/src/project-a
-afs fs read scratchpad state.md --path ~/src/project-a
-afs fs write scratchpad notes.md --path ~/src/project-a --content "..."
-```
-
-## Profiles and Mount Injection
-
-Profiles can mount external knowledge/skill/registry roots into context.
+Plain-language commands cover normal work:
 
 ```bash
-./scripts/afs context profile-show --profile work
-./scripts/afs context profile-apply --profile work
+afs start --path ~/src/project-a
+afs search "release checklist" --path ~/src/project-a
+afs files list knowledge --path ~/src/project-a
+afs notes list --path ~/src/project-a
+afs handoff threads --path ~/src/project-a
+afs messages list --path ~/src/project-a
 ```
 
-## Embedding Indexes
+`files` is an alias for `fs`; existing `afs fs ...` calls remain valid. In a
+v2 root, scoped file and search operations require the project path (or an
+explicit authorized scope). A central `context_path` by itself is not an
+all-project capability.
 
-Embedding indexes are stored alongside mounted knowledge roots (for example,
-`embedding_index.json` under the selected knowledge directory).
+`afs search` is local-first and filters scope before ranking. Pass
+`--semantic` to explicitly enable embeddings for that rebuild/query. Gemini
+defaults to stable `gemini-embedding-2` with 768-dimensional vectors. Without
+`--semantic`, no remote embedding call is made.
 
-Use:
+The older `afs embeddings ...` collection commands remain available for
+direct index management and evaluation. See [Embeddings](EMBEDDINGS.md).
+
+## Version 1 compatibility
+
+Version 1 may contain:
+
+```text
+.context/{memory,knowledge,tools,scratchpad,history,hivemind,global,items}/
+```
+
+Those names remain readable through `MountType` and existing CLI/MCP aliases.
+The public v2 term for `hivemind` is **messages**. Compatibility does not imply
+that unscoped legacy records become visible inside every project scope: v2
+imports legacy handoffs only into `common`, and legacy unscoped messages are
+excluded unless explicitly requested.
+
+Inspect before considering migration:
 
 ```bash
-./scripts/afs embeddings index --knowledge-dir <path> --source <path>
-./scripts/afs embeddings search "<query>" --knowledge-dir <path>
+afs layout audit --context-root ~/.context --json
+afs layout plan --context-root ~/.context --json
 ```
 
-## Monorepo Bridge
-
-Workspace switch tooling should update:
-
-- `.context/monorepo/active_workspace.toml`
-
-AFS warns when this file is stale and surfaces status via `./scripts/afs health`.
+Both are non-migrating operations. There is no v2 layout apply command.

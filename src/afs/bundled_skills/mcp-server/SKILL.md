@@ -33,6 +33,7 @@ python -m afs.mcp_server --verbose    # debug logging to stderr
 - `context.unmount` — remove a mount
 - `context.index.rebuild` — rebuild the context index
 - `context.query` — search indexed context
+- `context.search` — v2 scoped hybrid text/vector/symbol search
 - `context.diff` — diff context state
 - `context.status` — show context health
 - `context.repair` — fix broken context state
@@ -52,8 +53,12 @@ python -m afs.mcp_server --verbose    # debug logging to stderr
 - `agent.logs` — read agent event history
 
 ### Communication
-- `hivemind.send` — send an inter-agent message
-- `hivemind.read` — read hivemind messages
+- `messages.send` — send a scoped inter-agent message
+- `messages.read` — read current-project plus common messages
+
+### Notes and handoffs
+- `note.create`, `note.read`, `note.list` — immutable readable notes
+- `handoff.create`, `handoff.read`, `handoff.list` — scoped continuity records
 
 ### Tasks
 - `task.create` — create a task

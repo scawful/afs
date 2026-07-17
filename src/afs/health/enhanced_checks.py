@@ -30,11 +30,18 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - environment dependent
     psutil = None
 
+from afs.context_layout import (
+    LAYOUT_VERSION,
+    _atomic_write_text,
+    detect_layout_version,
+    resolve_runtime_root,
+)
 from afs.health.mcp_registration import (
     discover_mcp_config_paths,
     find_afs_mcp_registrations,
 )
 from afs.logging_config import get_logger
+from afs.path_safety import assert_no_linklike_components, iter_regular_files_no_links
 
 logger = get_logger(__name__)
 
@@ -199,9 +206,16 @@ class EnhancedHealthChecker:
             context_root: Root directory for health logs and trends
             config: Configuration overrides for thresholds
         """
-        self.context_root = context_root or Path.home() / ".context"
-        self.health_dir = self.context_root / "health"
-        self.health_dir.mkdir(parents=True, exist_ok=True)
+        self.context_root = (context_root or Path.home() / ".context").expanduser().resolve()
+        self._harden_paths = (
+            detect_layout_version(self.context_root) == LAYOUT_VERSION
+        )
+        self.health_dir = resolve_runtime_root(
+            self.context_root,
+            "health",
+            legacy_relative="health",
+            create=True,
+        )
 
         self.config = {
             "cpu_threshold": 85.0,
@@ -224,6 +238,24 @@ class EnhancedHealthChecker:
         self.checks: list[CheckResult] = []
         self.healing_actions: list[str] = []
         self.trends: dict[str, list[float]] = defaultdict(list)
+
+    def _safe_health_path(self, path: Path, *, allow_missing: bool = True) -> Path:
+        """Reject link-like managed health paths without changing v1 behavior."""
+
+        if not self._harden_paths:
+            return path
+        managed_root = resolve_runtime_root(
+            self.context_root,
+            "health",
+            legacy_relative="health",
+        )
+        if managed_root != self.health_dir:
+            raise ValueError("managed health path escaped the v2 health root")
+        return assert_no_linklike_components(
+            path,
+            boundary=managed_root,
+            allow_missing=allow_missing,
+        )
 
     def check(
         self,
@@ -975,21 +1007,29 @@ class EnhancedHealthChecker:
     def _check_data_integrity(self) -> float:
         """Check training data integrity."""
         try:
-            data_dir = Path.home() / ".context" / "training_data"
+            data_dir = resolve_runtime_root(
+                self.context_root,
+                "training",
+                legacy_relative="training_data",
+            )
             if not data_dir.exists():
                 return 0.8
 
             # Check for corrupted files
             corrupted = 0
             total = 0
-            for file in list(data_dir.glob("**/*"))[:100]:  # Limit to 100 files
-                if file.is_file():
-                    total += 1
-                    try:
-                        with open(file, "rb") as f:
-                            f.read()
-                    except Exception:
-                        corrupted += 1
+            files = (
+                iter_regular_files_no_links(data_dir)
+                if self._harden_paths
+                else (path for path in data_dir.glob("**/*") if path.is_file())
+            )
+            for file in list(files)[:100]:  # Limit to 100 files
+                total += 1
+                try:
+                    with open(file, "rb") as f:
+                        f.read()
+                except Exception:
+                    corrupted += 1
 
             return max(0, 1.0 - (corrupted / max(1, total)))
         except Exception:
@@ -1105,9 +1145,10 @@ class EnhancedHealthChecker:
 
     def _load_trends(self) -> None:
         """Load historical trend data."""
-        trends_file = self.health_dir / "trends.json"
+        trends_file = self._safe_health_path(self.health_dir / "trends.json")
         if trends_file.exists():
             try:
+                self._safe_health_path(trends_file, allow_missing=False)
                 with open(trends_file) as f:
                     data = json.load(f)
                     self.trends = {k: v[-100:] for k, v in data.items()}  # Keep last 100
@@ -1137,18 +1178,28 @@ class EnhancedHealthChecker:
         """Save health check report to disk."""
         try:
             # Save as JSON
-            json_file = self.health_dir / f"report-{result.timestamp.isoformat()}.json"
-            with open(json_file, "w") as f:
-                json.dump(result.to_dict(), f, indent=2, default=str)
+            json_file = self._safe_health_path(
+                self.health_dir / f"report-{result.timestamp.isoformat()}.json"
+            )
+            _atomic_write_text(
+                json_file,
+                json.dumps(result.to_dict(), indent=2, default=str),
+            )
 
             # Save trends
-            trends_file = self.health_dir / "trends.json"
-            with open(trends_file, "w") as f:
-                json.dump(self.trends, f, indent=2, default=str)
+            trends_file = self._safe_health_path(self.health_dir / "trends.json")
+            _atomic_write_text(
+                trends_file,
+                json.dumps(self.trends, indent=2, default=str),
+            )
 
             # Keep only last 100 reports
-            reports = sorted(self.health_dir.glob("report-*.json"))
+            reports = [
+                self._safe_health_path(report)
+                for report in sorted(self.health_dir.glob("report-*.json"))
+            ]
             for old_report in reports[:-100]:
+                self._safe_health_path(old_report, allow_missing=False)
                 old_report.unlink()
 
             logger.info(f"Health report saved to {json_file}")

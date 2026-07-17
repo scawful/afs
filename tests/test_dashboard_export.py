@@ -5,7 +5,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from afs.agents import dashboard_export as agent
+from afs.context_layout import scaffold_v2
+from afs.missions import MissionStore
+from afs.schema import AFSConfig, GeneralConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -337,6 +342,80 @@ def test_main_exits_zero(tmp_path: Path) -> None:
     loaded = json.loads(dp.read_text(encoding="utf-8"))
     assert "timestamp" in loaded
     assert loaded["agents"]["total"] == 8
+
+
+def test_main_uses_layout_aware_v2_default_sources(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+    reports = context_root / "scratchpad" / "common" / "afs_agents"
+    _write_json(
+        reports / "agent_supervisor.json",
+        {"payload": {"audit": {"counts": {"running": 2, "configured": 3}}}},
+    )
+    MissionStore(context_root, config=config).create(title="test")
+    monkeypatch.setattr(agent, "load_agent_config", lambda _path: config)
+    dashboard_path = tmp_path / "dashboard.json"
+    status_path = tmp_path / "status.txt"
+
+    rc = agent.main(
+        [
+            "--quiet",
+            "--dashboard-path",
+            str(dashboard_path),
+            "--status-path",
+            str(status_path),
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(dashboard_path.read_text(encoding="utf-8"))
+    assert payload["agents"] == {
+        "running": 2,
+        "failed": 0,
+        "historical_failed": 0,
+        "total": 3,
+        "active_total": 3,
+    }
+    assert payload["missions"]["active"] == 1
+
+
+def test_v2_dashboard_skips_linked_managed_reports_and_missions(
+    tmp_path: Path,
+) -> None:
+    context_root = tmp_path / ".context"
+    scaffold_v2(context_root)
+    config = AFSConfig(general=GeneralConfig(context_root=context_root))
+    reports = context_root / "scratchpad" / "common" / "afs_agents"
+    reports.mkdir(parents=True)
+    missions_parent = context_root / ".afs" / "compat" / "items"
+    outside_report = tmp_path / "outside-report.json"
+    outside_report.write_text(
+        json.dumps({"payload": {"audit": {"counts": {"running": 99}}}}),
+        encoding="utf-8",
+    )
+    outside_missions = tmp_path / "outside-missions"
+    outside_missions.mkdir()
+    (outside_missions / "mission_poison.json").write_text(
+        json.dumps({"mission_id": "mission_poison", "status": "active"}),
+        encoding="utf-8",
+    )
+    try:
+        (reports / "agent_supervisor.json").symlink_to(outside_report)
+        (missions_parent / "missions").symlink_to(
+            outside_missions,
+            target_is_directory=True,
+        )
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    payload = agent.build_dashboard(config=config)
+
+    assert payload["agents"]["running"] == 0
+    assert payload["missions"]["active"] == 0
 
 
 # ---------------------------------------------------------------------------

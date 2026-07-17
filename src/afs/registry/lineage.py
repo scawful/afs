@@ -7,6 +7,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..context_layout import (
+    LAYOUT_VERSION,
+    _atomic_write_text,
+    detect_layout_version,
+    resolve_runtime_root,
+)
+from ..path_safety import assert_no_linklike_components
+
 
 class LineageTracker:
     """Track model lineage, training history, and dependencies.
@@ -43,21 +51,61 @@ class LineageTracker:
 
     DEFAULT_PATH = Path.home() / ".context" / "training" / "lineage.json"
 
-    def __init__(self, lineage_path: Path | None = None):
+    def __init__(
+        self,
+        lineage_path: Path | None = None,
+        *,
+        context_root: Path | None = None,
+    ):
         """Initialize lineage tracker.
 
         Args:
             lineage_path: Path to lineage JSON file
+            context_root: Context root used only for the layout-aware default path
         """
-        self.lineage_path = Path(lineage_path or self.DEFAULT_PATH)
+        self._managed_context_root: Path | None = None
+        if lineage_path is None:
+            root = (context_root or Path.home() / ".context").expanduser().resolve()
+            training_root = resolve_runtime_root(
+                root,
+                "training",
+                legacy_relative="training",
+            )
+            lineage_path = training_root / "lineage.json"
+            if detect_layout_version(root) == LAYOUT_VERSION:
+                self._managed_context_root = root
+        self.lineage_path = Path(lineage_path)
         self.lineages: dict[str, dict[str, Any]] = {}
         self._load()
 
+    def _safe_lineage_path(self, *, create_parent: bool = False) -> Path:
+        """Return the managed v2 lineage leaf after containment checks."""
+
+        if self._managed_context_root is None:
+            if create_parent:
+                self.lineage_path.parent.mkdir(parents=True, exist_ok=True)
+            return self.lineage_path
+        training_root = resolve_runtime_root(
+            self._managed_context_root,
+            "training",
+            legacy_relative="training",
+            create=create_parent,
+        )
+        expected = assert_no_linklike_components(
+            training_root / "lineage.json",
+            boundary=training_root,
+        )
+        if self.lineage_path != expected:
+            raise ValueError("managed model lineage path escaped the v2 training root")
+        return expected
+
     def _load(self) -> None:
         """Load lineage data from disk."""
-        if self.lineage_path.exists():
+        lineage_path = self._safe_lineage_path()
+        if lineage_path.exists():
             try:
-                with open(self.lineage_path) as f:
+                self._safe_lineage_path()
+                with open(lineage_path) as f:
                     data = json.load(f)
                     if isinstance(data, dict) and "version" in data:
                         self.lineages = data.get("lineages", {})
@@ -69,14 +117,13 @@ class LineageTracker:
 
     def _save(self) -> None:
         """Save lineage data to disk."""
-        self.lineage_path.parent.mkdir(parents=True, exist_ok=True)
+        lineage_path = self._safe_lineage_path(create_parent=True)
         data = {
             "version": "1.0",
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "lineages": self.lineages,
         }
-        with open(self.lineage_path, "w") as f:
-            json.dump(data, f, indent=2)
+        _atomic_write_text(lineage_path, json.dumps(data, indent=2))
 
     def _init_lineage(self, model_name: str) -> None:
         """Initialize lineage entry if it doesn't exist."""

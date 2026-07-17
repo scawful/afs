@@ -34,10 +34,70 @@ from afs.agents.event_reactor import (
     sanitize_label,
 )
 from afs.agents.supervisor import AgentSupervisor, RunningAgent
+from afs.context_layout import LayoutMetadata, scaffold_v2
 from afs.models import MountType
 from afs.schema import AFSConfig, AgentConfig, GeneralConfig
 
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+
+
+def test_v2_reactor_does_not_follow_linked_daily_history_log(tmp_path: Path) -> None:
+    context = tmp_path / ".context"
+    scaffold_v2(context)
+    common = context / "history" / "common"
+    common.mkdir()
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text(
+        json.dumps(
+            {
+                "id": "outside",
+                "timestamp": NOW.isoformat(),
+                "type": "error",
+                "op": "outside-canary",
+                "source": "outside",
+                "metadata": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    try:
+        (common / "events_20260715.jsonl").symlink_to(outside)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"file symlinks unavailable: {exc}")
+
+    paths, available = event_reactor_module._history_files(context)
+
+    assert paths == []
+    assert available is False
+
+
+def test_v2_reactor_preserves_unread_legacy_tail_during_layout_upgrade(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / ".context"
+    state = tmp_path / "state"
+    _write_history_event(
+        context,
+        event_type="error",
+        op="delivered-before-upgrade",
+        timestamp=NOW - timedelta(minutes=2),
+    )
+    assert _collect(context, state, now=NOW - timedelta(minutes=1)) == []
+    _write_history_event(
+        context,
+        event_type="error",
+        op="unread-during-upgrade",
+        timestamp=NOW,
+    )
+    legacy_log = context / "history" / "events_20260715.jsonl"
+    legacy_bytes = legacy_log.read_bytes()
+    LayoutMetadata().write(context)
+
+    events = _collect(context, state, now=NOW + timedelta(minutes=1))
+
+    assert [event.detail for event in events] == ["unread-during-upgrade"]
+    assert (context / "history" / "common" / legacy_log.name).read_bytes() == legacy_bytes
 
 
 def _event(kind: str, detail: str = "", *, offset_seconds: int = 0) -> ReactorEvent:
