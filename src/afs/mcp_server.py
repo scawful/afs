@@ -539,6 +539,13 @@ def _resolve_prompt_context_path(arguments: dict[str, Any], manager: AFSManager)
     return manager.config.general.context_root
 
 
+def _resolve_prompt_project_path(arguments: dict[str, Any]) -> Path | None:
+    raw_path = arguments.get("project_path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    return Path(raw_path).expanduser().resolve()
+
+
 def _discover_allowed_contexts(manager: AFSManager) -> list[Any]:
     contexts: list[Any] = []
     try:
@@ -1275,6 +1282,38 @@ def _tool_context_query(arguments: dict[str, Any], manager: AFSManager) -> dict[
         for index, prefix in enumerate(_scoped_relative_prefixes(scoped, relative_prefix))
     ]
     return _merge_scoped_query_payloads(payloads, scoped=scoped, limit=limit)
+
+
+def _tool_context_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    """Search the immutable v2 hybrid index after applying scope authorization."""
+    from .context_layout import resolve_system_path
+    from .hybrid_search import HybridSearchEngine
+
+    query = arguments.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query is required")
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    if detect_layout_version(context_path) != LAYOUT_VERSION:
+        raise ValueError("context.search requires a v2 context; use context.query for v1")
+    engine = HybridSearchEngine(resolve_system_path(context_path, "search"))
+    mode = str(arguments.get("mode", "text") or "text").strip().lower()
+    allow_semantic = bool(arguments.get("semantic", False))
+    if allow_semantic:
+        mode = "hybrid"
+    response = engine.search(
+        query,
+        scope_ids=[scoped.scope_id] if scoped.scope_id != COMMON_SCOPE_ID else [],
+        include_common=True,
+        all_projects=bool(arguments.get("all_projects", False)),
+        mode=mode,
+        top_k=_coerce_int(arguments.get("limit"), default=10, minimum=1, maximum=100),
+        recreate_query_embedder=allow_semantic,
+    )
+    payload = response.to_dict()
+    payload["context_path"] = str(context_path)
+    payload["scope_id"] = "all-projects" if arguments.get("all_projects") else scoped.scope_id
+    payload["project_id"] = scoped.project_id
+    return payload
 
 
 def _tool_context_diff(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
@@ -2581,6 +2620,7 @@ def _tool_afs_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str
             model = arguments.get("model")
             try:
                 from .embeddings import create_embed_fn, search_embedding_index_detailed
+
                 embed_fn = None
                 if isinstance(provider, str) and provider.strip():
                     kwargs: dict[str, Any] = {}
@@ -3360,6 +3400,31 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_context_query,
+        ),
+        MCPToolDefinition(
+            name="context.search",
+            description=(
+                "Search the v2 scoped hybrid index. Defaults to local text retrieval; "
+                "semantic=true explicitly permits the index's embedding provider for the query."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    **_mcp_scope_properties(include_all_projects=True),
+                    "query": {"type": "string"},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["text", "symbol"],
+                        "default": "text",
+                    },
+                    "semantic": {"type": "boolean", "default": False},
+                    "limit": {"type": "integer", "default": 10},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            handler=_tool_context_search,
+            catalog="slim",
         ),
         MCPToolDefinition(
             name="context.diff",
@@ -5705,11 +5770,16 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
     prompts = [
         {
             "name": "afs.session.bootstrap",
-            "description": "Build a session-start bootstrap packet with health, scratchpad, tasks, hivemind, and durable memory. Call this first in a new session.",
+            "description": "Build a scoped session-start packet with health, notes, tasks, messages, handoffs, and durable memory. Call this first in a new session.",
             "arguments": [
                 {
                     "name": "context_path",
                     "description": "Path to .context root (uses configured default if omitted)",
+                    "required": False,
+                },
+                {
+                    "name": "project_path",
+                    "description": "Registered current project path used to authorize its v2 scope.",
                     "required": False,
                 },
                 {
@@ -5719,7 +5789,7 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
                 },
                 {
                     "name": "message_limit",
-                    "description": "Maximum hivemind messages to include (default 10)",
+                    "description": "Maximum scoped messages to include (default 10)",
                     "required": False,
                 },
                 {
@@ -5935,6 +6005,7 @@ def _get_prompt(
         payload = build_session_bootstrap(
             manager,
             context_path,
+            project_path=_resolve_prompt_project_path(arguments),
             task_limit=_coerce_int(arguments.get("task_limit"), default=10, minimum=1, maximum=100),
             message_limit=_coerce_int(
                 arguments.get("message_limit"), default=10, minimum=1, maximum=100

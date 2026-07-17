@@ -8,8 +8,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ..context_layout import LAYOUT_VERSION, detect_layout_version
+from ..context_layout import LAYOUT_VERSION, detect_layout_version, resolve_system_path
 from ..messages import MessageBus
+from ..models import ContextCategory
 from ..project_registry import COMMON_SCOPE_ID, ProjectRecord, ProjectRegistry
 from ._utils import load_manager, resolve_context_paths
 
@@ -45,6 +46,159 @@ def start_command(args: argparse.Namespace) -> int:
     from .core import session_bootstrap_command
 
     return session_bootstrap_command(args)
+
+
+def _search_sources(
+    context: Path,
+    project: Path,
+    *,
+    semantic: bool,
+    all_projects: bool,
+) -> tuple[list[Any], str, str]:
+    from ..hybrid_search import HybridSource
+
+    version = detect_layout_version(context)
+    sources: list[HybridSource] = []
+    current_scope = COMMON_SCOPE_ID
+    current_project_id = ""
+    if version == LAYOUT_VERSION:
+        registry = ProjectRegistry(context)
+        current = registry.resolve(project)
+        if current is None:
+            raise PermissionError(f"project is not registered in central context: {project}")
+        current_scope = current.scope_id
+        current_project_id = current.project_id
+        for record in registry.all_records():
+            active = record.project_id == current.project_id
+            sources.append(
+                HybridSource(
+                    Path(record.path),
+                    scope_id=record.scope_id,
+                    project_id=record.project_id,
+                    project_terms=(record.name,),
+                    active=active,
+                    embed_allowed=semantic and (active or all_projects),
+                )
+            )
+            for category in ContextCategory:
+                scoped_root = context / category.value / "projects" / record.project_id
+                if scoped_root.is_dir():
+                    sources.append(
+                        HybridSource(
+                            scoped_root,
+                            scope_id=record.scope_id,
+                            project_id=record.project_id,
+                            project_terms=(record.name, category.value),
+                            active=active,
+                            embed_allowed=semantic and (active or all_projects),
+                        )
+                    )
+        for category in ContextCategory:
+            common_root = context / category.value / "common"
+            if common_root.is_dir():
+                sources.append(
+                    HybridSource(
+                        common_root,
+                        scope_id=COMMON_SCOPE_ID,
+                        project_terms=("common", category.value),
+                        embed_allowed=semantic,
+                    )
+                )
+    else:
+        sources.append(
+            HybridSource(
+                project,
+                scope_id=COMMON_SCOPE_ID,
+                project_terms=(project.name,),
+                embed_allowed=semantic,
+            )
+        )
+        for category in ContextCategory:
+            category_root = context / category.value
+            if category_root.is_dir():
+                sources.append(
+                    HybridSource(
+                        category_root,
+                        scope_id=COMMON_SCOPE_ID,
+                        project_terms=(category.value,),
+                        embed_allowed=semantic,
+                    )
+                )
+    return sources, current_scope, current_project_id
+
+
+def search_command(args: argparse.Namespace) -> int:
+    """Run local-first scoped retrieval with explicit semantic opt-in."""
+    from ..embeddings import DEFAULT_GEMINI_MODEL, create_embed_fn
+    from ..hybrid_search import HybridSearchEngine
+
+    _manager, project, context = _manager_context(args)
+    sources, scope_id, project_id = _search_sources(
+        context,
+        project,
+        semantic=bool(args.semantic),
+        all_projects=bool(args.all_projects),
+    )
+    index_root = resolve_system_path(context, "search")
+    engine = HybridSearchEngine(index_root)
+    has_index = engine.current_path.is_file() or engine.metadata_path.is_file()
+    build_payload: dict[str, Any] | None = None
+    embed_fn = None
+    if args.semantic:
+        embed_fn = create_embed_fn(
+            args.provider,
+            model=args.model
+            or (DEFAULT_GEMINI_MODEL if args.provider == "gemini" else "nomic-embed-text"),
+        )
+    if args.rebuild or not has_index:
+        build = engine.build(sources, embed_fn=embed_fn)
+        build_payload = {
+            "total_files": build.total_files,
+            "indexed_files": build.indexed_files,
+            "chunks_written": build.chunks_written,
+            "skipped": build.skipped,
+            "vector_count": build.vector_count,
+            "vector_dimension": build.vector_dimension,
+            "semantic_status": build.semantic_status,
+            "capped_sources": build.capped_sources,
+            "denied": build.denied,
+            "errors": build.errors,
+        }
+    response = engine.search(
+        args.query,
+        scope_ids=[scope_id] if scope_id != COMMON_SCOPE_ID else [],
+        include_common=True,
+        all_projects=bool(args.all_projects),
+        mode="hybrid" if args.semantic else args.mode,
+        top_k=args.limit,
+        recreate_query_embedder=bool(args.semantic),
+    )
+    payload = response.to_dict()
+    payload.update(
+        {
+            "context_root": str(context),
+            "project_path": str(project),
+            "project_id": project_id,
+            "index_root": str(index_root),
+            "rebuilt": build_payload is not None,
+            "build": build_payload,
+        }
+    )
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    mode = payload["mode"]
+    print(
+        f"search: {len(response.results)} result(s)  mode={mode}  "
+        f"semantic={response.semantic_status}"
+    )
+    for hit in response.results:
+        location = f"{hit.source_path}:{hit.line_start}"
+        print(f"{hit.score:.6f}  [{hit.scope_id}]  {location}")
+        if hit.text_preview:
+            print(f"  {hit.text_preview.replace(chr(10), ' ')[:240]}")
+    return 0
 
 
 def projects_current_command(args: argparse.Namespace) -> int:
@@ -119,9 +273,7 @@ def projects_import_command(args: argparse.Namespace) -> int:
         include_local=not args.no_local,
     )
     existing_paths = {
-        str(root.resolve())
-        for record in registry.all_records()
-        for root in record.roots()
+        str(root.resolve()) for record in registry.all_records() for root in record.roots()
     }
     candidates = [
         entry for entry in entries if str(entry.path.expanduser().resolve()) not in existing_paths
@@ -209,9 +361,7 @@ def notes_list_command(args: argparse.Namespace) -> int:
     from ..artifacts import NoteStore
 
     manager, _project, context, scope_id, _project_id = _artifact_context(args)
-    notes = NoteStore(context, scope_id=scope_id, config=manager.config).list(
-        limit=args.limit
-    )
+    notes = NoteStore(context, scope_id=scope_id, config=manager.config).list(limit=args.limit)
     if args.json:
         print(json.dumps([note.to_dict() for note in notes], indent=2))
     elif not notes:
@@ -229,9 +379,7 @@ def notes_read_command(args: argparse.Namespace) -> int:
     from ..artifacts import NoteStore
 
     manager, _project, context, scope_id, _project_id = _artifact_context(args)
-    note = NoteStore(context, scope_id=scope_id, config=manager.config).read(
-        args.identifier
-    )
+    note = NoteStore(context, scope_id=scope_id, config=manager.config).read(args.identifier)
     if note is None:
         print(f"note not found: {args.identifier}")
         return 1
@@ -376,10 +524,7 @@ def handoff_list_command(args: argparse.Namespace) -> int:
     else:
         for packet in packets:
             state = "closed" if packet.closed else "open"
-            print(
-                f"{packet.timestamp[:19]}  {packet.revision_id}  "
-                f"{packet.title}  [{state}]"
-            )
+            print(f"{packet.timestamp[:19]}  {packet.revision_id}  {packet.title}  [{state}]")
     return 0
 
 
@@ -539,9 +684,7 @@ def messages_unsubscribe_command(args: argparse.Namespace) -> int:
 
 def messages_clean_command(args: argparse.Namespace) -> int:
     if not args.all_projects:
-        raise PermissionError(
-            "message cleanup is queue-wide; pass --all-projects to authorize it"
-        )
+        raise PermissionError("message cleanup is queue-wide; pass --all-projects to authorize it")
     bus = _message_bus(args)
     result = bus.reap(
         max_age_hours=args.max_age_hours,
@@ -573,6 +716,47 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     start.add_argument("--engage", action="store_true")
     start.add_argument("--json", action="store_true")
     start.set_defaults(func=start_command)
+
+    search = subparsers.add_parser(
+        "search",
+        help="Search the current project and shared context with scoped hybrid retrieval.",
+    )
+    _add_context_args(search)
+    search.add_argument("query", help="Non-empty search query.")
+    search.add_argument(
+        "--mode",
+        choices=["text", "symbol"],
+        default="text",
+        help="Local retrieval mode when --semantic is not enabled.",
+    )
+    search.add_argument("--limit", type=int, default=10)
+    search.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Rebuild the local index before searching.",
+    )
+    search.add_argument(
+        "--semantic",
+        action="store_true",
+        help="Explicitly enable semantic embeddings for this rebuild/query.",
+    )
+    search.add_argument(
+        "--provider",
+        default="gemini",
+        choices=["gemini", "ollama"],
+        help="Embedding provider used only with --semantic (default: gemini).",
+    )
+    search.add_argument(
+        "--model",
+        help="Embedding model override; Gemini defaults to stable gemini-embedding-2.",
+    )
+    search.add_argument(
+        "--all-projects",
+        action="store_true",
+        help="Explicitly authorize results from every registered project.",
+    )
+    search.add_argument("--json", action="store_true")
+    search.set_defaults(func=search_command)
 
     projects = subparsers.add_parser(
         "projects",
@@ -750,9 +934,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     handoff_read.add_argument("--json", action="store_true")
     handoff_read.set_defaults(func=handoff_read_command)
 
-    handoff_threads = handoff_commands.add_parser(
-        "threads", help="List logical handoff threads."
-    )
+    handoff_threads = handoff_commands.add_parser("threads", help="List logical handoff threads.")
     add_artifact_context(handoff_threads)
     handoff_threads.add_argument("--limit", type=int, default=100)
     handoff_threads.add_argument("--json", action="store_true")

@@ -19,6 +19,7 @@ from afs.cli.friendly import (
     projects_current_command,
     projects_import_command,
     projects_list_command,
+    search_command,
 )
 from afs.context_layout import scaffold_v2
 from afs.project_registry import ProjectRegistry
@@ -61,9 +62,7 @@ def test_projects_current_and_list_use_central_registry(
     assert len(json.loads(capsys.readouterr().out)) == 2
 
 
-def test_projects_import_is_dry_run_until_apply(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
+def test_projects_import_is_dry_run_until_apply(tmp_path: Path, monkeypatch, capsys) -> None:
     root, _project, _other = _central(tmp_path, monkeypatch)
     candidate = tmp_path / "candidate"
     candidate.mkdir()
@@ -94,9 +93,7 @@ def test_projects_import_is_dry_run_until_apply(
     assert ProjectRegistry(root).resolve(candidate) is not None
 
 
-def test_messages_commands_enforce_current_scope(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
+def test_messages_commands_enforce_current_scope(tmp_path: Path, monkeypatch, capsys) -> None:
     _root, project, other = _central(tmp_path, monkeypatch)
 
     def args(path: Path, **values):
@@ -112,28 +109,27 @@ def test_messages_commands_enforce_current_scope(
         defaults.update(values)
         return argparse.Namespace(**defaults)
 
-    assert messages_send_command(
-        args(
-            project,
-            from_agent="alpha",
-            type="status",
-            payload='{"ok": true}',
-            to=None,
-            topic=None,
-            ttl_hours=None,
-            scope=None,
+    assert (
+        messages_send_command(
+            args(
+                project,
+                from_agent="alpha",
+                type="status",
+                payload='{"ok": true}',
+                to=None,
+                topic=None,
+                ttl_hours=None,
+                scope=None,
+            )
         )
-    ) == 0
+        == 0
+    )
     capsys.readouterr()
 
-    assert messages_list_command(
-        args(project, agent=None, type=None, topic=None, limit=10)
-    ) == 0
+    assert messages_list_command(args(project, agent=None, type=None, topic=None, limit=10)) == 0
     assert len(json.loads(capsys.readouterr().out)) == 1
 
-    assert messages_list_command(
-        args(other, agent=None, type=None, topic=None, limit=10)
-    ) == 0
+    assert messages_list_command(args(other, agent=None, type=None, topic=None, limit=10)) == 0
     assert json.loads(capsys.readouterr().out) == []
 
 
@@ -145,7 +141,56 @@ def test_friendly_top_level_parsers_are_discoverable() -> None:
         if isinstance(action, argparse._SubParsersAction)
     )
 
-    assert {"start", "projects", "notes", "handoff", "messages"}.issubset(choices)
+    assert {
+        "start",
+        "search",
+        "repair",
+        "projects",
+        "notes",
+        "handoff",
+        "messages",
+    }.issubset(choices)
+
+
+def test_search_builds_once_and_filters_current_plus_common_scope(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    root, project, other = _central(tmp_path, monkeypatch)
+    (project / "alpha.md").write_text("shared-token alpha guide", encoding="utf-8")
+    (other / "beta.md").write_text("shared-token beta secret", encoding="utf-8")
+    common = root / "knowledge" / "common"
+    common.mkdir(parents=True)
+    (common / "shared.md").write_text("shared-token common note", encoding="utf-8")
+
+    def args(path: Path, *, rebuild: bool) -> argparse.Namespace:
+        return argparse.Namespace(
+            config=None,
+            path=str(path),
+            context_root=None,
+            context_dir=None,
+            query="shared-token",
+            semantic=False,
+            all_projects=False,
+            rebuild=rebuild,
+            mode="text",
+            limit=10,
+            provider="gemini",
+            model=None,
+            json=True,
+        )
+
+    assert search_command(args(project, rebuild=True)) == 0
+    alpha = json.loads(capsys.readouterr().out)
+    alpha_paths = {Path(hit["source_path"]).name for hit in alpha["results"]}
+    assert alpha_paths == {"alpha.md", "shared.md"}
+    assert alpha["rebuilt"] is True
+    assert alpha["semantic_status"] == "not_requested"
+
+    assert search_command(args(other, rebuild=False)) == 0
+    beta = json.loads(capsys.readouterr().out)
+    beta_paths = {Path(hit["source_path"]).name for hit in beta["results"]}
+    assert beta_paths == {"beta.md", "shared.md"}
+    assert beta["rebuilt"] is False
 
 
 def test_message_cleanup_requires_explicit_all_projects() -> None:
@@ -224,9 +269,10 @@ def test_handoff_create_and_revise_require_readable_titles(
 
     revised = dict(base)
     revised["title"] = "Context v2 review follow-up"
-    assert handoff_revise_command(
-        _artifact_args(project, revision_id=first["revision_id"], **revised)
-    ) == 0
+    assert (
+        handoff_revise_command(_artifact_args(project, revision_id=first["revision_id"], **revised))
+        == 0
+    )
     second = json.loads(capsys.readouterr().out)
 
     assert second["stream_id"] == first["stream_id"]

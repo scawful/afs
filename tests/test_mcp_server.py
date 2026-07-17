@@ -166,6 +166,7 @@ COMPATIBILITY_FILE_TOOL_ALIASES = {
 }
 
 PLAIN_SCOPED_TOOLS = {
+    "context.search",
     "messages.send",
     "messages.read",
     "note.create",
@@ -223,6 +224,7 @@ def test_claude_tool_name_style_lists_safe_aliases_and_accepts_calls(
         "context_read",
         "context_list",
         "context_write",
+        "context_search",
         "skill_match",
         "skill_read",
         "messages_send",
@@ -1171,6 +1173,42 @@ def test_context_file_tool_schemas_accept_scope_routing_fields(tmp_path: Path) -
         assert {"context_path", "project_path", "scope_id"}.issubset(properties)
     query_properties = registry.tools["context.query"].input_schema["properties"]
     assert "all_projects" in query_properties
+
+
+def test_v2_context_search_uses_hybrid_scope_filter(tmp_path: Path) -> None:
+    from afs.hybrid_search import HybridSearchEngine, HybridSource
+
+    manager, context_root, alpha, beta, alpha_id, beta_id = _make_v2_manager(tmp_path)
+    common = context_root / "knowledge" / "common"
+    common.mkdir(parents=True)
+    (alpha / "alpha.md").write_text("hybrid-token alpha", encoding="utf-8")
+    (beta / "beta.md").write_text("hybrid-token beta", encoding="utf-8")
+    (common / "common.md").write_text("hybrid-token common", encoding="utf-8")
+    engine = HybridSearchEngine(context_root / ".afs" / "search")
+    engine.build(
+        [
+            HybridSource(alpha, scope_id=f"project:{alpha_id}", project_id=alpha_id),
+            HybridSource(beta, scope_id=f"project:{beta_id}", project_id=beta_id),
+            HybridSource(common, scope_id="common"),
+        ]
+    )
+
+    response = _call_tool(
+        manager,
+        "context.search",
+        {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "query": "hybrid-token",
+            "limit": 10,
+        },
+    )
+    results = response["result"]["structuredContent"]["results"]
+    assert {Path(item["source_path"]).name for item in results} == {
+        "alpha.md",
+        "common.md",
+    }
+    assert all(Path(item["source_path"]).name != "beta.md" for item in results)
 
 
 def test_v2_message_tools_default_to_project_plus_common(tmp_path: Path) -> None:
@@ -2388,7 +2426,33 @@ def test_prompts_list_returns_expected_prompts(tmp_path: Path) -> None:
         assert isinstance(prompt["arguments"], list)
     bootstrap = next(prompt for prompt in prompts if prompt["name"] == "afs.session.bootstrap")
     argument_names = {argument["name"] for argument in bootstrap["arguments"]}
-    assert {"skills_prompt", "skills_top_k"}.issubset(argument_names)
+    assert {"project_path", "skills_prompt", "skills_top_k"}.issubset(argument_names)
+
+
+def test_prompt_bootstrap_forwards_registered_project_path(tmp_path: Path) -> None:
+    manager, context_root, alpha, _beta, _alpha_id, _beta_id = _make_v2_manager(tmp_path)
+    with (
+        patch("afs.mcp_server.build_session_bootstrap", return_value={}) as build,
+        patch("afs.mcp_server.render_session_bootstrap", return_value="scoped bootstrap"),
+    ):
+        response = _handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 124,
+                "method": "prompts/get",
+                "params": {
+                    "name": "afs.session.bootstrap",
+                    "arguments": {
+                        "context_path": str(context_root),
+                        "project_path": str(alpha),
+                    },
+                },
+            },
+            manager,
+        )
+
+    assert response is not None and "result" in response
+    assert build.call_args.kwargs["project_path"] == alpha.resolve()
 
 
 def test_prompts_get_session_bootstrap(tmp_path: Path, monkeypatch) -> None:
