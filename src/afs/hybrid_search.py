@@ -11,8 +11,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
-import tempfile
+import uuid
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -27,16 +28,28 @@ from .embeddings import (
     EmbeddingCollectionMetadata,
     create_embed_fn,
 )
+from .index_storage import (
+    atomic_write_text,
+    fsync_directory,
+    fsync_file,
+    index_file_lock,
+    read_generation_id,
+)
 
 HYBRID_INDEX_VERSION = 1
 RRF_K = 60
 DATABASE_FILENAME = "search.sqlite3"
 VECTOR_FILENAME = "vectors.npy"
 METADATA_FILENAME = "hybrid_index.json"
+CURRENT_FILENAME = "CURRENT"
+GENERATIONS_DIRNAME = "generations"
+BUILD_LOCK_FILENAME = ".hybrid-build.lock"
+PUBLICATION_LOCK_FILENAME = ".hybrid-publication.lock"
 
 _HARD_DENY_DIRS = frozenset(
     {
         ".git",
+        ".afs",
         ".hg",
         ".svn",
         ".cache",
@@ -200,29 +213,90 @@ class _DocumentRow:
     vector_row: int | None
 
 
+@dataclass
+class _ScopeBudget:
+    max_files: int
+    max_bytes: int
+    used_files: int = 0
+    used_bytes: int = 0
+
+
 class HybridSearchEngine:
     """Build and query a deterministic project-scoped hybrid index."""
 
     def __init__(self, index_root: Path) -> None:
         self.index_root = index_root.expanduser().resolve()
-        self.database_path = self.index_root / DATABASE_FILENAME
-        self.vector_path = self.index_root / VECTOR_FILENAME
-        self.metadata_path = self.index_root / METADATA_FILENAME
+
+    @property
+    def database_path(self) -> Path:
+        return self._active_generation_root() / DATABASE_FILENAME
+
+    @property
+    def vector_path(self) -> Path:
+        return self._active_generation_root() / VECTOR_FILENAME
+
+    @property
+    def metadata_path(self) -> Path:
+        return self._active_generation_root() / METADATA_FILENAME
+
+    @property
+    def current_path(self) -> Path:
+        return self.index_root / CURRENT_FILENAME
+
+    @property
+    def generations_root(self) -> Path:
+        return self.index_root / GENERATIONS_DIRNAME
+
+    @property
+    def build_lock_path(self) -> Path:
+        return self.index_root / BUILD_LOCK_FILENAME
+
+    @property
+    def publication_lock_path(self) -> Path:
+        return self.index_root / PUBLICATION_LOCK_FILENAME
 
     @staticmethod
     def discover(root: Path) -> list[Path]:
         """Discover only documented v2 locations in stable order."""
         resolved = root.expanduser().resolve()
         candidates = [resolved, resolved / ".afs" / "search"]
-        found = {
-            str(candidate): candidate
-            for candidate in candidates
-            if (candidate / METADATA_FILENAME).is_file()
-            and (candidate / DATABASE_FILENAME).is_file()
-        }
+        found: dict[str, Path] = {}
+        for candidate in candidates:
+            if not (
+                (candidate / CURRENT_FILENAME).is_file()
+                or (candidate / METADATA_FILENAME).is_file()
+            ):
+                continue
+            engine = HybridSearchEngine(candidate)
+            try:
+                with index_file_lock(engine.publication_lock_path, shared=True):
+                    if engine.metadata_path.is_file() and engine.database_path.is_file():
+                        found[str(candidate)] = candidate
+            except (OSError, ValueError):
+                continue
         return [found[key] for key in sorted(found)]
 
     def build(
+        self,
+        sources: Iterable[HybridSource],
+        *,
+        embed_fn: Callable[[str], list[float]] | None = None,
+        collection: EmbeddingCollectionMetadata | None = None,
+        chunk_tokens: int = 800,
+        chunk_overlap: int = 120,
+    ) -> HybridBuildResult:
+        """Serialize builders while readers continue using the current generation."""
+        self.index_root.mkdir(parents=True, exist_ok=True)
+        with index_file_lock(self.build_lock_path):
+            return self._build_locked(
+                sources,
+                embed_fn=embed_fn,
+                collection=collection,
+                chunk_tokens=chunk_tokens,
+                chunk_overlap=chunk_overlap,
+            )
+
+    def _build_locked(
         self,
         sources: Iterable[HybridSource],
         *,
@@ -249,9 +323,19 @@ class HybridSearchEngine:
         semantic_attempts = 0
         semantic_failures = 0
         next_row_id = 1
+        budgets: dict[str, _ScopeBudget] = {}
+        registered_sources = sorted(sources, key=lambda item: (item.scope_id, str(item.path)))
+        for source in registered_sources:
+            _scope_budget(source, budgets)
 
-        for source in sorted(sources, key=lambda item: (item.scope_id, str(item.path))):
-            for root, path, relative_path in _iter_safe_source_files(source, result):
+        for source in registered_sources:
+            budget = budgets[source.project_id or source.scope_id]
+            for root, path, relative_path in _iter_safe_source_files(
+                source,
+                result,
+                budget=budget,
+                excluded_root=self.index_root,
+            ):
                 result.total_files += 1
                 text = _safe_read_text(path, source.policy, result)
                 if text is None:
@@ -286,7 +370,9 @@ class HybridSearchEngine:
                             raw_vector = embed_fn(chunk_text)
                             vector = _normalize_vector(raw_vector)
                         except Exception as exc:
-                            result.errors.append(f"{path} chunk {chunk_index}: embed failed ({exc})")
+                            result.errors.append(
+                                f"{path} chunk {chunk_index}: embed failed ({exc})"
+                            )
                             semantic_failures += 1
                             vector = None
                         if vector is None:
@@ -354,6 +440,35 @@ class HybridSearchEngine:
         return result
 
     def search(
+        self,
+        query: str,
+        *,
+        scope_ids: Sequence[str] = (),
+        include_common: bool = True,
+        common_scope: str = "common",
+        all_projects: bool = False,
+        mode: str = "hybrid",
+        top_k: int = 10,
+        query_embed_fn: Callable[[str], list[float]] | None = None,
+        recreate_query_embedder: bool = False,
+    ) -> HybridSearchResponse:
+        """Search one immutable generation under a shared publication lock."""
+        if not query.strip():
+            raise ValueError("query cannot be empty")
+        with index_file_lock(self.publication_lock_path, shared=True):
+            return self._search_locked(
+                query,
+                scope_ids=scope_ids,
+                include_common=include_common,
+                common_scope=common_scope,
+                all_projects=all_projects,
+                mode=mode,
+                top_k=top_k,
+                query_embed_fn=query_embed_fn,
+                recreate_query_embedder=recreate_query_embedder,
+            )
+
+    def _search_locked(
         self,
         query: str,
         *,
@@ -472,15 +587,28 @@ class HybridSearchEngine:
         return ranked, "ready", None
 
     def _load_metadata(self) -> dict[str, Any]:
+        metadata_path = self.metadata_path
         try:
-            payload = json.loads(self.metadata_path.read_text(encoding="utf-8"))
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            raise FileNotFoundError(f"Hybrid index not found: {self.metadata_path}") from None
+            raise FileNotFoundError(f"Hybrid index not found: {metadata_path}") from None
         except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid hybrid index metadata: {self.metadata_path}") from exc
+            raise ValueError(f"Invalid hybrid index metadata: {metadata_path}") from exc
         if not isinstance(payload, dict) or payload.get("version") != HYBRID_INDEX_VERSION:
-            raise ValueError(f"Unsupported hybrid index metadata: {self.metadata_path}")
+            raise ValueError(f"Unsupported hybrid index metadata: {metadata_path}")
+        generation_id = read_generation_id(self.current_path)
+        if generation_id is not None and payload.get("generation_id") != generation_id:
+            raise ValueError("Hybrid index metadata does not match CURRENT generation")
         return payload
+
+    def _active_generation_root(self) -> Path:
+        generation_id = read_generation_id(self.current_path)
+        if generation_id is None:
+            return self.index_root
+        generation_root = self.generations_root / generation_id
+        if not generation_root.is_dir():
+            raise ValueError(f"Missing hybrid index generation: {generation_root}")
+        return generation_root
 
     def _write_index(
         self,
@@ -489,13 +617,15 @@ class HybridSearchEngine:
         collection: EmbeddingCollectionMetadata,
         result: HybridBuildResult,
     ) -> None:
-        db_fd, db_name = tempfile.mkstemp(prefix=".search-", suffix=".sqlite3", dir=self.index_root)
-        os.close(db_fd)
-        db_tmp = Path(db_name)
-        vector_tmp = self.index_root / f".{VECTOR_FILENAME}.tmp"
-        metadata_tmp = self.index_root / f".{METADATA_FILENAME}.tmp"
+        generation_id = uuid.uuid4().hex
+        generation_root = self.generations_root / generation_id
+        generation_root.mkdir(parents=True, exist_ok=False)
+        database_path = generation_root / DATABASE_FILENAME
+        vector_path = generation_root / VECTOR_FILENAME
+        metadata_path = generation_root / METADATA_FILENAME
         try:
-            with sqlite3.connect(db_tmp) as connection:
+            with sqlite3.connect(database_path) as connection:
+                connection.execute("PRAGMA synchronous=FULL")
                 _create_schema(connection)
                 for document in documents:
                     connection.execute(
@@ -544,10 +674,13 @@ class HybridSearchEngine:
                 if vectors
                 else np.empty((0, dimension), dtype=np.float32)
             )
-            with vector_tmp.open("wb") as handle:
+            with vector_path.open("wb") as handle:
                 np.save(handle, matrix, allow_pickle=False)
+                handle.flush()
+                os.fsync(handle.fileno())
             metadata = {
                 "version": HYBRID_INDEX_VERSION,
+                "generation_id": generation_id,
                 "built_at": datetime.now(timezone.utc).isoformat(),
                 "layout": {
                     "database": DATABASE_FILENAME,
@@ -564,18 +697,51 @@ class HybridSearchEngine:
                     "capped_sources": sorted(result.capped_sources),
                 },
             }
-            metadata_tmp.write_text(
-                json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            atomic_write_text(
+                metadata_path,
+                json.dumps(metadata, indent=2, sort_keys=True) + "\n",
             )
-            os.replace(db_tmp, self.database_path)
-            os.replace(vector_tmp, self.vector_path)
-            os.replace(metadata_tmp, self.metadata_path)
-        finally:
-            for temporary in (db_tmp, vector_tmp, metadata_tmp):
-                try:
-                    temporary.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            fsync_file(database_path)
+            fsync_directory(generation_root)
+            fsync_directory(self.generations_root)
+
+            with index_file_lock(self.publication_lock_path):
+                previous_generation = read_generation_id(self.current_path)
+                atomic_write_text(self.current_path, generation_id + "\n")
+                self._gc_generations(generation_id, previous_generation, result)
+        except Exception:
+            try:
+                published = read_generation_id(self.current_path) == generation_id
+            except (OSError, ValueError):
+                published = False
+            if not published:
+                shutil.rmtree(generation_root, ignore_errors=True)
+            raise
+
+    def _gc_generations(
+        self,
+        current_id: str,
+        previous_id: str | None,
+        result: HybridBuildResult,
+    ) -> None:
+        try:
+            generations = sorted(
+                (path for path in self.generations_root.iterdir() if path.is_dir()),
+                key=lambda path: path.name,
+            )
+        except OSError as exc:
+            result.errors.append(f"generation cleanup scan failed: {exc}")
+            return
+        keep = {current_id}
+        if previous_id:
+            keep.add(previous_id)
+        for generation in generations:
+            if generation.name in keep:
+                continue
+            try:
+                shutil.rmtree(generation)
+            except OSError as exc:
+                result.errors.append(f"{generation}: generation cleanup failed ({exc})")
 
 
 def _create_schema(connection: sqlite3.Connection) -> None:
@@ -607,8 +773,70 @@ def _create_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def _scope_budget(source: HybridSource, budgets: dict[str, _ScopeBudget]) -> _ScopeBudget:
+    key = source.project_id or source.scope_id
+    max_files = (
+        source.policy.max_files_active if source.active else source.policy.max_files_inactive
+    )
+    max_bytes = (
+        source.policy.max_total_bytes_active
+        if source.active
+        else source.policy.max_total_bytes_inactive
+    )
+    if max_files <= 0 or max_bytes <= 0:
+        raise ValueError("source policy file and byte caps must be positive")
+    budget = budgets.get(key)
+    if budget is None:
+        budget = _ScopeBudget(max_files=max_files, max_bytes=max_bytes)
+        budgets[key] = budget
+    else:
+        # Conflicting registrations resolve conservatively; splitting one
+        # project across mounts cannot multiply its crawl allowance.
+        budget.max_files = min(budget.max_files, max_files)
+        budget.max_bytes = min(budget.max_bytes, max_bytes)
+    return budget
+
+
+def _is_generated_path(path: Path, source_root: Path, excluded_root: Path) -> bool:
+    resolved_path = path.resolve()
+    resolved_source = source_root.resolve()
+    resolved_excluded = excluded_root.resolve()
+    if resolved_source != resolved_excluded and _is_within(resolved_excluded, resolved_source):
+        return _is_within(resolved_path, resolved_excluded)
+    if resolved_source != resolved_excluded:
+        try:
+            source_relative = resolved_source.relative_to(resolved_excluded)
+        except ValueError:
+            return False
+        return bool(source_relative.parts) and source_relative.parts[0] in {
+            GENERATIONS_DIRNAME,
+            DATABASE_FILENAME,
+            VECTOR_FILENAME,
+            METADATA_FILENAME,
+        }
+    try:
+        relative = resolved_path.relative_to(resolved_source)
+    except ValueError:
+        return False
+    if not relative.parts:
+        return False
+    return relative.parts[0] in {
+        CURRENT_FILENAME,
+        GENERATIONS_DIRNAME,
+        DATABASE_FILENAME,
+        VECTOR_FILENAME,
+        METADATA_FILENAME,
+        BUILD_LOCK_FILENAME,
+        PUBLICATION_LOCK_FILENAME,
+    }
+
+
 def _iter_safe_source_files(
-    source: HybridSource, result: HybridBuildResult
+    source: HybridSource,
+    result: HybridBuildResult,
+    *,
+    budget: _ScopeBudget,
+    excluded_root: Path,
 ) -> Iterable[tuple[Path, Path, str]]:
     requested = source.path.expanduser()
     try:
@@ -618,7 +846,14 @@ def _iter_safe_source_files(
         return
     if root.is_file():
         container = root.parent
-        if _path_allowed(root, container, root.name, source.policy, []):
+        if (
+            not _is_generated_path(root, container, excluded_root)
+            and _path_allowed(root, container, root.name, source.policy, [])
+            and budget.used_files < budget.max_files
+            and budget.used_bytes + root.stat().st_size <= budget.max_bytes
+        ):
+            budget.used_files += 1
+            budget.used_bytes += root.stat().st_size
             yield container, root, root.name
         else:
             result.skipped += 1
@@ -630,18 +865,11 @@ def _iter_safe_source_files(
     gitignore = _load_ignore_file(root / ".afsignore")
     if source.policy.respect_gitignore:
         gitignore.extend(_load_ignore_file(root / ".gitignore"))
-    max_files = source.max_files or (
-        source.policy.max_files_active
-        if source.active
-        else source.policy.max_files_inactive
+    hard_files = (
+        source.policy.max_files_active if source.active else source.policy.max_files_inactive
     )
-    max_total_bytes = (
-        source.policy.max_total_bytes_active
-        if source.active
-        else source.policy.max_total_bytes_inactive
-    )
+    max_files = min(source.max_files or hard_files, hard_files)
     yielded_files = 0
-    yielded_bytes = 0
     for base, dirs, files in os.walk(root, followlinks=False):
         base_path = Path(base)
         safe_dirs: list[str] = []
@@ -654,7 +882,11 @@ def _iter_safe_source_files(
                 resolved = candidate.resolve(strict=True)
             except OSError:
                 continue
-            if not _is_within(resolved, root) or _gitignored(rel + "/", gitignore):
+            if (
+                not _is_within(resolved, root)
+                or _is_generated_path(resolved, root, excluded_root)
+                or _gitignored(rel + "/", gitignore)
+            ):
                 continue
             safe_dirs.append(dirname)
         dirs[:] = safe_dirs
@@ -680,13 +912,18 @@ def _iter_safe_source_files(
                 result.errors.append(f"{resolved}: cannot stat ({exc})")
                 result.skipped += 1
                 continue
-            if yielded_files >= max_files or yielded_bytes + size_bytes > max_total_bytes:
+            if (
+                yielded_files >= max_files
+                or budget.used_files >= budget.max_files
+                or budget.used_bytes + size_bytes > budget.max_bytes
+            ):
                 source_label = f"{source.scope_id}:{root}"
                 if source_label not in result.capped_sources:
                     result.capped_sources.append(source_label)
                 return
             yielded_files += 1
-            yielded_bytes += size_bytes
+            budget.used_files += 1
+            budget.used_bytes += size_bytes
             yield root, resolved, rel
 
 
@@ -717,9 +954,7 @@ def _path_allowed(
     return not (policy.respect_gitignore and _gitignored(relative_path, gitignore))
 
 
-def _safe_read_text(
-    path: Path, policy: SourcePolicy, result: HybridBuildResult
-) -> str | None:
+def _safe_read_text(path: Path, policy: SourcePolicy, result: HybridBuildResult) -> str | None:
     try:
         with path.open("rb") as handle:
             raw = handle.read(policy.max_bytes + 1)
@@ -962,7 +1197,12 @@ def _association_ranks(
 ) -> dict[str, list[tuple[str, float]]]:
     terms = [term.lower() for term in _query_terms(query)]
     if not terms:
-        return {"path": [], "symbol": [], "exact": [], **({"project": []} if include_project else {})}
+        return {
+            "path": [],
+            "symbol": [],
+            "exact": [],
+            **({"project": []} if include_project else {}),
+        }
     ranks: dict[str, list[tuple[str, float]]] = {"path": [], "symbol": [], "exact": []}
     if include_project:
         ranks["project"] = []

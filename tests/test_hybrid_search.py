@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from afs.embeddings import EmbeddingCollectionMetadata
-from afs.hybrid_search import HybridSearchEngine, HybridSource, SourcePolicy
+from afs.hybrid_search import (
+    HybridSearchEngine,
+    HybridSearchResponse,
+    HybridSource,
+    SourcePolicy,
+)
 
 
 def _semantic_vector(text: str) -> list[float]:
@@ -81,9 +88,9 @@ def test_rrf_ranking_is_deterministic_and_reports_signal_provenance(tmp_path: Pa
     assert [hit.to_dict() for hit in first.results] == [hit.to_dict() for hit in second.results]
     assert first.results[0].relative_path == "renderer.md"
     assert {"exact", "symbol"}.issubset(first.results[0].signals)
-    assert first.results[0].score == pytest.approx(sum(
-        1.0 / (60 + int(signal["rank"])) for signal in first.results[0].signals.values()
-    ))
+    assert first.results[0].score == pytest.approx(
+        sum(1.0 / (60 + int(signal["rank"])) for signal in first.results[0].signals.values())
+    )
 
 
 def test_semantic_dimension_mismatch_falls_back_without_semantic_signal(tmp_path: Path) -> None:
@@ -240,3 +247,265 @@ def test_inactive_source_file_cap_is_enforced_before_unbounded_crawl(tmp_path: P
     assert result.indexed_files == 1
     assert result.capped_sources == [f"project:inactive:{source}"]
     assert [hit.relative_path for hit in response.results] == ["a.md"]
+
+
+def test_high_override_cannot_bypass_aggregate_project_cap(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    for root in (first, second):
+        for index in range(2):
+            (root / f"{index}.md").write_text("bounded content", encoding="utf-8")
+    policy = SourcePolicy(max_files_inactive=2)
+    engine = HybridSearchEngine(tmp_path / "index")
+
+    result = engine.build(
+        [
+            HybridSource(
+                first,
+                scope_id="project:inactive",
+                project_id="inactive",
+                active=False,
+                max_files=100,
+                policy=policy,
+            ),
+            HybridSource(
+                second,
+                scope_id="project:inactive",
+                project_id="inactive",
+                active=False,
+                max_files=100,
+                policy=policy,
+            ),
+        ]
+    )
+
+    assert result.indexed_files == 2
+    assert result.capped_sources
+
+
+def test_conflicting_source_policies_use_project_cap_before_crawl(tmp_path: Path) -> None:
+    active = tmp_path / "a-active"
+    inactive = tmp_path / "z-inactive"
+    active.mkdir()
+    inactive.mkdir()
+    for root in (active, inactive):
+        for index in range(3):
+            (root / f"{index}.md").write_text("bounded content", encoding="utf-8")
+    policy = SourcePolicy(max_files_active=3, max_files_inactive=1)
+
+    result = HybridSearchEngine(tmp_path / "index").build(
+        [
+            HybridSource(
+                active,
+                scope_id="project:shared",
+                project_id="shared",
+                active=True,
+                policy=policy,
+            ),
+            HybridSource(
+                inactive,
+                scope_id="project:shared",
+                project_id="shared",
+                active=False,
+                policy=policy,
+            ),
+        ]
+    )
+
+    assert result.indexed_files == 1
+    assert f"project:shared:{active}" in result.capped_sources
+
+
+def test_blank_query_is_rejected_before_embedder_invocation(tmp_path: Path) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / "guide.md").write_text("guide", encoding="utf-8")
+    engine = HybridSearchEngine(tmp_path / "index")
+    engine.build([HybridSource(source, scope_id="project:alpha")])
+    calls: list[str] = []
+
+    with pytest.raises(ValueError, match="query cannot be empty"):
+        engine.search(
+            "   ",
+            scope_ids=["project:alpha"],
+            query_embed_fn=lambda text: calls.append(text) or [1.0],
+        )
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("index_relative", [Path(".afs/search"), Path("generated-index")])
+def test_nested_index_is_never_self_indexed(tmp_path: Path, index_relative: Path) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / "guide.md").write_text("stable source", encoding="utf-8")
+    engine = HybridSearchEngine(source / index_relative)
+    registered = HybridSource(
+        source,
+        scope_id="project:alpha",
+        policy=SourcePolicy(allow_hidden=True),
+    )
+
+    first = engine.build([registered])
+    second = engine.build([registered])
+
+    assert first.indexed_files == 1
+    assert second.indexed_files == 1
+    response = engine.search(
+        "stable", scope_ids=["project:alpha"], include_common=False, mode="text"
+    )
+    assert [hit.relative_path for hit in response.results] == ["guide.md"]
+
+
+def test_index_parent_does_not_hide_registered_source(tmp_path: Path) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / "guide.md").write_text("visible source", encoding="utf-8")
+
+    result = HybridSearchEngine(tmp_path).build([HybridSource(source, scope_id="project:alpha")])
+
+    assert result.indexed_files == 1
+
+
+def test_publication_failure_leaves_previous_generation_searchable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    document = source / "guide.md"
+    document.write_text("old marker", encoding="utf-8")
+    engine = HybridSearchEngine(tmp_path / "index")
+    registered = HybridSource(source, scope_id="project:alpha")
+    engine.build([registered])
+    old_generation = engine.current_path.read_text(encoding="utf-8")
+    document.write_text("new marker", encoding="utf-8")
+
+    import afs.hybrid_search as hybrid_module
+
+    real_atomic_write = hybrid_module.atomic_write_text
+
+    def fail_current(path: Path, text: str) -> None:
+        if path.name == "CURRENT":
+            raise RuntimeError("injected publication crash")
+        real_atomic_write(path, text)
+
+    monkeypatch.setattr(hybrid_module, "atomic_write_text", fail_current)
+    with pytest.raises(RuntimeError, match="injected publication crash"):
+        engine.build([registered])
+
+    assert engine.current_path.read_text(encoding="utf-8") == old_generation
+    response = engine.search("old", scope_ids=["project:alpha"], include_common=False, mode="text")
+    assert response.results[0].text_preview == "old marker"
+
+
+def test_reader_holds_generation_until_search_completes(tmp_path: Path) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    document = source / "guide.md"
+    document.write_text("old marker", encoding="utf-8")
+    engine = HybridSearchEngine(tmp_path / "index")
+    registered = HybridSource(source, scope_id="project:alpha", embed_allowed=True)
+    engine.build([registered], embed_fn=lambda _: [1.0, 0.0])
+
+    entered = threading.Event()
+    release = threading.Event()
+    search_result: list[HybridSearchResponse] = []
+    failures: list[BaseException] = []
+
+    def query_embed(_: str) -> list[float]:
+        entered.set()
+        assert release.wait(5)
+        return [1.0, 0.0]
+
+    def run_search() -> None:
+        try:
+            search_result.append(
+                engine.search(
+                    "old",
+                    scope_ids=["project:alpha"],
+                    include_common=False,
+                    query_embed_fn=query_embed,
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    def run_build() -> None:
+        try:
+            engine.build([registered], embed_fn=lambda _: [1.0, 0.0])
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    search_thread = threading.Thread(target=run_search)
+    search_thread.start()
+    assert entered.wait(5)
+    document.write_text("new marker", encoding="utf-8")
+    build_thread = threading.Thread(target=run_build)
+    build_thread.start()
+    time.sleep(0.1)
+    assert build_thread.is_alive()
+    release.set()
+    search_thread.join(5)
+    build_thread.join(5)
+
+    assert failures == []
+    assert not search_thread.is_alive()
+    assert not build_thread.is_alive()
+    old_response = search_result[0]
+    assert old_response.results[0].text_preview == "old marker"
+    new_response = engine.search(
+        "new", scope_ids=["project:alpha"], include_common=False, mode="text"
+    )
+    assert new_response.results[0].text_preview == "new marker"
+
+
+def test_builders_are_serialized_and_old_generations_are_collected(tmp_path: Path) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / "guide.md").write_text("serialized", encoding="utf-8")
+    engine = HybridSearchEngine(tmp_path / "index")
+    registered = HybridSource(source, scope_id="project:alpha", embed_allowed=True)
+    active = 0
+    maximum_active = 0
+    guard = threading.Lock()
+    failures: list[BaseException] = []
+
+    def slow_embed(_: str) -> list[float]:
+        nonlocal active, maximum_active
+        with guard:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time.sleep(0.05)
+        with guard:
+            active -= 1
+        return [1.0, 0.0]
+
+    def run_build() -> None:
+        try:
+            engine.build([registered], embed_fn=slow_embed)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    threads = [threading.Thread(target=run_build) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+
+    assert failures == []
+    assert maximum_active == 1
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(list(engine.generations_root.iterdir())) == 2
+
+    previous_generation = engine.current_path.read_text(encoding="utf-8").strip()
+    abandoned = engine.generations_root / ("f" * 32)
+    abandoned.mkdir()
+    engine.build([registered], embed_fn=lambda _: [1.0, 0.0])
+    current_generation = engine.current_path.read_text(encoding="utf-8").strip()
+
+    assert {path.name for path in engine.generations_root.iterdir()} == {
+        previous_generation,
+        current_generation,
+    }
