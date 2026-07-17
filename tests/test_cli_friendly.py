@@ -270,6 +270,88 @@ def test_search_semantic_opt_in_upgrades_keyword_index(tmp_path: Path, monkeypat
     assert semantic["semantic_status"] == "ready"
 
 
+def test_search_semantic_adds_scope_without_dropping_prior_coverage(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    root, alpha, beta = _central(tmp_path, monkeypatch)
+    (alpha / "alpha.md").write_text("alpha-semantic-marker", encoding="utf-8")
+    (beta / "beta.md").write_text("beta-semantic-marker", encoding="utf-8")
+    common = root / "knowledge" / "common"
+    common.mkdir(parents=True)
+    (common / "shared.md").write_text("common-semantic-marker", encoding="utf-8")
+    embed_calls: list[str] = []
+
+    def factory(_provider: str, **kwargs):
+        def embed(text: str) -> list[float]:
+            embed_calls.append(text)
+            return [1.0, 0.5, 0.25]
+
+        embed._afs_embedding_provider = "gemini"  # type: ignore[attr-defined]
+        embed._afs_embedding_model = kwargs.get(  # type: ignore[attr-defined]
+            "model", "gemini-embedding-2"
+        )
+        embed._afs_embedding_dimension = 3  # type: ignore[attr-defined]
+        embed._afs_embedding_instruction = kwargs.get(  # type: ignore[attr-defined]
+            "task_type", "RETRIEVAL_DOCUMENT"
+        )
+        return embed
+
+    def args(path: Path) -> argparse.Namespace:
+        return argparse.Namespace(
+            config=None,
+            path=str(path),
+            context_root=None,
+            context_dir=None,
+            query="semantic marker",
+            semantic=True,
+            all_projects=False,
+            rebuild=False,
+            mode="text",
+            limit=10,
+            provider="gemini",
+            model=None,
+            json=True,
+        )
+
+    monkeypatch.setattr("afs.embeddings.create_embed_fn", factory)
+    monkeypatch.setattr("afs.hybrid_search.create_embed_fn", factory)
+    registry = ProjectRegistry(root)
+    alpha_scope = registry.resolve(alpha).scope_id  # type: ignore[union-attr]
+    beta_scope = registry.resolve(beta).scope_id  # type: ignore[union-attr]
+
+    assert search_command(args(alpha)) == 0
+    alpha_payload = json.loads(capsys.readouterr().out)
+    assert alpha_payload["rebuilt"] is True
+    assert set(alpha_payload["build"]["intended_scope_ids"]) == {
+        alpha_scope,
+        "common",
+    }
+    assert all("beta-semantic-marker" not in text for text in embed_calls)
+
+    embed_calls.clear()
+    assert search_command(args(beta)) == 0
+    beta_payload = json.loads(capsys.readouterr().out)
+    assert beta_payload["rebuilt"] is True
+    assert set(beta_payload["build"]["intended_scope_ids"]) == {
+        alpha_scope,
+        beta_scope,
+        "common",
+    }
+    assert set(beta_payload["build"]["embedded_scope_ids"]) == {
+        alpha_scope,
+        beta_scope,
+        "common",
+    }
+    assert any("alpha-semantic-marker" in text for text in embed_calls)
+    assert any("beta-semantic-marker" in text for text in embed_calls)
+
+    assert search_command(args(alpha)) == 0
+    alpha_again = json.loads(capsys.readouterr().out)
+    assert alpha_again["rebuilt"] is False
+    alpha_hit = next(hit for hit in alpha_again["results"] if hit["relative_path"] == "alpha.md")
+    assert "semantic" in alpha_hit["signals"]
+
+
 def test_message_cleanup_requires_explicit_all_projects() -> None:
     args = argparse.Namespace(all_projects=False)
 
