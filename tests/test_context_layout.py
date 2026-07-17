@@ -185,6 +185,36 @@ def test_manager_v1_keeps_legacy_cognitive_and_profile_mount_layout(tmp_path: Pa
     assert mounts[0].resolve() == profile_source.resolve()
 
 
+def test_manager_v2_manual_mount_fails_closed_but_legacy_alias_can_be_removed(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "home" / ".context"
+    project = tmp_path / "src" / "demo"
+    source = tmp_path / "shared-knowledge"
+    project.mkdir(parents=True)
+    source.mkdir()
+    manager = AFSManager(config=AFSConfig(general=GeneralConfig(context_root=root)))
+    manager.ensure(path=project, layout_version=2)
+
+    with pytest.raises(ValueError, match="manual filesystem mounts.*layout v2"):
+        manager.mount(
+            source,
+            MountType.KNOWLEDGE,
+            alias="docs",
+            context_path=root,
+        )
+    assert not (root / "knowledge" / "docs").exists()
+
+    legacy_alias = root / "knowledge" / "legacy-docs"
+    legacy_alias.symlink_to(source)
+    assert manager.unmount(
+        "legacy-docs",
+        MountType.KNOWLEDGE,
+        context_path=root,
+    )
+    assert not legacy_alias.exists()
+
+
 def test_audit_and_plan_are_read_only_and_route_legacy_messages(tmp_path: Path) -> None:
     root = tmp_path / ".context"
     (root / "hivemind").mkdir(parents=True)

@@ -204,6 +204,11 @@ class AFSManager:
         context_path = context_path.resolve()
         if not context_path.exists():
             raise FileNotFoundError(f"No AFS context at {context_path}")
+        if detect_layout_version(context_path) == LAYOUT_VERSION:
+            raise ValueError(
+                "manual filesystem mounts are not supported for layout v2; "
+                "use scoped context sources instead"
+            )
 
         metadata = self._load_metadata(context_path)
         directory_name = resolve_directory_name(
@@ -274,6 +279,7 @@ class AFSManager:
             context_path = Path(".") / self.CONTEXT_DIR_DEFAULT
 
         context_path = context_path.expanduser().resolve()
+        alias = self._normalize_mount_alias(alias)
         metadata = self._load_metadata(context_path)
         directory_name = resolve_directory_name(
             mount_type,
@@ -281,6 +287,8 @@ class AFSManager:
             metadata=metadata,
         )
         mount_path = context_path / directory_name / alias
+        # Keep cleanup available for simple root-level aliases created by
+        # pre-v2-guard releases.  New v2 mounts fail closed in ``mount``.
         if mount_path.exists() or mount_path.is_symlink():
             mount_path.unlink()
             if not keep_provenance:
