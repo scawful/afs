@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import json
+import os
 import shutil
 import stat
 from pathlib import Path
@@ -15,10 +18,13 @@ from afs.context_layout import (
     LAYOUT_VERSION,
     LayoutMetadata,
     LayoutStateError,
+    MigrationPlan,
     audit_layout,
     build_migration_plan,
     build_rollback_manifest,
     detect_layout_version,
+    inventory_source_tree,
+    load_migration_plan,
     resolve_system_path,
     scaffold_v2,
     write_manifest,
@@ -395,7 +401,7 @@ def test_audit_and_plan_are_read_only_and_route_legacy_messages(tmp_path: Path) 
     before = sorted(path.relative_to(root).as_posix() for path in root.rglob("*"))
 
     audit = audit_layout(root)
-    plan = build_migration_plan(root)
+    plan = build_migration_plan(root, tmp_path / "context-v2")
     rollback = build_rollback_manifest(plan)
 
     after = sorted(path.relative_to(root).as_posix() for path in root.rglob("*"))
@@ -405,10 +411,12 @@ def test_audit_and_plan_are_read_only_and_route_legacy_messages(tmp_path: Path) 
     assert plan.source_file_count == 2
     message_operation = next(operation for operation in plan.operations if operation.source.endswith("/hivemind"))
     assert message_operation.destination.endswith("/.afs/queue/messages")
-    assert rollback.operations[-1].destination.endswith("/hivemind")
+    assert rollback.operations == ()
+    assert rollback.source_unchanged is True
+    assert rollback.action == "retain_source_and_deactivate_destination"
 
 
-def test_migration_plan_scopes_category_imports_for_in_place_and_separate_roots(
+def test_migration_plan_requires_a_separate_nonexistent_destination(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / ".context"
@@ -416,18 +424,35 @@ def test_migration_plan_scopes_category_imports_for_in_place_and_separate_roots(
     (root / "memory" / "note.md").write_text("legacy\n", encoding="utf-8")
     before = sorted(path.relative_to(root).as_posix() for path in root.rglob("*"))
 
-    in_place = build_migration_plan(root)
     separate_root = tmp_path / "context-v2"
     separate = build_migration_plan(root, separate_root)
 
-    in_place_memory = next(op for op in in_place.operations if op.source.endswith("/memory"))
     separate_memory = next(op for op in separate.operations if op.source.endswith("/memory"))
-    assert in_place_memory.destination == str(root / "memory" / "common")
-    assert in_place_memory.operation == "copy_verify_staged"
     assert separate_memory.destination == str(separate_root / "memory" / "common")
     assert separate_memory.operation == "copy_verify"
     assert not separate_root.exists()
     assert before == sorted(path.relative_to(root).as_posix() for path in root.rglob("*"))
+    with pytest.raises(ValueError, match="must be separate"):
+        build_migration_plan(root, root)
+    separate_root.mkdir()
+    with pytest.raises(FileExistsError, match="already exists"):
+        build_migration_plan(root, separate_root)
+
+
+def test_migration_plan_rejects_linklike_source_parent_components(
+    tmp_path: Path,
+) -> None:
+    real_parent = tmp_path / "real-parent"
+    source = real_parent / ".context"
+    (source / "memory").mkdir(parents=True)
+    linked_parent = tmp_path / "linked-parent"
+    try:
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        build_migration_plan(linked_parent / ".context", tmp_path / "v2")
 
 
 def test_migration_plan_blocks_linked_top_level_source_without_reading_target(
@@ -444,7 +469,8 @@ def test_migration_plan_blocks_linked_top_level_source_without_reading_target(
         pytest.skip(f"symlinks unavailable: {exc}")
 
     audit = audit_layout(root)
-    plan = build_migration_plan(root, tmp_path / "v2")
+    with pytest.raises(ValueError, match="symbolic links.*not executable"):
+        build_migration_plan(root, tmp_path / "v2")
 
     assert audit.migration_ready is False
     assert any(
@@ -453,10 +479,6 @@ def test_migration_plan_blocks_linked_top_level_source_without_reading_target(
         and issue.blocking
         for issue in audit.issues
     )
-    assert plan.ready is False
-    assert plan.blocking_entries == ("knowledge",)
-    assert plan.source_file_count == 0
-    assert not any(operation.source.endswith("/knowledge") for operation in plan.operations)
 
 
 @pytest.mark.parametrize("damage", ["truncate", "delete"])
@@ -592,7 +614,7 @@ def test_migration_plan_blocks_unknown_entries_and_manifests_are_atomic(tmp_path
     (root / "mystery").mkdir()
     (root / "mystery" / "data.txt").write_text("unknown", encoding="utf-8")
 
-    plan = build_migration_plan(root)
+    plan = build_migration_plan(root, tmp_path / "context-v2")
     output = tmp_path / "plans" / "migration.json"
     write_manifest(output, plan)
 
@@ -602,7 +624,26 @@ def test_migration_plan_blocks_unknown_entries_and_manifests_are_atomic(tmp_path
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
 
 
-def test_layout_cli_audit_and_plan_register(tmp_path: Path) -> None:
+def test_write_manifest_rejects_symlink_output_without_touching_target(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".context"
+    (root / "memory").mkdir(parents=True)
+    plan = build_migration_plan(root, tmp_path / "context-v2")
+    canary = tmp_path / "canary.json"
+    canary.write_text("do not overwrite\n", encoding="utf-8")
+    output = tmp_path / "migration.json"
+    try:
+        output.symlink_to(canary)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        write_manifest(output, plan)
+    assert canary.read_text(encoding="utf-8") == "do not overwrite\n"
+
+
+def test_layout_cli_audit_registers(tmp_path: Path) -> None:
     import argparse
 
     root = tmp_path / ".context"
@@ -613,3 +654,345 @@ def test_layout_cli_audit_and_plan_register(tmp_path: Path) -> None:
 
     audit_args = parser.parse_args(["layout", "audit", "--context-root", str(root), "--json"])
     assert audit_args.func(audit_args) == 0
+
+
+def _rehash_plan_payload(payload: dict[str, object]) -> dict[str, object]:
+    updated = copy.deepcopy(payload)
+    updated.pop("plan_sha256", None)
+    canonical = json.dumps(
+        updated,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    updated["plan_sha256"] = hashlib.sha256(canonical).hexdigest()
+    return updated
+
+
+def test_explicit_mappings_are_sorted_hash_bound_and_strictly_loadable(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".context"
+    root.mkdir()
+    (root / "zeta").mkdir()
+    (root / "alpha.txt").write_text("alpha", encoding="utf-8")
+    destination = tmp_path / "context-v2"
+
+    plan = build_migration_plan(
+        root,
+        destination,
+        explicit_mappings={
+            "zeta": ".afs/compat/imported/zeta",
+            "alpha.txt": "knowledge/common/alpha.txt",
+        },
+    )
+    output = tmp_path / "migration.json"
+    write_manifest(output, plan)
+
+    assert plan.schema_version == 2
+    assert plan.ready is True
+    assert [mapping.source for mapping in plan.explicit_mappings] == ["alpha.txt", "zeta"]
+    assert plan.plan_sha256 == plan.canonical_sha256()
+    assert plan.source_device == root.stat().st_dev
+    assert plan.source_inode == root.stat().st_ino
+    assert load_migration_plan(output) == plan
+
+
+@pytest.mark.parametrize(
+    ("mappings", "message"),
+    [
+        ({"missing": "knowledge/common/missing"}, "not an unknown"),
+        ({"memory": "knowledge/common/memory"}, "not an unknown"),
+        ({"mystery": "/absolute"}, "normalized relative"),
+        ({"mystery": "knowledge/common/../escape"}, "normalized relative"),
+        ({"mystery": ".afs/search/mystery"}, "must be below"),
+        ({"mystery": "knowledge/common"}, "must be below"),
+        ({"mystery": "knowledge/common/bad\x1btitle"}, "control or format"),
+    ],
+)
+def test_explicit_mapping_rejects_nonunknown_or_unsafe_destinations(
+    tmp_path: Path,
+    mappings: dict[str, str],
+    message: str,
+) -> None:
+    root = tmp_path / ".context"
+    root.mkdir()
+    (root / "memory").mkdir()
+    (root / "mystery").mkdir()
+
+    with pytest.raises(ValueError, match=message):
+        build_migration_plan(root, tmp_path / "v2", explicit_mappings=mappings)
+
+
+@pytest.mark.parametrize(
+    "second_destination",
+    [
+        "knowledge/common/shared",
+        "knowledge/common/SHARED",
+        "knowledge/common/shared/nested",
+    ],
+)
+def test_explicit_mapping_rejects_duplicate_casefold_and_prefix_collisions(
+    tmp_path: Path,
+    second_destination: str,
+) -> None:
+    root = tmp_path / ".context"
+    root.mkdir()
+    (root / "one").mkdir()
+    (root / "two").mkdir()
+
+    with pytest.raises(ValueError, match="collid|prefix"):
+        build_migration_plan(
+            root,
+            tmp_path / "v2",
+            explicit_mappings={
+                "one": "knowledge/common/shared",
+                "two": second_destination,
+            },
+        )
+
+
+def test_explicit_mapping_rejects_collision_with_present_builtin_target(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".context"
+    root.mkdir()
+    (root / "memory").mkdir()
+    (root / "unknown").mkdir()
+
+    with pytest.raises(ValueError, match="collides with a built-in mapping"):
+        build_migration_plan(
+            root,
+            tmp_path / "v2",
+            explicit_mappings={"unknown": "memory/common/unknown"},
+        )
+
+    plan = build_migration_plan(
+        root,
+        tmp_path / "v2",
+        explicit_mappings={"unknown": ".afs/compat/imported/unknown"},
+    )
+    tampered = plan.to_dict()
+    mappings = copy.deepcopy(tampered["explicit_mappings"])
+    operations = copy.deepcopy(tampered["operations"])
+    assert isinstance(mappings, list) and isinstance(mappings[0], dict)
+    assert isinstance(operations, list)
+    mappings[0]["destination"] = "memory/common/unknown"
+    for operation in operations:
+        assert isinstance(operation, dict)
+        if operation["source"] == str(root / "unknown"):
+            operation["destination"] = str(tmp_path / "v2" / "memory/common/unknown")
+    tampered["explicit_mappings"] = mappings
+    tampered["operations"] = operations
+    with pytest.raises(ValueError, match="collides with a built-in mapping"):
+        MigrationPlan.from_dict(_rehash_plan_payload(tampered))
+
+
+def test_inventory_hashes_empty_directory_modes_and_rejects_unsafe_nodes(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "source"
+    empty = root / "empty"
+    empty.mkdir(parents=True)
+    os.chmod(empty, 0o700)
+    before = inventory_source_tree(root)
+    os.chmod(empty, 0o755)
+    after = inventory_source_tree(root)
+    assert before.fingerprint != after.fingerprint
+
+    linked = root / "linked"
+    target = tmp_path / "outside"
+    target.mkdir()
+    try:
+        linked.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    with pytest.raises(ValueError, match="symbolic links.*not executable"):
+        inventory_source_tree(root)
+
+
+def test_inventory_rejects_root_symlinks_and_hard_links(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    original = root / "original.txt"
+    original.write_text("same inode", encoding="utf-8")
+    os.link(original, root / "alias.txt")
+    with pytest.raises(ValueError, match="hard-linked"):
+        inventory_source_tree(root)
+
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    linked_root = tmp_path / "linked-root"
+    try:
+        linked_root.symlink_to(clean, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    with pytest.raises(ValueError, match="regular directory"):
+        inventory_source_tree(linked_root)
+    with pytest.raises(ValueError, match="symbolic link or reparse point"):
+        build_migration_plan(linked_root, tmp_path / "v2")
+
+
+def test_inventory_rejects_special_files_and_unstable_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO creation is unavailable")
+    special_root = tmp_path / "special"
+    special_root.mkdir()
+    os.mkfifo(special_root / "pipe")
+    with pytest.raises(ValueError, match="unsupported special file"):
+        inventory_source_tree(special_root)
+
+    root = tmp_path / "unstable"
+    root.mkdir()
+    changing = root / "changing.bin"
+    changing.write_bytes(b"a" * 32)
+    original_read = os.read
+    changed = False
+
+    def mutating_read(descriptor: int, size: int) -> bytes:
+        nonlocal changed
+        chunk = original_read(descriptor, size)
+        if chunk and not changed:
+            changed = True
+            changing.write_bytes(b"b" * 33)
+        return chunk
+
+    monkeypatch.setattr("afs.context_layout.os.read", mutating_read)
+    with pytest.raises(ValueError, match="source changed while inventorying"):
+        inventory_source_tree(root)
+
+
+def test_migration_plan_from_dict_rejects_rehashed_semantic_tampering(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".context"
+    (root / "memory").mkdir(parents=True)
+    plan = build_migration_plan(root, tmp_path / "v2")
+
+    escaped = plan.to_dict()
+    operations = copy.deepcopy(escaped["operations"])
+    assert isinstance(operations, list)
+    assert isinstance(operations[0], dict)
+    operations[0]["source"] = str(tmp_path / "outside")
+    escaped["operations"] = operations
+    with pytest.raises(ValueError, match="escapes source_root"):
+        MigrationPlan.from_dict(_rehash_plan_payload(escaped))
+
+    mismatched = plan.to_dict()
+    operations = copy.deepcopy(mismatched["operations"])
+    assert isinstance(operations, list)
+    assert isinstance(operations[0], dict)
+    operations[0]["destination"] = str(tmp_path / "v2" / "knowledge" / "common" / "wrong")
+    mismatched["operations"] = operations
+    with pytest.raises(ValueError, match="does not match its approved mapping"):
+        MigrationPlan.from_dict(_rehash_plan_payload(mismatched))
+
+
+def test_migration_plan_strict_load_rejects_bad_shapes_hashes_and_duplicate_keys(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".context"
+    (root / "memory").mkdir(parents=True)
+    plan = build_migration_plan(root, tmp_path / "v2")
+
+    unknown = plan.to_dict()
+    unknown["surprise"] = True
+    with pytest.raises(ValueError, match="unknown fields"):
+        MigrationPlan.from_dict(unknown)
+
+    wrong_type = plan.to_dict()
+    wrong_type["ready"] = "true"
+    with pytest.raises(ValueError, match="must be a boolean"):
+        MigrationPlan.from_dict(_rehash_plan_payload(wrong_type))
+
+    tampered = plan.to_dict()
+    tampered["source_bytes"] = plan.source_bytes + 1
+    with pytest.raises(ValueError, match="canonical SHA-256"):
+        MigrationPlan.from_dict(tampered)
+
+    missing_operation = plan.to_dict()
+    missing_operation["operations"] = []
+    missing_operation_path = tmp_path / "missing-operation.json"
+    missing_operation_path.write_text(
+        json.dumps(_rehash_plan_payload(missing_operation)),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="operation set no longer matches"):
+        load_migration_plan(missing_operation_path)
+
+    duplicate = tmp_path / "duplicate.json"
+    raw = json.dumps(plan.to_dict())
+    raw = raw.replace(
+        '"schema_version": 2',
+        '"schema_version": 2, "schema_version": 2',
+        1,
+    )
+    duplicate.write_text(raw, encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate key"):
+        load_migration_plan(duplicate)
+
+    nested_duplicate = tmp_path / "nested-duplicate.json"
+    raw = json.dumps(plan.to_dict()).replace(
+        '"operation": "copy_verify"',
+        '"operation": "copy_verify", "operation": "copy_verify"',
+        1,
+    )
+    nested_duplicate.write_text(raw, encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate key"):
+        load_migration_plan(nested_duplicate)
+
+
+def test_load_migration_plan_rejects_symlink_directory_and_control_text(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".context"
+    (root / "mystery").mkdir(parents=True)
+    plan = build_migration_plan(
+        root,
+        tmp_path / "v2",
+        explicit_mappings={"mystery": "knowledge/common/mystery"},
+    )
+    plan_path = tmp_path / "plan.json"
+    write_manifest(plan_path, plan)
+
+    linked = tmp_path / "linked.json"
+    try:
+        linked.symlink_to(plan_path)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    with pytest.raises(ValueError, match="must not be a symbolic link"):
+        load_migration_plan(linked)
+    with pytest.raises(ValueError, match="must be a regular file"):
+        load_migration_plan(tmp_path)
+
+    controlled = plan.to_dict()
+    controlled["transaction_id"] = "layout_" + "a" * 31 + "\x1b"
+    with pytest.raises(ValueError, match="control or format"):
+        MigrationPlan.from_dict(_rehash_plan_payload(controlled))
+
+    controlled = plan.to_dict()
+    operations = copy.deepcopy(controlled["operations"])
+    assert isinstance(operations, list)
+    assert isinstance(operations[0], dict)
+    operations[0]["destination"] = str(tmp_path / "v2" / "bad\npath")
+    controlled["operations"] = operations
+    with pytest.raises(ValueError, match="control or format"):
+        MigrationPlan.from_dict(_rehash_plan_payload(controlled))
+
+    controlled = plan.to_dict()
+    mappings = copy.deepcopy(controlled["explicit_mappings"])
+    operations = copy.deepcopy(controlled["operations"])
+    assert isinstance(mappings, list) and isinstance(mappings[0], dict)
+    assert isinstance(operations, list)
+    mappings[0]["source"] = "mystery\nname"
+    for operation in operations:
+        assert isinstance(operation, dict)
+        if operation["source"] == str(root / "mystery"):
+            operation["source"] = str(root / "mystery\nname")
+    controlled["explicit_mappings"] = mappings
+    controlled["operations"] = operations
+    with pytest.raises(ValueError, match="control or format"):
+        MigrationPlan.from_dict(_rehash_plan_payload(controlled))
