@@ -272,7 +272,14 @@ aliases, colors, and zsh completion without routing AI harness commands;
 ./scripts/afs index rebuild --mount scratchpad
 ./scripts/afs projects register "$PWD"
 ./scripts/afs layout audit --context-root ~/.context --json
-./scripts/afs layout plan --context-root ~/.context --json
+./scripts/afs layout plan --context-root /path/to/v1-context \
+  --destination-root /path/to/new-v2-context \
+  --mapping-file /private/path/layout-mappings.json \
+  --output /private/path/migration-plan.json \
+  --rollback-output /private/path/source-retention.json
+./scripts/afs layout migrate --plan /private/path/migration-plan.json
+./scripts/afs layout migrate --plan /private/path/migration-plan.json \
+  --apply --because "Create a verified v2 candidate for review"
 ```
 
 An explicitly marked version 2 root uses six human-facing categories:
@@ -281,9 +288,72 @@ records, messages, and indexes are internal state under `.afs/`. Normal v2
 access is limited to the current registered project plus `common`; a central
 context path by itself does not authorize every project.
 
-`layout audit` is read-only. `layout plan` writes a hash-bound copy/verify plan
-and optional rollback manifest, but does not move data. There is intentionally
-no layout apply command.
+`layout audit` is read-only. `layout plan` writes an atomic, mode-`0600`,
+schema-v2 plan that is hash-bound to the exact source inventory; it
+does not move data. The destination must be separate from the source and must
+not exist. Unknown top-level entries stay blocking unless `--mapping-file`
+maps their exact names to `<category>/common/...` or
+`.afs/compat/imported/...`; generic mappings cannot select nested paths or use
+globs.
+
+The mapping file, plan output, and optional rollback output must use three
+distinct paths outside both the source and candidate roots. This prevents a
+planning artifact from invalidating the source fingerprint or leaking into
+the copied candidate.
+
+The mapping file is strict schema-v1 JSON with this exact shape; its schema is
+independent of the schema-v2 migration plan:
+
+```json
+{
+  "schema_version": 1,
+  "mappings": {
+    "exact-top-level-name": "knowledge/common/imported/exact-top-level-name"
+  }
+}
+```
+
+`layout migrate --plan PLAN` is also read-only by default: it verifies and
+previews the transaction without creating the destination. Applying requires
+both `--apply --because "..."` and confirmation through the controlling
+terminal. Piped input and headless agents cannot confirm. Nested links and
+special files block; the v1 source is never modified or deleted; and the v2
+layout marker is published only after every copy verifies. A caught
+pre-marker apply failure is moved to an adjacent `.failed-*` path when that
+quarantine rename succeeds. A hard process or host interruption may instead
+leave an unmarked partial tree at the requested destination; inspect and move
+it explicitly before retrying.
+
+On Windows, `layout audit` and `layout plan` remain available, but
+`layout migrate` preview and apply fail preflight closed. The executor cannot
+use `chmod` to establish or verify the required private DACLs; Windows
+migration remains unavailable until explicit DACL support lands.
+
+A successful apply produces a separate verified candidate; it does not
+activate or swap roots. Activation, rollback of a later activation, and
+source or failed-tree cleanup are separate future human-gated operations. Any
+rollback manifest emitted for compatibility is informational and documents
+that the source was preserved; it does not perform or promise data
+restoration. See [Central Context Layout v2](CONTEXT_LAYOUT_V2.md) for the
+full safety contract. These commands do not imply that the live
+`~/.context` is ready or migrated.
+
+`layout migrate` exit codes:
+
+| Code | Meaning |
+|---|---|
+| `0` | Preview ready, candidate applied, or the exact completed transaction recognized as already applied. |
+| `2` | Invalid or stale plan, blocked preflight, invalid rationale, or refused/unavailable human confirmation. |
+| `3` | Authorized apply failure; output includes the retained `.failed-*` destination when a pre-marker tree was quarantined. |
+| `1` | Unexpected internal failure handled by the generic CLI; never treat it as migration evidence. |
+
+Run migration in a controlled maintenance window with active producers and
+other writers stopped. Its checks fail closed against accidental drift,
+static links, and copy failures, but do not sandbox a hostile concurrent
+same-user process that swaps paths between checks. Already-completed
+recognition also requires the source to continue matching the reviewed plan.
+See the threat boundary in
+[Central Context Layout v2](CONTEXT_LAYOUT_V2.md#threat-boundary).
 
 Indexed query usage:
 

@@ -7,9 +7,26 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 ### Added
 
 - An opt-in version 2 central context layout with six human-facing categories,
-  stable project/common scopes, a project registry, and audit-only migration
-  planning. Version 1 discovery and compatibility aliases remain available;
-  this release does not apply a live filesystem migration.
+  stable project/common scopes, a project registry, and schema-v2,
+  hash-bound private migration plans. Reviewed generic mappings accept exact
+  unknown top-level names only and can target `<category>/common/...` or
+  `.afs/compat/imported/...`. Version 1 discovery and compatibility aliases
+  remain available; AFS never migrates a live root implicitly.
+- A fail-closed `afs layout migrate --plan PLAN` preview and destination-only
+  apply path. Preview is read-only; apply requires `--apply`, a `--because`
+  rationale, and controlling-terminal confirmation. Migration requires a
+  separate nonexistent destination, never modifies or deletes the source,
+  blocks nested links and special files, and publishes the v2 marker last.
+  Caught pre-marker failures are quarantined as `.failed-*` when the rename
+  succeeds; a hard process or host interruption may leave an unmarked partial
+  destination for explicit inspection and relocation before retry.
+  Activation/swap, rollback, and cleanup remain separate future human-gated
+  operations; any rollback manifest is informational and records source
+  preservation rather than restoring data. Windows audit and planning remain
+  available, while migration preview/apply fail closed until private-DACL
+  support lands. Exit codes distinguish ready/applied/already-applied (`0`),
+  invalid/blocked/refused (`2`), an authorized apply failure with its retained
+  path when available (`3`), and a generic internal CLI failure (`1`).
 - Plain-language, scope-aware CLI and MCP workflows for starting sessions,
   searching and listing files, durable notes, immutable handoff revisions,
   messages, projects, jobs, missions, health checks, and repair guidance.
