@@ -187,6 +187,14 @@ never modifies or deletes the v1 source. Applying a reviewed plan requires
 `afs layout migrate --plan PLAN --apply --because "..."` plus controlling-
 terminal confirmation. A successful apply creates a verified candidate; it
 does not activate, swap, roll back, or clean up context roots automatically.
+Mapping schema v2 can record reason-bearing `retained_sources` and
+`retained_paths`. These are source-only exclusions and are not copied into the
+candidate; plans containing them use schema v3, while mapping schema v1 and
+plan schema v2 remain supported. The whole-source fingerprint still includes
+excluded content or link metadata, so writers must be stopped. Candidate
+capacity and copy evidence use `copy_bytes`, not whole-source bytes. Links and
+non-portable names are allowed only inside explicit exclusions.
+
 On Windows, audit and planning remain available but `layout migrate` is
 blocked until the executor can establish and verify private DACLs.
 See [Central Context Layout v2](docs/CONTEXT_LAYOUT_V2.md) for mapping limits

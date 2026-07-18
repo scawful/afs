@@ -145,8 +145,10 @@ compatibility surfaces for one cycle. New integrations should use
 
 ## Safe inspection, planning, and destination-only migration
 
-Auditing is read-only. Planning writes a private schema-v2 manifest;
-it does not copy data:
+Auditing is read-only. Planning writes a private, hash-bound manifest; it does
+not copy data. Copy-only decisions use plan schema v2. A plan that records
+source-only exclusions uses schema v3; existing schema-v2 plans remain
+loadable:
 
 ```bash
 afs layout audit --context-root /path/to/v1-context --json
@@ -169,16 +171,18 @@ destination trees. This keeps private planning artifacts out of the source
 fingerprint and prevents them from being copied into or exposed through the
 candidate.
 
-Unknown top-level entries remain blocking unless the mapping file names each
-source entry exactly. Generic mappings do not accept globs, nested source
-paths, or inferred categories. Their destinations are limited to either:
+Unknown top-level entries remain blocking unless the mapping file either maps
+or explicitly retains each source entry. Generic mappings do not accept globs,
+nested source paths, or inferred categories. Their destinations are limited to
+either:
 
 - `<category>/common/...`, where `<category>` is one of the six human-facing
   categories; or
 - `.afs/compat/imported/...` for preserved compatibility data that does not
   belong in a human-facing category.
 
-A minimal mapping file has this exact shape:
+A schema-v1 mapping file remains accepted for copy-only decisions and has this
+exact shape:
 
 ```json
 {
@@ -189,21 +193,62 @@ A minimal mapping file has this exact shape:
 }
 ```
 
-Mapping-file schema v1 is distinct from migration-plan schema v2. The mapping
-document contains exactly `schema_version` and `mappings`. Each mapping key
-names one exact unknown top-level entry; each value is one allowed destination
-relative to the new v2 root.
+Mapping-file schema v2 adds reviewed source-only exclusions:
+
+```json
+{
+  "schema_version": 2,
+  "mappings": {
+    "AFS_SPEC.md": "knowledge/common/specs/AFS_SPEC.md"
+  },
+  "retained_sources": {
+    "legacy-projects": "Requires project-scoped import before cutover"
+  },
+  "retained_paths": {
+    "knowledge/skills": "Recreate this link from the v2 tool registry"
+  }
+}
+```
+
+The three decision fields are strict objects. `mappings` values are approved
+v2 destination paths for exact unknown top-level entries. The other two fields
+use reviewed reason text: `retained_sources` names exact unknown top-level
+entries that remain only in the untouched v1 source, and `retained_paths`
+names normalized, nested paths below a copied top-level operation; the named
+file or entire subtree remains only in the v1 source. Retained sources and
+paths are **source-only exclusions: they are not copied into the candidate**.
+Entries must exist, may not overlap, and require a non-empty reason. A nested
+path may not stand in for a top-level retention decision.
+
+The whole-source fingerprint still covers excluded data. Regular excluded
+files contribute their content and metadata, while an explicitly excluded
+symbolic link contributes link metadata without dereferencing its target.
+Consequently, excluded data is not an escape from source-drift checks: stop
+all writers before planning, previewing, and applying. `source_file_count` and
+`source_bytes` describe the complete source. Schema-v3 `copy_file_count` and
+`copy_bytes` describe only the candidate copy set, and destination capacity is
+calculated from `copy_bytes`.
+
+Unreviewed symbolic links or reparse points still block planning. A link or a
+non-portable path name is allowed only when it is inside an explicit
+source-only exclusion. Hard links and special files remain blocked. Existing
+schema-v1 mapping files and schema-v2 migration plans remain supported; a new
+plan containing exclusions is schema v3 and hash-binds their paths, reasons,
+and copy totals.
 
 This deliberately narrow contract is suitable for simple files and
-single-purpose directories. Mixed stores, nested project contexts, active
-queues, and registries that need merging require a dedicated importer or must
-remain quarantined; a generic mapping must not guess how to split them.
+single-purpose directories. An exclusion is appropriate only when the v2
+candidate can operate without that source data. Mixed stores, nested project
+contexts, active queues, and registries that need merging still require a
+dedicated importer or must remain source-only until one exists; a generic
+mapping or exclusion must not pretend that semantic migration occurred.
 
 ### Preview and apply
 
 `layout migrate` previews a reviewed plan by default. Preview verifies the
-plan, source fingerprint, destination preconditions, links, special files,
-and proposed operations without creating the destination:
+plan, whole-source fingerprint, source-only exclusions, candidate copy totals,
+destination preconditions, links, special files, and proposed operations
+without creating the destination:
 
 ```bash
 afs layout migrate --plan /private/path/migration-plan.json
@@ -225,10 +270,12 @@ lands.
 
 `--apply` requires a non-empty rationale and confirmation through the
 controlling terminal; piped input and headless callers cannot satisfy the
-gate. The migration copies and verifies into the separate destination. It
-never modifies or deletes the v1 source. A symbolic link or special file
-anywhere in a planned source subtree blocks the transaction rather than being
-followed or copied.
+gate. Confirmation shows whole-source totals, candidate copy totals, and the
+exact paths and reasons for every source-only exclusion. The migration copies
+and verifies into the separate destination. It never modifies or deletes the
+v1 source. Links and non-portable names in the copy set block the transaction
+rather than being followed or copied; only paths bound to the reviewed
+exclusion list may remain source-only.
 
 The destination remains an unmarked candidate while data is copied and
 verified. `.afs/layout.toml` is published last, so an interrupted copy cannot
