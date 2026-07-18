@@ -485,10 +485,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         print("  hint: run `afs doctor` to diagnose", file=sys.stderr)
         return 1
 
-    try:
-        log_cli_invocation(argv_list, exit_code)
-    except Exception:
-        pass
+    if not getattr(args, "_skip_cli_history", False):
+        try:
+            log_cli_invocation(argv_list, exit_code)
+        except Exception:
+            pass
     return exit_code
 
 
