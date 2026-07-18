@@ -16,6 +16,7 @@ import afs.layout_migration as migration
 from afs.context_layout import (
     LAYOUT_FILE,
     MigrationPlan,
+    MigrationRetention,
     build_migration_plan,
     detect_layout_version,
     write_manifest,
@@ -216,12 +217,11 @@ def test_preflight_rejects_nested_links_hardlinks_and_special_files(tmp_path: Pa
 
 
 @pytest.mark.parametrize("name", ["CON.txt", "bad:name", "control\x01name", "format\u200ename"])
-def test_preflight_rejects_nonportable_names(tmp_path: Path, name: str) -> None:
+def test_planning_rejects_nonportable_names(tmp_path: Path, name: str) -> None:
     source = _source(tmp_path)
     (source / "history" / name).write_text("unsafe", encoding="utf-8")
-    plan = build_migration_plan(source, tmp_path / "destination")
-    with pytest.raises(migration.MigrationPreflightError, match="path name|character|reserved"):
-        migration.preflight_migration(plan)
+    with pytest.raises(ValueError, match="path name|character|reserved"):
+        build_migration_plan(source, tmp_path / "destination")
 
 
 def test_preflight_rejects_casefold_collisions(tmp_path: Path) -> None:
@@ -868,3 +868,174 @@ def test_concurrent_apply_serializes_and_second_observes_completion(
     assert not failures
     assert sorted(results) == ["already_applied", "applied"]
     assert detect_layout_version(destination) == 2
+
+
+def test_schema_v3_apply_excludes_retained_sources_and_paths_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    source = _source(tmp_path)
+    destination = tmp_path / "destination"
+    outside = tmp_path / "outside-skills"
+    outside.mkdir()
+    (outside / "canary.md").write_text("must not be copied", encoding="utf-8")
+    (source / "models").mkdir()
+    (source / "models" / "model.bin").write_bytes(b"legacy-model")
+    (source / "health").mkdir()
+    (source / "health" / "current.json").write_text("{}", encoding="utf-8")
+    (source / "health" / "archive:2026.json").write_text("old", encoding="utf-8")
+    (source / "knowledge").mkdir()
+    try:
+        (source / "knowledge" / "skills").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    plan = build_migration_plan(
+        source,
+        destination,
+        retained_sources={
+            "models": "Model data requires a dedicated importer before producer cutover.",
+        },
+        retained_paths={
+            "health/archive:2026.json": "The historical name is not portable to v2.",
+            "knowledge/skills": "The legacy external skill link remains available from v1.",
+        },
+    )
+
+    preview = migration.preflight_migration(plan)
+    rationale = "I reviewed the source-retained candidate"
+    result = migration.apply_migration(
+        plan,
+        rationale=rationale,
+        authorization=_authorization(plan, rationale),
+    )
+
+    assert plan.schema_version == 3
+    assert preview.source_file_count == plan.source_file_count
+    assert preview.source_bytes == plan.source_bytes
+    assert preview.copy_file_count == plan.copy_file_count
+    assert preview.copy_bytes == plan.copy_bytes
+    assert (destination / ".afs/health/current.json").read_text(encoding="utf-8") == "{}"
+    assert not (destination / ".afs/health/archive:2026.json").exists()
+    assert not (destination / "knowledge/common/skills").exists()
+    assert not (destination / "models").exists()
+    assert not any(path.name == "canary.md" for path in destination.rglob("*"))
+
+    receipt = json.loads(result.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["schema_version"] == 2
+    assert receipt["plan_schema_version"] == 3
+    assert receipt["copy_file_count"] == plan.copy_file_count
+    assert receipt["copy_bytes"] == plan.copy_bytes
+    assert receipt["retained_sources"] == [item.to_dict() for item in plan.retained_sources]
+    assert receipt["retained_paths"] == [item.to_dict() for item in plan.retained_paths]
+    assert migration.preflight_migration(plan).status == "already_applied"
+    assert (
+        migration.apply_migration(
+            plan,
+            rationale=rationale,
+            authorization=_authorization(plan, rationale),
+        ).status
+        == "already_applied"
+    )
+
+
+@pytest.mark.parametrize("mutation", ["retained_content", "retained_symlink"])
+def test_schema_v3_retained_source_mutation_invalidates_plan(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    source = _source(tmp_path)
+    destination = tmp_path / "destination"
+    outside_one = tmp_path / "outside-one"
+    outside_two = tmp_path / "outside-two"
+    outside_one.mkdir()
+    outside_two.mkdir()
+    (source / "models").mkdir()
+    retained_file = source / "models" / "model.bin"
+    retained_file.write_bytes(b"original")
+    (source / "knowledge").mkdir()
+    retained_link = source / "knowledge" / "skills"
+    try:
+        retained_link.symlink_to(outside_one, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    plan = build_migration_plan(
+        source,
+        destination,
+        retained_sources={"models": "Model data requires a dedicated importer."},
+        retained_paths={"knowledge/skills": "Retain the legacy external skill link."},
+    )
+
+    if mutation == "retained_content":
+        retained_file.write_bytes(b"changed")
+    else:
+        retained_link.unlink()
+        retained_link.symlink_to(outside_two, target_is_directory=True)
+
+    with pytest.raises(migration.MigrationPreflightError, match="source changed"):
+        migration.preflight_migration(plan)
+
+
+def test_schema_v3_capacity_uses_copy_bytes_not_retained_source_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(tmp_path)
+    destination = tmp_path / "destination"
+    (source / "models").mkdir()
+    (source / "models" / "model.bin").write_bytes(b"x" * 4096)
+    plan = build_migration_plan(
+        source,
+        destination,
+        retained_sources={"models": "Model data requires a dedicated importer."},
+    )
+    monkeypatch.setattr(migration, "_SPACE_FLOOR_BYTES", 1)
+    copy_required = plan.copy_bytes + max(1, plan.copy_bytes // 20)
+    whole_source_required = plan.source_bytes + max(1, plan.source_bytes // 20)
+    assert copy_required < whole_source_required
+    monkeypatch.setattr(
+        migration.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=copy_required),
+    )
+
+    preview = migration.preflight_migration(plan)
+
+    assert preview.required_bytes == copy_required
+    assert preview.available_bytes == copy_required
+    assert preview.copy_bytes == plan.copy_bytes
+    assert preview.source_bytes == plan.source_bytes
+
+
+def test_schema_v3_apply_rejects_case_mismatched_retention_spelling(
+    tmp_path: Path,
+) -> None:
+    source = _source(tmp_path)
+    destination = tmp_path / "destination"
+    retained = source / "knowledge" / "lower"
+    retained.mkdir(parents=True)
+    (retained / "secret.txt").write_text("source-only", encoding="utf-8")
+    reason = "This subtree must remain only in the v1 source."
+    plan = build_migration_plan(
+        source,
+        destination,
+        retained_paths={"knowledge/lower": reason},
+    )
+    mismatched = replace(
+        plan,
+        retained_paths=(MigrationRetention("knowledge/LOWER", reason),),
+        plan_sha256="",
+    ).with_canonical_hash()
+
+    with pytest.raises(
+        migration.MigrationPreflightError,
+        match="exact on-disk spelling|does not exist",
+    ):
+        migration.apply_migration(
+            mismatched,
+            rationale="I reviewed the case-spelling regression",
+            authorization=_authorization(
+                mismatched,
+                "I reviewed the case-spelling regression",
+            ),
+        )
+    assert not destination.exists()

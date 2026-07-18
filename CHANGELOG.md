@@ -7,16 +7,23 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 ### Added
 
 - An opt-in version 2 central context layout with six human-facing categories,
-  stable project/common scopes, a project registry, and schema-v2,
-  hash-bound private migration plans. Reviewed generic mappings accept exact
-  unknown top-level names only and can target `<category>/common/...` or
+  stable project/common scopes, a project registry, and hash-bound private
+  migration plans. Mapping schema v2 adds reason-bearing `retained_sources`
+  and nested `retained_paths`; plans containing these source-only exclusions
+  use schema v3 and prove both whole-source and candidate-copy totals. Excluded
+  paths are not copied, but remain fingerprinted, and links or non-portable
+  names are allowed only within an explicit exclusion. Mapping schema v1 and
+  plan schema v2 remain supported. Reviewed generic mappings still accept
+  exact unknown top-level names only and target `<category>/common/...` or
   `.afs/compat/imported/...`. Version 1 discovery and compatibility aliases
   remain available; AFS never migrates a live root implicitly.
 - A fail-closed `afs layout migrate --plan PLAN` preview and destination-only
   apply path. Preview is read-only; apply requires `--apply`, a `--because`
   rationale, and controlling-terminal confirmation. Migration requires a
   separate nonexistent destination, never modifies or deletes the source,
-  blocks nested links and special files, and publishes the v2 marker last.
+  distinguishes whole-source evidence from `copy_bytes` capacity, blocks
+  unreviewed links, copied non-portable names, hard links, and special files,
+  and publishes the v2 marker last.
   Caught pre-marker failures are quarantined as `.failed-*` when the rename
   succeeds; a hard process or host interruption may leave an unmarked partial
   destination for explicit inspection and relocation before retry.

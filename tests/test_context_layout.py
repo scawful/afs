@@ -698,6 +698,174 @@ def test_explicit_mappings_are_sorted_hash_bound_and_strictly_loadable(
     assert load_migration_plan(output) == plan
 
 
+def test_source_retention_plan_is_hash_bound_loadable_and_counts_only_copy_set(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".context"
+    destination = tmp_path / "context-v2"
+    outside = tmp_path / "outside-skills"
+    outside.mkdir()
+    (outside / "private.md").write_text("outside canary", encoding="utf-8")
+
+    copied_payloads = {
+        "memory/note.md": b"remember",
+        "knowledge/guide.md": b"guide",
+        "health/current.json": b"{}",
+    }
+    retained_payloads = {
+        "health/archive:2026.json": b"old-health",
+        "models/model.bin": b"model-data",
+    }
+    for relative, content in {**copied_payloads, **retained_payloads}.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    try:
+        (root / "knowledge" / "skills").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    plan = build_migration_plan(
+        root,
+        destination,
+        retained_sources={
+            "models": "Model registry needs a dedicated importer before producer cutover.",
+        },
+        retained_paths={
+            "knowledge/skills": "Legacy skill link remains available from the v1 source.",
+            "health/archive:2026.json": "Non-portable historical report remains in v1.",
+        },
+    )
+    output = tmp_path / "migration.json"
+    write_manifest(output, plan)
+
+    assert plan.schema_version == 3
+    assert plan.ready is True
+    assert plan.blocking_entries == ()
+    assert [item.source for item in plan.retained_sources] == ["models"]
+    assert [item.source for item in plan.retained_paths] == [
+        "health/archive:2026.json",
+        "knowledge/skills",
+    ]
+    assert {Path(operation.source).name for operation in plan.operations} == {
+        "health",
+        "knowledge",
+        "memory",
+    }
+    assert plan.source_file_count == len(copied_payloads) + len(retained_payloads)
+    assert plan.source_bytes == sum(
+        len(content) for content in (*copied_payloads.values(), *retained_payloads.values())
+    )
+    assert plan.copy_file_count == len(copied_payloads)
+    assert plan.copy_bytes == sum(len(content) for content in copied_payloads.values())
+    assert plan.plan_sha256 == plan.canonical_sha256()
+    assert load_migration_plan(output) == plan
+
+
+@pytest.mark.parametrize(
+    ("retained_sources", "retained_paths", "message"),
+    [
+        ({"memory": "Known source."}, None, "not below an allowed source"),
+        ({"models": "   "}, None, "reason must be non-empty"),
+        (None, {"memory": "Top-level path."}, "must be nested"),
+        (None, {"memory/missing.md": "Missing path."}, "does not exist"),
+        (
+            None,
+            {
+                "knowledge/archive": "Retain the directory.",
+                "knowledge/archive/note.md": "Retain its child too.",
+            },
+            "entries overlap",
+        ),
+    ],
+)
+def test_source_retention_rejects_invalid_reviews(
+    tmp_path: Path,
+    retained_sources: dict[str, str] | None,
+    retained_paths: dict[str, str] | None,
+    message: str,
+) -> None:
+    root = tmp_path / ".context"
+    (root / "memory").mkdir(parents=True)
+    (root / "models").mkdir()
+    archive = root / "knowledge" / "archive"
+    archive.mkdir(parents=True)
+    (archive / "note.md").write_text("legacy", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        build_migration_plan(
+            root,
+            tmp_path / "v2",
+            retained_sources=retained_sources,
+            retained_paths=retained_paths,
+        )
+
+
+def test_source_retention_rejects_copy_and_retain_overlap(tmp_path: Path) -> None:
+    root = tmp_path / ".context"
+    (root / "models").mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="both copied and source-retained"):
+        build_migration_plan(
+            root,
+            tmp_path / "v2",
+            explicit_mappings={"models": ".afs/compat/imported/models"},
+            retained_sources={"models": "Keep the legacy model registry."},
+        )
+
+
+@pytest.mark.parametrize("unsafe_kind", ["link", "nonportable"])
+def test_source_retention_must_explicitly_cover_unsafe_copied_paths(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    root = tmp_path / ".context"
+    knowledge = root / "knowledge"
+    knowledge.mkdir(parents=True)
+    if unsafe_kind == "link":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        try:
+            (knowledge / "skills").symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+        message = "symbolic links.*not executable"
+    else:
+        (knowledge / "archive:2026.md").write_text("legacy", encoding="utf-8")
+        message = "non-portable character"
+
+    with pytest.raises(ValueError, match=message):
+        build_migration_plan(root, tmp_path / "v2")
+
+
+def test_source_retention_plan_rejects_hash_and_semantic_tampering(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".context"
+    (root / "memory").mkdir(parents=True)
+    (root / "memory" / "note.md").write_text("remember", encoding="utf-8")
+    (root / "models").mkdir()
+    (root / "models" / "model.bin").write_bytes(b"model")
+    plan = build_migration_plan(
+        root,
+        tmp_path / "v2",
+        retained_sources={"models": "Requires a dedicated registry importer."},
+    )
+
+    changed_reason = plan.to_dict()
+    retentions = copy.deepcopy(changed_reason["retained_sources"])
+    assert isinstance(retentions, list) and isinstance(retentions[0], dict)
+    retentions[0]["reason"] = "Unreviewed replacement reason."
+    changed_reason["retained_sources"] = retentions
+    with pytest.raises(ValueError, match="canonical SHA-256"):
+        MigrationPlan.from_dict(changed_reason)
+
+    impossible_totals = plan.to_dict()
+    impossible_totals["copy_file_count"] = plan.source_file_count + 1
+    with pytest.raises(ValueError, match="cannot exceed whole-source totals"):
+        MigrationPlan.from_dict(_rehash_plan_payload(impossible_totals))
+
+
 @pytest.mark.parametrize(
     ("mappings", "message"),
     [

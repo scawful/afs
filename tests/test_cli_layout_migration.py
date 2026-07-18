@@ -98,6 +98,153 @@ def test_mapping_file_resolves_only_explicit_unknown_top_level_entry(
     assert not destination.exists()
 
 
+def test_mapping_v2_plans_and_previews_source_only_exclusions(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = _legacy_context(tmp_path)
+    (source / "models").mkdir()
+    (source / "models" / "model.bin").write_bytes(b"model")
+    (source / "health").mkdir()
+    (source / "health" / "current.json").write_text("{}", encoding="utf-8")
+    (source / "health" / "archive:2026.json").write_text("old", encoding="utf-8")
+    destination = tmp_path / "context-v2"
+    mapping_path = tmp_path / "mappings.json"
+    mapping_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "mappings": {},
+                "retained_sources": {"models": "A dedicated model-registry importer is required."},
+                "retained_paths": {"health/archive:2026.json": "Non-portable history stays in v1."},
+            }
+        ),
+        encoding="utf-8",
+    )
+    plan_path = tmp_path / "plan.json"
+
+    assert (
+        _run(
+            [
+                "layout",
+                "plan",
+                "--context-root",
+                str(source),
+                "--destination-root",
+                str(destination),
+                "--mapping-file",
+                str(mapping_path),
+                "--output",
+                str(plan_path),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    planned = json.loads(capsys.readouterr().out)["plan"]
+    assert planned["schema_version"] == 3
+    assert planned["retained_sources"] == [
+        {
+            "source": "models",
+            "reason": "A dedicated model-registry importer is required.",
+        }
+    ]
+    assert planned["retained_paths"] == [
+        {
+            "source": "health/archive:2026.json",
+            "reason": "Non-portable history stays in v1.",
+        }
+    ]
+    assert planned["source_file_count"] == 4
+    assert planned["copy_file_count"] == 2
+    assert {Path(item["source"]).name for item in planned["operations"]} == {
+        "health",
+        "memory",
+    }
+
+    assert _run(["layout", "migrate", "--plan", str(plan_path), "--json"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["mode"] == "preview"
+    assert preview["source_files"] == 4
+    assert preview["copy_files"] == 2
+    assert preview["retained_source_count"] == 1
+    assert preview["retained_path_count"] == 1
+    assert preview["retained_sources"] == planned["retained_sources"]
+    assert preview["retained_paths"] == planned["retained_paths"]
+    assert not destination.exists()
+
+
+def test_schema_v2_mapping_file_rejects_unreviewed_retention_reasons(
+    tmp_path: Path,
+) -> None:
+    base = {
+        "schema_version": 2,
+        "mappings": {},
+        "retained_sources": {},
+        "retained_paths": {},
+    }
+    invalid_reasons = ["", " padded ", "control\x01text", "x" * 1025]
+    for index, reason in enumerate(invalid_reasons):
+        document = dict(base)
+        document["retained_sources"] = {"models": reason}
+        mapping_path = tmp_path / f"mappings-{index}.json"
+        mapping_path.write_text(json.dumps(document), encoding="utf-8")
+        with pytest.raises(ValueError, match="reviewed non-empty text"):
+            layout_cli._read_mapping_file(mapping_path)
+
+
+def test_apply_prompt_states_source_only_paths_are_not_copied(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = _legacy_context(tmp_path)
+    (source / "models").mkdir()
+    (source / "models" / "model.bin").write_bytes(b"model")
+    plan_path = tmp_path / "plan.json"
+    mapping_path = tmp_path / "mappings.json"
+    mapping_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "mappings": {},
+                "retained_sources": {"models": "Import separately after review."},
+                "retained_paths": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        _run(
+            [
+                "layout",
+                "plan",
+                "--context-root",
+                str(source),
+                "--destination-root",
+                str(tmp_path / "context-v2"),
+                "--mapping-file",
+                str(mapping_path),
+                "--output",
+                str(plan_path),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    plan = load_migration_plan(plan_path)
+    prompts: list[str] = []
+    monkeypatch.setattr(layout_cli, "_TTY_READER", lambda prompt: prompts.append(prompt) or None)
+
+    assert layout_cli._confirm_apply(plan, "Create the reviewed candidate") is None
+    assert len(prompts) == 1
+    assert "1 top-level sources and 0 nested paths" in prompts[0]
+    assert "WILL NOT be copied into the candidate" in prompts[0]
+    assert "models: Import separately after review." in prompts[0]
+    assert f"candidate:   {plan.copy_file_count} files / {plan.copy_bytes} bytes" in prompts[0]
+
+
 @pytest.mark.parametrize(
     ("document", "message"),
     [
@@ -112,7 +259,7 @@ def test_mapping_file_resolves_only_explicit_unknown_top_level_entry(
         ),
         (
             '{"schema_version":2,"mappings":{}}',
-            "schema_version must be 1",
+            "missing: retained_paths, retained_sources",
         ),
     ],
 )
@@ -154,7 +301,7 @@ def test_layout_plan_json_reports_invalid_mapping_as_blocked(
     )
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "blocked"
-    assert "schema_version must be 1" in payload["error"]
+    assert "missing: retained_paths, retained_sources" in payload["error"]
 
 
 def test_layout_commands_do_not_write_cli_history(
