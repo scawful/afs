@@ -8,6 +8,7 @@ import os
 import stat
 import sys
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,14 @@ from ..layout_migration import (
 _TTY_READER = None
 _MAX_MAPPING_BYTES = 1024 * 1024
 _MAX_RATIONALE_CHARS = 4096
+_MAX_RETENTION_REASON_CHARS = 1024
+
+
+@dataclass(frozen=True)
+class _MappingDocument:
+    mappings: dict[str, str]
+    retained_sources: dict[str, str]
+    retained_paths: dict[str, str]
 
 
 def _context_root(args: argparse.Namespace) -> Path:
@@ -57,7 +66,7 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _read_mapping_file(path: Path) -> dict[str, str]:
+def _read_mapping_file(path: Path) -> _MappingDocument:
     """Read one small, stable, no-follow mapping document."""
 
     mapping_path = path.expanduser()
@@ -100,7 +109,12 @@ def _read_mapping_file(path: Path) -> dict[str, str]:
         raise ValueError(f"invalid mapping file JSON: {exc}") from exc
     if not isinstance(payload, dict):
         raise ValueError("mapping file must be a JSON object")
+    schema_version = payload.get("schema_version")
+    if type(schema_version) is not int or schema_version not in {1, 2}:
+        raise ValueError("mapping file schema_version must be 1 or 2")
     expected = {"schema_version", "mappings"}
+    if schema_version == 2:
+        expected.update({"retained_sources", "retained_paths"})
     keys = set(payload)
     if keys != expected:
         missing = sorted(expected - keys)
@@ -111,14 +125,43 @@ def _read_mapping_file(path: Path) -> dict[str, str]:
         if unknown:
             details.append(f"unknown: {', '.join(unknown)}")
         raise ValueError(f"mapping file fields are invalid ({'; '.join(details)})")
-    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
-        raise ValueError("mapping file schema_version must be 1")
     mappings = payload["mappings"]
     if not isinstance(mappings, dict):
         raise ValueError("mapping file field 'mappings' must be an object")
     if any(type(key) is not str or type(value) is not str for key, value in mappings.items()):
         raise ValueError("mapping file names and destinations must be strings")
-    return dict(mappings)
+    retentions: dict[str, dict[str, str]] = {
+        "retained_sources": {},
+        "retained_paths": {},
+    }
+    if schema_version == 2:
+        for field_name in retentions:
+            raw = payload[field_name]
+            if not isinstance(raw, dict):
+                raise ValueError(f"mapping file field {field_name!r} must be an object")
+            if any(type(key) is not str or type(value) is not str for key, value in raw.items()):
+                raise ValueError(f"mapping file {field_name} paths and reasons must be strings")
+            normalized: dict[str, str] = {}
+            for source, reason in raw.items():
+                if (
+                    not reason
+                    or reason != reason.strip()
+                    or len(reason) > _MAX_RETENTION_REASON_CHARS
+                    or any(unicodedata.category(character).startswith("C") for character in reason)
+                ):
+                    raise ValueError(
+                        f"mapping file {field_name} reason for {source!r} must be "
+                        "reviewed non-empty text without surrounding whitespace, "
+                        f"control characters, or more than {_MAX_RETENTION_REASON_CHARS} "
+                        "characters"
+                    )
+                normalized[source] = reason
+            retentions[field_name] = normalized
+    return _MappingDocument(
+        mappings=dict(mappings),
+        retained_sources=retentions["retained_sources"],
+        retained_paths=retentions["retained_paths"],
+    )
 
 
 def _terminal_text(value: Any, *, limit: int = 4096) -> str:
@@ -186,21 +229,33 @@ def _confirm_apply(plan: MigrationPlan, rationale: str):
         plan.transaction_id,
         rationale,
     )
-    prompt = "\n".join(
+    source_only_lines = [
+        f"    - {_terminal_text(item.source)}: {_terminal_text(item.reason)}"
+        for item in (*plan.retained_sources, *plan.retained_paths)
+    ]
+    prompt_lines = [
+        "",
+        "=== HUMAN CONFIRMATION REQUIRED (layout migration) ===",
+        f"  transaction: {_terminal_text(plan.transaction_id)}",
+        f"  plan sha256: {_terminal_text(plan.plan_sha256)}",
+        f"  source root: {_terminal_text(plan.source_root)}",
+        f"  destination: {_terminal_text(plan.destination_root)}",
+        f"  source data: {plan.source_file_count} files / {plan.source_bytes} bytes",
+        f"  candidate:   {plan.copy_file_count} files / {plan.copy_bytes} bytes",
+        "  source-only: "
+        f"{len(plan.retained_sources)} top-level sources and "
+        f"{len(plan.retained_paths)} nested paths WILL NOT be copied into the candidate.",
+    ]
+    if source_only_lines:
+        prompt_lines.extend(["  source-only exclusions:", *source_only_lines])
+    prompt_lines.extend(
         [
-            "",
-            "=== HUMAN CONFIRMATION REQUIRED (layout migration) ===",
-            f"  transaction: {_terminal_text(plan.transaction_id)}",
-            f"  plan sha256: {_terminal_text(plan.plan_sha256)}",
-            f"  source:      {_terminal_text(plan.source_root)}",
-            f"  destination: {_terminal_text(plan.destination_root)}",
-            f"  files:       {plan.source_file_count}",
-            f"  bytes:       {plan.source_bytes}",
             f"  because:     {_terminal_text(rationale)}",
             "  source will be retained; this does not activate the candidate.",
             f"Type '{plan.transaction_id}' to confirm, anything else aborts: ",
         ]
     )
+    prompt = "\n".join(prompt_lines)
     return _broker_for_reader(_TTY_READER).confirm_token(
         plan.transaction_id,
         prompt,
@@ -217,7 +272,12 @@ def _print_payload(payload: dict[str, Any], *, as_json: bool) -> None:
             print(f"{key}:")
             if value:
                 for item in value:
-                    print(f"- {_terminal_text(item)}")
+                    rendered = (
+                        json.dumps(item, ensure_ascii=False, sort_keys=True)
+                        if isinstance(item, dict)
+                        else _terminal_text(item)
+                    )
+                    print(f"- {rendered}")
             else:
                 print("- (none)")
         elif isinstance(value, bool):
@@ -294,11 +354,13 @@ def layout_plan_command(args: argparse.Namespace) -> int:
                 destination=destination,
                 label="rollback manifest output",
             )
-        mappings = _read_mapping_file(Path(args.mapping_file)) if args.mapping_file else None
+        decisions = _read_mapping_file(Path(args.mapping_file)) if args.mapping_file else None
         plan = build_migration_plan(
             source,
             destination,
-            explicit_mappings=mappings,
+            explicit_mappings=decisions.mappings if decisions else None,
+            retained_sources=decisions.retained_sources if decisions else None,
+            retained_paths=decisions.retained_paths if decisions else None,
         )
         rollback = build_rollback_manifest(plan)
         if args.output:
@@ -328,6 +390,8 @@ def layout_plan_command(args: argparse.Namespace) -> int:
         print(f"source_fingerprint: {plan.source_fingerprint}")
         print(f"source_files: {plan.source_file_count}")
         print(f"source_bytes: {plan.source_bytes}")
+        print(f"copy_files: {plan.copy_file_count}")
+        print(f"copy_bytes: {plan.copy_bytes}")
         print(f"operations: {len(plan.operations)}")
         if plan.explicit_mappings:
             print("explicit_mappings:")
@@ -335,6 +399,14 @@ def layout_plan_command(args: argparse.Namespace) -> int:
                 print(
                     f"- {_terminal_text(mapping.source)} -> {_terminal_text(mapping.destination)}"
                 )
+        if plan.retained_sources:
+            print("source_only_top_level_exclusions:")
+            for retained in plan.retained_sources:
+                print(f"- {_terminal_text(retained.source)} — {_terminal_text(retained.reason)}")
+        if plan.retained_paths:
+            print("source_only_nested_exclusions:")
+            for retained in plan.retained_paths:
+                print(f"- {_terminal_text(retained.source)} — {_terminal_text(retained.reason)}")
         if plan.blocking_entries:
             print("blocking_entries:")
             for entry in plan.blocking_entries:
@@ -438,7 +510,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     plan.add_argument(
         "--mapping-file",
-        help="Reviewed schema-v1 JSON mappings for exact unknown top-level names.",
+        help=("Reviewed schema-v1/v2 JSON decisions for mappings and source-only exclusions."),
     )
     plan.add_argument("--output", help="Write the private JSON migration plan atomically.")
     plan.add_argument(
@@ -452,7 +524,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         "migrate",
         help="Preview or human-confirm creation of a separate v2 candidate.",
     )
-    migrate.add_argument("--plan", required=True, help="Private schema-v2 plan path.")
+    migrate.add_argument(
+        "--plan",
+        required=True,
+        help="Private supported migration plan path.",
+    )
     migrate.add_argument(
         "--apply",
         action="store_true",

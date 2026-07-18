@@ -289,20 +289,20 @@ access is limited to the current registered project plus `common`; a central
 context path by itself does not authorize every project.
 
 `layout audit` is read-only. `layout plan` writes an atomic, mode-`0600`,
-schema-v2 plan that is hash-bound to the exact source inventory; it
-does not move data. The destination must be separate from the source and must
-not exist. Unknown top-level entries stay blocking unless `--mapping-file`
-maps their exact names to `<category>/common/...` or
-`.afs/compat/imported/...`; generic mappings cannot select nested paths or use
-globs.
+hash-bound plan and does not move data. Copy-only plans use schema v2; a plan
+with reviewed source-only exclusions uses schema v3. Existing schema-v2 plans
+remain loadable. The destination must be separate from the source and must not
+exist. Unknown top-level entries stay blocking unless `--mapping-file` maps
+their exact names to `<category>/common/...` or `.afs/compat/imported/...`, or
+records them as source-only. Generic mappings cannot select nested paths or
+use globs.
 
 The mapping file, plan output, and optional rollback output must use three
 distinct paths outside both the source and candidate roots. This prevents a
 planning artifact from invalidating the source fingerprint or leaking into
 the copied candidate.
 
-The mapping file is strict schema-v1 JSON with this exact shape; its schema is
-independent of the schema-v2 migration plan:
+The strict schema-v1 mapping format remains accepted for copy-only decisions:
 
 ```json
 {
@@ -313,16 +313,55 @@ independent of the schema-v2 migration plan:
 }
 ```
 
+Mapping schema v2 adds exact, reason-bearing exclusions:
+
+```json
+{
+  "schema_version": 2,
+  "mappings": {
+    "AFS_SPEC.md": "knowledge/common/specs/AFS_SPEC.md"
+  },
+  "retained_sources": {
+    "legacy-projects": "Requires project-scoped import before cutover"
+  },
+  "retained_paths": {
+    "knowledge/skills": "Recreate this link from the v2 tool registry"
+  }
+}
+```
+
+`retained_sources` accepts exact unknown top-level names. `retained_paths`
+accepts normalized nested paths below a copied top-level operation. Each value
+is a non-empty reviewed reason. These are **source-only exclusions**: the
+named file or subtree remains in the untouched v1 source and is not copied
+into the candidate. Entries must exist and may not overlap.
+
+Exclusions remain part of the whole-source fingerprint, so any content or
+metadata drift still invalidates the plan. Explicitly excluded links are
+hashed as link metadata without following them. Unreviewed links and copied
+non-portable names fail closed; a link or non-portable name is accepted only
+inside an exclusion. Hard links and special files remain blocked. Stop active
+writers before planning, previewing, and applying.
+
+Plan fields `source_file_count` and `source_bytes` cover the whole source.
+Schema-v3 `copy_file_count` and `copy_bytes` cover only candidate data;
+preflight capacity uses `copy_bytes`. Text and JSON preview distinguish these
+totals and list the reviewed exclusions. Schema-v1 mapping files and
+schema-v2 migration plans remain backward compatible.
+
 `layout migrate --plan PLAN` is also read-only by default: it verifies and
 previews the transaction without creating the destination. Applying requires
 both `--apply --because "..."` and confirmation through the controlling
-terminal. Piped input and headless agents cannot confirm. Nested links and
-special files block; the v1 source is never modified or deleted; and the v2
-layout marker is published only after every copy verifies. A caught
-pre-marker apply failure is moved to an adjacent `.failed-*` path when that
-quarantine rename succeeds. A hard process or host interruption may instead
-leave an unmarked partial tree at the requested destination; inspect and move
-it explicitly before retrying.
+terminal. The confirmation separates whole-source totals from candidate copy
+totals and lists every path and reason that will remain source-only. Piped
+input and headless agents cannot confirm. Unreviewed links, copied
+non-portable names, hard links, and special files block; the v1 source is never
+modified or deleted; and the v2 layout marker is published only after every
+copy verifies.
+A caught pre-marker apply failure is moved to an adjacent `.failed-*` path
+when that quarantine rename succeeds. A hard process or host interruption may
+instead leave an unmarked partial tree at the requested destination; inspect
+and move it explicitly before retrying.
 
 On Windows, `layout audit` and `layout plan` remain available, but
 `layout migrate` preview and apply fail preflight closed. The executor cannot
