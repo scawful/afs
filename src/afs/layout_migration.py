@@ -22,7 +22,7 @@ import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -84,6 +84,18 @@ class MigrationApplyError(LayoutMigrationError):
 
 
 @dataclass(frozen=True)
+class _Retention:
+    source_relative: Path
+    reason: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "source": self.source_relative.as_posix(),
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
 class MigrationPreflight:
     """Read-only evidence that a migration plan is presently executable."""
 
@@ -95,7 +107,11 @@ class MigrationPreflight:
     available_bytes: int
     source_file_count: int
     source_bytes: int
+    copy_file_count: int
+    copy_bytes: int
     mapping_count: int
+    retained_sources: tuple[_Retention, ...] = ()
+    retained_paths: tuple[_Retention, ...] = ()
     status: Literal["ready", "already_applied"] = "ready"
 
     def to_dict(self) -> dict[str, Any]:
@@ -106,7 +122,7 @@ class MigrationPreflight:
             }
             for operation in _operations(self.plan, self.source_root, self.destination_root)
         ]
-        return {
+        payload: dict[str, Any] = {
             "status": self.status,
             "transaction_id": str(self.plan.transaction_id),
             "plan_sha256": self.plan_hash,
@@ -123,6 +139,18 @@ class MigrationPreflight:
             "required_bytes": self.required_bytes,
             "available_bytes": self.available_bytes,
         }
+        if _plan_schema_version(self.plan) == 3:
+            payload.update(
+                {
+                    "copy_files": self.copy_file_count,
+                    "copy_bytes": self.copy_bytes,
+                    "retained_source_count": len(self.retained_sources),
+                    "retained_path_count": len(self.retained_paths),
+                    "retained_sources": [item.to_dict() for item in self.retained_sources],
+                    "retained_paths": [item.to_dict() for item in self.retained_paths],
+                }
+            )
+        return payload
 
 
 @dataclass(frozen=True)
@@ -137,11 +165,16 @@ class MigrationResult:
     source_fingerprint: str
     source_file_count: int
     source_bytes: int
+    copy_file_count: int
+    copy_bytes: int
     operation_count: int
     receipt_path: Path
+    plan_schema_version: int = 2
+    retained_sources: tuple[_Retention, ...] = ()
+    retained_paths: tuple[_Retention, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "status": self.status,
             "plan_sha256": self.plan_hash,
             "plan_hash": self.plan_hash,
@@ -155,6 +188,18 @@ class MigrationResult:
             "operations": self.operation_count,
             "receipt_path": str(self.receipt_path),
         }
+        if self.plan_schema_version == 3:
+            payload.update(
+                {
+                    "copy_files": self.copy_file_count,
+                    "copy_bytes": self.copy_bytes,
+                    "retained_source_count": len(self.retained_sources),
+                    "retained_path_count": len(self.retained_paths),
+                    "retained_sources": [item.to_dict() for item in self.retained_sources],
+                    "retained_paths": [item.to_dict() for item in self.retained_paths],
+                }
+            )
+        return payload
 
 
 @dataclass(frozen=True)
@@ -221,7 +266,7 @@ def _load_plan(value: Any) -> Any:
     if isinstance(value, (str, os.PathLike)):
         loader = getattr(context_layout, "load_migration_plan", None)
         if loader is None:
-            raise MigrationPreflightError("schema-v2 migration plan loading is unavailable")
+            raise MigrationPreflightError("migration plan loading is unavailable")
         try:
             return loader(Path(value))
         except (OSError, TypeError, ValueError) as exc:
@@ -277,6 +322,117 @@ def _relative_path(value: Any, *, field_name: str) -> Path:
     for part in candidate.parts:
         _validate_name(part)
     return candidate
+
+
+def _plan_schema_version(plan: Any) -> int:
+    value = getattr(plan, "schema_version", None)
+    if type(value) is not int or value not in {2, 3}:
+        raise MigrationPreflightError("migration execution requires a schema-v2 or schema-v3 plan")
+    return value
+
+
+def _retained_relative_path(value: Any, *, field_name: str) -> Path:
+    if not isinstance(value, str) or not value or "\\" in value or "\x00" in value:
+        raise MigrationPreflightError(f"{field_name} must be a safe relative POSIX path")
+    candidate = PurePosixPath(value)
+    if (
+        candidate.is_absolute()
+        or candidate.as_posix() != value
+        or value in {".", ".."}
+        or ".." in candidate.parts
+        or any(unicodedata.category(character).startswith("C") for character in value)
+    ):
+        raise MigrationPreflightError(f"{field_name} must be a normalized relative POSIX path")
+    return Path(*candidate.parts)
+
+
+def _retentions(plan: Any, field_name: str) -> tuple[_Retention, ...]:
+    schema_version = _plan_schema_version(plan)
+    raw = getattr(plan, field_name, None)
+    if raw is None:
+        raw = _payload(plan).get(field_name, ())
+    if not isinstance(raw, (list, tuple)):
+        raise MigrationPreflightError(f"migration plan {field_name} must be a sequence")
+    result: list[_Retention] = []
+    for item in raw:
+        data = _payload(item) if not isinstance(item, dict) else item
+        if set(data) != {"source", "reason"}:
+            raise MigrationPreflightError(
+                f"migration plan {field_name} entries require only source and reason"
+            )
+        source = _retained_relative_path(
+            data.get("source"),
+            field_name=f"migration plan {field_name} source",
+        )
+        reason = data.get("reason")
+        if (
+            not isinstance(reason, str)
+            or not reason
+            or reason != reason.strip()
+            or len(reason) > 1024
+            or any(unicodedata.category(character).startswith("C") for character in reason)
+        ):
+            raise MigrationPreflightError(
+                f"migration plan {field_name} reason must be reviewed non-empty text"
+            )
+        if field_name == "retained_sources" and len(source.parts) != 1:
+            raise MigrationPreflightError(
+                "migration plan retained_sources entries must be top-level paths"
+            )
+        if field_name == "retained_paths" and len(source.parts) < 2:
+            raise MigrationPreflightError(
+                "migration plan retained_paths entries must be nested paths"
+            )
+        result.append(_Retention(source, reason))
+    ordered = tuple(sorted(result, key=lambda item: item.source_relative.as_posix()))
+    if tuple(result) != ordered:
+        raise MigrationPreflightError(f"migration plan {field_name} must be sorted")
+    paths = [item.source_relative.parts for item in ordered]
+    if len(set(paths)) != len(paths):
+        raise MigrationPreflightError(f"migration plan {field_name} paths must be unique")
+    for index, first in enumerate(paths):
+        for second in paths[index + 1 :]:
+            if first[: len(second)] == second or second[: len(first)] == first:
+                raise MigrationPreflightError(f"migration plan {field_name} paths must not overlap")
+    if schema_version == 2 and ordered:
+        raise MigrationPreflightError("schema-v2 migration plans cannot retain source paths")
+    return ordered
+
+
+def _all_retained_paths(plan: Any) -> tuple[str, ...]:
+    return tuple(
+        item.source_relative.as_posix()
+        for item in (*_retentions(plan, "retained_sources"), *_retentions(plan, "retained_paths"))
+    )
+
+
+def _validate_retention_spellings(plan: Any, source_root: Path) -> None:
+    for item in (*_retentions(plan, "retained_sources"), *_retentions(plan, "retained_paths")):
+        try:
+            context_layout._resolve_exact_retention_path(
+                source_root,
+                item.source_relative.as_posix(),
+                field_name="retained source",
+            )
+        except (OSError, ValueError) as exc:
+            raise MigrationPreflightError(f"invalid source-only exclusion: {exc}") from exc
+
+
+def _operation_retained_paths(plan: Any, operation: _Operation) -> tuple[Path, ...]:
+    root = operation.source_relative.parts[0]
+    return tuple(
+        Path(*item.source_relative.parts[1:])
+        for item in _retentions(plan, "retained_paths")
+        if item.source_relative.parts[0] == root
+    )
+
+
+def _is_retained_path(relative: Path, retained_paths: tuple[Path, ...]) -> bool:
+    if relative == Path("."):
+        return False
+    return any(
+        relative.parts[: len(retained.parts)] == retained.parts for retained in retained_paths
+    )
 
 
 def _mappings(plan: Any) -> tuple[_Mapping, ...]:
@@ -366,7 +522,14 @@ def _lstat(path: Path, *, label: str) -> os.stat_result:
     return value
 
 
-def _walk_source(path: Path, *, relative: Path = Path(".")) -> Iterator[_Entry]:
+def _walk_source(
+    path: Path,
+    *,
+    relative: Path = Path("."),
+    retained_paths: tuple[Path, ...] = (),
+) -> Iterator[_Entry]:
+    if _is_retained_path(relative, retained_paths):
+        return
     path_stat = _lstat(path, label="migration source")
     if stat.S_ISREG(path_stat.st_mode):
         if path_stat.st_nlink != 1:
@@ -382,9 +545,15 @@ def _walk_source(path: Path, *, relative: Path = Path(".")) -> Iterator[_Entry]:
     except OSError as exc:
         raise MigrationPreflightError(f"cannot enumerate migration source {path}: {exc}") from exc
     for child in children:
-        _validate_name(child.name)
         child_relative = Path(child.name) if relative == Path(".") else relative / child.name
-        yield from _walk_source(Path(child.path), relative=child_relative)
+        if _is_retained_path(child_relative, retained_paths):
+            continue
+        _validate_name(child.name)
+        yield from _walk_source(
+            Path(child.path),
+            relative=child_relative,
+            retained_paths=retained_paths,
+        )
 
 
 def _scaffold_entries(transaction_id: str) -> dict[tuple[str, ...], str]:
@@ -427,6 +596,7 @@ def _validate_operation_trees(
     destination: Path,
     operations: tuple[_Operation, ...],
     transaction_id: str,
+    retained_paths: tuple[_Retention, ...] = (),
 ) -> tuple[int, int]:
     seen_sources: set[tuple[str, ...]] = set()
     targets = _scaffold_entries(transaction_id)
@@ -474,7 +644,12 @@ def _validate_operation_trees(
             )
         targets[root_key] = root_kind
         target_owners[root_key] = operation_index
-        for entry in _walk_source(source_path):
+        operation_retained = tuple(
+            Path(*item.source_relative.parts[1:])
+            for item in retained_paths
+            if item.source_relative.parts[0] == operation.source_relative.parts[0]
+        )
+        for entry in _walk_source(source_path, retained_paths=operation_retained):
             target = (
                 operation.destination_relative
                 if entry.relative == Path(".")
@@ -507,9 +682,16 @@ def _validate_operation_trees(
     return file_count, total_bytes
 
 
-def _tree_fingerprint(root: Path) -> tuple[str, int, int]:
+def _tree_fingerprint(
+    root: Path,
+    *,
+    retained_paths: tuple[str, ...] = (),
+) -> tuple[str, int, int]:
     try:
-        value = context_layout._tree_fingerprint(root)
+        if retained_paths:
+            value = context_layout._tree_fingerprint(root, retained_paths=retained_paths)
+        else:
+            value = context_layout._tree_fingerprint(root)
     except (OSError, ValueError) as exc:
         raise MigrationPreflightError(f"cannot inventory migration source: {exc}") from exc
     if isinstance(value, tuple) and len(value) == 3:
@@ -526,6 +708,7 @@ def _semantic_plan(plan: Any) -> tuple[Any, ...]:
     source = lexical_absolute(Path(str(getattr(plan, "source_root", ""))))
     destination = lexical_absolute(Path(str(plan.destination_root)))
     return (
+        _plan_schema_version(plan),
         str(getattr(plan, "source_root", "")),
         str(getattr(plan, "destination_root", "")),
         str(getattr(plan, "source_fingerprint", "")),
@@ -540,6 +723,16 @@ def _semantic_plan(plan: Any) -> tuple[Any, ...]:
             for item in _mappings(plan)
         ),
         tuple(
+            (item.source_relative.as_posix(), item.reason)
+            for item in _retentions(plan, "retained_sources")
+        ),
+        tuple(
+            (item.source_relative.as_posix(), item.reason)
+            for item in _retentions(plan, "retained_paths")
+        ),
+        int(getattr(plan, "copy_file_count", -1)),
+        int(getattr(plan, "copy_bytes", -1)),
+        tuple(
             (item.source_relative.as_posix(), item.destination_relative.as_posix())
             for item in _operations(plan, source, destination)
         ),
@@ -551,11 +744,20 @@ def _recompute_plan(plan: Any, source: Path, destination: Path) -> Any:
         mapping.source_relative.as_posix(): mapping.destination_relative.as_posix()
         for mapping in _mappings(plan)
     }
+    retained_sources = {
+        item.source_relative.as_posix(): item.reason
+        for item in _retentions(plan, "retained_sources")
+    }
+    retained_paths = {
+        item.source_relative.as_posix(): item.reason for item in _retentions(plan, "retained_paths")
+    }
     try:
         recomputed = context_layout.build_migration_plan(
             source,
             destination,
             explicit_mappings=explicit_mappings,
+            retained_sources=retained_sources,
+            retained_paths=retained_paths,
         )
     except (OSError, TypeError, ValueError) as exc:
         raise MigrationPreflightError(f"cannot recompute migration plan: {exc}") from exc
@@ -611,17 +813,28 @@ def preflight_migration(plan_or_path: Any) -> MigrationPreflight:
 
     _require_private_destination_permissions()
     plan = _load_plan(plan_or_path)
-    if getattr(plan, "schema_version", None) != 2:
-        raise MigrationPreflightError("migration execution requires a schema-v2 plan")
+    schema_version = _plan_schema_version(plan)
     if not bool(getattr(plan, "ready", False)):
         raise MigrationPreflightError("migration plan is not ready")
     if tuple(getattr(plan, "blocking_entries", ())):
         raise MigrationPreflightError("migration plan contains blocking entries")
     plan_hash = _canonical_plan_hash(plan)
+    retained_sources = _retentions(plan, "retained_sources")
+    retained_paths = _retentions(plan, "retained_paths")
     source = lexical_absolute(Path(str(getattr(plan, "source_root", ""))))
     destination = lexical_absolute(Path(str(getattr(plan, "destination_root", ""))))
     if not str(getattr(plan, "source_root", "")) or not str(getattr(plan, "destination_root", "")):
         raise MigrationPreflightError("migration plan roots are required")
+    try:
+        assert_no_linklike_components(source, boundary=Path(source.anchor), allow_missing=False)
+        assert_no_linklike_components(
+            destination.parent,
+            boundary=Path(destination.anchor),
+            allow_missing=False,
+        )
+    except (OSError, ValueError) as exc:
+        raise MigrationPreflightError(f"unsafe migration root: {exc}") from exc
+    _validate_retention_spellings(plan, source)
     completed = _completed_result(plan)
     if completed is not None:
         return MigrationPreflight(
@@ -633,18 +846,13 @@ def preflight_migration(plan_or_path: Any) -> MigrationPreflight:
             available_bytes=shutil.disk_usage(destination.parent).free,
             source_file_count=plan.source_file_count,
             source_bytes=plan.source_bytes,
+            copy_file_count=int(getattr(plan, "copy_file_count", plan.source_file_count)),
+            copy_bytes=int(getattr(plan, "copy_bytes", plan.source_bytes)),
             mapping_count=len(plan.operations),
+            retained_sources=retained_sources,
+            retained_paths=retained_paths,
             status="already_applied",
         )
-    try:
-        assert_no_linklike_components(source, boundary=Path(source.anchor), allow_missing=False)
-        assert_no_linklike_components(
-            destination.parent,
-            boundary=Path(destination.anchor),
-            allow_missing=False,
-        )
-    except (OSError, ValueError) as exc:
-        raise MigrationPreflightError(f"unsafe migration root: {exc}") from exc
     source_stat = _lstat(source, label="source root")
     if not stat.S_ISDIR(source_stat.st_mode):
         raise MigrationPreflightError(f"source root is not a directory: {source}")
@@ -675,8 +883,12 @@ def preflight_migration(plan_or_path: Any) -> MigrationPreflight:
         destination,
         operations,
         transaction_id,
+        retained_paths,
     )
-    fingerprint, fingerprint_count, fingerprint_bytes = _tree_fingerprint(source)
+    fingerprint, fingerprint_count, fingerprint_bytes = _tree_fingerprint(
+        source,
+        retained_paths=_all_retained_paths(plan),
+    )
     expected_fingerprint = str(getattr(plan, "source_fingerprint", ""))
     if (
         fingerprint != expected_fingerprint
@@ -684,7 +896,15 @@ def preflight_migration(plan_or_path: Any) -> MigrationPreflight:
         or fingerprint_bytes != int(getattr(plan, "source_bytes", -1))
     ):
         raise MigrationPreflightError("migration source changed after planning")
-    if file_count != fingerprint_count or total_bytes != fingerprint_bytes:
+    expected_copy_count = int(getattr(plan, "copy_file_count", -1))
+    expected_copy_bytes = int(getattr(plan, "copy_bytes", -1))
+    if file_count != expected_copy_count or total_bytes != expected_copy_bytes:
+        raise MigrationPreflightError(
+            "migration operations do not match the reviewed candidate copy set"
+        )
+    if schema_version == 2 and (
+        file_count != fingerprint_count or total_bytes != fingerprint_bytes
+    ):
         raise MigrationPreflightError("explicit mappings do not cover the complete source plan")
 
     _recompute_plan(plan, source, destination)
@@ -704,9 +924,13 @@ def preflight_migration(plan_or_path: Any) -> MigrationPreflight:
         destination_root=destination,
         required_bytes=required,
         available_bytes=available,
-        source_file_count=file_count,
-        source_bytes=total_bytes,
+        source_file_count=fingerprint_count,
+        source_bytes=fingerprint_bytes,
+        copy_file_count=file_count,
+        copy_bytes=total_bytes,
         mapping_count=len(operations),
+        retained_sources=retained_sources,
+        retained_paths=retained_paths,
     )
 
 
@@ -808,6 +1032,13 @@ def _completed_result(plan: Any) -> MigrationResult | None:
     if is_linklike(destination_stat) or not stat.S_ISDIR(destination_stat.st_mode):
         return None
     transaction_id = str(getattr(plan, "transaction_id", ""))
+    try:
+        plan_schema_version = _plan_schema_version(plan)
+        retained_sources = _retentions(plan, "retained_sources")
+        retained_paths = _retentions(plan, "retained_paths")
+        _validate_retention_spellings(plan, source)
+    except MigrationPreflightError:
+        return None
     receipt_path = _receipt_path(destination, transaction_id)
     try:
         receipt, receipt_stat = _read_receipt(receipt_path, boundary=destination)
@@ -830,7 +1061,10 @@ def _completed_result(plan: Any) -> MigrationResult | None:
         metadata = context_layout.LayoutMetadata.load(destination)
         plan_hash = _canonical_plan_hash(plan)
         source_stat = _lstat(source, label="source root")
-        source_fingerprint = _tree_fingerprint(source)
+        source_fingerprint = _tree_fingerprint(
+            source,
+            retained_paths=_all_retained_paths(plan),
+        )
         operations_sha256 = _verified_operations_digest(plan, source, destination)
         candidate_sha256 = _candidate_tree_digest(destination, transaction_id)
         audit = context_layout.audit_layout(destination)
@@ -886,8 +1120,13 @@ def _completed_result(plan: Any) -> MigrationResult | None:
         source_fingerprint=str(plan.source_fingerprint),
         source_file_count=int(plan.source_file_count),
         source_bytes=int(plan.source_bytes),
+        copy_file_count=int(getattr(plan, "copy_file_count", plan.source_file_count)),
+        copy_bytes=int(getattr(plan, "copy_bytes", plan.source_bytes)),
         operation_count=len(tuple(plan.operations)),
         receipt_path=receipt_path,
+        plan_schema_version=plan_schema_version,
+        retained_sources=retained_sources,
+        retained_paths=retained_paths,
     )
 
 
@@ -1067,7 +1306,12 @@ def _hash_regular_file(path: Path) -> tuple[str, int]:
         os.close(descriptor)
 
 
-def _mapped_content_fingerprint(source: Path, destination: Path) -> str:
+def _mapped_content_fingerprint(
+    source: Path,
+    destination: Path,
+    *,
+    retained_paths: tuple[Path, ...] = (),
+) -> str:
     """Verify and hash only entries owned by one source operation.
 
     A destination directory may contain additional entries owned by another
@@ -1079,6 +1323,9 @@ def _mapped_content_fingerprint(source: Path, destination: Path) -> str:
     digest = hashlib.sha256()
 
     def visit(source_path: Path, destination_path: Path, relative: str) -> None:
+        relative_path = Path(relative)
+        if _is_retained_path(relative_path, retained_paths):
+            return
         source_stat = _lstat(source_path, label="operation source verification path")
         destination_stat = _lstat(
             destination_path,
@@ -1099,8 +1346,10 @@ def _mapped_content_fingerprint(source: Path, destination: Path) -> str:
                     f"cannot verify operation directory {source_path}: {exc}"
                 ) from exc
             for child in children:
-                _validate_name(child.name)
                 child_relative = child.name if relative == "." else f"{relative}/{child.name}"
+                if _is_retained_path(Path(child_relative), retained_paths):
+                    continue
+                _validate_name(child.name)
                 visit(
                     Path(child.path),
                     destination_path / child.name,
@@ -1141,7 +1390,11 @@ def _verified_operations_digest(
     for operation in _operations(plan, source_root, destination_root):
         source = source_root / operation.source_relative
         destination = destination_root / operation.destination_relative
-        destination_digest = _mapped_content_fingerprint(source, destination)
+        destination_digest = _mapped_content_fingerprint(
+            source,
+            destination,
+            retained_paths=_operation_retained_paths(plan, operation),
+        )
         for value in (
             operation.source_relative.as_posix(),
             operation.destination_relative.as_posix(),
@@ -1199,7 +1452,16 @@ def _candidate_tree_digest(destination: Path, transaction_id: str) -> str:
     return digest.hexdigest()
 
 
-def _copy_tree(source: Path, destination: Path, *, boundary: Path) -> tuple[int, int]:
+def _copy_tree(
+    source: Path,
+    destination: Path,
+    *,
+    boundary: Path,
+    relative: Path = Path("."),
+    retained_paths: tuple[Path, ...] = (),
+) -> tuple[int, int]:
+    if _is_retained_path(relative, retained_paths):
+        return 0, 0
     source_stat = _lstat(source, label="copy source")
     if stat.S_ISREG(source_stat.st_mode):
         _ensure_private_directory(destination.parent, root=boundary)
@@ -1221,11 +1483,16 @@ def _copy_tree(source: Path, destination: Path, *, boundary: Path) -> tuple[int,
     except OSError as exc:
         raise MigrationApplyError(f"cannot enumerate copy source {source}: {exc}") from exc
     for child in children:
+        child_relative = Path(child.name) if relative == Path(".") else relative / child.name
+        if _is_retained_path(child_relative, retained_paths):
+            continue
         _validate_name(child.name)
         child_count, child_bytes = _copy_tree(
             Path(child.path),
             destination / child.name,
             boundary=boundary,
+            relative=child_relative,
+            retained_paths=retained_paths,
         )
         count += child_count
         total += child_bytes
@@ -1242,12 +1509,18 @@ def _copy_operations(preflight: MigrationPreflight) -> tuple[int, int]:
     ):
         source = preflight.source_root / operation.source_relative
         destination = preflight.destination_root / operation.destination_relative
+        retained_paths = _operation_retained_paths(preflight.plan, operation)
         copied_count, copied_bytes = _copy_tree(
             source,
             destination,
             boundary=preflight.destination_root,
+            retained_paths=retained_paths,
         )
-        _mapped_content_fingerprint(source, destination)
+        _mapped_content_fingerprint(
+            source,
+            destination,
+            retained_paths=retained_paths,
+        )
         count += copied_count
         total += copied_bytes
     return count, total
@@ -1290,6 +1563,17 @@ def _receipt_payload(
         "authorized_via": authorization.confirmed_via,
         "applied_at": context_layout._utc_now(),
     }
+    if _plan_schema_version(preflight.plan) == 3:
+        payload.update(
+            {
+                "schema_version": 2,
+                "plan_schema_version": 3,
+                "copy_file_count": preflight.copy_file_count,
+                "copy_bytes": preflight.copy_bytes,
+                "retained_sources": [item.to_dict() for item in preflight.retained_sources],
+                "retained_paths": [item.to_dict() for item in preflight.retained_paths],
+            }
+        )
     payload["receipt_sha256"] = _canonical_receipt_sha256(payload)
     return payload
 
@@ -1308,6 +1592,7 @@ def _canonical_receipt_sha256(payload: dict[str, Any]) -> str:
 
 
 def _valid_receipt_schema(receipt: dict[str, Any], plan: Any) -> bool:
+    plan_schema_version = _plan_schema_version(plan)
     expected_fields = {
         "schema_version",
         "status",
@@ -1333,29 +1618,63 @@ def _valid_receipt_schema(receipt: dict[str, Any], plan: Any) -> bool:
         "applied_at",
         "receipt_sha256",
     }
+    if plan_schema_version == 3:
+        expected_fields.update(
+            {
+                "plan_schema_version",
+                "copy_file_count",
+                "copy_bytes",
+                "retained_sources",
+                "retained_paths",
+            }
+        )
     if set(receipt) != expected_fields:
         return False
     string_fields = expected_fields - {
         "schema_version",
+        "plan_schema_version",
         "source_file_count",
         "source_bytes",
+        "copy_file_count",
+        "copy_bytes",
         "source_device",
         "source_inode",
         "source_unchanged",
+        "retained_sources",
+        "retained_paths",
     }
     if any(type(receipt[field]) is not str or not receipt[field] for field in string_fields):
         return False
     integer_fields = {
         "schema_version",
+        "plan_schema_version",
         "source_file_count",
         "source_bytes",
+        "copy_file_count",
+        "copy_bytes",
         "source_device",
         "source_inode",
     }
+    integer_fields.intersection_update(expected_fields)
     if any(type(receipt[field]) is not int or receipt[field] < 0 for field in integer_fields):
         return False
-    if receipt["schema_version"] != 1 or receipt["source_unchanged"] is not True:
+    expected_receipt_schema = 2 if plan_schema_version == 3 else 1
+    if (
+        receipt["schema_version"] != expected_receipt_schema
+        or receipt["source_unchanged"] is not True
+    ):
         return False
+    if plan_schema_version == 3:
+        expected_sources = [item.to_dict() for item in _retentions(plan, "retained_sources")]
+        expected_paths = [item.to_dict() for item in _retentions(plan, "retained_paths")]
+        if (
+            receipt.get("plan_schema_version") != 3
+            or receipt.get("copy_file_count") != getattr(plan, "copy_file_count", None)
+            or receipt.get("copy_bytes") != getattr(plan, "copy_bytes", None)
+            or receipt.get("retained_sources") != expected_sources
+            or receipt.get("retained_paths") != expected_paths
+        ):
+            return False
     if receipt["authorized_via"] != "controlling_terminal":
         return False
     if receipt["receipt_sha256"] != _canonical_receipt_sha256(receipt):
@@ -1399,7 +1718,7 @@ def apply_migration(
     authorization: HumanAuthorization,
     lock_timeout: float = _LOCK_TIMEOUT_SECONDS,
 ) -> MigrationResult:
-    """Copy one authorized schema-v2 plan to a separate destination.
+    """Copy one authorized schema-v2/v3 plan to a separate destination.
 
     The source is never written, renamed, or deleted.  The destination's
     layout marker is the final durable write, so every tree visible as v2 is
@@ -1447,11 +1766,14 @@ def apply_migration(
             _build_unmarked_scaffold(destination)
             copied_count, copied_bytes = _copy_operations(current)
             if (copied_count, copied_bytes) != (
-                current.source_file_count,
-                current.source_bytes,
+                current.copy_file_count,
+                current.copy_bytes,
             ):
                 raise MigrationApplyError("copied file totals do not match preflight evidence")
-            final_fingerprint = _tree_fingerprint(current.source_root)
+            final_fingerprint = _tree_fingerprint(
+                current.source_root,
+                retained_paths=_all_retained_paths(plan),
+            )
             expected = (
                 str(plan.source_fingerprint),
                 int(plan.source_file_count),
@@ -1516,7 +1838,13 @@ def apply_migration(
                 != operations_sha256
             ):
                 raise MigrationApplyError("operation evidence changed before marker publication")
-            if _tree_fingerprint(current.source_root) != expected:
+            if (
+                _tree_fingerprint(
+                    current.source_root,
+                    retained_paths=_all_retained_paths(plan),
+                )
+                != expected
+            ):
                 raise MigrationApplyError("source changed before final marker publication")
             final_result = MigrationResult(
                 status="applied",
@@ -1527,8 +1855,13 @@ def apply_migration(
                 source_fingerprint=str(plan.source_fingerprint),
                 source_file_count=current.source_file_count,
                 source_bytes=current.source_bytes,
+                copy_file_count=current.copy_file_count,
+                copy_bytes=current.copy_bytes,
                 operation_count=current.mapping_count,
                 receipt_path=receipt_path,
+                plan_schema_version=_plan_schema_version(plan),
+                retained_sources=current.retained_sources,
+                retained_paths=current.retained_paths,
             )
             atomic_write_text(
                 marker,

@@ -547,6 +547,30 @@ class MigrationMapping:
         return cls(source, destination)
 
 
+@dataclass(frozen=True, order=True)
+class MigrationRetention:
+    """A reviewed source path deliberately left outside the v2 candidate."""
+
+    source: str
+    reason: str
+
+    def to_dict(self) -> dict[str, str]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: object) -> MigrationRetention:
+        payload = _strict_object(
+            data,
+            expected={"source", "reason"},
+            label="migration retention",
+        )
+        source = _strict_string(payload, "source", label="migration retention")
+        reason = _strict_string(payload, "reason", label="migration retention")
+        _validate_relative_source_path(source, field_name="retained source path")
+        _validate_retention_reason(reason)
+        return cls(source, reason)
+
+
 @dataclass(frozen=True)
 class SourceInventory:
     """Stable, no-follow inventory metadata for one source tree."""
@@ -573,11 +597,15 @@ class MigrationPlan:
     ready: bool
     blocking_entries: tuple[str, ...]
     explicit_mappings: tuple[MigrationMapping, ...]
+    retained_sources: tuple[MigrationRetention, ...]
+    retained_paths: tuple[MigrationRetention, ...]
+    copy_file_count: int
+    copy_bytes: int
     operations: tuple[MigrationOperation, ...]
     plan_sha256: str
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "schema_version": self.schema_version,
             "transaction_id": self.transaction_id,
             "created_at": self.created_at,
@@ -594,6 +622,16 @@ class MigrationPlan:
             "operations": [operation.to_dict() for operation in self.operations],
             "plan_sha256": self.plan_sha256,
         }
+        if self.schema_version >= 3:
+            payload.update(
+                {
+                    "retained_sources": [item.to_dict() for item in self.retained_sources],
+                    "retained_paths": [item.to_dict() for item in self.retained_paths],
+                    "copy_file_count": self.copy_file_count,
+                    "copy_bytes": self.copy_bytes,
+                }
+            )
+        return payload
 
     def canonical_sha256(self) -> str:
         """Hash the canonical plan payload, excluding the hash field itself."""
@@ -613,6 +651,14 @@ class MigrationPlan:
 
     @classmethod
     def from_dict(cls, data: object) -> MigrationPlan:
+        if not isinstance(data, dict) or any(type(key) is not str for key in data):
+            raise ValueError("migration plan must be a JSON object with string keys")
+        raw_schema_version = data.get("schema_version")
+        if type(raw_schema_version) is not int or raw_schema_version not in {2, 3}:
+            raise ValueError(
+                f"unsupported migration plan schema_version {raw_schema_version!r}; "
+                "regenerate the plan with this AFS version"
+            )
         expected = {
             "schema_version",
             "transaction_id",
@@ -630,13 +676,17 @@ class MigrationPlan:
             "operations",
             "plan_sha256",
         }
+        if raw_schema_version == 3:
+            expected.update(
+                {
+                    "retained_sources",
+                    "retained_paths",
+                    "copy_file_count",
+                    "copy_bytes",
+                }
+            )
         payload = _strict_object(data, expected=expected, label="migration plan")
         schema_version = _strict_integer(payload, "schema_version", label="migration plan")
-        if schema_version != 2:
-            raise ValueError(
-                f"unsupported migration plan schema_version {schema_version!r}; "
-                "regenerate the plan with this AFS version"
-            )
         transaction_id = _strict_string(payload, "transaction_id", label="migration plan")
         if not re.fullmatch(r"layout_[a-f0-9]{32}", transaction_id):
             raise ValueError("migration plan transaction_id is invalid")
@@ -682,6 +732,33 @@ class MigrationPlan:
             raise ValueError("migration plan mapping sources must be unique")
         _validate_mapping_destination_collisions(explicit_mappings)
 
+        if schema_version == 3:
+            retained_sources = _retention_tuple(
+                payload,
+                "retained_sources",
+                top_level=True,
+            )
+            retained_paths = _retention_tuple(
+                payload,
+                "retained_paths",
+                top_level=False,
+            )
+            copy_file_count = _strict_nonnegative_integer(
+                payload,
+                "copy_file_count",
+                label="migration plan",
+            )
+            copy_bytes = _strict_nonnegative_integer(
+                payload,
+                "copy_bytes",
+                label="migration plan",
+            )
+        else:
+            retained_sources = ()
+            retained_paths = ()
+            copy_file_count = source_file_count
+            copy_bytes = source_bytes
+
         operations_raw = payload["operations"]
         if not isinstance(operations_raw, list):
             raise ValueError("migration plan field 'operations' must be a list")
@@ -707,6 +784,10 @@ class MigrationPlan:
             ready=ready,
             blocking_entries=blocking_entries,
             explicit_mappings=explicit_mappings,
+            retained_sources=retained_sources,
+            retained_paths=retained_paths,
+            copy_file_count=copy_file_count,
+            copy_bytes=copy_bytes,
             operations=operations,
             plan_sha256=plan_sha256,
         )
@@ -783,6 +864,30 @@ def _strict_string_tuple(
     return tuple(value)
 
 
+def _retention_tuple(
+    payload: dict[str, object],
+    field_name: str,
+    *,
+    top_level: bool,
+) -> tuple[MigrationRetention, ...]:
+    value = payload[field_name]
+    if not isinstance(value, list):
+        raise ValueError(f"migration plan field {field_name!r} must be a list")
+    result = tuple(MigrationRetention.from_dict(item) for item in value)
+    if result != tuple(sorted(result)):
+        raise ValueError(f"migration plan field {field_name!r} must be sorted")
+    if len({item.source for item in result}) != len(result):
+        raise ValueError(f"migration plan field {field_name!r} sources must be unique")
+    for item in result:
+        parts = PurePosixPath(item.source).parts
+        if top_level and len(parts) != 1:
+            raise ValueError("retained_sources entries must name one top-level source")
+        if not top_level and len(parts) < 2:
+            raise ValueError("retained_paths entries must be nested below a top-level source")
+    _validate_retention_overlaps(result, label=field_name)
+    return result
+
+
 def _validate_sha256(value: str, *, field_name: str) -> None:
     if not re.fullmatch(r"[a-f0-9]{64}", value):
         raise ValueError(f"{field_name} must be 64 lowercase hexadecimal characters")
@@ -803,6 +908,83 @@ def _validate_top_level_entry(value: str, *, field_name: str) -> None:
         raise ValueError(f"{field_name} must be one top-level entry name")
     if "/" in value or "\\" in value or "\x00" in value:
         raise ValueError(f"{field_name} must be one top-level entry name")
+
+
+def _validate_relative_source_path(value: str, *, field_name: str) -> str:
+    _reject_control_characters(value, field_name=field_name)
+    if "\\" in value or "\x00" in value:
+        raise ValueError(f"{field_name} must use a safe relative POSIX path")
+    relative = PurePosixPath(value)
+    if (
+        relative.is_absolute()
+        or value != relative.as_posix()
+        or value in {"", ".", ".."}
+        or ".." in relative.parts
+    ):
+        raise ValueError(f"{field_name} must be a normalized relative POSIX path")
+    return relative.as_posix()
+
+
+def _validate_retention_reason(value: str) -> str:
+    _reject_control_characters(value, field_name="retention reason")
+    if not value.strip():
+        raise ValueError("retention reason must be non-empty")
+    if value != value.strip():
+        raise ValueError("retention reason must not have leading or trailing whitespace")
+    if len(value) > 1024:
+        raise ValueError("retention reason must be no more than 1024 characters")
+    return value
+
+
+def _validate_retention_overlaps(
+    retentions: tuple[MigrationRetention, ...],
+    *,
+    label: str,
+) -> None:
+    sources = [item.source for item in retentions]
+    for index, first in enumerate(sources):
+        for second in sources[index + 1 :]:
+            if _paths_collide_or_overlap(first, second):
+                raise ValueError(f"{label} entries overlap: {first!r} and {second!r}")
+
+
+def _resolve_exact_retention_path(
+    source_root: Path,
+    source: str,
+    *,
+    field_name: str,
+) -> Path:
+    """Resolve a reviewed source path only when every component matches exactly."""
+
+    parts = PurePosixPath(source).parts
+    current = source_root
+    for index, part in enumerate(parts):
+        current_stat = os.lstat(current)
+        if is_linklike(current_stat) or not stat.S_ISDIR(current_stat.st_mode):
+            raise ValueError(f"{field_name} path has an unsafe parent: {source}")
+        with os.scandir(current) as iterator:
+            entries = list(iterator)
+        normalized = unicodedata.normalize("NFKC", part).casefold()
+        folded_matches = [
+            entry
+            for entry in entries
+            if unicodedata.normalize("NFKC", entry.name).casefold() == normalized
+        ]
+        exact_matches = [entry for entry in folded_matches if entry.name == part]
+        if len(folded_matches) > 1:
+            raise ValueError(f"{field_name} path spelling is ambiguous: {source}")
+        if not exact_matches:
+            if folded_matches:
+                raise ValueError(
+                    f"{field_name} path must use exact on-disk spelling: {source}"
+                )
+            raise ValueError(f"{field_name} path does not exist: {source}")
+        current = Path(exact_matches[0].path)
+        if index < len(parts) - 1:
+            candidate_stat = os.lstat(current)
+            if is_linklike(candidate_stat) or not stat.S_ISDIR(candidate_stat.st_mode):
+                raise ValueError(f"{field_name} path has an unsafe parent: {source}")
+    return current
 
 
 def _validate_explicit_destination(value: str) -> str:
@@ -895,11 +1077,26 @@ def _validate_plan_semantics(plan: MigrationPlan) -> None:
         raise ValueError("migration plan ready flag is inconsistent with blocking_entries")
 
     mapping_targets = {mapping.source: mapping.destination for mapping in plan.explicit_mappings}
+    retained_source_names = {item.source for item in plan.retained_sources}
+    retained_path_names = {item.source for item in plan.retained_paths}
     known_sources = set(_V1_MIGRATION_TARGETS)
     if known_sources.intersection(mapping_targets):
         raise ValueError("explicit mappings may only name unknown top-level entries")
-    if set(plan.blocking_entries).intersection(mapping_targets):
-        raise ValueError("mapped entries must not remain in blocking_entries")
+    if retained_source_names.intersection(known_sources):
+        raise ValueError("retained_sources may only name unknown top-level entries")
+    if retained_source_names.intersection(mapping_targets):
+        raise ValueError("a source cannot be both copied and retained")
+    if set(plan.blocking_entries).intersection(set(mapping_targets) | retained_source_names):
+        raise ValueError("reviewed entries must not remain in blocking_entries")
+    if plan.schema_version == 2 and (
+        plan.retained_sources
+        or plan.retained_paths
+        or plan.copy_file_count != plan.source_file_count
+        or plan.copy_bytes != plan.source_bytes
+    ):
+        raise ValueError("schema-v2 plans cannot contain source-retention fields")
+    if plan.copy_file_count > plan.source_file_count or plan.copy_bytes > plan.source_bytes:
+        raise ValueError("migration copy totals cannot exceed whole-source totals")
 
     operation_sources: set[str] = set()
     destination_keys: set[str] = set()
@@ -939,6 +1136,14 @@ def _validate_plan_semantics(plan: MigrationPlan) -> None:
             "explicit mappings are missing migration operations: "
             + ", ".join(sorted(missing_mapped_operations))
         )
+    if retained_path_names:
+        operation_roots = operation_sources
+        for retained_path in retained_path_names:
+            parts = PurePosixPath(retained_path).parts
+            if len(parts) < 2 or parts[0] not in operation_roots:
+                raise ValueError(
+                    "retained_paths entries must be nested below a copied source operation"
+                )
     _validate_explicit_builtin_collisions(
         plan.explicit_mappings,
         present_builtin_sources=operation_sources.intersection(known_sources),
@@ -965,8 +1170,16 @@ def _update_inventory_digest(
         digest.update(value)
 
 
-def inventory_source_tree(root: Path) -> SourceInventory:
-    """Hash a source tree without following links and reject unstable reads."""
+def inventory_source_tree(
+    root: Path,
+    *,
+    retained_paths: tuple[str, ...] = (),
+) -> SourceInventory:
+    """Hash a source tree without following links and reject unstable reads.
+
+    Link metadata is hashable only below an explicitly source-retained path;
+    links that would be copied remain a hard error.
+    """
 
     source = lexical_absolute(root)
     try:
@@ -979,6 +1192,11 @@ def inventory_source_tree(root: Path) -> SourceInventory:
     digest = hashlib.sha256()
     file_count = 0
     total_bytes = 0
+    retained_parts = tuple(PurePosixPath(item).parts for item in retained_paths)
+
+    def is_retained(relative: str) -> bool:
+        parts = PurePosixPath(relative).parts
+        return any(parts[: len(reviewed)] == reviewed for reviewed in retained_parts)
 
     def record(path: Path, relative: str) -> None:
         nonlocal file_count, total_bytes
@@ -989,9 +1207,27 @@ def inventory_source_tree(root: Path) -> SourceInventory:
         mode = str(stat.S_IMODE(before.st_mode)).encode("ascii")
         relative_bytes = os.fsencode(relative)
         if is_linklike(before):
-            raise ValueError(
-                f"symbolic links and reparse points are not executable migration sources: {relative}"
+            if not is_retained(relative):
+                raise ValueError(
+                    "symbolic links and reparse points are not executable migration "
+                    "sources unless explicitly retained in the v1 source: "
+                    f"{relative}"
+                )
+            try:
+                target = os.readlink(path)
+                after = os.lstat(path)
+            except OSError as exc:
+                raise ValueError(f"source changed while inventorying: {relative}") from exc
+            if _stat_signature(before) != _stat_signature(after):
+                raise ValueError(f"source changed while inventorying: {relative}")
+            _update_inventory_digest(
+                digest,
+                b"L",
+                relative_bytes,
+                mode,
+                os.fsencode(target),
             )
+            return
         if stat.S_ISDIR(before.st_mode):
             _update_inventory_digest(digest, b"D", relative_bytes, mode)
             try:
@@ -1066,8 +1302,12 @@ def inventory_source_tree(root: Path) -> SourceInventory:
     )
 
 
-def _tree_fingerprint(root: Path) -> tuple[str, int, int]:
-    inventory = inventory_source_tree(root)
+def _tree_fingerprint(
+    root: Path,
+    *,
+    retained_paths: tuple[str, ...] = (),
+) -> tuple[str, int, int]:
+    inventory = inventory_source_tree(root, retained_paths=retained_paths)
     return inventory.fingerprint, inventory.file_count, inventory.total_bytes
 
 
@@ -1098,11 +1338,125 @@ def _normalize_explicit_mappings(
     return mappings
 
 
+def _normalize_retentions(
+    values: Mapping[str, str] | None,
+    *,
+    field_name: str,
+    source_root: Path,
+    top_level: bool,
+    allowed_top_levels: set[str],
+) -> tuple[MigrationRetention, ...]:
+    if values is None:
+        return ()
+    if not isinstance(values, Mapping):
+        raise ValueError(f"{field_name} must map source paths to review reasons")
+    normalized: list[MigrationRetention] = []
+    for raw_source, raw_reason in values.items():
+        if type(raw_source) is not str or type(raw_reason) is not str:
+            raise ValueError(f"{field_name} paths and reasons must be strings")
+        source = _validate_relative_source_path(raw_source, field_name=field_name)
+        reason = _validate_retention_reason(raw_reason)
+        parts = PurePosixPath(source).parts
+        if top_level and len(parts) != 1:
+            raise ValueError(f"{field_name} entries must name one top-level source")
+        if not top_level and len(parts) < 2:
+            raise ValueError(f"{field_name} entries must be nested below a top-level source")
+        if parts[0] not in allowed_top_levels:
+            allowed = ", ".join(sorted(allowed_top_levels)) or "(none)"
+            raise ValueError(
+                f"{field_name} entry {source!r} is not below an allowed source: {allowed}"
+            )
+        _resolve_exact_retention_path(
+            source_root,
+            source,
+            field_name=field_name,
+        )
+        normalized.append(MigrationRetention(source, reason))
+    result = tuple(sorted(normalized))
+    if len({item.source for item in result}) != len(result):
+        raise ValueError(f"{field_name} sources must be unique")
+    _validate_retention_overlaps(result, label=field_name)
+    return result
+
+
+def _validate_portable_migration_name(name: str) -> None:
+    if name in {"", ".", ".."}:
+        raise ValueError(f"unsafe migration path name: {name!r}")
+    if name[-1:] in {" ", "."}:
+        raise ValueError(f"non-portable trailing character in migration path name: {name!r}")
+    if any(unicodedata.category(character).startswith("C") for character in name):
+        raise ValueError(f"control or formatting character in migration path name: {name!r}")
+    if any(character in '<>:"/\\|?*' for character in name):
+        raise ValueError(f"non-portable character in migration path name: {name!r}")
+    stem = name.split(".", 1)[0].casefold()
+    reserved = {"con", "prn", "aux", "nul"}.union(
+        {f"com{number}" for number in range(1, 10)},
+        {f"lpt{number}" for number in range(1, 10)},
+    )
+    if stem in reserved:
+        raise ValueError(f"reserved migration path name: {name!r}")
+
+
+def _copy_inventory(
+    source_root: Path,
+    operations: tuple[MigrationOperation, ...],
+    retained_paths: tuple[MigrationRetention, ...],
+) -> tuple[int, int]:
+    retained_parts = tuple(PurePosixPath(item.source).parts for item in retained_paths)
+    file_count = 0
+    total_bytes = 0
+
+    def is_retained(parts: tuple[str, ...]) -> bool:
+        return any(parts[: len(reviewed)] == reviewed for reviewed in retained_parts)
+
+    def visit(path: Path, relative_parts: tuple[str, ...]) -> None:
+        nonlocal file_count, total_bytes
+        if is_retained(relative_parts):
+            return
+        _validate_portable_migration_name(relative_parts[-1])
+        before = os.lstat(path)
+        if is_linklike(before):
+            raise ValueError(
+                "symbolic links and reparse points are not executable migration "
+                "sources unless explicitly retained in the v1 source: "
+                f"{'/'.join(relative_parts)}"
+            )
+        if stat.S_ISREG(before.st_mode):
+            if before.st_nlink != 1:
+                raise ValueError(
+                    "hard-linked files are not executable migration sources: "
+                    f"{'/'.join(relative_parts)}"
+                )
+            file_count += 1
+            total_bytes += before.st_size
+            return
+        if not stat.S_ISDIR(before.st_mode):
+            raise ValueError(
+                f"unsupported special file in migration source: {'/'.join(relative_parts)}"
+            )
+        children = sorted(os.scandir(path), key=lambda entry: os.fsencode(entry.name))
+        for child in children:
+            visit(Path(child.path), (*relative_parts, child.name))
+        after = os.lstat(path)
+        if _stat_signature(before) != _stat_signature(after):
+            raise ValueError(
+                f"source changed while inventorying copy set: {'/'.join(relative_parts)}"
+            )
+
+    for operation in operations:
+        operation_source = Path(operation.source)
+        relative = operation_source.relative_to(source_root)
+        visit(operation_source, relative.parts)
+    return file_count, total_bytes
+
+
 def build_migration_plan(
     context_root: Path,
     destination_root: Path,
     *,
     explicit_mappings: Mapping[str, str] | None = None,
+    retained_sources: Mapping[str, str] | None = None,
+    retained_paths: Mapping[str, str] | None = None,
 ) -> MigrationPlan:
     """Build a hash-bound v1-to-v2 plan; never execute its operations."""
 
@@ -1139,6 +1493,13 @@ def build_migration_plan(
         explicit_mappings,
         unknown_entries=audit.unknown_entries,
     )
+    retained_source_records = _normalize_retentions(
+        retained_sources,
+        field_name="retained_sources",
+        source_root=source,
+        top_level=True,
+        allowed_top_levels=set(audit.unknown_entries),
+    )
     present_builtin_sources = {
         entry.name for entry in source.iterdir() if entry.name in _V1_MIGRATION_TARGETS
     }
@@ -1147,19 +1508,24 @@ def build_migration_plan(
         present_builtin_sources=present_builtin_sources,
     )
     mapping_targets = {mapping.source: mapping.destination for mapping in mappings}
+    retained_source_names = {item.source for item in retained_source_records}
+    overlap = set(mapping_targets).intersection(retained_source_names)
+    if overlap:
+        raise ValueError(
+            "entries cannot be both copied and source-retained: " + ", ".join(sorted(overlap))
+        )
+    reviewed_unknowns = set(mapping_targets) | retained_source_names
     blocking_entries = tuple(
         sorted(
             {
                 issue.path
                 for issue in audit.issues
-                if issue.blocking and issue.path
-                and not (
-                    issue.code == "unknown_entry" and issue.path in mapping_targets
-                )
+                if issue.blocking
+                and issue.path
+                and not (issue.code == "unknown_entry" and issue.path in reviewed_unknowns)
             }
         )
     )
-    inventory = inventory_source_tree(source)
     operations: list[MigrationOperation] = []
     for entry in sorted(source.iterdir(), key=lambda item: item.name):
         target = _V1_MIGRATION_TARGETS.get(entry.name) or mapping_targets.get(entry.name)
@@ -1175,8 +1541,30 @@ def build_migration_plan(
                 destination=str(destination_path),
             )
         )
+    operation_tuple = tuple(operations)
+    operation_roots = {Path(operation.source).name for operation in operation_tuple}
+    retained_path_records = _normalize_retentions(
+        retained_paths,
+        field_name="retained_paths",
+        source_root=source,
+        top_level=False,
+        allowed_top_levels=operation_roots,
+    )
+    retained_inventory_paths = tuple(
+        item.source for item in (*retained_source_records, *retained_path_records)
+    )
+    inventory = inventory_source_tree(
+        source,
+        retained_paths=retained_inventory_paths,
+    )
+    copy_file_count, copy_bytes = _copy_inventory(
+        source,
+        operation_tuple,
+        retained_path_records,
+    )
+    schema_version = 3 if retained_inventory_paths else 2
     plan = MigrationPlan(
-        schema_version=2,
+        schema_version=schema_version,
         transaction_id=f"layout_{uuid4().hex}",
         created_at=_utc_now(),
         source_root=str(source),
@@ -1189,7 +1577,11 @@ def build_migration_plan(
         ready=not blocking_entries,
         blocking_entries=blocking_entries,
         explicit_mappings=mappings,
-        operations=tuple(operations),
+        retained_sources=retained_source_records,
+        retained_paths=retained_path_records,
+        copy_file_count=copy_file_count,
+        copy_bytes=copy_bytes,
+        operations=operation_tuple,
         plan_sha256="",
     )
     return plan.with_canonical_hash()
@@ -1265,6 +1657,11 @@ def load_migration_plan(path: Path) -> MigrationPlan:
         raise ValueError(f"invalid migration plan JSON: {exc}") from exc
     plan = MigrationPlan.from_dict(payload)
     source_root = Path(plan.source_root)
+    assert_no_linklike_components(
+        source_root,
+        boundary=Path(source_root.anchor),
+        allow_missing=False,
+    )
     source_stat = os.lstat(source_root)
     if is_linklike(source_stat) or not stat.S_ISDIR(source_stat.st_mode):
         raise ValueError("migration plan source_root is no longer a regular directory")
@@ -1273,12 +1670,26 @@ def load_migration_plan(path: Path) -> MigrationPlan:
     audit = audit_layout(source_root)
     actual_unknown = set(audit.unknown_entries)
     mapped_sources = {mapping.source for mapping in plan.explicit_mappings}
+    retained_source_names = {item.source for item in plan.retained_sources}
+    for retained in (*plan.retained_sources, *plan.retained_paths):
+        _resolve_exact_retention_path(
+            source_root,
+            retained.source,
+            field_name="retained source",
+        )
     for mapping in plan.explicit_mappings:
         if mapping.source not in actual_unknown:
             raise ValueError(
                 "explicit migration mapping source is not currently an unknown "
                 f"top-level entry: {mapping.source}"
             )
+    for retained in plan.retained_sources:
+        if retained.source not in actual_unknown:
+            raise ValueError(
+                "retained migration source is not currently an unknown top-level "
+                f"entry: {retained.source}"
+            )
+    reviewed_unknowns = mapped_sources | retained_source_names
     expected_blocking = tuple(
         sorted(
             {
@@ -1286,7 +1697,7 @@ def load_migration_plan(path: Path) -> MigrationPlan:
                 for issue in audit.issues
                 if issue.blocking
                 and issue.path
-                and not (issue.code == "unknown_entry" and issue.path in mapped_sources)
+                and not (issue.code == "unknown_entry" and issue.path in reviewed_unknowns)
             }
         )
     )
@@ -1296,6 +1707,7 @@ def load_migration_plan(path: Path) -> MigrationPlan:
         str(entry)
         for entry in source_root.iterdir()
         if entry.name not in expected_blocking
+        and entry.name not in retained_source_names
         and (entry.name in _V1_MIGRATION_TARGETS or entry.name in mapped_sources)
     }
     actual_operation_sources = {operation.source for operation in plan.operations}
