@@ -168,7 +168,11 @@ afs repair                            # Friendly alias for `afs doctor`
 afs context discover                  # Find existing context roots
 afs context init --layout-version 2 --path "$PWD" # Fresh central v2 root
 afs layout audit --context-root ~/.context         # Read-only inspection
-afs layout plan --context-root ~/.context          # Manifest only; no apply
+afs layout plan --context-root /path/to/v1-context \
+  --destination-root /path/to/new-v2-context \
+  --mapping-file /private/path/layout-mappings.json \
+  --output /private/path/migration-plan.json        # Private, hash-bound plan
+afs layout migrate --plan /private/path/migration-plan.json # Read-only preview
 afs status --start-dir "$PWD"         # Show mount status and index health
 afs context query "search term"       # Search the context index
 afs sources list                      # Extension-owned context source providers
@@ -177,6 +181,17 @@ afs context diff                      # Changes since last session
 afs session pack --model gemini       # Local-first token-budgeted context export
 afs session pack "query" --semantic   # Explicitly permit remote query embeddings
 ```
+
+Layout migration only writes to a separate, nonexistent destination and
+never modifies or deletes the v1 source. Applying a reviewed plan requires
+`afs layout migrate --plan PLAN --apply --because "..."` plus controlling-
+terminal confirmation. A successful apply creates a verified candidate; it
+does not activate, swap, roll back, or clean up context roots automatically.
+On Windows, audit and planning remain available but `layout migrate` is
+blocked until the executor can establish and verify private DACLs.
+See [Central Context Layout v2](docs/CONTEXT_LAYOUT_V2.md) for mapping limits
+and failure handling. The example does not assert that a live `~/.context` is
+ready or migrated.
 
 Context-source sync is v1-only today. Version 2 keeps provider list/status
 read-only and rejects sync before provider invocation until scoped ingestion
