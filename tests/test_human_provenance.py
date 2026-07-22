@@ -4,6 +4,9 @@ import builtins
 import copy
 import dataclasses
 import io
+import os
+import select
+import threading
 
 import pytest
 
@@ -128,6 +131,49 @@ def test_broker_fails_closed_when_os_identity_is_unavailable() -> None:
 
     assert broker.confirm_token("expected", "prompt", scope=scope) is None
     assert broker.read_line("prompt", scope=scope) is None
+
+
+@pytest.mark.skipif(not hasattr(os, "openpty"), reason="POSIX PTY required")
+def test_posix_terminal_backend_reads_nonseekable_pty() -> None:
+    master, slave = os.openpty()
+    result: list[str | None] = []
+    try:
+        reader = provenance.default_terminal_reader(os.ttyname(slave))
+        worker = threading.Thread(
+            target=lambda: result.append(reader("prompt: ")), daemon=True
+        )
+        worker.start()
+        prompt = b""
+        while len(prompt) < len("prompt: "):
+            readable, _, _ = select.select([master], [], [], 2)
+            assert readable
+            prompt += os.read(master, len("prompt: ") - len(prompt))
+        assert prompt == b"prompt: "
+        os.write(master, b"confirmed\n")
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+        assert result == ["confirmed"]
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_terminal_path_refuses_regular_file_without_mutation(tmp_path) -> None:  # noqa: ANN001
+    ordinary = tmp_path / "not-a-terminal.txt"
+    ordinary.write_text("preserve me", encoding="utf-8")
+
+    assert provenance.default_terminal_reader(str(ordinary))("prompt: ") is None
+    assert ordinary.read_text(encoding="utf-8") == "preserve me"
+
+
+def test_terminal_path_refuses_symlink_without_mutation(tmp_path) -> None:  # noqa: ANN001
+    ordinary = tmp_path / "not-a-terminal.txt"
+    ordinary.write_text("preserve me", encoding="utf-8")
+    link = tmp_path / "terminal-link"
+    link.symlink_to(ordinary)
+
+    assert provenance.default_terminal_reader(str(link))("prompt: ") is None
+    assert ordinary.read_text(encoding="utf-8") == "preserve me"
 
 
 def test_windows_console_backend_uses_conin_and_conout(monkeypatch) -> None:
