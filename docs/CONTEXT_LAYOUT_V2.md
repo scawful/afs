@@ -301,14 +301,69 @@ in a controlled maintenance window. Recognition of an already completed
 candidate is valid only while the source still matches the identity and
 fingerprint captured by the reviewed plan.
 
-Successful migration creates a verified v2 candidate only. Activating or
-swapping it into use, rolling back an activation, and cleaning up either the
-source or a `.failed-*` tree are separate future human-gated operations.
+Successful migration creates a verified v2 candidate only. Activation remains
+a separate, preview-first, human-gated transaction:
 
-Any rollback manifest emitted for compatibility is informational and records
-source preservation. It does not restore, overwrite, or delete data. Because
-the source remains untouched and activation is not automatic, there is no
-implicit restore step in `layout migrate`.
+```bash
+afs layout activate \
+  --plan /private/path/migration-plan.json \
+  --state-dir /private/path/activation-state
+
+afs layout activate \
+  --plan /private/path/migration-plan.json \
+  --state-dir /private/path/activation-state \
+  --apply --because "Activate the fresh candidate during the maintenance window"
+```
+
+Activation keeps the configured source path stable. It uses one platform
+atomic exchange (`renamex_np(RENAME_SWAP)` on macOS or
+`renameat2(RENAME_EXCHANGE)` on Linux) so the v2 inode appears at the active
+path while the original v1 inode appears at the old candidate path. It never
+uses two sequential renames, a symlink, a copy fallback, or deletion. The two
+roots must be real sibling directories on the same filesystem, the candidate
+must be private, the configured context root must equal the planned source,
+and a private `0700` state directory must live outside both roots.
+
+Activation re-verifies the original plan, source fingerprint and inode,
+migration receipt, candidate digest, v2 audit, and root topology. It also uses
+`lsof` to reject the transition while any process has either root open. Stop
+and disable every producer before preview and keep it stopped through the
+post-activation canary. This is cooperative quiescence, not a sandbox against
+a hostile same-user process starting between checks.
+
+**Any `retained_sources` or `retained_paths` entry blocks activation.** A
+reviewed exclusion proves only that data was intentionally left in v1; it does
+not prove that its readers and writers are cut over. Build a fresh plan after
+each retained item has been imported, recreated, or explicitly archived.
+Likewise, `layout audit` validity alone is not activation readiness. A central
+v2 deployment still needs project registry records for project-scoped access,
+and repo-local `.context` directories continue to take precedence where the
+normal discovery rules select them.
+
+The external state directory holds a durable phase journal and immutable
+activation/rollback receipts. Root device and inode pairs are the recovery
+truth. If the atomic exchange succeeds but the parent sync or receipt write
+fails, the next preview reports `receipt_pending`; a newly authorized apply
+finalizes evidence without exchanging the roots a second time. Any other inode
+arrangement is a conflict and no mutation occurs.
+
+Rollback is a separate decision and preserves both trees:
+
+```bash
+afs layout rollback --state-dir /private/path/activation-state
+afs layout rollback --state-dir /private/path/activation-state \
+  --apply --because "Restore preserved v1 while retaining v2-era writes"
+```
+
+Rollback verifies the activation receipt, exact inode topology, and untouched
+inactive v1 fingerprint, then atomically exchanges the same directories back.
+All v2-era writes remain at the inactive candidate path; AFS does not merge or
+delete them. A rolled-back activation transaction cannot be replayed.
+
+Any rollback manifest emitted by `layout plan` is informational and records
+source preservation. It is not the executable activation receipt and does not
+restore, overwrite, or delete data. There is no implicit restore step in
+`layout migrate`.
 
 ### Exit codes
 
@@ -320,6 +375,13 @@ implicit restore step in `layout migrate`.
 | `2` | The plan is invalid or stale, preflight is blocked, the rationale is invalid, or human confirmation was refused or unavailable. |
 | `3` | An authorized apply started and failed. Output identifies the retained `.failed-*` path when a pre-marker tree was created and quarantined. |
 | `1` | An unexpected internal error escaped to the generic AFS CLI handler. It is not migration evidence. |
+
+`layout activate` and `layout rollback` use the same code classes: `0` for a
+ready preview or verified completed state, `2` for blocked/refused preflight,
+`3` for failure after an authorized transition starts, and `1` for an
+unexpected internal error. A code `3` can mean the atomic exchange committed
+but its receipt is pending; inspect the state directory and rerun preview
+before restarting any service.
 
 These examples describe the command contract; they do not assert that any
 particular live `~/.context` is migration-ready or has been migrated.

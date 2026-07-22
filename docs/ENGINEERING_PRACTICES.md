@@ -54,6 +54,10 @@ is for content whose torn or lost state is genuinely harmless.
 - `exclusive_create_text(path, text)` — artifacts that must never be
   overwritten (immutable revisions, one-shot claims). O_EXCL makes
   create-or-fail atomic; O_NOFOLLOW refuses planted symlinks.
+- `atomic_create_text(..., durable=True)` — immutable transaction evidence
+  whose final path must never expose partial content and whose content and
+  containing directory must be synced before success is reported (for example,
+  layout activation and rollback receipts).
 - `secure_mkdir(path, mode=0o700)` — any directory holding private state.
   `Path.mkdir(mode=..., parents=True)` applies the mode **only to the
   leaf**; intermediates get umask defaults. *Evidence: artifact and
