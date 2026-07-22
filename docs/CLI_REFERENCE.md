@@ -280,6 +280,12 @@ aliases, colors, and zsh completion without routing AI harness commands;
 ./scripts/afs layout migrate --plan /private/path/migration-plan.json
 ./scripts/afs layout migrate --plan /private/path/migration-plan.json \
   --apply --because "Create a verified v2 candidate for review"
+./scripts/afs layout activate --plan /private/path/migration-plan.json \
+  --state-dir /private/path/activation-state
+./scripts/afs layout activate --plan /private/path/migration-plan.json \
+  --state-dir /private/path/activation-state \
+  --apply --because "Activate the fresh candidate during maintenance"
+./scripts/afs layout rollback --state-dir /private/path/activation-state
 ```
 
 An explicitly marked version 2 root uses six human-facing categories:
@@ -368,14 +374,29 @@ On Windows, `layout audit` and `layout plan` remain available, but
 use `chmod` to establish or verify the required private DACLs; Windows
 migration remains unavailable until explicit DACL support lands.
 
-A successful apply produces a separate verified candidate; it does not
-activate or swap roots. Activation, rollback of a later activation, and
-source or failed-tree cleanup are separate future human-gated operations. Any
-rollback manifest emitted for compatibility is informational and documents
-that the source was preserved; it does not perform or promise data
-restoration. See [Central Context Layout v2](CONTEXT_LAYOUT_V2.md) for the
-full safety contract. These commands do not imply that the live
-`~/.context` is ready or migrated.
+A successful migrate apply produces a separate verified candidate; it does
+not activate or swap roots. `layout activate` is a separate preview-first
+command. Apply requires `--apply --because`, an exact controlling-terminal
+token, a private external `--state-dir`, stable configured root, zero retained
+source/path exclusions, no open processes below either root, and a supported
+same-filesystem atomic directory exchange. It puts v2 at the stable source
+path and preserves v1 at the old candidate path. There is no sequential-rename,
+symlink, copy, merge, or delete fallback.
+
+`layout rollback` previews from the external activation state. Its separately
+authorized apply verifies the activation receipt, inode topology, and
+preserved v1 fingerprint, then exchanges the roots back. V2-era writes remain
+at the inactive candidate path. A `receipt_pending` preview means an exchange
+committed but its immutable receipt still needs a fresh human-authorized
+finalization; it does not perform a second exchange.
+
+The rollback manifest emitted by `layout plan` remains informational and is
+not an executable rollback receipt. `layout audit` validity also does not mean
+activation readiness: central v2 project access needs registry records, and
+repo-local `.context` roots can still shadow the central root. See
+[Central Context Layout v2](CONTEXT_LAYOUT_V2.md) for the full safety
+contract. These commands do not imply that live `~/.context` is ready or
+migrated.
 
 `layout migrate` exit codes:
 
@@ -385,6 +406,13 @@ full safety contract. These commands do not imply that the live
 | `2` | Invalid or stale plan, blocked preflight, invalid rationale, or refused/unavailable human confirmation. |
 | `3` | Authorized apply failure; output includes the retained `.failed-*` destination when a pre-marker tree was quarantined. |
 | `1` | Unexpected internal failure handled by the generic CLI; never treat it as migration evidence. |
+
+`layout activate` and `layout rollback` use the same code classes. Exit `0`
+means preview-ready or a verified completed state, `2` means blocked/refused,
+`3` means an authorized transition started but did not fully record success,
+and `1` remains an unexpected internal error. After exit `3`, keep services
+stopped and rerun preview to distinguish unchanged, `receipt_pending`, and
+conflicting topology.
 
 Run migration in a controlled maintenance window with active producers and
 other writers stopped. Its checks fail closed against accidental drift,

@@ -42,9 +42,15 @@ __all__ = [
     "MigrationPreflight",
     "MigrationPreflightError",
     "MigrationResult",
+    "VerifiedMigrationCandidate",
     "apply_migration",
+    "candidate_tree_sha256",
     "layout_migration_authorization_scope",
     "preflight_migration",
+    "source_tree_fingerprint",
+    "tree_fingerprint",
+    "verify_completed_candidate",
+    "verify_relocated_candidate",
 ]
 
 _COPY_CHUNK_SIZE = 1024 * 1024
@@ -199,6 +205,39 @@ class MigrationResult:
                     "retained_paths": [item.to_dict() for item in self.retained_paths],
                 }
             )
+        return payload
+
+
+@dataclass(frozen=True)
+class VerifiedMigrationCandidate:
+    """Path-independent evidence for one completed migration candidate.
+
+    Activation deliberately moves the candidate away from the destination
+    recorded in its immutable migration receipt.  Callers must therefore
+    capture this evidence while the original source and destination paths
+    still match the reviewed plan.
+    """
+
+    result: MigrationResult
+    candidate_sha256: str
+    receipt_sha256: str
+    source_device: int
+    source_inode: int
+    candidate_device: int
+    candidate_inode: int
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = self.result.to_dict()
+        payload.update(
+            {
+                "candidate_sha256": self.candidate_sha256,
+                "migration_receipt_sha256": self.receipt_sha256,
+                "source_device": self.source_device,
+                "source_inode": self.source_inode,
+                "candidate_device": self.candidate_device,
+                "candidate_inode": self.candidate_inode,
+            }
+        )
         return payload
 
 
@@ -1128,6 +1167,155 @@ def _completed_result(plan: Any) -> MigrationResult | None:
         retained_sources=retained_sources,
         retained_paths=retained_paths,
     )
+
+
+def verify_completed_candidate(plan_or_path: Any) -> VerifiedMigrationCandidate:
+    """Return durable evidence for a fresh, fully verified candidate.
+
+    Unlike :func:`preflight_migration`, this function never treats an absent
+    destination as ready work.  It is the activation boundary: both the
+    original source and the separate destination must still match the plan
+    and the migration receipt byte-for-byte.
+    """
+
+    plan = _load_plan(plan_or_path)
+    result = _completed_result(plan)
+    if result is None:
+        raise MigrationPreflightError(
+            "migration candidate is absent, stale, or no longer fully verified"
+        )
+    source_stat = _lstat(result.source_root, label="source root")
+    candidate_stat = _lstat(result.destination_root, label="candidate root")
+    try:
+        receipt_document, _receipt_stat = _read_stable_regular(
+            result.receipt_path,
+            boundary=result.destination_root,
+            maximum_bytes=_MAX_RECEIPT_BYTES,
+            label="migration receipt",
+        )
+        candidate_sha256 = _candidate_tree_digest(
+            result.destination_root,
+            result.transaction_id,
+        )
+    except (OSError, ValueError, LayoutMigrationError) as exc:
+        raise MigrationPreflightError(f"cannot verify completed candidate: {exc}") from exc
+    return VerifiedMigrationCandidate(
+        result=result,
+        candidate_sha256=candidate_sha256,
+        receipt_sha256=hashlib.sha256(receipt_document).hexdigest(),
+        source_device=int(source_stat.st_dev),
+        source_inode=int(source_stat.st_ino),
+        candidate_device=int(candidate_stat.st_dev),
+        candidate_inode=int(candidate_stat.st_ino),
+    )
+
+
+def source_tree_fingerprint(plan_or_path: Any, source_root: Path) -> tuple[str, int, int]:
+    """Fingerprint a source-shaped tree using a plan's reviewed exclusions."""
+
+    plan = _load_plan(plan_or_path)
+    root = lexical_absolute(source_root)
+    try:
+        assert_no_linklike_components(root, boundary=Path(root.anchor), allow_missing=False)
+        _validate_retention_spellings(plan, root)
+        return _tree_fingerprint(root, retained_paths=_all_retained_paths(plan))
+    except (OSError, ValueError, LayoutMigrationError) as exc:
+        raise MigrationPreflightError(f"cannot fingerprint source tree: {exc}") from exc
+
+
+def tree_fingerprint(root: Path) -> tuple[str, int, int]:
+    """Fingerprint a complete regular-file tree without exclusions."""
+
+    source = lexical_absolute(root)
+    try:
+        assert_no_linklike_components(source, boundary=Path(source.anchor), allow_missing=False)
+        return _tree_fingerprint(source)
+    except (OSError, ValueError, LayoutMigrationError) as exc:
+        raise MigrationPreflightError(f"cannot fingerprint tree: {exc}") from exc
+
+
+def candidate_tree_sha256(root: Path, transaction_id: str) -> str:
+    """Hash a candidate tree using the migration receipt exclusion contract."""
+
+    candidate = lexical_absolute(root)
+    try:
+        assert_no_linklike_components(
+            candidate,
+            boundary=Path(candidate.anchor),
+            allow_missing=False,
+        )
+        return _candidate_tree_digest(candidate, transaction_id)
+    except (OSError, ValueError, LayoutMigrationError) as exc:
+        raise MigrationPreflightError(f"cannot fingerprint candidate tree: {exc}") from exc
+
+
+def verify_relocated_candidate(
+    plan_or_path: Any,
+    candidate_root: Path,
+    evidence: VerifiedMigrationCandidate,
+) -> None:
+    """Verify immutable candidate evidence after an atomic path relocation."""
+
+    plan = _load_plan(plan_or_path)
+    candidate = lexical_absolute(candidate_root)
+    transaction_id = str(getattr(plan, "transaction_id", ""))
+    try:
+        assert_no_linklike_components(
+            candidate,
+            boundary=Path(candidate.anchor),
+            allow_missing=False,
+        )
+        receipt_path = _receipt_path(candidate, transaction_id)
+        receipt_document, receipt_stat = _read_stable_regular(
+            receipt_path,
+            boundary=candidate,
+            maximum_bytes=_MAX_RECEIPT_BYTES,
+            label="relocated migration receipt",
+        )
+        receipt = json.loads(receipt_document.decode("utf-8"), object_pairs_hook=_receipt_object)
+        marker_path = candidate / context_layout.AFS_STATE_DIR / context_layout.LAYOUT_FILE
+        marker_document, marker_stat = _read_stable_regular(
+            marker_path,
+            boundary=candidate,
+            maximum_bytes=_MAX_MARKER_BYTES,
+            label="relocated layout marker",
+        )
+        readme_document, readme_stat = _read_stable_regular(
+            candidate / "README.md",
+            boundary=candidate,
+            maximum_bytes=_MAX_README_BYTES,
+            label="relocated layout README",
+        )
+        candidate_sha256 = _candidate_tree_digest(candidate, transaction_id)
+        metadata = context_layout.LayoutMetadata.load(candidate)
+        audit = context_layout.audit_layout(candidate)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError, LayoutMigrationError) as exc:
+        raise MigrationPreflightError(f"cannot verify relocated candidate: {exc}") from exc
+    if not isinstance(receipt, dict) or not _valid_receipt_schema(receipt, plan):
+        raise MigrationPreflightError("relocated migration receipt schema is invalid")
+    plan_hash = _canonical_plan_hash(plan)
+    marker_sha256 = hashlib.sha256(marker_document).hexdigest()
+    expected_categories = tuple(category.value for category in ContextCategory)
+    if (
+        hashlib.sha256(receipt_document).hexdigest() != evidence.receipt_sha256
+        or candidate_sha256 != evidence.candidate_sha256
+        or receipt.get("candidate_sha256") != evidence.candidate_sha256
+        or receipt.get("marker_sha256") != marker_sha256
+        or receipt.get("transaction_id") != transaction_id
+        or receipt.get("plan_hash") != plan_hash
+        or receipt.get("source_root") != str(evidence.result.source_root)
+        or receipt.get("destination_root") != str(evidence.result.destination_root)
+        or metadata is None
+        or metadata.namespace != "central"
+        or metadata.categories != expected_categories
+        or not audit.valid
+        or audit.layout_version != 2
+        or readme_document.decode("utf-8") != context_layout.LAYOUT_README
+        or _has_group_or_world_permissions(receipt_stat)
+        or _has_group_or_world_permissions(marker_stat)
+        or _has_group_or_world_permissions(readme_stat)
+    ):
+        raise MigrationPreflightError("relocated candidate evidence does not match migration")
 
 
 @contextmanager

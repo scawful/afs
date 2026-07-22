@@ -173,6 +173,8 @@ afs layout plan --context-root /path/to/v1-context \
   --mapping-file /private/path/layout-mappings.json \
   --output /private/path/migration-plan.json        # Private, hash-bound plan
 afs layout migrate --plan /private/path/migration-plan.json # Read-only preview
+afs layout activate --plan /private/path/migration-plan.json \
+  --state-dir /private/path/activation-state           # Read-only cutover preview
 afs status --start-dir "$PWD"         # Show mount status and index health
 afs context query "search term"       # Search the context index
 afs sources list                      # Extension-owned context source providers
@@ -185,8 +187,13 @@ afs session pack "query" --semantic   # Explicitly permit remote query embedding
 Layout migration only writes to a separate, nonexistent destination and
 never modifies or deletes the v1 source. Applying a reviewed plan requires
 `afs layout migrate --plan PLAN --apply --because "..."` plus controlling-
-terminal confirmation. A successful apply creates a verified candidate; it
-does not activate, swap, roll back, or clean up context roots automatically.
+terminal confirmation. A successful migrate apply creates a verified
+candidate; it does not activate or clean up context roots automatically. A
+separate `layout activate` command can atomically exchange a fresh,
+exclusion-free candidate into the stable configured path after another
+controlling-terminal decision. The original v1 tree remains intact at the
+candidate path, and `layout rollback` can exchange the roots back after its
+own human decision. Neither transition merges or deletes data.
 Mapping schema v2 can record reason-bearing `retained_sources` and
 `retained_paths`. These are source-only exclusions and are not copied into the
 candidate; plans containing them use schema v3, while mapping schema v1 and
@@ -197,6 +204,11 @@ non-portable names are allowed only inside explicit exclusions.
 
 On Windows, audit and planning remain available but `layout migrate` is
 blocked until the executor can establish and verify private DACLs.
+Activation additionally requires a supported atomic directory-exchange syscall
+(`renamex_np(RENAME_SWAP)` on macOS or `renameat2(RENAME_EXCHANGE)` on Linux),
+same-parent roots, a private external state directory, stable configuration,
+and proof that no process has either tree open. Plans with any retained source
+or path are not activation-ready.
 See [Central Context Layout v2](docs/CONTEXT_LAYOUT_V2.md) for mapping limits
 and failure handling. The example does not assert that a live `~/.context` is
 ready or migrated.

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..config import load_runtime_config_model
 from ..context_layout import (
     MigrationPlan,
     audit_layout,
@@ -20,7 +21,24 @@ from ..context_layout import (
     load_migration_plan,
     write_manifest,
 )
+from ..core import resolve_context_root
 from ..human_provenance import _broker_for_reader
+from ..layout_activation import (
+    ActivationApplyError,
+    ActivationPreflight,
+    ActivationPreflightError,
+    RollbackApplyError,
+    RollbackPreflight,
+    RollbackPreflightError,
+    activate_layout,
+    activation_confirmation_token,
+    layout_activation_authorization_scope,
+    layout_rollback_authorization_scope,
+    preflight_activation,
+    preflight_rollback,
+    rollback_confirmation_token,
+    rollback_layout,
+)
 from ..layout_migration import (
     MigrationApplyError,
     MigrationPreflightError,
@@ -215,6 +233,40 @@ def _rationale(args: argparse.Namespace) -> str | None:
             {
                 "status": "blocked",
                 "error": "Layout migration rationale must not contain control or "
+                "formatting characters.",
+            },
+            as_json=args.json,
+        )
+        return None
+    return rationale
+
+
+def _transition_rationale(args: argparse.Namespace, action: str) -> str | None:
+    rationale = str(getattr(args, "because", "") or "").strip()
+    if not rationale:
+        _print_error_payload(
+            {
+                "status": "blocked",
+                "error": f'A rationale is required to {action}: pass --because "<why>".',
+            },
+            as_json=args.json,
+        )
+        return None
+    if len(rationale) > _MAX_RATIONALE_CHARS:
+        _print_error_payload(
+            {
+                "status": "blocked",
+                "error": f"{action.title()} rationale must be no more than "
+                f"{_MAX_RATIONALE_CHARS} characters.",
+            },
+            as_json=args.json,
+        )
+        return None
+    if any(unicodedata.category(character).startswith("C") for character in rationale):
+        _print_error_payload(
+            {
+                "status": "blocked",
+                "error": f"{action.title()} rationale must not contain control or "
                 "formatting characters.",
             },
             as_json=args.json,
@@ -486,10 +538,213 @@ def layout_migrate_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _configured_context_root(args: argparse.Namespace) -> Path:
+    config_path = Path(args.config).expanduser() if getattr(args, "config", None) else None
+    config, _resolved_path = load_runtime_config_model(
+        config_path=config_path,
+        start_dir=Path.cwd(),
+    )
+    return resolve_context_root(config, None)
+
+
+def _confirm_activation(preflight: ActivationPreflight, rationale: str):
+    token = activation_confirmation_token(preflight, rationale)
+    action = (
+        "finalize the pending activation receipt"
+        if preflight.status == "receipt_pending"
+        else ("atomically exchange the v1 and v2 roots")
+    )
+    prompt = "\n".join(
+        (
+            "",
+            "=== HUMAN CONFIRMATION REQUIRED (layout activation) ===",
+            f"  activation: {_terminal_text(preflight.activation_id)}",
+            f"  plan sha256: {_terminal_text(preflight.evidence.result.plan_hash)}",
+            f"  action:      {action}",
+            f"  active path: {_terminal_text(preflight.active_root)}",
+            f"  inactive:    {_terminal_text(preflight.inactive_root)}",
+            f"  because:     {_terminal_text(rationale)}",
+            "  v1 will remain intact at the inactive path.",
+            "  this does not merge data; rollback requires a separate human decision.",
+            f"Type '{token}' to confirm, anything else aborts: ",
+        )
+    )
+    return _broker_for_reader(_TTY_READER).confirm_token(
+        token,
+        prompt,
+        scope=layout_activation_authorization_scope(preflight, rationale),
+    )
+
+
+def _confirm_rollback(preflight: RollbackPreflight, rationale: str):
+    token = rollback_confirmation_token(preflight, rationale)
+    action = (
+        "finalize the pending rollback receipt"
+        if preflight.status == "receipt_pending"
+        else ("atomically restore v1")
+    )
+    prompt = "\n".join(
+        (
+            "",
+            "=== HUMAN CONFIRMATION REQUIRED (layout rollback) ===",
+            f"  activation:  {_terminal_text(preflight.activation_id)}",
+            f"  action:      {action}",
+            f"  active path: {_terminal_text(preflight.active_root)}",
+            f"  inactive:    {_terminal_text(preflight.inactive_root)}",
+            f"  because:     {_terminal_text(rationale)}",
+            "  v2 and all v2-era writes will be preserved at the inactive path.",
+            "  no data will be merged or deleted.",
+            f"Type '{token}' to confirm, anything else aborts: ",
+        )
+    )
+    return _broker_for_reader(_TTY_READER).confirm_token(
+        token,
+        prompt,
+        scope=layout_rollback_authorization_scope(preflight, rationale),
+    )
+
+
+def layout_activate_command(args: argparse.Namespace) -> int:
+    if args.because and not args.apply:
+        _print_error_payload(
+            {"status": "blocked", "error": "--because is only valid together with --apply"},
+            as_json=args.json,
+        )
+        return 2
+    try:
+        plan = load_migration_plan(Path(args.plan))
+        configured_root = _configured_context_root(args)
+        preview = preflight_activation(
+            plan,
+            Path(args.state_dir),
+            configured_root,
+        )
+    except (OSError, ValueError, ActivationPreflightError) as exc:
+        _print_error_payload(
+            {"status": "blocked", "error": f"layout activation blocked: {exc}"},
+            as_json=args.json,
+        )
+        return 2
+    if preview.status == "already_active":
+        payload = preview.to_dict()
+        payload["mode"] = "verified_active"
+        _print_payload(payload, as_json=args.json)
+        return 0
+    if preview.status == "already_rolled_back":
+        payload = preview.to_dict()
+        payload["mode"] = "verified_rolled_back"
+        _print_payload(payload, as_json=args.json)
+        return 0
+    if not args.apply:
+        payload = preview.to_dict()
+        payload["mode"] = "preview"
+        _print_payload(payload, as_json=args.json)
+        return 0
+    rationale = _transition_rationale(args, "activate the v2 context")
+    if rationale is None:
+        return 2
+    authorization = _confirm_activation(preview, rationale)
+    if authorization is None:
+        _print_error_payload(
+            {
+                "status": "blocked",
+                "error": "Layout activation requires interactive human confirmation through "
+                "the controlling terminal; roots were not exchanged.",
+            },
+            as_json=args.json,
+        )
+        return 2
+    try:
+        result = activate_layout(
+            plan,
+            Path(args.state_dir),
+            configured_root,
+            rationale=rationale,
+            authorization=authorization,
+        )
+    except ActivationPreflightError as exc:
+        _print_error_payload(
+            {"status": "blocked", "error": str(exc)},
+            as_json=args.json,
+        )
+        return 2
+    except ActivationApplyError as exc:
+        _print_error_payload(
+            {"status": "failed", "error": str(exc)},
+            as_json=args.json,
+        )
+        return 3
+    _print_payload(result.to_dict(), as_json=args.json)
+    return 0
+
+
+def layout_rollback_command(args: argparse.Namespace) -> int:
+    if args.because and not args.apply:
+        _print_error_payload(
+            {"status": "blocked", "error": "--because is only valid together with --apply"},
+            as_json=args.json,
+        )
+        return 2
+    try:
+        configured_root = _configured_context_root(args)
+        preview = preflight_rollback(Path(args.state_dir), configured_root)
+    except (OSError, ValueError, RollbackPreflightError) as exc:
+        _print_error_payload(
+            {"status": "blocked", "error": f"layout rollback blocked: {exc}"},
+            as_json=args.json,
+        )
+        return 2
+    if preview.status == "already_rolled_back":
+        payload = preview.to_dict()
+        payload["mode"] = "verified_rolled_back"
+        _print_payload(payload, as_json=args.json)
+        return 0
+    if not args.apply:
+        payload = preview.to_dict()
+        payload["mode"] = "preview"
+        _print_payload(payload, as_json=args.json)
+        return 0
+    rationale = _transition_rationale(args, "rollback the v2 context")
+    if rationale is None:
+        return 2
+    authorization = _confirm_rollback(preview, rationale)
+    if authorization is None:
+        _print_error_payload(
+            {
+                "status": "blocked",
+                "error": "Layout rollback requires interactive human confirmation through "
+                "the controlling terminal; roots were not exchanged.",
+            },
+            as_json=args.json,
+        )
+        return 2
+    try:
+        result = rollback_layout(
+            Path(args.state_dir),
+            configured_root,
+            rationale=rationale,
+            authorization=authorization,
+        )
+    except RollbackPreflightError as exc:
+        _print_error_payload(
+            {"status": "blocked", "error": str(exc)},
+            as_json=args.json,
+        )
+        return 2
+    except RollbackApplyError as exc:
+        _print_error_payload(
+            {"status": "failed", "error": str(exc)},
+            as_json=args.json,
+        )
+        return 3
+    _print_payload(result.to_dict(), as_json=args.json)
+    return 0
+
+
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     layout = subparsers.add_parser(
         "layout",
-        help="Audit, plan, or safely create a versioned context candidate.",
+        help="Audit, migrate, activate, or rollback a versioned context layout.",
     )
     commands = layout.add_subparsers(dest="layout_command")
 
@@ -537,3 +792,42 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     migrate.add_argument("--because", help="Human rationale required with --apply.")
     migrate.add_argument("--json", action="store_true", help="Output JSON.")
     migrate.set_defaults(func=layout_migrate_command, _skip_cli_history=True)
+
+    activate = commands.add_parser(
+        "activate",
+        help="Preview or human-confirm atomic activation of a verified v2 candidate.",
+    )
+    activate.add_argument("--plan", required=True, help="Private completed migration plan path.")
+    activate.add_argument(
+        "--state-dir",
+        required=True,
+        help="External private directory for the activation journal and receipts.",
+    )
+    activate.add_argument("--config", help="Runtime config that must resolve the stable root.")
+    activate.add_argument(
+        "--apply",
+        action="store_true",
+        help="Atomically exchange v1 and v2 after human confirmation.",
+    )
+    activate.add_argument("--because", help="Human rationale required with --apply.")
+    activate.add_argument("--json", action="store_true", help="Output JSON.")
+    activate.set_defaults(func=layout_activate_command, _skip_cli_history=True)
+
+    rollback = commands.add_parser(
+        "rollback",
+        help="Preview or human-confirm restoration of the preserved v1 root.",
+    )
+    rollback.add_argument(
+        "--state-dir",
+        required=True,
+        help="External private activation state directory.",
+    )
+    rollback.add_argument("--config", help="Runtime config that must resolve the stable root.")
+    rollback.add_argument(
+        "--apply",
+        action="store_true",
+        help="Atomically restore v1 after a separate human confirmation.",
+    )
+    rollback.add_argument("--because", help="Human rationale required with --apply.")
+    rollback.add_argument("--json", action="store_true", help="Output JSON.")
+    rollback.set_defaults(func=layout_rollback_command, _skip_cli_history=True)
