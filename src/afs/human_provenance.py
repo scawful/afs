@@ -19,10 +19,11 @@ import hmac
 import json
 import os
 import secrets
+import stat
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TextIO
 
 TtyReader = Callable[[str], "str | None"]
 
@@ -319,6 +320,35 @@ def os_reviewer() -> str:
     return os_identity().reviewer
 
 
+def _duplicate_terminal_stream(descriptor: int, mode: str) -> TextIO:
+    duplicate = os.dup(descriptor)
+    try:
+        return os.fdopen(duplicate, mode, encoding="utf-8")
+    except BaseException:
+        os.close(duplicate)
+        raise
+
+
+def _read_posix_terminal(path: str, prompt: str) -> str:
+    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISCHR(opened.st_mode) or not os.isatty(descriptor):
+            raise OSError("terminal path is not a character TTY")
+        # Two text wrappers over duplicates of one verified descriptor avoid
+        # non-seekable ``r+`` streams without reopening a mutable path.
+        with (
+            _duplicate_terminal_stream(descriptor, "w") as output,
+            _duplicate_terminal_stream(descriptor, "r") as input_stream,
+        ):
+            output.write(prompt)
+            output.flush()
+            return input_stream.readline()
+    finally:
+        os.close(descriptor)
+
+
 def default_terminal_reader(terminal_path: str | None = None) -> TtyReader:
     """Return a cross-platform controlling-terminal line reader.
 
@@ -332,10 +362,7 @@ def default_terminal_reader(terminal_path: str | None = None) -> TtyReader:
     def _read(prompt: str) -> str | None:
         try:
             if terminal_path:
-                with open(terminal_path, "r+", encoding="utf-8") as terminal:
-                    terminal.write(prompt)
-                    terminal.flush()
-                    line = terminal.readline()
+                line = _read_posix_terminal(terminal_path, prompt)
             elif os.name == "nt":
                 with open("CONOUT$", "w", encoding="utf-8") as output:
                     output.write(prompt)
@@ -345,10 +372,7 @@ def default_terminal_reader(terminal_path: str | None = None) -> TtyReader:
             else:
                 ctermid = getattr(os, "ctermid", None)
                 path = ctermid() if ctermid is not None else "/dev/tty"
-                with open(path, "r+", encoding="utf-8") as terminal:
-                    terminal.write(prompt)
-                    terminal.flush()
-                    line = terminal.readline()
+                line = _read_posix_terminal(path, prompt)
         except (OSError, ValueError):
             return None
         if line == "":
