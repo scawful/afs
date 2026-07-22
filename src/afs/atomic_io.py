@@ -11,16 +11,93 @@ See docs/ENGINEERING_PRACTICES.md for when to use which primitive.
 from __future__ import annotations
 
 import contextlib
+import ctypes
+import errno
 import os
+import stat
+import sys
 import uuid
 from pathlib import Path
 
 __all__ = [
+    "atomic_create_text",
     "atomic_write_text",
     "exclusive_create_text",
     "fsync_directory",
     "secure_mkdir",
+    "strict_fsync_directory",
 ]
+
+_AT_FDCWD = -100
+_RENAME_NOREPLACE = 0x00000001
+_RENAME_EXCL = 0x00000004
+
+
+def _rename_noreplace(source: Path, destination: Path) -> None:
+    """Atomically rename without replacing an existing destination."""
+
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin" and getattr(library, "renamex_np", None) is not None:
+        renamex_np = library.renamex_np
+        renamex_np.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        renamex_np.restype = ctypes.c_int
+        result = renamex_np(os.fsencode(source), os.fsencode(destination), _RENAME_EXCL)
+    elif sys.platform.startswith("linux") and getattr(library, "renameat2", None) is not None:
+        renameat2 = library.renameat2
+        renameat2.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            _AT_FDCWD,
+            os.fsencode(source),
+            _AT_FDCWD,
+            os.fsencode(destination),
+            _RENAME_NOREPLACE,
+        )
+    else:
+        raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable")
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), destination)
+
+
+def atomic_create_text(
+    path: Path,
+    text: str,
+    *,
+    encoding: str = "utf-8",
+    mode: int = 0o600,
+    durable: bool = False,
+) -> None:
+    """Atomically publish a new immutable file without replacing a target.
+
+    Content is completed in a private sibling temporary file, then renamed to
+    the final path with create-or-fail semantics. A crash can leave a complete
+    temporary file, but never a partial final receipt.
+    """
+
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, mode)
+    try:
+        with os.fdopen(descriptor, "w", encoding=encoding) as handle:
+            handle.write(text)
+            if hasattr(os, "fchmod"):
+                os.fchmod(handle.fileno(), mode)
+            if durable:
+                handle.flush()
+                os.fsync(handle.fileno())
+        _rename_noreplace(temporary, path)
+        if durable:
+            strict_fsync_directory(path.parent)
+    finally:
+        with contextlib.suppress(OSError):
+            temporary.unlink(missing_ok=True)
 
 
 def fsync_directory(directory: Path) -> None:
@@ -39,6 +116,26 @@ def fsync_directory(directory: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def strict_fsync_directory(directory: Path) -> None:
+    """Durably sync a directory or raise when the platform cannot do so.
+
+    Namespace-changing transactions such as context activation cannot accept
+    the best-effort semantics of :func:`fsync_directory`.
+    """
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        directory_stat = os.fstat(descriptor)
+        if not stat.S_ISDIR(directory_stat.st_mode):
+            raise NotADirectoryError(directory)
+        if directory_stat.st_nlink < 1:
+            raise OSError(f"directory has no durable link: {directory}")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def atomic_write_text(

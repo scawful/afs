@@ -8,10 +8,13 @@ from pathlib import Path
 
 import pytest
 
+import afs.atomic_io as atomic_io
 from afs.atomic_io import (
+    atomic_create_text,
     atomic_write_text,
     exclusive_create_text,
     secure_mkdir,
+    strict_fsync_directory,
 )
 
 
@@ -79,6 +82,45 @@ def test_exclusive_create_writes_with_declared_mode(tmp_path: Path) -> None:
         os.umask(previous_umask)
     assert target.read_text(encoding="utf-8") == "immutable"
     assert _mode_of(target) == 0o600
+
+
+def test_exclusive_create_durable_smoke(tmp_path: Path) -> None:
+    target = tmp_path / "durable-receipt.json"
+    atomic_create_text(target, '{"status":"complete"}\n', durable=True)
+    assert target.read_text(encoding="utf-8") == '{"status":"complete"}\n'
+    assert _mode_of(target) == 0o600
+
+
+def test_atomic_create_never_exposes_final_path_when_publish_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "receipt.json"
+    monkeypatch.setattr(
+        atomic_io,
+        "_rename_noreplace",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("publish failed")),
+    )
+    with pytest.raises(OSError, match="publish failed"):
+        atomic_create_text(target, "complete", durable=True)
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_atomic_create_refuses_to_replace_existing_target(tmp_path: Path) -> None:
+    target = tmp_path / "receipt.json"
+    target.write_text("original", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        atomic_create_text(target, "replacement", durable=True)
+    assert target.read_text(encoding="utf-8") == "original"
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_strict_fsync_directory_rejects_regular_file(tmp_path: Path) -> None:
+    target = tmp_path / "not-a-directory"
+    target.write_text("x", encoding="utf-8")
+    with pytest.raises((NotADirectoryError, OSError)):
+        strict_fsync_directory(target)
 
 
 def test_exclusive_create_refuses_existing_file(tmp_path: Path) -> None:
