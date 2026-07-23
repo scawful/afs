@@ -783,6 +783,139 @@ def test_session_bootstrap_delivers_explicitly_matched_skill_body(
     assert inferred["skills"]["matches"][0]["body"] == expected_body
 
 
+def test_session_bootstrap_surfaces_skill_warnings_without_losing_matches(
+    tmp_path: Path,
+) -> None:
+    from afs.session_bootstrap import (
+        build_session_bootstrap,
+        render_session_bootstrap,
+    )
+
+    skill_root = tmp_path / "skills"
+    good = skill_root / "good" / "SKILL.md"
+    good.parent.mkdir(parents=True)
+    good.write_text(
+        "---\nname: good\ntriggers: [diagnosticprobe]\n---\n\n# Good\n",
+        encoding="utf-8",
+    )
+    invalid_skills: list[Path] = []
+    for skill_index in range(25):
+        directory = (
+            "invalid-\x1b\x85`[entry]"
+            if skill_index == 0
+            else f"invalid-{skill_index:02d}"
+        )
+        invalid = skill_root / directory / "SKILL.md"
+        invalid.parent.mkdir(parents=True)
+        invalid.write_text(
+            f"---\nname: invalid-{skill_index:02d}\nenforcement:\n"
+            + "".join(f"  - rule {index}\n" for index in range(17))
+            + "---\n",
+            encoding="utf-8",
+        )
+        invalid_skills.append(invalid)
+    context_root = tmp_path / ".context"
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            profiles=ProfilesConfig(
+                active_profile="default",
+                profiles={"default": ProfileConfig(skill_roots=[skill_root])},
+            ),
+        )
+    )
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path, context_root=context_root)
+
+    summary = build_session_bootstrap(
+        manager,
+        context_root,
+        skills_prompt="diagnosticprobe",
+        record_event=False,
+    )
+
+    assert summary["skills"]["matches"][0]["name"] == "good"
+    assert summary["skills"]["diagnostic_count"] == 25
+    assert len(summary["skills"]["diagnostics"]) == 20
+    assert summary["skills"]["diagnostics_omitted"] == 5
+    assert summary["skills"]["diagnostics"][0]["code"] == "skill_invalid"
+    rendered = render_session_bootstrap(summary)
+    assert "## Relevant Skills" in rendered
+    assert "## Skill Discovery Warnings" in rendered
+    from afs.skills import escape_skill_diagnostic_text
+
+    escaped_path = escape_skill_diagnostic_text(
+        invalid_skills[0],
+        max_chars=240,
+        markdown=True,
+    )
+    warning_section = rendered.split("## Skill Discovery Warnings", 1)[1].split(
+        "## Agent Jobs",
+        1,
+    )[0]
+    assert f"[skill\\_invalid] {escaped_path}" in warning_section
+    assert "\x1b" not in warning_section
+    assert "\x85" not in warning_section
+    assert "\\u001b" in warning_section
+    assert "\\u0085" in warning_section
+    assert "\\`\\[entry\\]" in warning_section
+    assert "25 configured skill entry or root" in rendered
+
+
+def test_session_bootstrap_survives_unresolvable_skill_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from afs.session_bootstrap import build_session_bootstrap
+
+    healthy_root = tmp_path / "healthy"
+    healthy = healthy_root / "healthy" / "SKILL.md"
+    healthy.parent.mkdir(parents=True)
+    healthy.write_text(
+        "---\nname: healthy\ntriggers: [resolutionprobe]\n---\n\n# Healthy\n",
+        encoding="utf-8",
+    )
+    broken_root = tmp_path / "broken-loop"
+    context_root = tmp_path / ".context"
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            profiles=ProfilesConfig(
+                active_profile="default",
+                profiles={
+                    "default": ProfileConfig(
+                        skill_roots=[healthy_root, broken_root]
+                    )
+                },
+            ),
+        )
+    )
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path, context_root=context_root)
+    original_resolve = Path.resolve
+
+    def simulated_resolve(path: Path, *args, **kwargs) -> Path:
+        if path == broken_root:
+            raise RuntimeError("simulated symlink loop")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", simulated_resolve)
+
+    summary = build_session_bootstrap(
+        manager,
+        context_root,
+        skills_prompt="resolutionprobe",
+        record_event=False,
+    )
+
+    assert summary["skills"]["available"] is True
+    assert summary["skills"]["matches"][0]["name"] == "healthy"
+    assert summary["skills"]["diagnostic_count"] == 1
+    assert summary["skills"]["diagnostics"][0]["code"] == "root_unreadable"
+
+
 def test_bootstrap_token_budget_sheds_bodies_before_skill_pointers() -> None:
     from afs.session_bootstrap import _apply_token_budget, _estimate_tokens
 

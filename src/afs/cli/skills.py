@@ -23,10 +23,15 @@ from ..skill_mining import (
     write_skill_candidate_artifacts,
 )
 from ..skills import (
-    discover_skills,
+    bounded_skill_diagnostics,
+    discover_skills_with_diagnostics,
+    escape_skill_diagnostic_text,
     resolve_skill_roots,
     score_skill_relevance,
 )
+
+_MAX_DIAGNOSTICS_JSON = 100
+_MAX_DIAGNOSTICS_TEXT = 20
 
 
 def _print_hint(text: str) -> None:
@@ -37,9 +42,40 @@ def _print_hint(text: str) -> None:
         print(f"  {text}")
 
 
+def _print_skill_diagnostics(
+    diagnostics: list[dict[str, object]],
+    *,
+    diagnostic_count: int,
+) -> None:
+    if not diagnostics:
+        return
+    print(f"warnings: {diagnostic_count}")
+    for diagnostic in diagnostics[:_MAX_DIAGNOSTICS_TEXT]:
+        code = escape_skill_diagnostic_text(
+            diagnostic["code"],
+            max_chars=80,
+        )
+        path = escape_skill_diagnostic_text(
+            diagnostic["path"] or diagnostic["root"],
+            max_chars=512,
+        )
+        message = escape_skill_diagnostic_text(
+            diagnostic["message"],
+            max_chars=512,
+        )
+        print(f"  [{code}] {path}: {message}")
+    omitted = diagnostic_count - min(
+        len(diagnostics),
+        _MAX_DIAGNOSTICS_TEXT,
+    )
+    if omitted:
+        print(f"  ... {omitted} more warning(s) omitted")
+    _print_hint("run `afs skills list --json` for structured diagnostics")
+
+
 def _resolve_skill_roots(args: argparse.Namespace, profile_roots: list[Path]) -> list[Path]:
     explicit_roots = (
-        [Path(path).expanduser().resolve() for path in args.root]
+        [Path(path) for path in args.root]
         if args.root
         else None
     )
@@ -57,11 +93,19 @@ def skills_list_command(args: argparse.Namespace) -> int:
 
     roots = _resolve_skill_roots(args, list(profile.skill_roots))
 
-    skills = discover_skills(roots, profile=profile.name)
+    discovery = discover_skills_with_diagnostics(roots, profile=profile.name)
+    skills = discovery.skills
+    diagnostic_payload = bounded_skill_diagnostics(
+        discovery.diagnostics,
+        diagnostic_count=discovery.diagnostic_count,
+        limit=_MAX_DIAGNOSTICS_JSON,
+    )
+    diagnostics = diagnostic_payload["diagnostics"]
     if args.json:
         payload = {
             "profile": profile.name,
             "roots": [str(path) for path in roots],
+            **diagnostic_payload,
             "skills": [
                 {
                     "name": skill.name,
@@ -79,6 +123,10 @@ def skills_list_command(args: argparse.Namespace) -> int:
         return 0
 
     print(f"profile: {profile.name}")
+    _print_skill_diagnostics(
+        diagnostics,
+        diagnostic_count=discovery.diagnostic_count,
+    )
     if not skills:
         print("(no skills)")
         _print_hint("add SKILL.md files to profile skill_roots, extensions, or AFS_ROOT/skills")
@@ -99,7 +147,13 @@ def skills_match_command(args: argparse.Namespace) -> int:
 
     roots = _resolve_skill_roots(args, list(profile.skill_roots))
 
-    skills = discover_skills(roots, profile=profile.name)
+    discovery = discover_skills_with_diagnostics(roots, profile=profile.name)
+    skills = discovery.skills
+    diagnostic_payload = bounded_skill_diagnostics(
+        discovery.diagnostics,
+        diagnostic_count=discovery.diagnostic_count,
+        limit=_MAX_DIAGNOSTICS_JSON,
+    )
     ranked = []
     for skill in skills:
         score = score_skill_relevance(args.prompt, skill)
@@ -111,6 +165,7 @@ def skills_match_command(args: argparse.Namespace) -> int:
         payload = {
             "profile": profile.name,
             "prompt": args.prompt,
+            **diagnostic_payload,
             "matches": [
                 {
                     "score": score,
@@ -131,6 +186,10 @@ def skills_match_command(args: argparse.Namespace) -> int:
         print(f"{score}\t{skill.name}\t{skill.path}")
     if not ranked:
         print("(no matches)")
+    _print_skill_diagnostics(
+        diagnostic_payload["diagnostics"],
+        diagnostic_count=discovery.diagnostic_count,
+    )
     return 0
 
 

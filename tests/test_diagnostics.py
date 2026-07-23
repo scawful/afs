@@ -19,6 +19,7 @@ from afs.diagnostics import (
     check_mcp_registration,
     check_python_environment,
     check_services,
+    check_skills,
     format_results_json,
     format_results_text,
     run_all_checks,
@@ -26,7 +27,14 @@ from afs.diagnostics import (
 )
 from afs.manager import AFSManager
 from afs.models import MountType, ProjectMetadata
-from afs.schema import AFSConfig, GeneralConfig, ServiceConfig, ServicesConfig
+from afs.schema import (
+    AFSConfig,
+    GeneralConfig,
+    ProfileConfig,
+    ProfilesConfig,
+    ServiceConfig,
+    ServicesConfig,
+)
 from afs.services import manager as services_manager
 
 
@@ -71,6 +79,100 @@ def test_check_dependencies() -> None:
     result = check_dependencies()
     assert result.status in {"ok", "warn"}
     assert result.name == "dependencies"
+
+
+def test_check_skills_warns_with_structured_details_but_counts_good_skills(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    skill_root = tmp_path / "skills"
+    good = skill_root / "good" / "SKILL.md"
+    invalid = skill_root / "invalid" / "SKILL.md"
+    good.parent.mkdir(parents=True)
+    invalid.parent.mkdir(parents=True)
+    good.write_text("---\nname: good\n---\n", encoding="utf-8")
+    invalid.write_text(
+        "---\nname: invalid\nenforcement:\n"
+        + "".join(f"  - rule {index}\n" for index in range(17))
+        + "---\n",
+        encoding="utf-8",
+    )
+    config = AFSConfig(
+        general=GeneralConfig(context_root=tmp_path / "context"),
+        profiles=ProfilesConfig(
+            active_profile="default",
+            profiles={"default": ProfileConfig(skill_roots=[skill_root])},
+        ),
+    )
+    monkeypatch.setattr(
+        "afs.diagnostics._load_runtime",
+        lambda config_path=None: (
+            config,
+            AFSManager(config=config),
+            config.general.context_root,
+        ),
+    )
+
+    result = check_skills()
+
+    assert result.status == "warn"
+    assert result.name == "skills"
+    assert "valid skill(s) loaded with 1 warning(s)" in result.message
+    assert result.details[0]["code"] == "skill_invalid"
+    assert result.details[0]["path"] == str(invalid)
+    assert result.to_dict()["details"] == result.details
+
+
+def test_check_skills_uses_repo_runtime_precedence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    user_config = home / ".config" / "afs" / "config.toml"
+    user_skill = tmp_path / "user-skills" / "good" / "SKILL.md"
+    local_invalid = tmp_path / "local-skills" / "invalid" / "SKILL.md"
+    user_config.parent.mkdir(parents=True)
+    repo.mkdir()
+    user_skill.parent.mkdir(parents=True)
+    local_invalid.parent.mkdir(parents=True)
+    user_skill.write_text("---\nname: user-good\n---\n", encoding="utf-8")
+    local_invalid.write_text(
+        "---\nname: local-invalid\nenforcement:\n"
+        + "".join(f"  - rule {index}\n" for index in range(17))
+        + "---\n",
+        encoding="utf-8",
+    )
+    user_config.write_text(
+        "[profiles]\n"
+        'active_profile = "user"\n'
+        "[profiles.user]\n"
+        f'skill_roots = ["{user_skill.parent.parent}"]\n',
+        encoding="utf-8",
+    )
+    (repo / "afs.toml").write_text(
+        "[profiles]\n"
+        'active_profile = "local"\n'
+        "[profiles.local]\n"
+        f'skill_roots = ["{local_invalid.parent.parent}"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    for name in (
+        "AFS_CONFIG_PATH",
+        "AFS_PREFER_REPO_CONFIG",
+        "AFS_PREFER_USER_CONFIG",
+        "AFS_SKILL_ROOTS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(repo)
+
+    result = check_skills()
+
+    assert result.status == "warn"
+    assert "1 warning(s)" in result.message
+    assert result.details[0]["path"] == str(local_invalid)
+    assert str(user_skill) not in result.message
 
 
 def test_check_config_valid(tmp_path: Path) -> None:

@@ -53,12 +53,13 @@ class DiagnosticResult:
     fix_available: bool = False
     fix_description: str = ""
     fix_applied: bool = False
+    details: list[dict[str, Any]] = field(default_factory=list)
 
     # Internal — not serialised.  Holds a callable that performs the fix.
     _fix_fn: Callable[[], str] | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "name": self.name,
             "status": self.status,
             "message": self.message,
@@ -66,6 +67,9 @@ class DiagnosticResult:
             "fix_description": self.fix_description,
             "fix_applied": self.fix_applied,
         }
+        if self.details:
+            payload["details"] = self.details
+        return payload
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +566,68 @@ def check_extensions(config_path: Path | None = None) -> DiagnosticResult:
     )
 
 
+def check_skills(config_path: Path | None = None) -> DiagnosticResult:
+    """Report non-fatal failures while loading configured skill roots."""
+    try:
+        from .profiles import resolve_active_profile
+        from .skills import (
+            bounded_skill_diagnostics,
+            discover_skills_with_diagnostics,
+            escape_skill_diagnostic_text,
+            resolve_skill_roots,
+        )
+
+        config, _manager, _context_root = _load_runtime(config_path)
+        profile = resolve_active_profile(config)
+        roots = resolve_skill_roots(list(profile.skill_roots))
+        discovery = discover_skills_with_diagnostics(roots, profile=profile.name)
+    except (OSError, TypeError, ValueError) as exc:
+        return DiagnosticResult(
+            name="skills",
+            status="warn",
+            message=f"Skill diagnostics failed ({type(exc).__name__})",
+        )
+
+    diagnostic_payload = bounded_skill_diagnostics(
+        discovery.diagnostics,
+        diagnostic_count=discovery.diagnostic_count,
+        limit=20,
+    )
+    details = diagnostic_payload["diagnostics"]
+    if details:
+        diagnostic_count = discovery.diagnostic_count
+
+        def display(value: object) -> str:
+            return escape_skill_diagnostic_text(value, max_chars=512)
+
+        examples = "; ".join(
+            f"{display(item['code'])}: {display(item['path'] or item['root'])}"
+            for item in details[:3]
+        )
+        omitted = diagnostic_count - min(diagnostic_count, 3)
+        if omitted:
+            examples += f"; {omitted} more"
+        return DiagnosticResult(
+            name="skills",
+            status="warn",
+            message=(
+                f"{len(discovery.skills)} valid skill(s) loaded with "
+                f"{diagnostic_count} warning(s): {examples}. "
+                "See `afs skills list --json` for detailed diagnostics."
+            ),
+            details=details,
+        )
+
+    return DiagnosticResult(
+        name="skills",
+        status="ok",
+        message=(
+            f"{len(discovery.skills)} skill(s) loaded from "
+            f"{len(roots)} configured root(s)"
+        ),
+    )
+
+
 def check_services(config_path: Path | None = None) -> DiagnosticResult:
     """Check configured auto-start background services."""
     try:
@@ -838,6 +904,7 @@ def run_all_checks(
         ("agent_manifest", lambda: check_agent_manifest()),
         ("embeddings", lambda: check_embedding_indexes(config_path)),
         ("extensions", lambda: check_extensions(config_path)),
+        ("skills", lambda: check_skills(config_path)),
         ("context_index", lambda: check_context_index(config_path)),
         ("mcp_server", lambda: check_mcp_server(config_path)),
     ]

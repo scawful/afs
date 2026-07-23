@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .schema import AFSConfig
+from .skills import normalize_skill_root
 from .toml_compat import tomllib
 
 
@@ -108,8 +109,15 @@ def _expand_config_paths(config_data: dict[str, Any]) -> None:
                 continue
             for key in ("memory_mounts", "knowledge_mounts", "skill_roots", "model_registries"):
                 if key in profile_data and isinstance(profile_data[key], list):
+                    path_parser = (
+                        normalize_skill_root
+                        if key == "skill_roots"
+                        else _expand_path
+                    )
                     profile_data[key] = [
-                        _expand_path(p) for p in profile_data[key] if isinstance(p, (str, Path))
+                        path_parser(p)
+                        for p in profile_data[key]
+                        if isinstance(p, (str, Path))
                     ]
 
         nested_profiles = profile_root.get("profiles")
@@ -119,8 +127,15 @@ def _expand_config_paths(config_data: dict[str, Any]) -> None:
                     continue
                 for key in ("memory_mounts", "knowledge_mounts", "skill_roots", "model_registries"):
                     if key in profile_data and isinstance(profile_data[key], list):
+                        path_parser = (
+                            normalize_skill_root
+                            if key == "skill_roots"
+                            else _expand_path
+                        )
                         profile_data[key] = [
-                            _expand_path(p) for p in profile_data[key] if isinstance(p, (str, Path))
+                            path_parser(p)
+                            for p in profile_data[key]
+                            if isinstance(p, (str, Path))
                         ]
 
     if "projects" in config_data:
