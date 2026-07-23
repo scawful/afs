@@ -958,12 +958,12 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
                     max_chars=240,
                     markdown=True,
                 )
-                message = escape_skill_diagnostic_text(
+                diagnostic_message = escape_skill_diagnostic_text(
                     diagnostic.get("message") or "",
                     max_chars=512,
                     markdown=True,
                 )
-                lines.append(f"- [{code}] {path}: {message}")
+                lines.append(f"- [{code}] {path}: {diagnostic_message}")
             if isinstance(total_diagnostics, int) and total_diagnostics > 5:
                 lines.append(
                     "- more: run `afs skills list --json` for detailed diagnostics"
