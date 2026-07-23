@@ -242,8 +242,9 @@ def _parse_frontmatter_block(lines: list[str]) -> dict[str, str | list[str]]:
         if line.lstrip().startswith("- ") and current_list_key:
             parsed.setdefault(current_list_key, [])
             value = line.split("-", 1)[1].strip()
-            if isinstance(parsed[current_list_key], list):
-                parsed[current_list_key].append(value)
+            current_values = parsed.get(current_list_key)
+            if isinstance(current_values, list):
+                current_values.append(value)
             continue
 
         current_list_key = None

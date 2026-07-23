@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shlex
@@ -41,6 +42,24 @@ _DEFAULT_SYSTEM_PROMPT_TOKEN_BUDGET = 4000
 _WORKFLOW_SNAPSHOT_STEP_LIMIT = 6
 _WORKFLOW_SNAPSHOT_SKILL_LIMIT = 4
 _VERIFICATION_RECORD_LIMIT = 10
+logger = logging.getLogger(__name__)
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    """Return a mapping-shaped payload value without unsafe chained access."""
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> list[Any]:
+    """Return a list-shaped payload value without unsafe chained access."""
+    return value if isinstance(value, list) else []
+
+
+def _as_dict_list(value: Any) -> list[dict[str, Any]]:
+    """Return only mapping entries from an untrusted payload list."""
+    return [entry for entry in _as_list(value) if isinstance(entry, dict)]
+
+
 _DEFAULT_BASE_PROMPTS = {
     "generic": (
         "You are a context-aware assistant operating inside the Agentic File System. "
@@ -340,11 +359,12 @@ def _ensure_client_session_payload_shape(payload: dict[str, Any]) -> dict[str, A
     normalized.setdefault("repo_policy", {"available": False})
     normalized.setdefault("verification_plan", {"available": False})
     normalized.setdefault("structured_guidance", {})
+    pack_state = _as_dict(normalized.get("pack"))
     normalized.setdefault(
         "model_profile",
         profile_for_client_model(
             str(normalized.get("client", "generic")),
-            str((normalized.get("pack") if isinstance(normalized.get("pack"), dict) else {}).get("model", normalized.get("client", "generic"))),
+            str(pack_state.get("model", normalized.get("client", "generic"))),
         ).to_dict(),
     )
     cli_hints = normalized.get("cli_hints")
@@ -562,19 +582,11 @@ def _normalize_verification_status(value: Any) -> str:
 
 
 def _verification_requirements(payload: dict[str, Any]) -> dict[str, Any]:
-    verification_plan = (
-        payload.get("verification_plan")
-        if isinstance(payload.get("verification_plan"), dict)
-        else {}
-    )
-    selected_checks = (
-        verification_plan.get("selected_checks")
-        if isinstance(verification_plan.get("selected_checks"), list)
-        else []
-    )
+    verification_plan = _as_dict(payload.get("verification_plan"))
+    selected_checks = _as_list(verification_plan.get("selected_checks"))
     preflight_required = bool(verification_plan.get("preflight_required"))
     if verification_plan.get("available") and (selected_checks or preflight_required):
-        expected: list[str] = []
+        planned_expected: list[str] = []
         required = preflight_required
         required_checks: dict[str, int] = {}
         required_items: dict[str, str] = {}
@@ -595,12 +607,8 @@ def _verification_requirements(payload: dict[str, Any]) -> dict[str, Any]:
             check_required = bool(check.get("required"))
             required = required or check_required
             required_item_count = 0
-            executions = (
-                check.get("executions")
-                if isinstance(check.get("executions"), list)
-                else []
-            )
-            commands = check.get("commands") if isinstance(check.get("commands"), list) else []
+            executions = _as_list(check.get("executions"))
+            commands = _as_list(check.get("commands"))
             execution_item_ids = list(check.get("execution_item_ids") or [])
             command_item_ids = list(check.get("command_item_ids") or [])
             rendered = False
@@ -616,7 +624,7 @@ def _verification_requirements(payload: dict[str, Any]) -> dict[str, Any]:
                         execution.get("redact_argv_indices"),
                     )
                 )
-                expected.append(f"{name}: {text}" if name else text)
+                planned_expected.append(f"{name}: {text}" if name else text)
                 rendered = True
                 required_item_count += 1
                 item_id = (
@@ -640,7 +648,7 @@ def _verification_requirements(payload: dict[str, Any]) -> dict[str, Any]:
                     f"legacy shell ({legacy_status}): "
                     f"{redact_legacy_verification_command(text)}"
                 )
-                expected.append(
+                planned_expected.append(
                     f"{name}: {rendered_command}" if name else rendered_command
                 )
                 rendered = True
@@ -654,7 +662,7 @@ def _verification_requirements(payload: dict[str, Any]) -> dict[str, Any]:
                 if check_required and name:
                     required_items[item_id] = name
             if not rendered and name:
-                expected.append(f"{name}: review changed scope")
+                planned_expected.append(f"{name}: review changed scope")
                 if check_required:
                     item_id = str(
                         check.get("review_item_id")
@@ -675,7 +683,7 @@ def _verification_requirements(payload: dict[str, Any]) -> dict[str, Any]:
             "required": required,
             "workflow": str(verification_plan.get("workflow", "")).strip(),
             "tool_profile": str(verification_plan.get("tool_profile", "")).strip(),
-            "expected": expected,
+            "expected": planned_expected,
             "required_checks": required_checks,
             "required_items": required_items,
             "plan_items": plan_items,
@@ -684,9 +692,9 @@ def _verification_requirements(payload: dict[str, Any]) -> dict[str, Any]:
             ).strip(),
         }
 
-    pack = payload.get("pack") if isinstance(payload.get("pack"), dict) else {}
-    prompt = payload.get("prompt") if isinstance(payload.get("prompt"), dict) else {}
-    skills = payload.get("skills") if isinstance(payload.get("skills"), dict) else {}
+    pack = _as_dict(payload.get("pack"))
+    prompt = _as_dict(payload.get("prompt"))
+    skills = _as_dict(payload.get("skills"))
 
     workflow = str(pack.get("workflow") or prompt.get("workflow") or "").strip()
     tool_profile = str(pack.get("tool_profile") or prompt.get("tool_profile") or "").strip()
@@ -700,7 +708,7 @@ def _verification_requirements(payload: dict[str, Any]) -> dict[str, Any]:
                 workflow=workflow,
                 tool_profile=tool_profile or None,
             )
-        except Exception:
+        except (KeyError, TypeError, ValueError):
             execution_profile = {}
         workflow_contract = [
             str(item).strip()
@@ -789,10 +797,9 @@ def _build_session_verification_state(
     final: bool,
     updated_at: str = "",
 ) -> dict[str, Any]:
-    activity = payload.get("activity") if isinstance(payload.get("activity"), dict) else {}
-    current = activity.get("verification") if isinstance(activity, dict) else {}
-    current = current if isinstance(current, dict) else {}
-    records = current.get("records") if isinstance(current.get("records"), list) else []
+    activity = _as_dict(payload.get("activity"))
+    current = _as_dict(activity.get("verification"))
+    records = _as_list(current.get("records"))
 
     requirements = _verification_requirements(payload)
     required = bool(requirements.get("required"))
@@ -940,23 +947,15 @@ def _build_session_feedback_state(
     *,
     updated_at: str = "",
 ) -> dict[str, Any]:
-    activity = payload.get("activity") if isinstance(payload.get("activity"), dict) else {}
-    verification = (
-        activity.get("verification")
-        if isinstance(activity.get("verification"), dict)
-        else {}
-    )
-    policy = payload.get("repo_policy") if isinstance(payload.get("repo_policy"), dict) else {}
+    activity = _as_dict(payload.get("activity"))
+    verification = _as_dict(activity.get("verification"))
+    policy = _as_dict(payload.get("repo_policy"))
 
     counts: dict[str, int] = {}
     signals: list[str] = []
 
-    matched_risks = policy.get("matched_risks") if isinstance(policy.get("matched_risks"), list) else []
-    anti_pattern_hits = (
-        policy.get("anti_pattern_hits")
-        if isinstance(policy.get("anti_pattern_hits"), list)
-        else []
-    )
+    matched_risks = _as_list(policy.get("matched_risks"))
+    anti_pattern_hits = _as_list(policy.get("anti_pattern_hits"))
     if matched_risks:
         counts["review_risk"] = len(matched_risks)
         signals.append("review_risk")
@@ -998,44 +997,16 @@ def build_session_activity_snapshot(
     if not isinstance(activity, dict):
         return {}
 
-    pack = payload.get("pack") if isinstance(payload.get("pack"), dict) else {}
-    skills = payload.get("skills") if isinstance(payload.get("skills"), dict) else {}
-    current_prompt = (
-        activity.get("current_prompt")
-        if isinstance(activity.get("current_prompt"), dict)
-        else {}
-    )
-    current_turn = (
-        activity.get("current_turn")
-        if isinstance(activity.get("current_turn"), dict)
-        else {}
-    )
-    last_task = (
-        activity.get("last_task")
-        if isinstance(activity.get("last_task"), dict)
-        else {}
-    )
-    session_state = (
-        activity.get("session_state")
-        if isinstance(activity.get("session_state"), dict)
-        else {}
-    )
-    verification = (
-        activity.get("verification")
-        if isinstance(activity.get("verification"), dict)
-        else {}
-    )
-    feedback = (
-        activity.get("feedback")
-        if isinstance(activity.get("feedback"), dict)
-        else {}
-    )
-    counters = activity.get("counters") if isinstance(activity.get("counters"), dict) else {}
-    recent_events = (
-        activity.get("recent_events")
-        if isinstance(activity.get("recent_events"), list)
-        else []
-    )
+    pack = _as_dict(payload.get("pack"))
+    skills = _as_dict(payload.get("skills"))
+    current_prompt = _as_dict(activity.get("current_prompt"))
+    current_turn = _as_dict(activity.get("current_turn"))
+    last_task = _as_dict(activity.get("last_task"))
+    session_state = _as_dict(activity.get("session_state"))
+    verification = _as_dict(activity.get("verification"))
+    feedback = _as_dict(activity.get("feedback"))
+    counters = _as_dict(activity.get("counters"))
+    recent_events = _as_dict_list(activity.get("recent_events"))
 
     matched_skills: list[str] = []
     matches = skills.get("matches") if isinstance(skills, dict) else []
@@ -1274,7 +1245,8 @@ def _resolve_client_base_prompt(
 ) -> tuple[str, str]:
     try:
         registry = load_chat_registry(config=manager.config, config_path=config_path)
-    except Exception:
+    except Exception:  # noqa: BLE001 - registry config is an optional external boundary.
+        logger.debug("Unable to load chat registry", exc_info=True)
         registry = None
 
     if registry is not None:
