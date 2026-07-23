@@ -48,7 +48,9 @@ from .skills import (
     MAX_SKILL_BODY_CHARS,
     MAX_SKILL_BODY_MATCHES,
     MAX_SKILL_MATCHES,
-    build_skill_matches,
+    bounded_skill_diagnostics,
+    build_skill_matches_with_diagnostics,
+    escape_skill_diagnostic_text,
     resolve_skill_roots,
     truncate_skill_body,
 )
@@ -930,6 +932,43 @@ def render_session_bootstrap(summary: dict[str, Any]) -> str:
                 if match.get("body_omitted"):
                     lines.append(f"- body_omitted: {match['body_omitted']}")
 
+        diagnostics = skills.get("diagnostics")
+        if isinstance(diagnostics, list) and diagnostics:
+            total_diagnostics = skills.get("diagnostic_count", len(diagnostics))
+            lines.extend(
+                [
+                    "",
+                    "## Skill Discovery Warnings",
+                    (
+                        f"- {total_diagnostics} configured skill entry or root "
+                        "could not be loaded; valid skills remain available."
+                    ),
+                ]
+            )
+            for diagnostic in diagnostics[:5]:
+                if not isinstance(diagnostic, dict):
+                    continue
+                code = escape_skill_diagnostic_text(
+                    diagnostic.get("code") or "skill_warning",
+                    max_chars=80,
+                    markdown=True,
+                )
+                path = escape_skill_diagnostic_text(
+                    diagnostic.get("path") or diagnostic.get("root") or "",
+                    max_chars=240,
+                    markdown=True,
+                )
+                diagnostic_message = escape_skill_diagnostic_text(
+                    diagnostic.get("message") or "",
+                    max_chars=512,
+                    markdown=True,
+                )
+                lines.append(f"- [{code}] {path}: {diagnostic_message}")
+            if isinstance(total_diagnostics, int) and total_diagnostics > 5:
+                lines.append(
+                    "- more: run `afs skills list --json` for detailed diagnostics"
+                )
+
     lines.extend(["", "## Agent Jobs"])
     lines.append(f"- total: {agent_jobs.get('total', 0)}")
     if agent_jobs.get("counts"):
@@ -1475,21 +1514,35 @@ def _collect_skills(
 ) -> dict[str, Any]:
     """Collect bounded skill bodies matched to an explicit task prompt."""
     if not enabled:
-        return {"available": False, "roots": [], "matches": []}
+        return {
+            "available": False,
+            "roots": [],
+            "matches": [],
+            "diagnostic_count": 0,
+            "diagnostics_omitted": 0,
+            "diagnostics": [],
+        }
     try:
         profile = resolve_active_profile(manager.config)
         roots = resolve_skill_roots(list(profile.skill_roots))
+        match_result = build_skill_matches_with_diagnostics(
+            prompt,
+            roots,
+            profile=profile.name,
+            top_k=top_k,
+        )
+        diagnostics = bounded_skill_diagnostics(
+            match_result.diagnostics,
+            diagnostic_count=match_result.diagnostic_count,
+            limit=20,
+        )
         return {
             "available": True,
             "profile": profile.name,
             "prompt_source": prompt_source,
             "roots": [str(path) for path in roots],
-            "matches": build_skill_matches(
-                prompt,
-                roots,
-                profile=profile.name,
-                top_k=top_k,
-            ),
+            "matches": match_result.matches,
+            **diagnostics,
         }
     except Exception as exc:  # noqa: BLE001 - skill collection is failure-isolated.
         return {
@@ -1497,6 +1550,9 @@ def _collect_skills(
             "prompt_source": prompt_source,
             "roots": [],
             "matches": [],
+            "diagnostic_count": 0,
+            "diagnostics_omitted": 0,
+            "diagnostics": [],
             "error": str(exc),
         }
 

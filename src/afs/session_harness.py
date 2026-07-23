@@ -24,7 +24,11 @@ from .repo_policy import evaluate_repo_policy, load_repo_policy
 from .scopes import resolve_scope
 from .session_bootstrap import build_session_bootstrap, write_session_bootstrap_artifacts
 from .session_workflows import build_session_execution_profile
-from .skills import build_skill_matches, resolve_skill_roots
+from .skills import (
+    bounded_skill_diagnostics,
+    build_skill_matches_with_diagnostics,
+    resolve_skill_roots,
+)
 from .verification import (
     build_structured_guidance,
     build_verification_plan,
@@ -1196,11 +1200,17 @@ def _skills_summary(
         list(profile.skill_roots),
         afs_root=os.getenv("AFS_ROOT", "").strip() or None,
     )
-    matches = build_skill_matches(
+    match_result = build_skill_matches_with_diagnostics(
         prompt,
         roots,
         profile=profile.name,
         top_k=top_k,
+    )
+    matches = match_result.matches
+    diagnostics = bounded_skill_diagnostics(
+        match_result.diagnostics,
+        diagnostic_count=match_result.diagnostic_count,
+        limit=20,
     )
     prompt_source = "explicit" if prompt.strip() else "none"
     if not matches and not prompt.strip() and isinstance(fallback_state, dict):
@@ -1217,6 +1227,7 @@ def _skills_summary(
         "prompt_source": prompt_source,
         "roots": [str(path) for path in roots],
         "matches": matches,
+        **diagnostics,
         "artifact_paths": {},
     }
     if write_artifacts:

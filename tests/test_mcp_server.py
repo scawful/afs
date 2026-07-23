@@ -49,6 +49,7 @@ from afs.skills import (
     MAX_SKILL_BODY_MATCHES,
     MAX_SKILL_METADATA_ITEM_CHARS,
     MAX_SKILL_NAME_CHARS,
+    SkillDiscoveryResult,
     SkillMetadata,
 )
 from afs.work_assistant import WorkAssistantStore
@@ -5290,7 +5291,10 @@ def test_skill_tools_bound_adversarial_metadata(tmp_path: Path) -> None:
 
     with (
         patch("afs.mcp_server.discover_skills", return_value=[metadata]),
-        patch("afs.skills.discover_skills", return_value=[metadata]),
+        patch(
+            "afs.skills.discover_skills_with_diagnostics",
+            return_value=SkillDiscoveryResult(skills=[metadata]),
+        ),
     ):
         match_response = _call_tool(
             manager,

@@ -828,40 +828,59 @@ def _skills_context_block(skills_state: dict[str, Any] | None) -> str:
         return ""
 
     matches = skills_state.get("matches", [])
-    if not isinstance(matches, list) or not matches:
+    if not isinstance(matches, list):
+        matches = []
+    diagnostic_count = skills_state.get("diagnostic_count", 0)
+    if not isinstance(diagnostic_count, int) or isinstance(diagnostic_count, bool):
+        diagnostic_count = 0
+    if not matches and diagnostic_count <= 0:
         return ""
 
-    lines = ["## Relevant Skills"]
+    lines: list[str] = []
     enforcement_lines: list[str] = []
     verification_lines: list[str] = []
-    for match in matches[:MAX_SKILL_MATCHES]:
-        if not isinstance(match, dict):
-            continue
-        name = " ".join(str(match.get("name", "") or "").split()).strip()[:120]
-        if not name:
-            continue
-        score = match.get("score")
-        triggers = match.get("triggers", [])
-        line = name
-        if isinstance(score, int):
-            line += f" (score={score})"
-        if isinstance(triggers, list) and triggers:
-            trigger_values = [
-                str(trigger).strip()
-                for trigger in triggers
-                if isinstance(trigger, str) and str(trigger).strip()
-            ]
-            if trigger_values:
-                line += f" triggers={', '.join(trigger_values[:4])}"
-        source = " ".join(str(match.get("path", "") or "").split()).strip()[:240]
-        if source:
-            line += f" source=`{source}`"
-        lines.append(f"- {line}")
+    if matches:
+        lines.append("## Relevant Skills")
+        for match in matches[:MAX_SKILL_MATCHES]:
+            if not isinstance(match, dict):
+                continue
+            name = " ".join(str(match.get("name", "") or "").split()).strip()[:120]
+            if not name:
+                continue
+            score = match.get("score")
+            triggers = match.get("triggers", [])
+            line = name
+            if isinstance(score, int):
+                line += f" (score={score})"
+            if isinstance(triggers, list) and triggers:
+                trigger_values = [
+                    str(trigger).strip()
+                    for trigger in triggers
+                    if isinstance(trigger, str) and str(trigger).strip()
+                ]
+                if trigger_values:
+                    line += f" triggers={', '.join(trigger_values[:4])}"
+            source = " ".join(str(match.get("path", "") or "").split()).strip()[:240]
+            if source:
+                line += f" source=`{source}`"
+            lines.append(f"- {line}")
 
-        enforcement = _skill_guidance_lines(match.get("enforcement"), limit=3)
-        verification = _skill_guidance_lines(match.get("verification"), limit=2)
-        enforcement_lines.extend(f"- {name}: {item}" for item in enforcement)
-        verification_lines.extend(f"- {name}: {item}" for item in verification)
+            enforcement = _skill_guidance_lines(match.get("enforcement"), limit=3)
+            verification = _skill_guidance_lines(match.get("verification"), limit=2)
+            enforcement_lines.extend(f"- {name}: {item}" for item in enforcement)
+            verification_lines.extend(f"- {name}: {item}" for item in verification)
+
+    if diagnostic_count > 0:
+        lines.extend(
+            [
+                "",
+                "## Skill Discovery",
+                (
+                    f"- warnings: {diagnostic_count}; valid skills remain available. "
+                    "Inspect with `afs skills list --json`."
+                ),
+            ]
+        )
 
     if enforcement_lines:
         lines.append("")

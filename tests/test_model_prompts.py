@@ -215,6 +215,34 @@ def test_build_model_system_prompt_budget_drops_dynamic_sections_first() -> None
     assert "## Session Context" not in prompt
 
 
+def test_model_prompt_surfaces_skill_warning_count_without_diagnostic_text() -> None:
+    prompt = build_model_system_prompt(
+        base_prompt="Base behavior.",
+        skills_state={
+            "available": True,
+            "matches": [],
+            "diagnostic_count": 7,
+            "diagnostics_omitted": 2,
+            "diagnostics": [
+                {
+                    "code": "skill_invalid",
+                    "path": "/tmp/hostile\x1b\x85`[skill]/SKILL.md",
+                    "message": "hostile diagnostic text",
+                }
+            ],
+        },
+    )
+
+    assert "## Skill Discovery" in prompt
+    assert (
+        "- warnings: 7; valid skills remain available. "
+        "Inspect with `afs skills list --json`."
+    ) in prompt
+    assert "hostile diagnostic text" not in prompt
+    assert "\x1b" not in prompt
+    assert "\x85" not in prompt
+
+
 def test_session_context_surfaces_stakeholders_and_project_intent() -> None:
     prompt = build_model_system_prompt(
         base_prompt="Base behavior.",
