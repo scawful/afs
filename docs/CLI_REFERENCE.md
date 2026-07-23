@@ -364,6 +364,14 @@ input and headless agents cannot confirm. Unreviewed links, copied
 non-portable names, hard links, and special files block; the v1 source is never
 modified or deleted; and the v2 layout marker is published only after every
 copy verifies.
+Current receipts record
+`directory_durability_protocol = "strict-fsync-v1"`. They remain
+`publication_state = "prepared"` until marker publication and its strict
+directory sync succeed, then transition durably to `"published"`. A legacy
+receipt, unknown durability attestation, or interrupted prepared receipt fails
+preflight and candidate verification with instructions to move the candidate
+aside and rebuild it using the current executor, or use a separately reviewed
+explicit re-attestation workflow. AFS does not silently upgrade old evidence.
 A caught pre-marker apply failure is moved to an adjacent `.failed-*` path
 when that quarantine rename succeeds. A hard process or host interruption may
 instead leave an unmarked partial tree at the requested destination; inspect
