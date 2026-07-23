@@ -145,6 +145,9 @@ def test_apply_copies_to_private_v2_and_never_modifies_source(tmp_path: Path) ->
     assert stat.S_IMODE(result.receipt_path.stat().st_mode) == 0o600
     assert migration._tree_fingerprint(source)[0] == before
     receipt = json.loads(result.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["schema_version"] == 2
+    assert receipt["directory_durability_protocol"] == "strict-fsync-v1"
+    assert receipt["publication_state"] == "published"
     assert receipt["rationale"] == rationale
     assert receipt["candidate_sha256"]
 
@@ -432,6 +435,37 @@ def test_copy_fault_quarantines_partial_destination_without_marker(
     assert not (failure.value.failed_destination / ".afs" / LAYOUT_FILE).exists()
 
 
+def test_root_chmod_failure_quarantines_created_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(tmp_path)
+    destination = tmp_path / "destination"
+    plan = build_migration_plan(source, destination)
+    real_chmod = migration.os.chmod
+
+    def fail_destination_chmod(path: str | os.PathLike[str], mode: int) -> None:
+        if Path(path) == destination:
+            raise PermissionError("injected root chmod failure")
+        real_chmod(path, mode)
+
+    monkeypatch.setattr(migration.os, "chmod", fail_destination_chmod)
+    with pytest.raises(
+        migration.MigrationApplyError,
+        match="injected root chmod failure",
+    ) as failure:
+        migration.apply_migration(
+            plan,
+            rationale="I reviewed root creation cleanup",
+            authorization=_authorization(plan, "I reviewed root creation cleanup"),
+        )
+
+    assert not destination.exists()
+    assert failure.value.failed_destination is not None
+    assert failure.value.failed_destination.is_dir()
+    assert not (failure.value.failed_destination / ".afs" / LAYOUT_FILE).exists()
+
+
 def test_copied_directory_open_failure_aborts_before_marker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -539,6 +573,101 @@ def test_marker_revocation_failure_reports_marked_candidate_in_place(
     assert failure.value.failed_destination == destination
     assert marker.exists()
     assert destination.exists()
+    receipt = json.loads(
+        migration._receipt_path(destination, plan.transaction_id).read_text(encoding="utf-8")
+    )
+    assert receipt["publication_state"] == "prepared"
+    with pytest.raises(
+        migration.MigrationPreflightError,
+        match="published, supported strict directory-durability attestation",
+    ):
+        migration.preflight_migration(plan)
+
+
+def test_marker_directory_sync_and_revocation_failure_remains_unpublished(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(tmp_path)
+    destination = tmp_path / "destination"
+    plan = build_migration_plan(source, destination)
+    marker = destination / ".afs" / LAYOUT_FILE
+    open_failures = _inject_directory_open_failure(
+        monkeypatch,
+        should_fail=lambda path: (
+            path == marker.parent and marker.exists() and not open_failures
+        ),
+        message="injected marker publication sync failure",
+    )
+    real_unlink = Path.unlink
+
+    def refuse_marker_unlink(path: Path, missing_ok: bool = False) -> None:
+        if path == marker:
+            raise PermissionError("injected marker revocation failure")
+        real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refuse_marker_unlink)
+    with pytest.raises(migration.MigrationApplyError, match="revocation failed") as failure:
+        migration.apply_migration(
+            plan,
+            rationale="I reviewed ambiguous marker publication",
+            authorization=_authorization(plan, "I reviewed ambiguous marker publication"),
+        )
+
+    assert open_failures == [marker.parent]
+    assert failure.value.failed_destination == destination
+    assert marker.exists()
+    receipt = json.loads(
+        migration._receipt_path(destination, plan.transaction_id).read_text(encoding="utf-8")
+    )
+    assert receipt["publication_state"] == "prepared"
+    match = "published, supported strict directory-durability attestation"
+    with pytest.raises(migration.MigrationPreflightError, match=match):
+        migration.preflight_migration(plan)
+    with pytest.raises(migration.MigrationPreflightError, match=match):
+        migration.verify_completed_candidate(plan)
+
+
+def test_visible_published_receipt_is_safe_after_post_marker_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(tmp_path)
+    destination = tmp_path / "destination"
+    plan = build_migration_plan(source, destination)
+    marker = destination / ".afs" / LAYOUT_FILE
+    receipt_path = migration._receipt_path(destination, plan.transaction_id)
+    real_unlink = Path.unlink
+    open_failures = _inject_directory_open_failure(
+        monkeypatch,
+        should_fail=lambda path: (
+            path == receipt_path.parent
+            and marker.exists()
+            and '"publication_state": "published"' in receipt_path.read_text(encoding="utf-8")
+            and not open_failures
+        ),
+        message="injected published-receipt directory sync failure",
+    )
+
+    def refuse_marker_unlink(path: Path, missing_ok: bool = False) -> None:
+        if path == marker:
+            raise PermissionError("injected marker revocation failure")
+        real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refuse_marker_unlink)
+    with pytest.raises(migration.MigrationApplyError, match="revocation failed"):
+        migration.apply_migration(
+            plan,
+            rationale="I reviewed published receipt recovery",
+            authorization=_authorization(plan, "I reviewed published receipt recovery"),
+        )
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert open_failures == [receipt_path.parent]
+    assert marker.exists()
+    assert receipt["publication_state"] == "published"
+    assert migration.preflight_migration(plan).status == "already_applied"
+    assert migration.verify_completed_candidate(plan).result.status == "already_applied"
 
 
 def test_post_publication_directory_open_failure_revokes_and_quarantines(
@@ -775,6 +904,55 @@ def test_completed_transaction_is_idempotent_but_candidate_tamper_is_not(
     with pytest.raises(migration.MigrationPreflightError, match="candidate"):
         migration.preflight_migration(plan)
     assert first.receipt_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "durability_protocol"),
+    [
+        pytest.param(2, None, id="legacy-receipt"),
+        pytest.param(3, "unknown-strict-sync-v99", id="unknown-attestation"),
+    ],
+)
+def test_completed_recognition_rejects_unsupported_directory_durability(
+    tmp_path: Path,
+    schema_version: int,
+    durability_protocol: str | None,
+) -> None:
+    source = _source(tmp_path)
+    (source / "models").mkdir()
+    (source / "models" / "legacy.bin").write_bytes(b"legacy")
+    destination = tmp_path / "destination"
+    plan = build_migration_plan(
+        source,
+        destination,
+        retained_sources={"models": "Requires a dedicated model importer."},
+    )
+    result = migration.apply_migration(
+        plan,
+        rationale="I reviewed legacy receipt rejection",
+        authorization=_authorization(plan, "I reviewed legacy receipt rejection"),
+    )
+    evidence = migration.verify_completed_candidate(plan)
+    receipt = json.loads(result.receipt_path.read_text(encoding="utf-8"))
+    receipt["schema_version"] = schema_version
+    if durability_protocol is None:
+        receipt.pop("directory_durability_protocol")
+        receipt.pop("publication_state")
+    else:
+        receipt["directory_durability_protocol"] = durability_protocol
+    receipt["receipt_sha256"] = migration._canonical_receipt_sha256(receipt)
+    result.receipt_path.write_text(
+        json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    match = "strict directory-durability attestation.*move it aside and rebuild"
+    with pytest.raises(migration.MigrationPreflightError, match=match):
+        migration.preflight_migration(plan)
+    with pytest.raises(migration.MigrationPreflightError, match=match):
+        migration.verify_completed_candidate(plan)
+    with pytest.raises(migration.MigrationPreflightError, match=match):
+        migration.verify_relocated_candidate(plan, destination, evidence)
 
 
 def test_completed_recognition_rejects_receipt_and_marker_tampering(tmp_path: Path) -> None:
@@ -1056,7 +1234,9 @@ def test_schema_v3_apply_excludes_retained_sources_and_paths_and_is_idempotent(
     assert not any(path.name == "canary.md" for path in destination.rglob("*"))
 
     receipt = json.loads(result.receipt_path.read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == 2
+    assert receipt["schema_version"] == 3
+    assert receipt["directory_durability_protocol"] == "strict-fsync-v1"
+    assert receipt["publication_state"] == "published"
     assert receipt["plan_schema_version"] == 3
     assert receipt["copy_file_count"] == plan.copy_file_count
     assert receipt["copy_bytes"] == plan.copy_bytes

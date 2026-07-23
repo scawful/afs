@@ -61,6 +61,7 @@ _RECEIPT_DIRECTORY = Path(context_layout.AFS_STATE_DIR) / "migrations"
 _MAX_RECEIPT_BYTES = 1024 * 1024
 _MAX_MARKER_BYTES = 64 * 1024
 _MAX_README_BYTES = 64 * 1024
+_DIRECTORY_DURABILITY_PROTOCOL = "strict-fsync-v1"
 _WINDOWS_RESERVED_NAMES = frozenset(
     {"con", "prn", "aux", "nul"}.union(
         (f"com{number}" for number in range(1, 10)),
@@ -87,6 +88,10 @@ class MigrationApplyError(LayoutMigrationError):
     def __init__(self, message: str, *, failed_destination: Path | None = None) -> None:
         super().__init__(message)
         self.failed_destination = failed_destination
+
+
+class _UnsupportedReceiptDurability(MigrationPreflightError):
+    """Raised when an existing candidate predates strict directory sync."""
 
 
 @dataclass(frozen=True)
@@ -1046,6 +1051,24 @@ def _read_receipt(path: Path, *, boundary: Path) -> tuple[dict[str, Any], os.sta
     return payload, path_stat
 
 
+def _expected_receipt_schema(plan: Any) -> int:
+    return 3 if _plan_schema_version(plan) == 3 else 2
+
+
+def _require_receipt_durability(receipt: dict[str, Any], plan: Any) -> None:
+    if (
+        receipt.get("schema_version") != _expected_receipt_schema(plan)
+        or receipt.get("directory_durability_protocol") != _DIRECTORY_DURABILITY_PROTOCOL
+        or receipt.get("publication_state") != "published"
+    ):
+        raise _UnsupportedReceiptDurability(
+            "migration candidate lacks a published, supported strict "
+            "directory-durability attestation; move it aside and rebuild it "
+            "with the current AFS executor, or use a separately reviewed "
+            "explicit re-attestation workflow (AFS will not upgrade it silently)"
+        )
+
+
 def _completed_result(plan: Any) -> MigrationResult | None:
     destination = lexical_absolute(Path(str(getattr(plan, "destination_root", ""))))
     source = lexical_absolute(Path(str(getattr(plan, "source_root", ""))))
@@ -1081,6 +1104,7 @@ def _completed_result(plan: Any) -> MigrationResult | None:
     receipt_path = _receipt_path(destination, transaction_id)
     try:
         receipt, receipt_stat = _read_receipt(receipt_path, boundary=destination)
+        _require_receipt_durability(receipt, plan)
         marker_path = destination / context_layout.AFS_STATE_DIR / context_layout.LAYOUT_FILE
         marker_document, marker_stat = _read_stable_regular(
             marker_path,
@@ -1108,6 +1132,8 @@ def _completed_result(plan: Any) -> MigrationResult | None:
         candidate_sha256 = _candidate_tree_digest(destination, transaction_id)
         audit = context_layout.audit_layout(destination)
         marker_sha256 = hashlib.sha256(marker_text.encode("utf-8")).hexdigest()
+    except _UnsupportedReceiptDurability:
+        raise
     except (
         OSError,
         TypeError,
@@ -1273,6 +1299,9 @@ def verify_relocated_candidate(
             label="relocated migration receipt",
         )
         receipt = json.loads(receipt_document.decode("utf-8"), object_pairs_hook=_receipt_object)
+        if not isinstance(receipt, dict):
+            raise ValueError("relocated migration receipt must be a JSON object")
+        _require_receipt_durability(receipt, plan)
         marker_path = candidate / context_layout.AFS_STATE_DIR / context_layout.LAYOUT_FILE
         marker_document, marker_stat = _read_stable_regular(
             marker_path,
@@ -1289,9 +1318,11 @@ def verify_relocated_candidate(
         candidate_sha256 = _candidate_tree_digest(candidate, transaction_id)
         metadata = context_layout.LayoutMetadata.load(candidate)
         audit = context_layout.audit_layout(candidate)
+    except _UnsupportedReceiptDurability:
+        raise
     except (OSError, TypeError, ValueError, json.JSONDecodeError, LayoutMigrationError) as exc:
         raise MigrationPreflightError(f"cannot verify relocated candidate: {exc}") from exc
-    if not isinstance(receipt, dict) or not _valid_receipt_schema(receipt, plan):
+    if not _valid_receipt_schema(receipt, plan):
         raise MigrationPreflightError("relocated migration receipt schema is invalid")
     plan_hash = _canonical_plan_hash(plan)
     marker_sha256 = hashlib.sha256(marker_document).hexdigest()
@@ -1724,8 +1755,10 @@ def _receipt_payload(
     marker_sha256: str,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "schema_version": 1,
-        "status": "applied",
+        "schema_version": 2,
+        "directory_durability_protocol": _DIRECTORY_DURABILITY_PROTOCOL,
+        "publication_state": "prepared",
+        "status": "prepared",
         "transaction_id": str(preflight.plan.transaction_id),
         "plan_hash": preflight.plan_hash,
         "plan_created_at": str(preflight.plan.created_at),
@@ -1754,7 +1787,7 @@ def _receipt_payload(
     if _plan_schema_version(preflight.plan) == 3:
         payload.update(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "plan_schema_version": 3,
                 "copy_file_count": preflight.copy_file_count,
                 "copy_bytes": preflight.copy_bytes,
@@ -1764,6 +1797,18 @@ def _receipt_payload(
         )
     payload["receipt_sha256"] = _canonical_receipt_sha256(payload)
     return payload
+
+
+def _published_receipt(prepared: dict[str, Any]) -> dict[str, Any]:
+    published = dict(prepared)
+    published.update(
+        {
+            "publication_state": "published",
+            "status": "applied",
+        }
+    )
+    published["receipt_sha256"] = _canonical_receipt_sha256(published)
+    return published
 
 
 def _canonical_receipt_sha256(payload: dict[str, Any]) -> str:
@@ -1783,6 +1828,8 @@ def _valid_receipt_schema(receipt: dict[str, Any], plan: Any) -> bool:
     plan_schema_version = _plan_schema_version(plan)
     expected_fields = {
         "schema_version",
+        "directory_durability_protocol",
+        "publication_state",
         "status",
         "transaction_id",
         "plan_hash",
@@ -1846,9 +1893,11 @@ def _valid_receipt_schema(receipt: dict[str, Any], plan: Any) -> bool:
     integer_fields.intersection_update(expected_fields)
     if any(type(receipt[field]) is not int or receipt[field] < 0 for field in integer_fields):
         return False
-    expected_receipt_schema = 2 if plan_schema_version == 3 else 1
+    expected_receipt_schema = _expected_receipt_schema(plan)
     if (
         receipt["schema_version"] != expected_receipt_schema
+        or receipt["directory_durability_protocol"] != _DIRECTORY_DURABILITY_PROTOCOL
+        or receipt["publication_state"] != "published"
         or receipt["source_unchanged"] is not True
     ):
         return False
@@ -1949,8 +1998,9 @@ def apply_migration(
         failed: Path | None = None
         quarantine_durable = False
         try:
-            _mkdir_private(destination)
+            os.mkdir(destination, 0o700)
             created = True
+            os.chmod(destination, 0o700)
             strict_fsync_directory(destination.parent)
             _build_unmarked_scaffold(destination)
             copied_count, copied_bytes = _copy_operations(current)
@@ -2002,8 +2052,9 @@ def apply_migration(
                 mode=0o600,
                 durable=True,
             )
-            # Re-read every self-referential/private artifact before the
-            # commit point. No fallible verification follows marker publish.
+            # Re-read every prepared/private artifact before the marker commit
+            # point. The receipt remains explicitly prepared until marker
+            # publication has completed its strict directory sync.
             persisted_receipt, receipt_stat = _read_receipt(
                 receipt_path,
                 boundary=destination,
@@ -2058,6 +2109,29 @@ def apply_migration(
                 mode=0o600,
                 durable=True,
             )
+            published_receipt = _published_receipt(receipt)
+            atomic_write_text(
+                receipt_path,
+                json.dumps(
+                    published_receipt,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                mode=0o600,
+                durable=True,
+            )
+            persisted_receipt, receipt_stat = _read_receipt(
+                receipt_path,
+                boundary=destination,
+            )
+            if (
+                persisted_receipt != published_receipt
+                or _has_group_or_world_permissions(receipt_stat)
+                or not _valid_receipt_schema(persisted_receipt, plan)
+            ):
+                raise MigrationApplyError("published migration receipt verification failed")
             return final_result
         except BaseException as exc:  # noqa: BLE001 - cleanup must cover interrupts and bugs
             if _destination_exists(marker):
