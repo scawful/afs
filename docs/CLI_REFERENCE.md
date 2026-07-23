@@ -981,9 +981,10 @@ carries the same bounded warnings; prepare-client prompts include a compact
 count plus an `afs skills list --json` follow-up, and `afs doctor` summarizes
 them using the same runtime config precedence.
 
-Structured diagnostic parity for the MCP `skill.match` and `skill.read` tools
-is a separate, ratchet-gated `mcp_server.py` cleanup slice; this CLI/session
-change intentionally does not broaden that legacy module.
+The MCP `skill.match` and `skill.read` tools expose the same bounded
+`diagnostic_count`, `diagnostics_omitted`, and structured `diagnostics`
+envelope. Unknown-name errors include a compact, control-safe warning summary
+so malformed roots do not disappear when a tool call has no success payload.
 
 ## Embeddings
 
