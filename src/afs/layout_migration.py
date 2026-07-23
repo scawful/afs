@@ -27,7 +27,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from . import context_layout
-from .atomic_io import atomic_write_text, fsync_directory
+from .atomic_io import atomic_write_text, strict_fsync_directory
 from .human_provenance import (
     HumanAuthorization,
     consume_human_authorization,
@@ -1388,7 +1388,6 @@ def _unlock_descriptor(descriptor: int) -> None:
 def _mkdir_private(path: Path) -> None:
     os.mkdir(path, 0o700)
     os.chmod(path, 0o700)
-    fsync_directory(path.parent)
 
 
 def _ensure_private_directory(path: Path, *, root: Path) -> None:
@@ -1400,6 +1399,7 @@ def _ensure_private_directory(path: Path, *, root: Path) -> None:
             current_stat = os.lstat(current)
         except FileNotFoundError:
             _mkdir_private(current)
+            strict_fsync_directory(current.parent)
             continue
         if is_linklike(current_stat) or not stat.S_ISDIR(current_stat.st_mode):
             raise MigrationApplyError(f"unsafe scaffold path: {current}")
@@ -1659,7 +1659,7 @@ def _copy_tree(
             raise MigrationApplyError(f"copy verification failed: {source}")
         # fsync(file) persists content; fsync(parent) persists the exclusive
         # directory entry before the layout marker can authorize the tree.
-        fsync_directory(destination.parent)
+        strict_fsync_directory(destination.parent)
         return 1, source_size
     if not stat.S_ISDIR(source_stat.st_mode):
         raise MigrationApplyError(f"copy source is not a regular file or directory: {source}")
@@ -1893,7 +1893,7 @@ def _quarantine_destination(
     except OSError:
         return None, False
     try:
-        fsync_directory(destination.parent)
+        strict_fsync_directory(destination.parent)
     except OSError:
         return candidate, False
     return candidate, True
@@ -1951,6 +1951,7 @@ def apply_migration(
         try:
             _mkdir_private(destination)
             created = True
+            strict_fsync_directory(destination.parent)
             _build_unmarked_scaffold(destination)
             copied_count, copied_bytes = _copy_operations(current)
             if (copied_count, copied_bytes) != (
@@ -2062,7 +2063,7 @@ def apply_migration(
             if _destination_exists(marker):
                 try:
                     marker.unlink()
-                    fsync_directory(marker.parent)
+                    strict_fsync_directory(marker.parent)
                 except OSError as revoke_error:
                     raise MigrationApplyError(
                         "migration failed after layout marker publication and marker "

@@ -6,6 +6,7 @@ import os
 import stat
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +51,34 @@ def _authorization(
     )
     assert authorization is not None
     return authorization
+
+
+def _inject_directory_open_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    should_fail: Callable[[Path], bool],
+    message: str,
+) -> list[Path]:
+    real_open = migration.os.open
+    failures: list[Path] = []
+
+    def selective_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        candidate = Path(os.fsdecode(path))
+        if should_fail(candidate):
+            failures.append(candidate)
+            raise OSError(message)
+        if dir_fd is None:
+            return real_open(path, flags, mode)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(migration.os, "open", selective_open)
+    return failures
 
 
 def test_preflight_is_strictly_read_only(tmp_path: Path) -> None:
@@ -403,6 +432,39 @@ def test_copy_fault_quarantines_partial_destination_without_marker(
     assert not (failure.value.failed_destination / ".afs" / LAYOUT_FILE).exists()
 
 
+def test_copied_directory_open_failure_aborts_before_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(tmp_path)
+    destination = tmp_path / "destination"
+    plan = build_migration_plan(source, destination)
+    target_directory = destination / "history" / "common"
+    open_failures = _inject_directory_open_failure(
+        monkeypatch,
+        should_fail=lambda path: path == target_directory,
+        message="injected copied-directory open failure",
+    )
+    with pytest.raises(
+        migration.MigrationApplyError,
+        match="injected copied-directory open failure",
+    ) as failure:
+        migration.apply_migration(
+            plan,
+            rationale="I reviewed copied-directory durability handling",
+            authorization=_authorization(
+                plan,
+                "I reviewed copied-directory durability handling",
+            ),
+        )
+
+    assert open_failures == [target_directory]
+    assert not destination.exists()
+    assert failure.value.failed_destination is not None
+    assert failure.value.failed_destination.is_dir()
+    assert not (failure.value.failed_destination / ".afs" / LAYOUT_FILE).exists()
+
+
 def test_marker_publication_failure_quarantines_unmarked_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -479,6 +541,77 @@ def test_marker_revocation_failure_reports_marked_candidate_in_place(
     assert destination.exists()
 
 
+def test_post_publication_directory_open_failure_revokes_and_quarantines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(tmp_path)
+    destination = tmp_path / "destination"
+    plan = build_migration_plan(source, destination)
+    marker = destination / ".afs" / LAYOUT_FILE
+    open_failures = _inject_directory_open_failure(
+        monkeypatch,
+        should_fail=lambda path: (
+            path == marker.parent and marker.exists() and not open_failures
+        ),
+        message="injected marker-directory open failure",
+    )
+    with pytest.raises(
+        migration.MigrationApplyError,
+        match="injected marker-directory open failure",
+    ) as failure:
+        migration.apply_migration(
+            plan,
+            rationale="I reviewed post-publication cleanup",
+            authorization=_authorization(
+                plan,
+                "I reviewed post-publication cleanup",
+            ),
+        )
+
+    assert open_failures == [marker.parent]
+    assert not destination.exists()
+    assert failure.value.failed_destination is not None
+    assert failure.value.failed_destination.is_dir()
+    assert not (failure.value.failed_destination / ".afs" / LAYOUT_FILE).exists()
+
+
+def test_post_publication_directory_open_failure_blocks_unsafe_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(tmp_path)
+    destination = tmp_path / "destination"
+    plan = build_migration_plan(source, destination)
+    marker = destination / ".afs" / LAYOUT_FILE
+    marker_parent = marker.parent
+    open_failures = _inject_directory_open_failure(
+        monkeypatch,
+        should_fail=lambda path: (
+            path == marker_parent and (marker.exists() or bool(open_failures))
+        ),
+        message="injected marker-directory open failure",
+    )
+    with pytest.raises(
+        migration.MigrationApplyError,
+        match="marker revocation failed",
+    ) as failure:
+        migration.apply_migration(
+            plan,
+            rationale="I reviewed post-publication durability handling",
+            authorization=_authorization(
+                plan,
+                "I reviewed post-publication durability handling",
+            ),
+        )
+
+    assert open_failures == [marker_parent, marker_parent]
+    assert failure.value.failed_destination == destination
+    assert destination.exists()
+    assert not marker.exists()
+    assert not list(tmp_path.glob("destination.failed-layout_*"))
+
+
 def test_failed_quarantine_rename_reports_original_partial_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -509,26 +642,27 @@ def test_failed_quarantine_rename_reports_original_partial_path(
     assert not (destination / ".afs" / LAYOUT_FILE).exists()
 
 
-def test_quarantine_parent_fsync_failure_reports_retained_path(
+def test_quarantine_parent_directory_open_failure_reports_retained_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _source(tmp_path)
     destination = tmp_path / "destination"
     plan = build_migration_plan(source, destination)
-    real_fsync_directory = migration.fsync_directory
 
     def fail_copy(_source: Path, _destination: Path) -> tuple[str, int]:
         raise OSError("injected copy failure")
 
-    def fail_quarantine_sync(path: Path) -> None:
-        quarantined = list(tmp_path.glob("destination.failed-layout_*"))
-        if path == destination.parent and not destination.exists() and quarantined:
-            raise OSError("injected quarantine durability failure")
-        real_fsync_directory(path)
-
     monkeypatch.setattr(migration, "_copy_regular_file", fail_copy)
-    monkeypatch.setattr(migration, "fsync_directory", fail_quarantine_sync)
+    open_failures = _inject_directory_open_failure(
+        monkeypatch,
+        should_fail=lambda path: (
+            path == destination.parent
+            and not destination.exists()
+            and bool(list(tmp_path.glob("destination.failed-layout_*")))
+        ),
+        message="injected quarantine durability failure",
+    )
 
     with pytest.raises(
         migration.MigrationApplyError,
@@ -540,6 +674,7 @@ def test_quarantine_parent_fsync_failure_reports_retained_path(
             authorization=_authorization(plan, "I reviewed quarantine durability handling"),
         )
 
+    assert open_failures == [destination.parent]
     assert not destination.exists()
     assert failure.value.failed_destination is not None
     assert failure.value.failed_destination.is_dir()
@@ -780,7 +915,7 @@ def test_copied_entries_and_directories_are_fsynced_before_marker(
     destination = tmp_path / "destination"
     plan = build_migration_plan(source, destination)
     events: list[tuple[str, str]] = []
-    real_fsync = migration.fsync_directory
+    real_fsync = migration.strict_fsync_directory
     real_atomic = migration.atomic_write_text
 
     def tracked_fsync(path: Path) -> None:
@@ -799,7 +934,7 @@ def test_copied_entries_and_directories_are_fsynced_before_marker(
             events.append(("marker", str(path)))
         real_atomic(path, text, encoding=encoding, mode=mode, durable=durable)
 
-    monkeypatch.setattr(migration, "fsync_directory", tracked_fsync)
+    monkeypatch.setattr(migration, "strict_fsync_directory", tracked_fsync)
     monkeypatch.setattr(migration, "atomic_write_text", tracked_atomic)
     migration.apply_migration(
         plan,
