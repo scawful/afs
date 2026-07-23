@@ -390,3 +390,77 @@ def test_skills_list_keeps_good_explicit_root_when_another_cannot_resolve(
     assert payload["diagnostic_count"] == 1
     assert payload["diagnostics"][0]["code"] == "root_unreadable"
     assert payload["diagnostics"][0]["root"] == str(broken_root)
+
+
+def test_skills_list_and_match_use_repo_runtime_config_precedence(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    user_config = home / ".config" / "afs" / "config.toml"
+    user_skill = tmp_path / "user-skills" / "user" / "SKILL.md"
+    repo_skill = repo / "repo-skills" / "repo" / "SKILL.md"
+    user_config.parent.mkdir(parents=True)
+    repo_skill.parent.mkdir(parents=True)
+    user_skill.parent.mkdir(parents=True)
+    repo_skill.write_text(
+        "---\nname: repo-skill\ntriggers: [repo-focus]\n---\n",
+        encoding="utf-8",
+    )
+    user_skill.write_text(
+        "---\nname: user-skill\ntriggers: [user-focus]\n---\n",
+        encoding="utf-8",
+    )
+    user_config.write_text(
+        "[profiles]\n"
+        'active_profile = "user"\n'
+        "[profiles.user]\n"
+        f'skill_roots = ["{user_skill.parent.parent}"]\n'
+        "[extensions]\n"
+        "auto_discover = false\n",
+        encoding="utf-8",
+    )
+    (repo / "afs.toml").write_text(
+        "[profiles]\n"
+        'active_profile = "repo"\n'
+        "[profiles.repo]\n"
+        f'skill_roots = ["{repo_skill.parent.parent}"]\n'
+        "[extensions]\n"
+        "auto_discover = false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    for name in (
+        "AFS_CONFIG_PATH",
+        "AFS_PREFER_REPO_CONFIG",
+        "AFS_PREFER_USER_CONFIG",
+        "AFS_ROOT",
+        "AFS_SKILL_ROOTS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(repo)
+
+    list_args = Namespace(config=None, profile=None, root=None, json=True)
+    assert skills_list_command(list_args) == 0
+    list_payload = json.loads(capsys.readouterr().out)
+
+    assert list_payload["profile"] == "repo"
+    list_names = {entry["name"] for entry in list_payload["skills"]}
+    assert "repo-skill" in list_names
+    assert "user-skill" not in list_names
+
+    match_args = Namespace(
+        config=None,
+        profile=None,
+        root=None,
+        prompt="repo-focus",
+        top_k=10,
+        json=True,
+    )
+    assert skills_match_command(match_args) == 0
+    match_payload = json.loads(capsys.readouterr().out)
+
+    assert match_payload["profile"] == "repo"
+    assert [entry["name"] for entry in match_payload["matches"]] == ["repo-skill"]

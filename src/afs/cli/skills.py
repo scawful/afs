@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from ..cli._utils import load_runtime_config_from_args, resolve_context_paths
-from ..config import load_config_model
 from ..manager import AFSManager
 from ..profiles import resolve_active_profile
 from ..skill_mining import (
@@ -88,8 +87,10 @@ def _resolve_skill_roots(args: argparse.Namespace, profile_roots: list[Path]) ->
 
 
 def skills_list_command(args: argparse.Namespace) -> int:
-    config_path = Path(args.config) if args.config else None
-    config = load_config_model(config_path=config_path, merge_user=True)
+    config, _config_path = load_runtime_config_from_args(
+        args,
+        start_dir=Path.cwd(),
+    )
     profile = resolve_active_profile(config, profile_name=args.profile)
 
     roots = _resolve_skill_roots(args, list(profile.skill_roots))
@@ -142,8 +143,10 @@ def skills_list_command(args: argparse.Namespace) -> int:
 
 
 def skills_match_command(args: argparse.Namespace) -> int:
-    config_path = Path(args.config) if args.config else None
-    config = load_config_model(config_path=config_path, merge_user=True)
+    config, _config_path = load_runtime_config_from_args(
+        args,
+        start_dir=Path.cwd(),
+    )
     profile = resolve_active_profile(config, profile_name=args.profile)
 
     roots = _resolve_skill_roots(args, list(profile.skill_roots))
