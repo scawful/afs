@@ -9,6 +9,7 @@ session state, workflow hints, and memory manifests.
 
 from __future__ import annotations
 
+import logging
 import re
 import shlex
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from .verification import (
 )
 
 _HOOK_SKILL_BODY_CHARS = 1_000
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -254,6 +256,11 @@ def build_hook_injection(
                 record_event=False,
             )
         except Exception:  # noqa: BLE001 - optional hook context must fail closed.
+            logger.debug(
+                "Unable to build hook session context for %s",
+                context_path,
+                exc_info=True,
+            )
             return ""
     if not state:
         return ""
@@ -558,6 +565,11 @@ def _session_context_block(
                 record_event=False,
             )
         except Exception:  # noqa: BLE001 - optional prompt context must fail closed.
+            logger.debug(
+                "Unable to build model session context for %s",
+                context_path,
+                exc_info=True,
+            )
             return ""
 
     if not state:
