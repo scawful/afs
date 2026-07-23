@@ -3119,8 +3119,11 @@ def _require_known_skill_arguments(
         )
 
 
-def _has_ascii_or_c1_controls(value: str) -> bool:
-    return any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in value)
+def _has_unsafe_skill_name_characters(value: str) -> bool:
+    return any(
+        unicodedata.category(char) in _LOG_ESCAPE_CATEGORIES
+        for char in value
+    )
 
 
 def _safe_skill_error_label(value: str, *, max_chars: int) -> str:
@@ -3230,10 +3233,10 @@ def _tool_skill_match(arguments: dict[str, Any], manager: AFSManager) -> dict[st
 def _skill_path_within_roots(path: Path, roots: list[Path]) -> tuple[Path, Path]:
     resolved = path.expanduser().resolve()
     for root in roots:
-        resolved_root = root.expanduser().resolve()
         try:
+            resolved_root = root.expanduser().resolve()
             resolved.relative_to(resolved_root)
-        except (OSError, ValueError):
+        except (OSError, RuntimeError, ValueError):
             continue
         return resolved, resolved_root
     raise PermissionError(f"Skill path outside configured roots: {resolved}")
@@ -3253,10 +3256,11 @@ def _tool_skill_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str
             arguments,
             f"name must be at most {MAX_SKILL_NAME_CHARS} characters",
         )
-    if _has_ascii_or_c1_controls(raw_name):
+    if _has_unsafe_skill_name_characters(raw_name):
         _reject_skill_arguments(
             arguments,
-            "name must not contain ASCII or C1 control characters",
+            "name must not contain Unicode control, format, surrogate, "
+            "or separator characters",
         )
     name = raw_name.strip()
     if not name:

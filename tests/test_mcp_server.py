@@ -5086,6 +5086,41 @@ def test_skill_tools_surface_partial_discovery_diagnostics(
     assert len(message) < 2_000
 
 
+def test_skill_read_skips_unresolvable_root_before_valid_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bad_root = tmp_path / "bad-root"
+    valid_root = tmp_path / "valid-root"
+    _write_matching_skill(valid_root.parent, valid_root.name, body_size=20)
+    skill_root = valid_root.parent / "skills"
+    valid_skill = skill_root / valid_root.name / "SKILL.md"
+    original_expanduser = Path.expanduser
+
+    def selective_expanduser(path: Path) -> Path:
+        if path == bad_root:
+            raise RuntimeError("cannot resolve configured skill root")
+        return original_expanduser(path)
+
+    monkeypatch.setattr(Path, "expanduser", selective_expanduser)
+    with patch(
+        "afs.mcp_server._profile_skill_roots",
+        return_value=("general", [bad_root, skill_root]),
+    ):
+        response = _call_tool(
+            _make_manager(tmp_path),
+            "skill.read",
+            {"name": valid_root.name},
+        )
+
+    payload = response["result"]["structuredContent"]
+    assert payload["name"] == valid_root.name
+    assert payload["path"] == str(valid_skill.resolve())
+    assert payload["diagnostic_count"] == 1
+    assert payload["diagnostics_omitted"] == 0
+    assert payload["diagnostics"][0]["code"] == "root_unreadable"
+
+
 def test_skill_read_warning_summary_is_control_safe(
     tmp_path: Path,
 ) -> None:
@@ -5209,9 +5244,13 @@ def test_skill_read_rejects_whitespace_padded_oversized_name(tmp_path: Path) -> 
         "osc\x1b]8;;https://example.invalid\x07click\x1b]8;;\x07",
         "delete\x7fcontrol",
         "c1\x85control",
+        "bidi\u202econtrol",
+        "line\u2028separator",
+        "paragraph\u2029separator",
+        "surrogate\ud800control",
     ],
 )
-def test_skill_read_rejects_control_characters_without_echoing_them(
+def test_skill_read_rejects_unsafe_unicode_without_echoing_it(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     name: str,
@@ -5221,12 +5260,17 @@ def test_skill_read_rejects_control_characters_without_echoing_them(
 
     response = _call_tool(manager, "skill.read", {"name": name})
 
-    expected = "name must not contain ASCII or C1 control characters"
+    expected = (
+        "name must not contain Unicode control, format, surrogate, "
+        "or separator characters"
+    )
     assert response["error"]["message"] == expected
     assert capsys.readouterr().err == f"[afs-mcp] tool error: skill.read: {expected}\n"
 
     history_files = sorted((manager.config.general.context_root / "history").glob("*.jsonl"))
-    event = json.loads(history_files[-1].read_text(encoding="utf-8").splitlines()[-1])
+    event_text = history_files[-1].read_text(encoding="utf-8").splitlines()[-1]
+    assert name not in event_text
+    event = json.loads(event_text)
     assert "arguments" not in event["metadata"]
 
 
