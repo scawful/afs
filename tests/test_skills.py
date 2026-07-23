@@ -164,6 +164,36 @@ def test_root_resolution_failure_does_not_hide_healthy_siblings(
     assert "simulated symlink loop" in broken.message
 
 
+def test_root_stat_failure_does_not_hide_healthy_siblings(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    healthy_root = tmp_path / "healthy"
+    healthy_skill = healthy_root / "healthy" / "SKILL.md"
+    healthy_skill.parent.mkdir(parents=True)
+    healthy_skill.write_text("---\nname: healthy\n---\n", encoding="utf-8")
+    broken_root = tmp_path / "too-long"
+    original_exists = Path.exists
+
+    def simulated_exists(path: Path) -> bool:
+        if path == broken_root:
+            raise OSError("simulated stat failure")
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", simulated_exists)
+
+    result = discover_skills_with_diagnostics([healthy_root, broken_root])
+
+    assert "healthy" in {skill.name for skill in result.skills}
+    broken = next(
+        diagnostic
+        for diagnostic in result.diagnostics
+        if diagnostic.root == broken_root
+    )
+    assert broken.code == "root_unreadable"
+    assert "simulated stat failure" in broken.message
+
+
 def test_unknown_tilde_afs_root_reaches_discovery_as_a_diagnostic(
     tmp_path: Path,
 ) -> None:

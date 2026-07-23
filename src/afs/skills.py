@@ -682,14 +682,24 @@ def discover_skills_with_diagnostics(
                 message=f"Cannot expand or resolve configured skill root: {exc}",
             )
             continue
-        if not resolved_root.exists():
+        try:
+            root_exists = resolved_root.exists()
+            root_is_directory = resolved_root.is_dir() if root_exists else False
+        except (OSError, RuntimeError) as exc:
+            add_diagnostic(
+                code="root_unreadable",
+                root=resolved_root,
+                message=f"Cannot inspect configured skill root: {exc}",
+            )
+            continue
+        if not root_exists:
             add_diagnostic(
                 code="root_missing",
                 root=resolved_root,
                 message="Configured skill root does not exist",
             )
             continue
-        if not resolved_root.is_dir():
+        if not root_is_directory:
             add_diagnostic(
                 code="root_not_directory",
                 root=resolved_root,
