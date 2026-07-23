@@ -122,9 +122,11 @@ Operational repair entrypoint:
 
 `afs doctor` is the operator-facing diagnostic surface. It checks config,
 active context health, mount provenance, index freshness, extension loading,
-MCP registration, and configured auto-start maintenance services. The built-in
-MCP server reuses a lighter startup subset of these checks so clients get
-warnings without paying for the full operator sweep on every launch.
+configured skill loading, MCP registration, and configured auto-start
+maintenance services. The built-in MCP server reuses a lighter startup subset
+of these checks so clients get warnings without paying for the full operator
+sweep on every launch. Use `afs skills list --json` for the complete structured
+report when doctor or session bootstrap reports a skipped skill entry.
 
 Agent contract:
 

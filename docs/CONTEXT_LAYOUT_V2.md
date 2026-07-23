@@ -282,6 +282,16 @@ verified. `.afs/layout.toml` is published last, so an interrupted copy cannot
 be mistaken for an authorized v2 root. On a caught apply failure before marker
 publication, AFS attempts to rename the partial tree to an adjacent
 `.failed-*` name and reports that retained path when the rename succeeds.
+Current migration receipts carry the
+`directory_durability_protocol = "strict-fsync-v1"` attestation. The receipt is
+durably stored as `publication_state = "prepared"` before marker publication
+and transitions to `"published"` only after the marker's strict directory sync
+succeeds. Completed-candidate and activation verification require that
+published state. Candidates created by an older executor, carrying an unknown
+attestation, or left prepared by an interrupted publication are not accepted.
+Move such a candidate aside and rebuild it with the current executor, or use a
+separately reviewed explicit re-attestation workflow; AFS never upgrades this
+evidence silently.
 
 A hard process or host interruption can bypass that failure handler and leave
 an unmarked partial tree at the requested destination. It is never treated as

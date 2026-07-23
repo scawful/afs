@@ -220,6 +220,10 @@ roots and returns at most 2,000 characters of its instruction body. Both tools
 report truncation explicitly. Discovery rejects skill files over 64,000
 characters, names over 256 characters, and metadata lists over 16 entries of
 256 characters each, so safety metadata is not silently clipped.
+Both tools also return a bounded `diagnostic_count`, `diagnostics_omitted`, and
+`diagnostics` envelope when malformed or unreadable skill entries are skipped.
+An unknown `skill.read` name includes a compact, control-safe warning summary
+in its error because MCP error responses do not carry structured tool content.
 
 When `AFS_MCP_TOOL_NAME_STYLE=claude` is set, advertised dotted names use
 underscore aliases (for example, `context_search`, `messages_send`, and

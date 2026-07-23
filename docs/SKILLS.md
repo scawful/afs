@@ -24,6 +24,11 @@ MCP tools (in the default slim catalog):
 - `skill.read` — load one skill's `SKILL.md` body plus metadata by name.
   Reads are root-contained: only files under resolved skill roots are served.
 
+Both MCP tools preserve valid results when another configured skill entry is
+malformed or unreadable. Their success payloads include bounded
+`diagnostic_count`, `diagnostics_omitted`, and `diagnostics` fields; unknown
+`skill.read` errors include a compact warning summary.
+
 Use these mid-session when the task shifts: the launch-time match reflects the
 opening prompt, not where the session ends up.
 

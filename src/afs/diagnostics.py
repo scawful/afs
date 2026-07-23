@@ -17,6 +17,7 @@ from __future__ import annotations
 import filecmp
 import importlib
 import json
+import logging
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ _SERVICE_DIAGNOSTIC_NAMES = (
     "history-memory",
 )
 DOCTOR_SNAPSHOT_JSON = "doctor_snapshot.json"
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -53,12 +55,13 @@ class DiagnosticResult:
     fix_available: bool = False
     fix_description: str = ""
     fix_applied: bool = False
+    details: list[dict[str, Any]] = field(default_factory=list)
 
     # Internal — not serialised.  Holds a callable that performs the fix.
     _fix_fn: Callable[[], str] | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "name": self.name,
             "status": self.status,
             "message": self.message,
@@ -66,6 +69,9 @@ class DiagnosticResult:
             "fix_description": self.fix_description,
             "fix_applied": self.fix_applied,
         }
+        if self.details:
+            payload["details"] = self.details
+        return payload
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +99,7 @@ def check_config(config_path: Path | None = None) -> DiagnosticResult:
     """Verify the AFS config loads without errors."""
     try:
         config, _manager, _context_root = _load_runtime(config_path)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - diagnostics must report loader failures.
         return DiagnosticResult(
             name="config",
             status="error",
@@ -115,7 +121,7 @@ def check_context_root(config_path: Path | None = None) -> DiagnosticResult:
     """Verify context root exists and has required mount directories."""
     try:
         _config, manager, context_root = _load_runtime(config_path)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - diagnostics must report loader failures.
         return DiagnosticResult(
             name="context_root",
             status="error",
@@ -179,7 +185,7 @@ def check_context_health(config_path: Path | None = None) -> DiagnosticResult:
     """Verify mount health, profile-managed mounts, and provenance integrity."""
     try:
         config, manager, context_root = _load_runtime(config_path)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - diagnostics must report loader failures.
         return DiagnosticResult(
             name="context_health",
             status="error",
@@ -195,7 +201,7 @@ def check_context_health(config_path: Path | None = None) -> DiagnosticResult:
 
     try:
         health = manager.context_health(context_root)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - diagnostics must report backend failures.
         return DiagnosticResult(
             name="context_health",
             status="error",
@@ -289,7 +295,7 @@ def check_mcp_registration() -> DiagnosticResult:
         from .health.mcp_registration import find_afs_mcp_registrations
 
         registrations = find_afs_mcp_registrations()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - diagnostics must report client failures.
         return DiagnosticResult(
             name="mcp_registration",
             status="warn",
@@ -323,7 +329,7 @@ def check_embedding_indexes(config_path: Path | None = None) -> DiagnosticResult
 
         config = load_config_model(config_path=config_path, merge_user=True)
         profile = resolve_active_profile(config)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - diagnostics must report profile failures.
         return DiagnosticResult(
             name="embeddings",
             status="warn",
@@ -405,7 +411,7 @@ def check_context_index(config_path: Path | None = None) -> DiagnosticResult:
     """Check whether the active context index exists and matches filesystem state."""
     try:
         config, manager, context_root = _load_runtime(config_path)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - diagnostics must report loader failures.
         return DiagnosticResult(
             name="context_index",
             status="error",
@@ -430,7 +436,7 @@ def check_context_index(config_path: Path | None = None) -> DiagnosticResult:
         from .context_index import ContextSQLiteIndex
 
         index = ContextSQLiteIndex(manager, context_root)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - diagnostics must report index failures.
         return DiagnosticResult(
             name="context_index",
             status="error",
@@ -501,7 +507,7 @@ def check_extensions(config_path: Path | None = None) -> DiagnosticResult:
 
         config = load_config_model(config_path=config_path, merge_user=True)
         report = extension_load_report(config)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - diagnostics isolate extension failures.
         return DiagnosticResult(
             name="extensions",
             status="warn",
@@ -562,6 +568,68 @@ def check_extensions(config_path: Path | None = None) -> DiagnosticResult:
     )
 
 
+def check_skills(config_path: Path | None = None) -> DiagnosticResult:
+    """Report non-fatal failures while loading configured skill roots."""
+    try:
+        from .profiles import resolve_active_profile
+        from .skills import (
+            bounded_skill_diagnostics,
+            discover_skills_with_diagnostics,
+            escape_skill_diagnostic_text,
+            resolve_skill_roots,
+        )
+
+        config, _manager, _context_root = _load_runtime(config_path)
+        profile = resolve_active_profile(config)
+        roots = resolve_skill_roots(list(profile.skill_roots))
+        discovery = discover_skills_with_diagnostics(roots, profile=profile.name)
+    except (OSError, TypeError, ValueError) as exc:
+        return DiagnosticResult(
+            name="skills",
+            status="warn",
+            message=f"Skill diagnostics failed ({type(exc).__name__})",
+        )
+
+    diagnostic_payload = bounded_skill_diagnostics(
+        discovery.diagnostics,
+        diagnostic_count=discovery.diagnostic_count,
+        limit=20,
+    )
+    details = diagnostic_payload["diagnostics"]
+    if details:
+        diagnostic_count = discovery.diagnostic_count
+
+        def display(value: object) -> str:
+            return escape_skill_diagnostic_text(value, max_chars=512)
+
+        examples = "; ".join(
+            f"{display(item['code'])}: {display(item['path'] or item['root'])}"
+            for item in details[:3]
+        )
+        omitted = diagnostic_count - min(diagnostic_count, 3)
+        if omitted:
+            examples += f"; {omitted} more"
+        return DiagnosticResult(
+            name="skills",
+            status="warn",
+            message=(
+                f"{len(discovery.skills)} valid skill(s) loaded with "
+                f"{diagnostic_count} warning(s): {examples}. "
+                "See `afs skills list --json` for detailed diagnostics."
+            ),
+            details=details,
+        )
+
+    return DiagnosticResult(
+        name="skills",
+        status="ok",
+        message=(
+            f"{len(discovery.skills)} skill(s) loaded from "
+            f"{len(roots)} configured root(s)"
+        ),
+    )
+
+
 def check_services(config_path: Path | None = None) -> DiagnosticResult:
     """Check configured auto-start background services."""
     try:
@@ -569,7 +637,7 @@ def check_services(config_path: Path | None = None) -> DiagnosticResult:
         from .services.manager import ServiceManager
 
         service_manager = ServiceManager(config=config, config_path=config_path)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - diagnostics must report service failures.
         return DiagnosticResult(
             name="services",
             status="warn",
@@ -660,7 +728,7 @@ def check_mcp_server(config_path: Path | None = None) -> DiagnosticResult:
         config = load_config_model(config_path=config_path, merge_user=True)
         manager = AFSManager(config=config)
         registry = build_mcp_registry(manager)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - diagnostics isolate MCP build failures.
         return DiagnosticResult(
             name="mcp_server",
             status="error",
@@ -691,7 +759,7 @@ def check_agent_manifest() -> DiagnosticResult:
         path = default_manifest_path().expanduser()
         data = load_manifest(path)
         issues = validate_manifest(data, check_paths=True)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - diagnostics must report manifest failures.
         return DiagnosticResult(
             name="agent_manifest",
             status="error",
@@ -797,7 +865,7 @@ def _run_checks(
     for name, check_fn in checks:
         try:
             result = check_fn()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - each diagnostic is isolated.
             result = DiagnosticResult(
                 name=name,
                 status="error",
@@ -810,7 +878,7 @@ def _run_checks(
                 result.fix_applied = True
                 result.message = f"FIXED: {fix_msg}"
                 result.status = "ok"
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - auto-fixes are failure-isolated.
                 result.message += f" (fix failed: {exc})"
 
         results.append(result)
@@ -838,6 +906,7 @@ def run_all_checks(
         ("agent_manifest", lambda: check_agent_manifest()),
         ("embeddings", lambda: check_embedding_indexes(config_path)),
         ("extensions", lambda: check_extensions(config_path)),
+        ("skills", lambda: check_skills(config_path)),
         ("context_index", lambda: check_context_index(config_path)),
         ("mcp_server", lambda: check_mcp_server(config_path)),
     ]
@@ -898,7 +967,8 @@ def write_doctor_snapshot(
     """Write the latest doctor snapshot into the active context agent output dir."""
     try:
         config, _manager, context_root = _load_runtime(config_path)
-    except Exception:
+    except Exception:  # noqa: BLE001 - snapshot writing is optional and best-effort.
+        logger.debug("Unable to resolve doctor snapshot destination", exc_info=True)
         return None
 
     resolved_results = results if results is not None else run_all_checks(config_path=config_path)

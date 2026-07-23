@@ -57,6 +57,14 @@ def _make_manager(tmp_path: Path) -> tuple[AFSManager, Path]:
         "Keep progress visible and leave a durable handoff for the next agent.\n",
         encoding="utf-8",
     )
+    invalid_skill = skill_root / "invalid" / "SKILL.md"
+    invalid_skill.parent.mkdir()
+    invalid_skill.write_text(
+        "---\nname: invalid\nenforcement:\n"
+        + "".join(f"  - rule {index}\n" for index in range(17))
+        + "---\n",
+        encoding="utf-8",
+    )
 
     config = AFSConfig(
         general=GeneralConfig(context_root=context_root),
@@ -177,6 +185,8 @@ def test_session_prepare_client_command_outputs_artifacts(
     assert payload["skills"]["artifact_paths"]["json"].endswith("session_skills_codex.json")
     assert Path(payload["skills"]["artifact_paths"]["json"]).exists()
     assert payload["skills"]["matches"][0]["name"] == "agentic-background"
+    assert payload["skills"]["diagnostic_count"] == 1
+    assert payload["skills"]["diagnostics_omitted"] == 0
     assert payload["skills"]["matches"][0]["enforcement"] == [
         "Stream background progress instead of hiding state.",
         "Preserve a clear handoff trail for long-running work.",
@@ -251,6 +261,11 @@ def test_session_prepare_client_command_outputs_artifacts(
     assert "name: agentic-background" not in prompt_text
     assert "- agentic-background: Stream background progress instead of hiding state." in prompt_text
     assert "## Skill Verification" in prompt_text
+    assert "## Skill Discovery" in prompt_text
+    assert (
+        "- warnings: 1; valid skills remain available. "
+        "Inspect with `afs skills list --json`."
+    ) in prompt_text
     assert "## Verification Plan" in prompt_text
     assert (
         "- harness-artifacts: python3 -m pytest -q tests/test_session_harness.py"
@@ -269,6 +284,41 @@ def test_session_prepare_client_command_outputs_artifacts(
     supported_names = {entry["name"] for entry in payload["integration"]["supported_events"]}
     assert "user_prompt_submit" in supported_names
     assert "task_completed" in supported_names
+
+
+def test_prepare_client_survives_unresolvable_skill_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager, context_root = _make_manager(tmp_path)
+    broken_root = tmp_path / "broken-loop"
+    profile = manager.config.profiles.profiles["default"]
+    profile.skill_roots.append(broken_root)
+    original_resolve = Path.resolve
+
+    def simulated_resolve(path: Path, *args, **kwargs) -> Path:
+        if path == broken_root:
+            raise RuntimeError("simulated symlink loop")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", simulated_resolve)
+
+    payload = build_client_session_payload(
+        manager,
+        context_root,
+        client="codex",
+        cwd=tmp_path / "project",
+        task="Improve the background agents harness.",
+        include_pack=False,
+        write_artifacts=False,
+    )
+
+    assert payload["skills"]["available"] is True
+    assert payload["skills"]["matches"][0]["name"] == "agentic-background"
+    diagnostic_codes = {
+        diagnostic["code"] for diagnostic in payload["skills"]["diagnostics"]
+    }
+    assert diagnostic_codes == {"root_unreadable", "skill_invalid"}
 
 
 def test_v2_client_session_artifacts_are_project_scoped(tmp_path: Path) -> None:

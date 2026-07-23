@@ -13,6 +13,7 @@ from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .extensions import load_extensions
 from .models import MountType
 from .schema import AFSConfig, AgentConfig, ProfileConfig
+from .skills import normalize_skill_root
 
 if TYPE_CHECKING:
     from .manager import AFSManager
@@ -64,6 +65,18 @@ def _as_env_paths(name: str) -> list[Path]:
         if entry.strip():
             values.append(Path(entry).expanduser().resolve())
     return values
+
+
+def _as_env_skill_roots() -> list[Path]:
+    """Preserve lexical skill roots so discovery can diagnose bad entries."""
+    raw = os.environ.get("AFS_SKILL_ROOTS", "").strip()
+    if not raw:
+        return []
+    return [
+        normalize_skill_root(entry.strip())
+        for entry in raw.split(os.pathsep)
+        if entry.strip()
+    ]
 
 
 def _as_env_list(name: str) -> list[str]:
@@ -215,7 +228,7 @@ def resolve_active_profile(
         skill_roots=_merge_unique_paths(
             resolved_profile.skill_roots,
             extension_skills,
-            _as_env_paths("AFS_SKILL_ROOTS"),
+            _as_env_skill_roots(),
         ),
         model_registries=_merge_unique_paths(
             resolved_profile.model_registries,
@@ -262,7 +275,15 @@ def list_profile_mount_specs(profile: ResolvedProfile) -> list[ProfileMountSpec]
     )
     for mount_type, prefix, paths in spec_groups:
         for idx, source in enumerate(paths):
-            source_path = source.expanduser().resolve()
+            if mount_type == MountType.TOOLS:
+                source_path = normalize_skill_root(source)
+                try:
+                    source_exists = source_path.exists()
+                except (OSError, RuntimeError):
+                    source_exists = False
+            else:
+                source_path = source.expanduser().resolve()
+                source_exists = source_path.exists()
             alias = f"{prefix}{profile.name}-{idx}-{_slug(source_path.name)}"
             specs.append(
                 ProfileMountSpec(
@@ -270,7 +291,7 @@ def list_profile_mount_specs(profile: ResolvedProfile) -> list[ProfileMountSpec]
                     mount_type=mount_type,
                     alias=alias,
                     source=source_path,
-                    source_exists=source_path.exists(),
+                    source_exists=source_exists,
                 )
             )
     return specs

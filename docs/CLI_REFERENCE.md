@@ -364,6 +364,14 @@ input and headless agents cannot confirm. Unreviewed links, copied
 non-portable names, hard links, and special files block; the v1 source is never
 modified or deleted; and the v2 layout marker is published only after every
 copy verifies.
+Current receipts record
+`directory_durability_protocol = "strict-fsync-v1"`. They remain
+`publication_state = "prepared"` until marker publication and its strict
+directory sync succeed, then transition durably to `"published"`. A legacy
+receipt, unknown durability attestation, or interrupted prepared receipt fails
+preflight and candidate verification with instructions to move the candidate
+aside and rebuild it using the current executor, or use a separately reviewed
+explicit re-attestation workflow. AFS does not silently upgrade old evidence.
 A caught pre-marker apply failure is moved to an adjacent `.failed-*` path
 when that quarantine rename succeeds. A hard process or host interruption may
 instead leave an unmarked partial tree at the requested destination; inspect
@@ -961,6 +969,7 @@ and `AFS_PREFER_REPO_CONFIG=1` so Claude uses the repo-local AFS config.
 
 ```bash
 ./scripts/afs skills list --profile work
+./scripts/afs skills list --profile work --json
 ./scripts/afs skills match "mcp context mount" --profile work
 ./scripts/afs skills mine --path ~/src/project-a
 ./scripts/afs skills review --path ~/src/project-a --status pending
@@ -968,6 +977,22 @@ and `AFS_PREFER_REPO_CONFIG=1` so Claude uses the repo-local AFS config.
 ./scripts/afs skills reject --path ~/src/project-a --candidate workflow-example
 ./scripts/afs skills archive --path ~/src/project-a --candidate workflow-example
 ```
+
+Skill discovery is fail-soft per entry and directory: malformed or unreadable
+`SKILL.md` files and failed directory scans do not hide valid skills from other
+configured roots or readable sibling directories. The human list and match
+commands print warnings, while their `--json` output includes
+`diagnostic_count` and structured `diagnostics` records with the affected
+root/path and warning code. Diagnostic fields are bounded; `truncated_fields`
+names any code, message, root, or path shortened for output. Session bootstrap
+carries the same bounded warnings; prepare-client prompts include a compact
+count plus an `afs skills list --json` follow-up, and `afs doctor` summarizes
+them using the same runtime config precedence.
+
+The MCP `skill.match` and `skill.read` tools expose the same bounded
+`diagnostic_count`, `diagnostics_omitted`, and structured `diagnostics`
+envelope. Unknown-name errors include a compact, control-safe warning summary
+so malformed roots do not disappear when a tool call has no success payload.
 
 ## Embeddings
 
@@ -1279,7 +1304,8 @@ wrapper-local path defaults without exporting `AFS_MCP_ALLOWED_ROOTS` globally.
 actionable results. Checks include: Python environment, config loading,
 context root integrity, context mount/provenance health, optional dependencies,
 MCP registration, embedding indexes, extension loading, context index freshness,
-configured auto-start service state, and MCP server build.
+configured skill loading, configured auto-start service state, and MCP server
+build.
 
 When `--fix` is passed, the doctor auto-applies fixes for issues that have
 automated remediation (e.g., creating missing context directories, rebuilding

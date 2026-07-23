@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import re
 import stat
+import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,20 @@ MAX_SKILL_NAME_CHARS = 256
 MAX_SKILL_PATH_CHARS = 4_096
 MAX_SKILL_METADATA_ITEMS = 16
 MAX_SKILL_METADATA_ITEM_CHARS = 256
+MAX_SKILL_DIAGNOSTICS = 100
+MAX_SKILL_DIAGNOSTIC_CODE_CHARS = 80
+MAX_SKILL_DIAGNOSTIC_MESSAGE_CHARS = 512
+
+
+def _bounded_diagnostic_text(value: object, *, max_chars: int) -> tuple[str, bool]:
+    """Return deterministic diagnostic text with a hard character bound."""
+    text = str(value)
+    limit = max(0, max_chars)
+    if len(text) <= limit:
+        return text, False
+    if limit <= 3:
+        return text[:limit], True
+    return text[: limit - 3] + "...", True
 
 
 @dataclass
@@ -32,8 +48,140 @@ class SkillMetadata:
     verification: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class SkillDiscoveryDiagnostic:
+    """One bounded warning produced while scanning configured skill roots."""
+
+    code: str
+    message: str
+    root: Path
+    path: Path | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        code, code_truncated = _bounded_diagnostic_text(
+            self.code,
+            max_chars=MAX_SKILL_DIAGNOSTIC_CODE_CHARS,
+        )
+        message, message_truncated = _bounded_diagnostic_text(
+            self.message,
+            max_chars=MAX_SKILL_DIAGNOSTIC_MESSAGE_CHARS,
+        )
+        root, root_truncated = _bounded_diagnostic_text(
+            self.root,
+            max_chars=MAX_SKILL_PATH_CHARS,
+        )
+        path, path_truncated = _bounded_diagnostic_text(
+            self.path if self.path is not None else "",
+            max_chars=MAX_SKILL_PATH_CHARS,
+        )
+        truncated_fields = [
+            field_name
+            for field_name, truncated in (
+                ("code", code_truncated),
+                ("message", message_truncated),
+                ("root", root_truncated),
+                ("path", path_truncated),
+            )
+            if truncated
+        ]
+        return {
+            "severity": "warning",
+            "code": code,
+            "message": message,
+            "root": root,
+            "path": path,
+            "truncated_fields": truncated_fields,
+        }
+
+
+@dataclass
+class SkillDiscoveryResult:
+    """Discovered skills plus non-fatal warnings from the same scan."""
+
+    skills: list[SkillMetadata] = field(default_factory=list)
+    diagnostics: list[SkillDiscoveryDiagnostic] = field(default_factory=list)
+    diagnostic_count: int = 0
+
+    @property
+    def diagnostics_omitted(self) -> int:
+        return max(0, self.diagnostic_count - len(self.diagnostics))
+
+
+@dataclass
+class SkillMatchResult:
+    """Matched skill payloads plus discovery/body-read warnings."""
+
+    matches: list[dict[str, Any]] = field(default_factory=list)
+    diagnostics: list[SkillDiscoveryDiagnostic] = field(default_factory=list)
+    diagnostic_count: int = 0
+
+    @property
+    def diagnostics_omitted(self) -> int:
+        return max(0, self.diagnostic_count - len(self.diagnostics))
+
+
+def bounded_skill_diagnostics(
+    diagnostics: list[SkillDiscoveryDiagnostic],
+    *,
+    diagnostic_count: int,
+    limit: int,
+) -> dict[str, Any]:
+    """Render a bounded structured diagnostic envelope with overflow count."""
+    rendered = [
+        diagnostic.to_dict()
+        for diagnostic in diagnostics[: max(0, limit)]
+    ]
+    return {
+        "diagnostic_count": diagnostic_count,
+        "diagnostics_omitted": max(0, diagnostic_count - len(rendered)),
+        "diagnostics": rendered,
+    }
+
+
+def escape_skill_diagnostic_text(
+    value: object,
+    *,
+    max_chars: int,
+    markdown: bool = False,
+) -> str:
+    """Bound text while escaping terminal controls and optional Markdown syntax."""
+    escaped: list[str] = []
+    markdown_chars = frozenset("\\`*_{}[]<>#|")
+    for char in str(value).strip(" "):
+        codepoint = ord(char)
+        if unicodedata.category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"}:
+            escaped.append(f"\\u{codepoint:04x}")
+        elif markdown and char in markdown_chars:
+            escaped.append(f"\\{char}")
+        else:
+            escaped.append(char)
+    text = "".join(escaped)
+    limit = max(0, max_chars)
+    if len(text) <= limit:
+        return text
+    if limit <= 3:
+        return text[:limit]
+    return text[: limit - 3].rstrip() + "..."
+
+
 def _clean_token(value: str) -> str:
     return value.strip().strip('"').strip("'")
+
+
+def normalize_skill_root(value: str | Path) -> Path:
+    """Best-effort normalization that preserves roots discovery must diagnose."""
+    path = Path(value)
+    try:
+        expanded = path.expanduser()
+    except (OSError, RuntimeError):
+        return path
+    try:
+        return expanded.resolve()
+    except (OSError, RuntimeError):
+        try:
+            return expanded.absolute()
+        except (OSError, RuntimeError):
+            return expanded
 
 
 def merge_unique_paths(*groups: list[Path]) -> list[Path]:
@@ -42,25 +190,37 @@ def merge_unique_paths(*groups: list[Path]) -> list[Path]:
     seen: set[str] = set()
     for group in groups:
         for path in group:
-            resolved = path.expanduser().resolve()
-            marker = str(resolved)
+            normalized = normalize_skill_root(path)
+            marker = str(normalized)
             if marker in seen:
                 continue
             seen.add(marker)
-            merged.append(resolved)
+            merged.append(normalized)
     return merged
 
 
 def bundled_skill_roots(*, afs_root: str | Path | None = None) -> list[Path]:
     """Return bundled core skill roots available to the current runtime."""
-    candidates: list[Path] = []
+    configured_candidates: list[Path] = []
     root_value = afs_root or os.getenv("AFS_ROOT", "").strip()
     if root_value:
-        candidates.append(Path(root_value).expanduser().resolve() / "skills")
-    candidates.append(Path(__file__).resolve().parent / "bundled_skills")
-    return merge_unique_paths(
-        [candidate for candidate in candidates if candidate.exists()]
+        lexical_root = Path(root_value)
+        try:
+            expanded_root = lexical_root.expanduser()
+            resolved_root = expanded_root.resolve()
+        except (OSError, RuntimeError):
+            configured_candidates.append(lexical_root / "skills")
+        else:
+            overlay_root = resolved_root / "skills"
+            if not resolved_root.exists() or os.path.lexists(overlay_root):
+                configured_candidates.append(overlay_root)
+    internal_candidate = Path(__file__).resolve().parent / "bundled_skills"
+    internal_candidates = (
+        [internal_candidate]
+        if internal_candidate.is_dir()
+        else []
     )
+    return merge_unique_paths(configured_candidates, internal_candidates)
 
 
 def resolve_skill_roots(
@@ -242,8 +402,9 @@ def _parse_frontmatter_block(lines: list[str]) -> dict[str, str | list[str]]:
         if line.lstrip().startswith("- ") and current_list_key:
             parsed.setdefault(current_list_key, [])
             value = line.split("-", 1)[1].strip()
-            if isinstance(parsed[current_list_key], list):
-                parsed[current_list_key].append(value)
+            current_values = parsed.get(current_list_key)
+            if isinstance(current_values, list):
+                current_values.append(value)
             continue
 
         current_list_key = None
@@ -276,8 +437,9 @@ def _parse_skill_metadata_text(content: str, *, path: Path) -> SkillMetadata:
             if lines[idx].strip() == "---":
                 closing = idx
                 break
-        if closing is not None:
-            frontmatter = _parse_frontmatter_block(lines[1:closing])
+        if closing is None:
+            raise ValueError(f"Skill frontmatter is missing a closing delimiter: {path}")
+        frontmatter = _parse_frontmatter_block(lines[1:closing])
 
     name_value = frontmatter.get("name")
     if isinstance(name_value, str) and name_value.strip():
@@ -407,23 +569,147 @@ def truncate_skill_body(body: str, *, max_chars: int) -> tuple[str, bool]:
     return excerpt[:limit], True
 
 
-def discover_skills(skill_roots: list[Path], profile: str | None = None) -> list[SkillMetadata]:
-    """Discover SKILL.md files and filter by profile when requested."""
+def _skill_diagnostic(
+    *,
+    code: str,
+    root: Path,
+    message: str,
+    path: Path | None = None,
+) -> SkillDiscoveryDiagnostic:
+    normalized = " ".join(str(message).split()).strip()
+    if len(normalized) > MAX_SKILL_DIAGNOSTIC_MESSAGE_CHARS:
+        normalized = (
+            normalized[: MAX_SKILL_DIAGNOSTIC_MESSAGE_CHARS - 3].rstrip()
+            + "..."
+        )
+    return SkillDiscoveryDiagnostic(
+        code=code,
+        message=normalized,
+        root=root,
+        path=path,
+    )
+
+
+def _scan_skill_candidates(
+    root: Path,
+    *,
+    on_error: Callable[..., None],
+) -> list[Path]:
+    """Walk one root deterministically without following directory symlinks."""
+    candidates: list[Path] = []
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+                child_directories: list[Path] = []
+                for entry in entries:
+                    entry_path = current / entry.name
+                    if entry.name == "SKILL.md":
+                        candidates.append(entry_path)
+                    try:
+                        is_directory = entry.is_dir(follow_symlinks=False)
+                    except OSError as exc:
+                        on_error(
+                            code="subtree_scan_failed",
+                            root=root,
+                            path=entry_path,
+                            message=f"Cannot inspect skill-root entry: {exc}",
+                        )
+                        continue
+                    if is_directory:
+                        child_directories.append(entry_path)
+        except OSError as exc:
+            on_error(
+                code=(
+                    "root_scan_failed"
+                    if current == root
+                    else "subtree_scan_failed"
+                ),
+                root=root,
+                path=None if current == root else current,
+                message=(
+                    "Cannot scan configured skill root"
+                    if current == root
+                    else "Cannot scan skill-root subdirectory"
+                )
+                + f": {exc}",
+            )
+            continue
+        pending.extend(reversed(child_directories))
+    candidates.sort(key=lambda candidate: str(candidate))
+    return candidates
+
+
+def discover_skills_with_diagnostics(
+    skill_roots: list[Path],
+    profile: str | None = None,
+) -> SkillDiscoveryResult:
+    """Discover valid skills without hiding malformed or unreadable entries."""
     discovered: list[SkillMetadata] = []
+    diagnostics: list[SkillDiscoveryDiagnostic] = []
+    diagnostic_count = 0
+
+    def add_diagnostic(
+        *,
+        code: str,
+        root: Path,
+        message: str,
+        path: Path | None = None,
+    ) -> None:
+        nonlocal diagnostic_count
+        diagnostic_count += 1
+        if len(diagnostics) >= MAX_SKILL_DIAGNOSTICS:
+            return
+        diagnostics.append(
+            _skill_diagnostic(
+                code=code,
+                root=root,
+                message=message,
+                path=path,
+            )
+        )
+
     for root in skill_roots:
         try:
-            resolved_root = root.expanduser().resolve()
-        except OSError:
-            continue
-        if not resolved_root.exists():
+            expanded_root = root.expanduser()
+            resolved_root = expanded_root.resolve()
+        except (OSError, RuntimeError) as exc:
+            add_diagnostic(
+                code="root_unreadable",
+                root=root,
+                message=f"Cannot expand or resolve configured skill root: {exc}",
+            )
             continue
         try:
-            candidates = sorted(
-                resolved_root.rglob("SKILL.md"),
-                key=lambda candidate: str(candidate),
+            root_exists = resolved_root.exists()
+            root_is_directory = resolved_root.is_dir() if root_exists else False
+        except (OSError, RuntimeError) as exc:
+            add_diagnostic(
+                code="root_unreadable",
+                root=resolved_root,
+                message=f"Cannot inspect configured skill root: {exc}",
             )
-        except OSError:
             continue
+        if not root_exists:
+            add_diagnostic(
+                code="root_missing",
+                root=resolved_root,
+                message="Configured skill root does not exist",
+            )
+            continue
+        if not root_is_directory:
+            add_diagnostic(
+                code="root_not_directory",
+                root=resolved_root,
+                message="Configured skill root is not a directory",
+            )
+            continue
+        candidates = _scan_skill_candidates(
+            resolved_root,
+            on_error=add_diagnostic,
+        )
         for candidate in candidates:
             try:
                 resolved_candidate = candidate.resolve(strict=True)
@@ -436,11 +722,21 @@ def discover_skills(skill_roots: list[Path], profile: str | None = None) -> list
                     content,
                     path=resolved_candidate,
                 )
-            except ValueError:
-                # A symlink must not turn a configured instruction root into
-                # an implicit trust grant for an unrelated filesystem path.
+            except ValueError as exc:
+                add_diagnostic(
+                    code="skill_invalid",
+                    root=resolved_root,
+                    path=candidate,
+                    message=f"Invalid skill metadata or path: {exc}",
+                )
                 continue
-            except OSError:
+            except (OSError, RuntimeError) as exc:
+                add_diagnostic(
+                    code="skill_unreadable",
+                    root=resolved_root,
+                    path=candidate,
+                    message=f"Cannot read skill: {exc}",
+                )
                 continue
             if profile and metadata.profiles:
                 if profile not in metadata.profiles and "general" not in metadata.profiles:
@@ -448,7 +744,16 @@ def discover_skills(skill_roots: list[Path], profile: str | None = None) -> list
             discovered.append(metadata)
 
     discovered.sort(key=lambda item: item.name.lower())
-    return discovered
+    return SkillDiscoveryResult(
+        skills=discovered,
+        diagnostics=diagnostics,
+        diagnostic_count=diagnostic_count,
+    )
+
+
+def discover_skills(skill_roots: list[Path], profile: str | None = None) -> list[SkillMetadata]:
+    """Discover valid SKILL.md files, preserving the historical list API."""
+    return discover_skills_with_diagnostics(skill_roots, profile=profile).skills
 
 
 def infer_trigger_matches(prompt: str, triggers: list[str]) -> bool:
@@ -528,7 +833,7 @@ def bounded_skill_metadata(skill: SkillMetadata) -> dict[str, Any]:
     return payload
 
 
-def build_skill_matches(
+def build_skill_matches_with_diagnostics(
     prompt: str,
     skill_roots: list[Path],
     *,
@@ -537,12 +842,18 @@ def build_skill_matches(
     max_body_chars: int = MAX_SKILL_BODY_CHARS,
     max_total_body_chars: int = MAX_SKILL_BODIES_CHARS,
     max_body_matches: int = MAX_SKILL_BODY_MATCHES,
-) -> list[dict[str, Any]]:
-    """Return deterministic, bounded match records for a task prompt."""
-    resolved_roots = [root.expanduser().resolve() for root in skill_roots]
+) -> SkillMatchResult:
+    """Return deterministic matches and non-fatal skill-loading warnings."""
+    resolved_roots: list[Path] = []
+    for root in skill_roots:
+        resolved_roots.append(normalize_skill_root(root))
+
+    discovery = discover_skills_with_diagnostics(skill_roots, profile=profile)
+    diagnostics = list(discovery.diagnostics)
+    diagnostic_count = discovery.diagnostic_count
     ranked: list[tuple[int, int, SkillMetadata]] = []
     seen_names: set[str] = set()
-    for skill in discover_skills(skill_roots, profile=profile):
+    for skill in discovery.skills:
         name_key = skill.name.casefold()
         if name_key in seen_names:
             continue
@@ -593,8 +904,22 @@ def build_skill_matches(
                     max_chars=body_limit,
                     trusted_root=trusted_root,
                 )
-            except OSError:
+            except (OSError, RuntimeError, ValueError) as exc:
                 body, body_truncated = "", False
+                diagnostic_count += 1
+                if len(diagnostics) < MAX_SKILL_DIAGNOSTICS:
+                    diagnostics.append(
+                        _skill_diagnostic(
+                            code="skill_body_unreadable",
+                            root=(
+                                resolved_roots[_root_priority]
+                                if _root_priority < len(resolved_roots)
+                                else skill.path.parent
+                            ),
+                            path=skill.path,
+                            message=f"Cannot read matched skill body: {exc}",
+                        )
+                    )
         remaining = max(0, remaining - len(body))
         match = {
             "score": score,
@@ -606,4 +931,30 @@ def build_skill_matches(
         if body_omitted:
             match["body_omitted"] = body_omitted
         matches.append(match)
-    return matches
+    return SkillMatchResult(
+        matches=matches,
+        diagnostics=diagnostics,
+        diagnostic_count=diagnostic_count,
+    )
+
+
+def build_skill_matches(
+    prompt: str,
+    skill_roots: list[Path],
+    *,
+    profile: str | None = None,
+    top_k: int = 5,
+    max_body_chars: int = MAX_SKILL_BODY_CHARS,
+    max_total_body_chars: int = MAX_SKILL_BODIES_CHARS,
+    max_body_matches: int = MAX_SKILL_BODY_MATCHES,
+) -> list[dict[str, Any]]:
+    """Return deterministic, bounded matches, preserving the historical list API."""
+    return build_skill_matches_with_diagnostics(
+        prompt,
+        skill_roots,
+        profile=profile,
+        top_k=top_k,
+        max_body_chars=max_body_chars,
+        max_total_body_chars=max_total_body_chars,
+        max_body_matches=max_body_matches,
+    ).matches
