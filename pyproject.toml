@@ -176,7 +176,6 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/manager.py" = ["BLE001"]
 "src/afs/manager_gui.py" = ["BLE001"]
 "src/afs/mcp/registry.py" = ["BLE001", "S110"]
-"src/afs/mcp_server.py" = ["BLE001", "S110", "S112"]
 "src/afs/memory_consolidation.py" = ["BLE001", "S110"]
 "src/afs/missions.py" = ["BLE001", "S110"]
 "src/afs/model_prompts.py" = ["BLE001"]
@@ -327,7 +326,6 @@ module = [
     "afs.knowledge.graph_core",
     "afs.logging_config",
     "afs.manager",
-    "afs.mcp_server",
     "afs.missions",
     "afs.model_prompts",
     "afs.models",
