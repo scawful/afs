@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from ..cli._utils import load_runtime_config_from_args, resolve_context_paths
 from ..config import load_config_model
@@ -145,7 +146,7 @@ def skills_mine_command(args: argparse.Namespace) -> int:
             manager,
             prefer_existing=True,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary reports context failures.
         print(str(exc), file=sys.stderr)
         return 1
 
@@ -201,7 +202,7 @@ def skills_review_command(args: argparse.Namespace) -> int:
             manager,
             prefer_existing=True,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary reports context failures.
         print(str(exc), file=sys.stderr)
         return 1
 
@@ -252,7 +253,7 @@ def _record_candidate_decision_command(
             status_filter="",
             limit=max(args.limit, 1),
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary reports review failures.
         print(str(exc), file=sys.stderr)
         return 1
 
@@ -271,7 +272,7 @@ def _record_candidate_decision_command(
     candidate_id = str(candidate.get("id", "")).strip() or str(candidate.get("name", "")).strip()
 
     try:
-        payload = {
+        payload: dict[str, Any] = {
             "artifact_path": str(review.get("artifact_path", "")).strip(),
             "candidate_id": candidate_id,
             "candidate_name": str(candidate.get("name", "")).strip(),
@@ -284,7 +285,7 @@ def _record_candidate_decision_command(
             status=status,
             artifact_path=payload["artifact_path"],
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary reports persistence failures.
         print(str(exc), file=sys.stderr)
         return 1
 
@@ -336,7 +337,7 @@ def skills_promote_command(args: argparse.Namespace) -> int:
             status_filter="",
             limit=max(args.limit, 1),
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary reports review failures.
         print(str(exc), file=sys.stderr)
         return 1
 
@@ -365,7 +366,7 @@ def skills_promote_command(args: argparse.Namespace) -> int:
             profile_name=profile_name,
             artifact_path=str(review.get("artifact_path", "")).strip(),
         )
-        payload = {
+        payload: dict[str, Any] = {
             "artifact_path": str(review.get("artifact_path", "")).strip(),
             "candidate_id": str(candidate.get("id", "")).strip(),
             "skill_name": skill_name,
@@ -401,7 +402,7 @@ def skills_promote_command(args: argparse.Namespace) -> int:
                     "overwritten": False,
                 }
             )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary reports promotion failures.
         print(str(exc), file=sys.stderr)
         return 1
 
