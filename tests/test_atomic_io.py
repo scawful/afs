@@ -55,6 +55,103 @@ def test_atomic_write_durable_smoke(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "flushed"
 
 
+def test_atomic_write_durable_fails_when_parent_directory_open_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "durable.txt"
+
+    def fail_directory_open(*_args: object, **_kwargs: object) -> int:
+        raise OSError("simulated directory open failure")
+
+    monkeypatch.setattr(atomic_io.os, "open", fail_directory_open)
+    with pytest.raises(OSError, match="simulated directory open failure"):
+        atomic_write_text(target, "published", durable=True)
+
+    assert target.read_text(encoding="utf-8") == "published"
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_atomic_write_durable_fails_when_parent_directory_fsync_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "durable.txt"
+    real_fsync = atomic_io.os.fsync
+
+    def fail_directory_fsync(descriptor: int) -> None:
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError("simulated directory fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(atomic_io.os, "fsync", fail_directory_fsync)
+    with pytest.raises(OSError, match="simulated directory fsync failure"):
+        atomic_write_text(target, "published", durable=True)
+
+    assert target.read_text(encoding="utf-8") == "published"
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_atomic_write_durable_applies_mode_before_sync_and_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "durable.txt"
+    events: list[str] = []
+    real_fchmod = atomic_io.os.fchmod
+    real_fsync = atomic_io.os.fsync
+    real_replace = atomic_io.os.replace
+
+    def record_fchmod(descriptor: int, mode: int) -> None:
+        events.append("fchmod")
+        real_fchmod(descriptor, mode)
+
+    def record_fsync(descriptor: int) -> None:
+        kind = "directory_fsync" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file_fsync"
+        events.append(kind)
+        real_fsync(descriptor)
+
+    def record_replace(source: Path, destination: Path) -> None:
+        events.append("replace")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(atomic_io.os, "fchmod", record_fchmod)
+    monkeypatch.setattr(atomic_io.os, "fsync", record_fsync)
+    monkeypatch.setattr(atomic_io.os, "replace", record_replace)
+    atomic_write_text(target, "published", mode=0o600, durable=True)
+
+    assert events == ["fchmod", "file_fsync", "replace", "directory_fsync"]
+    assert _mode_of(target) == 0o600
+
+
+def test_atomic_write_non_durable_skips_strict_directory_sync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "state.txt"
+
+    def fail_strict_sync(_directory: Path) -> None:
+        raise AssertionError("non-durable write requested a strict directory sync")
+
+    monkeypatch.setattr(atomic_io, "strict_fsync_directory", fail_strict_sync)
+    atomic_write_text(target, "best effort")
+
+    assert target.read_text(encoding="utf-8") == "best effort"
+
+
+def test_atomic_write_encoding_failure_cleans_temp_and_preserves_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "state.txt"
+    target.write_text("original", encoding="utf-8")
+
+    with pytest.raises(UnicodeEncodeError):
+        atomic_write_text(target, "snowman: \N{SNOWMAN}", encoding="ascii")
+
+    assert target.read_text(encoding="utf-8") == "original"
+    assert list(tmp_path.iterdir()) == [target]
+
+
 def test_atomic_write_failure_cleans_temp_and_preserves_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

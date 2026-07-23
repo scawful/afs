@@ -260,11 +260,14 @@ def collect_context_status(
                 )
                 index_info["db_size_bytes"] = db_path.stat().st_size
                 index_info["db_path"] = str(db_path)
-            except Exception:
+            except Exception:  # noqa: BLE001 - status collection must tolerate index failures.
+                logger.debug("Unable to read context index status", exc_info=True)
                 index_info["error"] = "failed to read index"
         else:
             index_info["built"] = False
 
+    suggested_actions = mount_health.get("suggested_actions")
+    actions = list(suggested_actions) if isinstance(suggested_actions, list) else []
     return {
         "context_path": str(context_path),
         "scope_id": scope.scope_id,
@@ -273,7 +276,7 @@ def collect_context_status(
         "mount_counts": mount_counts,
         "total_files": total_files,
         "mount_health": mount_health,
-        "actions": list(mount_health.get("suggested_actions", [])),
+        "actions": actions,
         "index": index_info,
         "discovery_path": build_agent_discovery_path(context_path),
     }
@@ -457,8 +460,8 @@ def build_session_bootstrap(
         stale_mounts = [
             name for name, mf in freshness_map.items() if mf.stale
         ]
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 - freshness is optional bootstrap context.
+        logger.debug("Unable to collect filesystem freshness", exc_info=True)
 
     # Fall back to index-based freshness when filesystem scan is empty
     if not freshness_map:
@@ -488,8 +491,8 @@ def build_session_bootstrap(
                     mount for mount, score in idx_freshness["mount_scores"].items()
                     if score < 0.3
                 ]
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - index freshness is an optional fallback.
+            logger.debug("Unable to collect index freshness", exc_info=True)
 
     # Session-aware diff: compare against previous snapshot if one exists
     session_changes: dict[str, Any] = {"available": False}
@@ -504,8 +507,8 @@ def build_session_bootstrap(
                 "available": True,
                 **session_diff.to_dict(),
             }
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 - session diff is optional bootstrap context.
+        logger.debug("Unable to collect session diff", exc_info=True)
 
     summary = {
         "context_path": str(context_path),
@@ -566,8 +569,8 @@ def build_session_bootstrap(
                 metadata={"context_path": str(context_path)},
                 context_root=context_path,
             )
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - event logging cannot block bootstrap.
+            logger.debug("Unable to record bootstrap event", exc_info=True)
 
         # Save a context snapshot for the next session to diff against
         import os
@@ -581,8 +584,8 @@ def build_session_bootstrap(
                 config=manager.config,
                 scoped=resolved_scope,
             )
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - snapshots cannot block bootstrap.
+            logger.debug("Unable to save bootstrap snapshot", exc_info=True)
     return summary
 
 
@@ -1090,15 +1093,16 @@ def write_session_bootstrap_artifacts(
 
     payload = dict(summary)
     payload["generated_at"] = datetime.now(timezone.utc).isoformat()
-    payload["artifact_paths"] = {
+    artifact_paths = {
         "json": str(json_path),
         "markdown": str(markdown_path),
     }
+    payload["artifact_paths"] = artifact_paths
     markdown = render_session_bootstrap(payload)
 
     _atomic_write_text(json_path, json.dumps(payload, indent=2) + "\n")
     _atomic_write_text(markdown_path, markdown + "\n")
-    return payload["artifact_paths"]
+    return artifact_paths
 
 
 def _collect_scratchpad(
@@ -1212,7 +1216,8 @@ def _collect_scratchpad(
             reverse=True,
         )
         scoped_drafts = scoped_drafts[:_MAX_LIST_ITEMS]
-    except Exception:
+    except Exception:  # noqa: BLE001 - scoped drafts are optional bootstrap context.
+        logger.debug("Unable to collect scoped drafts", exc_info=True)
         scoped_drafts = []
 
     return {
@@ -1232,7 +1237,7 @@ def _collect_tasks(context_path: Path, *, limit: int) -> dict[str, Any]:
 
         queue = TaskQueue(context_path)
         tasks = queue.list()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - task collection is failure-isolated.
         return {"total": 0, "counts": {}, "items": [], "error": str(exc)}
 
     counts: dict[str, int] = {}
@@ -1267,7 +1272,7 @@ def _collect_agent_manifest() -> dict[str, Any]:
             "issues": [issue.to_dict() for issue in issues],
             **summary,
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - manifest collection is failure-isolated.
         return {"available": False, "error": str(exc), "issues": []}
 
 
@@ -1305,7 +1310,7 @@ def _collect_agent_jobs(context_path: Path, *, limit: int) -> dict[str, Any]:
             if job.status in {"queue", "running", "done", "failed"}
         ]
         inbox = build_agent_job_inbox(context_path, limit=max(1, limit))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - job collection is failure-isolated.
         return {"total": 0, "counts": {}, "items": [], "error": str(exc)}
 
     counts: dict[str, int] = {}
@@ -1335,7 +1340,7 @@ def _collect_agent_runs(
             for run in AgentRunStore(context_path).list(limit=0)
             if _run_workspace_visible(run.workspace, scoped=scoped)
         ][: max(1, limit)]
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - run collection is failure-isolated.
         return {"recent_count": 0, "items": [], "error": str(exc)}
 
     return {
@@ -1417,7 +1422,7 @@ def _collect_work_assistant(
             "recent_activity": store.list_activity(limit=max(1, min(limit, _MAX_LIST_ITEMS))),
             "commands": commands,
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - work context is failure-isolated.
         return {
             "available": False,
             "initialized": False,
@@ -1442,12 +1447,13 @@ def _collect_missions(
     Defensive: missions are optional; any failure yields an empty, well-shaped
     result rather than breaking bootstrap.
     """
+    active: list[Any] = []
     try:
         from .missions import MissionStore
 
         store = MissionStore(context_path, config=manager.config)
-        active = store.active(limit=max(1, limit))
-    except Exception as exc:
+        active = list(store.active(limit=max(1, limit)))
+    except Exception as exc:  # noqa: BLE001 - mission collection is failure-isolated.
         return {"available": False, "active": [], "active_count": 0, "error": str(exc)}
     def bounded_text(value: Any, *, max_chars: int) -> str:
         text = str(value or "").strip()
@@ -1538,7 +1544,7 @@ def _collect_skills(
             "matches": match_result.matches,
             **diagnostics,
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - skill collection is failure-isolated.
         return {
             "available": False,
             "prompt_source": prompt_source,
@@ -1602,7 +1608,7 @@ def _collect_messages(
             include_legacy=detect_layout_version(context_path) != LAYOUT_VERSION,
         )
         messages = bus.read(limit=max(1, limit))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - message collection is failure-isolated.
         return {"recent_count": 0, "messages": [], "error": str(exc)}
     return {
         "recent_count": len(messages),
@@ -1633,7 +1639,8 @@ def _collect_memory(
             from .memory_consolidation import memory_status
 
             pipeline_status = memory_status(context_path, config=manager.config)
-        except Exception:
+        except Exception:  # noqa: BLE001 - memory status is optional bootstrap context.
+            logger.debug("Unable to collect memory consolidation status", exc_info=True)
             pipeline_status = {}
 
     memory_root = resolve_mount_root(context_path, MountType.MEMORY, config=manager.config)
@@ -1823,25 +1830,22 @@ def _collect_latest_handoff(
 ) -> dict[str, Any]:
     """Collect the latest handoff packet if available."""
     try:
-        from .handoff import HandoffStore
+        from .handoff import HandoffPacket, HandoffStore
 
-        packets = []
+        packets: list[HandoffPacket] = []
         for scope_id in dict.fromkeys(scope_ids or ["common"]):
             store = HandoffStore(context_path, config=config, scope_id=scope_id)
             packet = store.read()
             if packet is not None:
                 packets.append(packet)
-        packet = max(
-            packets,
-            key=lambda item: (item.timestamp, item.revision_id),
-            default=None,
-        )
-        if packet is None:
+        if not packets:
             return {"available": False}
+        packet = max(packets, key=lambda item: (item.timestamp, item.revision_id))
         result = packet.to_dict()
         result["available"] = True
         return result
-    except Exception:
+    except Exception:  # noqa: BLE001 - handoff context is optional during bootstrap.
+        logger.debug("Unable to collect latest handoff", exc_info=True)
         return {"available": False}
 
 
@@ -2085,7 +2089,7 @@ def run_engage_prediction(
             authorization=authorization,
             config=config,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - interactive persistence is best-effort.
         logger.warning("Failed to record engage prediction: %s", exc)
         entry = None
     marker = {True: "matched", False: "different", None: "unresolved"}[match]

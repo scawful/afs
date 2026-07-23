@@ -154,25 +154,29 @@ def atomic_write_text(
     permissions. When ``durable`` is true the content is fsynced before
     the rename and the directory entry is fsynced after it.
 
-    On failure the temp file is removed and the original error re-raised;
-    the destination is left untouched.
+    On failure before the rename the temp file is removed and the destination
+    is left untouched. A durable directory-sync failure is reported after the
+    rename, so the new destination may already be visible even though crash
+    durability could not be established.
     """
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with open(temporary, "x", encoding=encoding) as handle:
             handle.write(text)
+            if mode is not None:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(handle.fileno(), mode)
+                else:
+                    os.chmod(temporary, mode)
             if durable:
                 handle.flush()
                 os.fsync(handle.fileno())
-        if mode is not None:
-            os.chmod(temporary, mode)
         os.replace(temporary, path)
         if durable:
-            fsync_directory(path.parent)
-    except OSError:
+            strict_fsync_directory(path.parent)
+    finally:
         with contextlib.suppress(OSError):
             temporary.unlink(missing_ok=True)
-        raise
 
 
 def exclusive_create_text(

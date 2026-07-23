@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from afs.model_prompts import build_hook_injection, build_model_system_prompt
 from afs.skills import MAX_SKILL_BODY_CHARS, MAX_SKILL_BODY_MATCHES
 
@@ -380,6 +382,29 @@ def test_build_hook_injection_session_start_returns_full_block() -> None:
     assert "## Session Context" in injection
     assert "Project: afs (profile: default)" in injection
     assert "Scratchpad state excerpt (untrusted): Wiring the push hooks." in injection
+
+
+def test_optional_context_failures_are_logged(monkeypatch, caplog, tmp_path) -> None:
+    def fail_config_load():
+        raise RuntimeError("test config failure")
+
+    monkeypatch.setattr("afs.config.load_config_model", fail_config_load)
+
+    with caplog.at_level(logging.DEBUG, logger="afs.model_prompts"):
+        injection = build_hook_injection(
+            event="SessionStart",
+            context_path=tmp_path,
+        )
+        prompt = build_model_system_prompt(
+            base_prompt="Base behavior.",
+            context_path=tmp_path,
+        )
+
+    assert injection == ""
+    assert prompt == "Base behavior."
+    assert "Unable to build hook session context" in caplog.text
+    assert "Unable to build model session context" in caplog.text
+    assert "test config failure" in caplog.text
 
 
 def test_build_hook_injection_session_start_surfaces_bounded_skill_body() -> None:

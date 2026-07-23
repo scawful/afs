@@ -26,6 +26,7 @@ from afs.mcp_server import (
     _handle_request,
     _normalize_extension_tools,
     _read_message,
+    _warn_fallback,
     build_mcp_registry,
 )
 from afs.models import MountType
@@ -2059,6 +2060,38 @@ def test_context_file_mutations_respect_sensitivity_rules(tmp_path: Path) -> Non
     assert public_note.exists()
 
 
+def test_context_read_fails_closed_when_sensitivity_path_resolution_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context_root = tmp_path / "context"
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            sensitivity=SensitivityConfig(never_export=["knowledge/private/*"]),
+        )
+    )
+    manager.ensure(context_root=context_root)
+    public_note = context_root / "knowledge" / "public.md"
+    public_note.parent.mkdir(parents=True, exist_ok=True)
+    public_note.write_text("must not leak", encoding="utf-8")
+
+    def fail_mount_resolution(*_args, **_kwargs):
+        raise RuntimeError("simulated mount resolver failure")
+
+    monkeypatch.setattr(manager, "resolve_mount_root", fail_mount_resolution)
+    response = _call_tool(
+        manager,
+        "context.read",
+        {"path": str(public_note)},
+        request_id=514,
+    )
+
+    assert "error" in response
+    assert "Unable to resolve sensitivity paths safely" in response["error"]["message"]
+    assert "must not leak" not in json.dumps(response)
+
+
 def test_context_query_tool_resolves_parent_context_from_nested_path(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -2423,6 +2456,52 @@ def test_context_write_keeps_context_query_fresh_without_rebuild(tmp_path: Path)
     structured = query_response["result"]["structuredContent"]
     assert any(entry["relative_path"] == "state.md" for entry in structured["entries"])
     assert "index_rebuild" not in structured
+
+
+def test_context_write_reports_best_effort_index_sync_failure(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    target = context_root / "scratchpad" / "state.md"
+
+    def fail_sync(*_args, **_kwargs):
+        raise RuntimeError("simulated index failure")
+
+    monkeypatch.setattr(ContextSQLiteIndex, "sync_absolute_path", fail_sync)
+    response = _call_tool(
+        manager,
+        "context.write",
+        {"path": str(target), "content": "committed content"},
+        request_id=12,
+    )
+
+    structured = response["result"]["structuredContent"]
+    assert target.read_text(encoding="utf-8") == "committed content"
+    assert structured["index_updated"] is False
+    assert structured["warnings"] == [
+        "filesystem mutation succeeded, but the context index was not synchronized; "
+        "run context.index.rebuild"
+    ]
+    assert "context index sync failed" in capsys.readouterr().err
+
+
+def test_fallback_warning_sanitizes_controls_and_bounds_untrusted_fields(capsys) -> None:
+    controls = "\x1b\x85\u202e\u2028\u2029"
+    _warn_fallback(
+        controls + ("o" * 1_000),
+        RuntimeError(controls + ("d" * 5_000)),
+    )
+
+    warning = capsys.readouterr().err
+    assert warning.count("\n") == 1
+    assert not any(control in warning for control in controls)
+    for escaped in ("\\u001b", "\\u0085", "\\u202e", "\\u2028", "\\u2029"):
+        assert warning.count(escaped) == 2
+    assert len(warning) <= len("[afs-mcp] warning: ") + 256 + 2 + 1_024 + 1
+    assert warning.endswith("...\n")
 
 
 def test_context_delete_updates_context_index(tmp_path: Path) -> None:

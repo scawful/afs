@@ -9,6 +9,7 @@ session state, workflow hints, and memory manifests.
 
 from __future__ import annotations
 
+import logging
 import re
 import shlex
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from .verification import (
 )
 
 _HOOK_SKILL_BODY_CHARS = 1_000
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -253,7 +255,12 @@ def build_hook_injection(
                 token_budget=0,
                 record_event=False,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - optional hook context must fail closed.
+            logger.debug(
+                "Unable to build hook session context for %s",
+                context_path,
+                exc_info=True,
+            )
             return ""
     if not state:
         return ""
@@ -343,7 +350,7 @@ def _workflow_hints(
             workflow=workflow,
             tool_profile=tool_profile,
         )
-    except Exception:
+    except (KeyError, TypeError, ValueError):
         return ""
 
     lines = ["## Execution Profile"]
@@ -557,7 +564,12 @@ def _session_context_block(
                 token_budget=2000,
                 record_event=False,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - optional prompt context must fail closed.
+            logger.debug(
+                "Unable to build model session context for %s",
+                context_path,
+                exc_info=True,
+            )
             return ""
 
     if not state:
@@ -959,12 +971,12 @@ def _verification_context_block(verification_state: dict[str, Any] | None) -> st
             if not isinstance(check, dict):
                 continue
             name = str(check.get("name", "") or "").strip()
-            executions = (
-                check.get("executions")
-                if isinstance(check.get("executions"), list)
-                else []
-            )
-            commands = check.get("commands") if isinstance(check.get("commands"), list) else []
+            executions = check.get("executions")
+            if not isinstance(executions, list):
+                executions = []
+            commands = check.get("commands")
+            if not isinstance(commands, list):
+                commands = []
             rendered = False
             for execution in executions[:3]:
                 if not isinstance(execution, dict):
@@ -1045,7 +1057,9 @@ def _repo_policy_block(policy_state: dict[str, Any] | None) -> str:
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name", "") or item.get("risk", "")).strip()
-            paths = item.get("paths") if isinstance(item.get("paths"), list) else []
+            paths = item.get("paths")
+            if not isinstance(paths, list):
+                paths = []
             preview = ", ".join(str(path).strip() for path in paths[:4] if str(path).strip())
             if name and preview:
                 lines.append(f"- {name}: {preview}")
