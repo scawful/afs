@@ -109,9 +109,11 @@ from .skills import (
     MAX_SKILL_MATCHES,
     MAX_SKILL_METADATA_ITEM_CHARS,
     MAX_SKILL_NAME_CHARS,
+    bounded_skill_diagnostics,
     bounded_skill_metadata,
-    build_skill_matches,
-    discover_skills,
+    build_skill_matches_with_diagnostics,
+    discover_skills_with_diagnostics,
+    escape_skill_diagnostic_text,
     read_skill_body,
     resolve_skill_roots,
 )
@@ -148,6 +150,8 @@ DEFAULT_MCP_TOOL_CATALOG = frozenset(
 )
 MAX_SKILL_MATCH_PROMPT_CHARS = 8_000
 MAX_SKILL_KNOWN_PREVIEW_CHARS = 1_024
+MAX_MCP_SKILL_DIAGNOSTICS = 20
+MAX_SKILL_DIAGNOSTIC_ERROR_CHARS = 512
 SKILL_MATCH_ARGUMENT_NAMES = frozenset({"prompt", "top_k", "include_bodies"})
 SKILL_READ_ARGUMENT_NAMES = frozenset({"name"})
 INDEX_SYNC_WARNING = (
@@ -3115,21 +3119,47 @@ def _require_known_skill_arguments(
         )
 
 
-def _has_ascii_or_c1_controls(value: str) -> bool:
-    return any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in value)
+def _has_unsafe_skill_name_characters(value: str) -> bool:
+    return any(
+        unicodedata.category(char) in _LOG_ESCAPE_CATEGORIES
+        for char in value
+    )
 
 
 def _safe_skill_error_label(value: str, *, max_chars: int) -> str:
     """Render one bounded label without terminal control characters."""
-    escaped = "".join(
-        f"\\u{ord(char):04x}" if _has_ascii_or_c1_controls(char) else char
-        for char in str(value).strip()
+    return escape_skill_diagnostic_text(
+        value,
+        max_chars=max_chars,
     )
-    if len(escaped) <= max_chars:
-        return escaped
-    if max_chars <= 3:
-        return escaped[:max_chars]
-    return escaped[: max_chars - 3].rstrip() + "..."
+
+
+def _skill_diagnostic_error_suffix(
+    diagnostic_payload: dict[str, Any],
+) -> str:
+    count = diagnostic_payload["diagnostic_count"]
+    if not isinstance(count, int) or count <= 0:
+        return ""
+    diagnostics = diagnostic_payload["diagnostics"]
+    examples: list[str] = []
+    if isinstance(diagnostics, list):
+        for item in diagnostics[:3]:
+            if not isinstance(item, dict):
+                continue
+            code = _safe_skill_error_label(
+                str(item.get("code") or "skill_warning"),
+                max_chars=80,
+            )
+            path = _safe_skill_error_label(
+                str(item.get("path") or item.get("root") or ""),
+                max_chars=120,
+            )
+            examples.append(f"{code}: {path}")
+    detail = f": {'; '.join(examples)}" if examples else ""
+    return " " + _safe_skill_error_label(
+        f"Skill discovery warnings: {count}{detail}.",
+        max_chars=MAX_SKILL_DIAGNOSTIC_ERROR_CHARS,
+    )
 
 
 def _skill_match_top_k(raw: Any) -> int:
@@ -3173,7 +3203,7 @@ def _tool_skill_match(arguments: dict[str, Any], manager: AFSManager) -> dict[st
     except ValueError as exc:
         _reject_skill_arguments(arguments, str(exc))
     profile_name, roots = _profile_skill_roots(manager)
-    matches = build_skill_matches(
+    match_result = build_skill_matches_with_diagnostics(
         prompt,
         roots,
         profile=profile_name,
@@ -3182,24 +3212,31 @@ def _tool_skill_match(arguments: dict[str, Any], manager: AFSManager) -> dict[st
         max_total_body_chars=MAX_SKILL_BODIES_CHARS if include_bodies else 0,
         max_body_matches=MAX_SKILL_BODY_MATCHES if include_bodies else 0,
     )
+    matches = match_result.matches
     if not include_bodies:
         for match in matches:
             match["body_omitted"] = "not_requested"
+    diagnostic_payload = bounded_skill_diagnostics(
+        match_result.diagnostics,
+        diagnostic_count=match_result.diagnostic_count,
+        limit=MAX_MCP_SKILL_DIAGNOSTICS,
+    )
     return {
         "profile": profile_name,
         "prompt": prompt,
         "include_bodies": include_bodies,
         "matches": matches,
+        **diagnostic_payload,
     }
 
 
 def _skill_path_within_roots(path: Path, roots: list[Path]) -> tuple[Path, Path]:
     resolved = path.expanduser().resolve()
     for root in roots:
-        resolved_root = root.expanduser().resolve()
         try:
+            resolved_root = root.expanduser().resolve()
             resolved.relative_to(resolved_root)
-        except (OSError, ValueError):
+        except (OSError, RuntimeError, ValueError):
             continue
         return resolved, resolved_root
     raise PermissionError(f"Skill path outside configured roots: {resolved}")
@@ -3219,17 +3256,24 @@ def _tool_skill_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str
             arguments,
             f"name must be at most {MAX_SKILL_NAME_CHARS} characters",
         )
-    if _has_ascii_or_c1_controls(raw_name):
+    if _has_unsafe_skill_name_characters(raw_name):
         _reject_skill_arguments(
             arguments,
-            "name must not contain ASCII or C1 control characters",
+            "name must not contain Unicode control, format, surrogate, "
+            "or separator characters",
         )
     name = raw_name.strip()
     if not name:
         _reject_skill_arguments(arguments, "name must be a non-empty string")
     wanted = name.casefold()
     profile_name, roots = _profile_skill_roots(manager)
-    skills = discover_skills(roots, profile=profile_name)
+    discovery = discover_skills_with_diagnostics(roots, profile=profile_name)
+    skills = discovery.skills
+    diagnostic_payload = bounded_skill_diagnostics(
+        discovery.diagnostics,
+        diagnostic_count=discovery.diagnostic_count,
+        limit=MAX_MCP_SKILL_DIAGNOSTICS,
+    )
     for skill in skills:
         if skill.name.casefold() != wanted:
             continue
@@ -3245,6 +3289,7 @@ def _tool_skill_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str
             "body": body,
             "body_truncated": body_truncated,
             "body_chars": len(body),
+            **diagnostic_payload,
         }
 
     known = sorted({skill.name for skill in skills}, key=str.casefold)
@@ -3261,7 +3306,10 @@ def _tool_skill_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str
     suffix = (
         f" (and {len(known) - MAX_SKILL_MATCHES} more)" if len(known) > MAX_SKILL_MATCHES else ""
     )
-    raise ValueError(f"Unknown skill '{name}'. Known skills: {preview}{suffix}")
+    diagnostic_suffix = _skill_diagnostic_error_suffix(diagnostic_payload)
+    raise ValueError(
+        f"Unknown skill '{name}'. Known skills: {preview}{suffix}{diagnostic_suffix}"
+    )
 
 
 def _tool_alias_definition(
