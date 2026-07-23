@@ -140,7 +140,6 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/cli/gemini.py" = ["BLE001", "S110"]
 "src/afs/cli/optimize.py" = ["BLE001"]
 "src/afs/cli/personal.py" = ["BLE001"]
-"src/afs/cli/skills.py" = ["BLE001"]
 "src/afs/cli/sources.py" = ["BLE001"]
 "src/afs/cli/watch.py" = ["BLE001", "S110", "S112"]
 "src/afs/codebase_index.py" = ["BLE001"]
@@ -151,7 +150,6 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/context_index.py" = ["BLE001", "S112"]
 "src/afs/deployment/cli.py" = ["BLE001", "S110"]
 "src/afs/deployment/validator.py" = ["BLE001"]
-"src/afs/diagnostics.py" = ["BLE001"]
 "src/afs/discovery.py" = ["BLE001", "S112"]
 "src/afs/embeddings.py" = ["BLE001", "S110"]
 "src/afs/evaluation/semantic_eval.py" = ["BLE001"]
@@ -176,10 +174,8 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/manager.py" = ["BLE001"]
 "src/afs/manager_gui.py" = ["BLE001"]
 "src/afs/mcp/registry.py" = ["BLE001", "S110"]
-"src/afs/mcp_server.py" = ["BLE001", "S110", "S112"]
 "src/afs/memory_consolidation.py" = ["BLE001", "S110"]
 "src/afs/missions.py" = ["BLE001", "S110"]
-"src/afs/model_prompts.py" = ["BLE001"]
 "src/afs/next_action.py" = ["BLE001"]
 "src/afs/notifications/desktop.py" = ["BLE001"]
 "src/afs/notifications/discord.py" = ["BLE001"]
@@ -189,8 +185,6 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/pretraining/corpus_builder.py" = ["BLE001"]
 "src/afs/registry/cli.py" = ["BLE001"]
 "src/afs/services/manager.py" = ["BLE001", "S110"]
-"src/afs/session_bootstrap.py" = ["BLE001", "S110"]
-"src/afs/session_harness.py" = ["BLE001"]
 "src/afs/sources/registry.py" = ["BLE001", "S112"]
 "src/afs/workspace_sync.py" = ["BLE001"]
 "tests/test_agent_jobs.py" = ["BLE001"]
@@ -238,9 +232,9 @@ ignore_missing_imports = true
 
 # --- mypy ratchet baseline ----------------------------------------------
 # Generated 2026-07-17 with mypy 1.11.1 (pinned in CI). The modules below
-# carry 512 pre-existing errors and are ignore_errors-grandfathered; the
-# remaining ~223 modules in the package are fully type-checked, as is
-# every NEW module. Contract: never add an entry. When touching a listed
+# carry pre-existing errors and are ignore_errors-grandfathered; every
+# unlisted module in the package is fully type-checked, as is every NEW
+# module. Contract: never add an entry. When touching a listed
 # module, fix its errors and delete its line.
 # See docs/ENGINEERING_PRACTICES.md. Full check: mypy -p afs
 [[tool.mypy.overrides]]
@@ -296,7 +290,6 @@ module = [
     "afs.cli.pipeline",
     "afs.cli.review",
     "afs.cli.schema",
-    "afs.cli.skills",
     "afs.cli.tokenizer",
     "afs.cli.training",
     "afs.cli.verify",
@@ -327,9 +320,7 @@ module = [
     "afs.knowledge.graph_core",
     "afs.logging_config",
     "afs.manager",
-    "afs.mcp_server",
     "afs.missions",
-    "afs.model_prompts",
     "afs.models",
     "afs.next_action",
     "afs.notifications.base",
@@ -347,10 +338,7 @@ module = [
     "afs.repo_policy",
     "afs.response_schemas",
     "afs.schema",
-    "afs.session_bootstrap",
-    "afs.session_harness",
     "afs.skill_mining",
-    "afs.skills",
     "afs.sources.models",
     "afs.sources.registry",
     "afs.training.lifecycle",

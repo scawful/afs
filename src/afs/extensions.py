@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .schema import AFSConfig, ExtensionsConfig
+from .skills import normalize_skill_root
 from .toml_compat import tomllib
 
 logger = logging.getLogger(__name__)
@@ -423,6 +424,25 @@ def _as_path_list(items: Any, root: Path) -> list[Path]:
     return values
 
 
+def _as_skill_root_list(items: Any, root: Path) -> list[Path]:
+    if not isinstance(items, list):
+        return []
+    values: list[Path] = []
+    for entry in items:
+        if not isinstance(entry, (str, Path)):
+            continue
+        candidate = Path(entry)
+        try:
+            expanded = candidate.expanduser()
+        except (OSError, RuntimeError):
+            values.append(candidate)
+            continue
+        if not expanded.is_absolute():
+            expanded = root / expanded
+        values.append(normalize_skill_root(expanded))
+    return values
+
+
 def _as_str_list(items: Any) -> list[str]:
     if not isinstance(items, list):
         return []
@@ -732,7 +752,7 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
             raw.get("knowledge_mounts", mounts.get("knowledge_mounts")),
             root,
         )
-        skill_roots = _as_path_list(
+        skill_roots = _as_skill_root_list(
             raw.get("skill_roots", mounts.get("skill_roots")),
             root,
         )

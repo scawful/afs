@@ -17,6 +17,7 @@ from afs.schema import (
     ProfilesConfig,
     default_directory_configs,
 )
+from afs.skills import discover_skills_with_diagnostics, resolve_skill_roots
 
 
 def test_resolve_profile_with_extension(tmp_path: Path) -> None:
@@ -68,6 +69,41 @@ def test_resolve_profile_with_extension(tmp_path: Path) -> None:
     assert work_knowledge.resolve() in resolved.knowledge_mounts
     assert work_skills.resolve() in resolved.skill_roots
     assert work_registry.resolve() in resolved.model_registries
+
+
+def test_bad_environment_skill_root_remains_diagnosable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    healthy_root = tmp_path / "healthy"
+    healthy = healthy_root / "healthy" / "SKILL.md"
+    healthy.parent.mkdir(parents=True)
+    healthy.write_text("---\nname: healthy\n---\n", encoding="utf-8")
+    broken_root = Path("~afs-env-user-that-cannot-exist-48ba775")
+    afs_root = tmp_path / "empty-afs"
+    (afs_root / "skills").mkdir(parents=True)
+
+    monkeypatch.setenv("AFS_SKILL_ROOTS", str(broken_root))
+    config = AFSConfig(
+        profiles=ProfilesConfig(
+            active_profile="default",
+            profiles={
+                "default": ProfileConfig(skill_roots=[healthy_root]),
+            },
+        )
+    )
+
+    profile = resolve_active_profile(config)
+    roots = resolve_skill_roots(
+        list(profile.skill_roots),
+        afs_root=afs_root,
+    )
+    result = discover_skills_with_diagnostics(roots, profile=profile.name)
+
+    assert "healthy" in {skill.name for skill in result.skills}
+    assert result.diagnostic_count == 1
+    assert result.diagnostics[0].code == "root_unreadable"
+    assert result.diagnostics[0].root == broken_root
 
 
 def test_manager_applies_profile_mounts(tmp_path: Path) -> None:

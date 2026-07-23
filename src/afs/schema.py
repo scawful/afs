@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import MountType
+from .skills import normalize_skill_root
 
 
 def _as_path(value: str | Path) -> Path:
@@ -190,6 +191,16 @@ def _as_path_list(items: list[Any] | None) -> list[Path]:
     return [_as_path(item) for item in items if isinstance(item, (str, Path))]
 
 
+def _as_skill_root_list(items: list[Any] | None) -> list[Path]:
+    if not isinstance(items, list):
+        return []
+    return [
+        normalize_skill_root(item)
+        for item in items
+        if isinstance(item, (str, Path))
+    ]
+
+
 def _as_str_list(items: list[Any] | None) -> list[str]:
     if not isinstance(items, list):
         return []
@@ -221,7 +232,7 @@ class ProfileConfig:
             inherits=_as_str_list(data.get("inherits")),
             memory_mounts=_as_path_list(data.get("memory_mounts")),
             knowledge_mounts=_as_path_list(data.get("knowledge_mounts")),
-            skill_roots=_as_path_list(data.get("skill_roots")),
+            skill_roots=_as_skill_root_list(data.get("skill_roots")),
             model_registries=_as_path_list(data.get("model_registries")),
             enabled_extensions=_as_str_list(data.get("enabled_extensions")),
             policies=_as_str_list(data.get("policies")),

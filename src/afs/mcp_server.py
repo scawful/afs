@@ -17,11 +17,12 @@ import re
 import shutil
 import stat
 import sys
+import unicodedata
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
 from .agent_scope import allowed_tools, is_tool_allowed
 from .codebase_explorer import (
@@ -108,9 +109,11 @@ from .skills import (
     MAX_SKILL_MATCHES,
     MAX_SKILL_METADATA_ITEM_CHARS,
     MAX_SKILL_NAME_CHARS,
+    bounded_skill_diagnostics,
     bounded_skill_metadata,
-    build_skill_matches,
-    discover_skills,
+    build_skill_matches_with_diagnostics,
+    discover_skills_with_diagnostics,
+    escape_skill_diagnostic_text,
     read_skill_body,
     resolve_skill_roots,
 )
@@ -147,8 +150,60 @@ DEFAULT_MCP_TOOL_CATALOG = frozenset(
 )
 MAX_SKILL_MATCH_PROMPT_CHARS = 8_000
 MAX_SKILL_KNOWN_PREVIEW_CHARS = 1_024
+MAX_MCP_SKILL_DIAGNOSTICS = 20
+MAX_SKILL_DIAGNOSTIC_ERROR_CHARS = 512
 SKILL_MATCH_ARGUMENT_NAMES = frozenset({"prompt", "top_k", "include_bodies"})
 SKILL_READ_ARGUMENT_NAMES = frozenset({"name"})
+INDEX_SYNC_WARNING = (
+    "filesystem mutation succeeded, but the context index was not synchronized; "
+    "run context.index.rebuild"
+)
+_WARNING_OPERATION_MAX_CHARS = 256
+_WARNING_DETAIL_MAX_CHARS = 1_024
+_LOG_ESCAPE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+
+
+def _sanitize_log_field(value: object, *, max_chars: int) -> str:
+    """Escape terminal controls and bound one untrusted log field."""
+
+    try:
+        raw = str(value)
+    except Exception:  # noqa: BLE001 - logging must survive hostile __str__ methods
+        raw = f"<unprintable {type(value).__name__}>"
+
+    pieces: list[str] = []
+    used = 0
+    for char in raw:
+        codepoint = ord(char)
+        if unicodedata.category(char) in _LOG_ESCAPE_CATEGORIES:
+            piece = (
+                f"\\u{codepoint:04x}"
+                if codepoint <= 0xFFFF
+                else f"\\U{codepoint:08x}"
+            )
+        else:
+            piece = char
+        if used + len(piece) > max_chars:
+            while pieces and used + 3 > max_chars:
+                used -= len(pieces.pop())
+            return "".join([*pieces, "..."])
+        pieces.append(piece)
+        used += len(piece)
+    return "".join(pieces)
+
+
+def _warn_fallback(operation: str, exc: BaseException) -> None:
+    """Keep best-effort MCP fallbacks observable without polluting stdout."""
+
+    safe_operation = _sanitize_log_field(
+        operation,
+        max_chars=_WARNING_OPERATION_MAX_CHARS,
+    )
+    safe_detail = _sanitize_log_field(
+        exc,
+        max_chars=_WARNING_DETAIL_MAX_CHARS,
+    )
+    print(f"[afs-mcp] warning: {safe_operation}: {safe_detail}", file=sys.stderr)
 
 
 def _allowed_roots(manager: AFSManager) -> list[Path]:
@@ -414,8 +469,9 @@ def _resolve_context_file_path(
     parts = list(raw_path.parts)
     if parts and parts[0] == ".context":
         parts = parts[1:]
-    category = _CATEGORY_NAMES.get(parts[0]) if parts else None
-    if category is not None:
+    matched_category = _CATEGORY_NAMES.get(parts[0]) if parts else None
+    if matched_category is not None:
+        category = matched_category
         parts = parts[1:]
     else:
         category = ContextCategory.SCRATCHPAD
@@ -601,15 +657,16 @@ def _discover_allowed_contexts(manager: AFSManager) -> list[Any]:
     contexts: list[Any] = []
     try:
         contexts = discover_contexts(config=manager.config)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - discovery is an optional integration boundary
+        _warn_fallback("context discovery failed", exc)
         contexts = []
 
     default_context = manager.config.general.context_root
     if default_context.exists():
         try:
             contexts.append(manager.list_context(context_path=default_context))
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - retain partial discovery results
+            _warn_fallback(f"default context inspection failed for {default_context}", exc)
 
     allowed: list[Any] = []
     seen: set[Path] = set()
@@ -668,8 +725,10 @@ def _sensitivity_relative_paths(path: Path, manager: AFSManager) -> list[str]:
         for mount_type in MountType:
             try:
                 mount_root = manager.resolve_mount_root(context_path, mount_type)
-            except Exception:
-                continue
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise PermissionError(
+                    "Unable to resolve sensitivity paths safely; access was denied"
+                ) from exc
             try:
                 rel = resolved.relative_to(mount_root.expanduser().resolve()).as_posix()
             except ValueError:
@@ -739,9 +798,24 @@ def _sync_context_index_for_path(
             ):
                 continue
             return True
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - best-effort sync after committed mutation
+            _warn_fallback(f"context index sync failed for {path}", exc)
             continue
     return False
+
+
+def _add_index_sync_warning(payload: dict[str, Any], *, manager: AFSManager) -> None:
+    detailed_sync_keys = ("source_index_updated", "destination_index_updated")
+    detailed_sync_values = [
+        bool(payload[key]) for key in detailed_sync_keys if key in payload
+    ]
+    sync_complete = (
+        all(detailed_sync_values)
+        if detailed_sync_values
+        else bool(payload.get("index_updated"))
+    )
+    if not sync_complete and _context_index_settings(manager).enabled:
+        payload["warnings"] = [INDEX_SYNC_WARNING]
 
 
 def _resolve_optional_v2_index_scope(
@@ -807,16 +881,21 @@ def _query_context_index(
             effective_auto_refresh and needs_refresh
         )
     if refresh or should_auto_refresh:
-        rebuild_kwargs = {
-            "mount_types": mount_types,
-            "include_content": settings.include_content,
-            "max_file_size_bytes": effective_max_file_size_bytes,
-            "max_content_chars": effective_max_content_chars,
-        }
         summary = (
-            index.rebuild_scoped(scoped, **rebuild_kwargs)
+            index.rebuild_scoped(
+                scoped,
+                mount_types=mount_types,
+                include_content=settings.include_content,
+                max_file_size_bytes=effective_max_file_size_bytes,
+                max_content_chars=effective_max_content_chars,
+            )
             if scoped is not None and scoped.layout_version == LAYOUT_VERSION
-            else index.rebuild(**rebuild_kwargs)
+            else index.rebuild(
+                mount_types=mount_types,
+                include_content=settings.include_content,
+                max_file_size_bytes=effective_max_file_size_bytes,
+                max_content_chars=effective_max_content_chars,
+            )
         )
         rebuild_summary = summary.to_dict()
 
@@ -907,10 +986,12 @@ def _tool_work_communication_guide(
     limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
     person_id = arguments.get("person_id")
     purpose = arguments.get("purpose")
-    summary = store.communication_style_summary(
-        person_id=person_id if isinstance(person_id, str) and person_id.strip() else None,
-        purpose=purpose if isinstance(purpose, str) and purpose.strip() else None,
-        limit=limit,
+    summary = dict(
+        store.communication_style_summary(
+            person_id=person_id if isinstance(person_id, str) and person_id.strip() else None,
+            purpose=purpose if isinstance(purpose, str) and purpose.strip() else None,
+            limit=limit,
+        )
     )
     summary["context_path"] = str(context_path)
     return summary
@@ -941,13 +1022,15 @@ def _tool_work_communication_preflight(
     )
     person_id = arguments.get("person_id")
     purpose = arguments.get("purpose")
-    return store.communication_preflight(
-        person_id=person_id if isinstance(person_id, str) and person_id.strip() else None,
-        purpose=purpose if isinstance(purpose, str) and purpose.strip() else None,
-        limit=limit,
-        approval_limit=approval_limit,
-        personal_context=_load_personal_context_for_work(arguments),
-        context_path=context_path,
+    return dict(
+        store.communication_preflight(
+            person_id=person_id if isinstance(person_id, str) and person_id.strip() else None,
+            purpose=purpose if isinstance(purpose, str) and purpose.strip() else None,
+            limit=limit,
+            approval_limit=approval_limit,
+            personal_context=_load_personal_context_for_work(arguments),
+            context_path=context_path,
+        )
     )
 
 
@@ -955,7 +1038,9 @@ def _tool_work_approvals_list(arguments: dict[str, Any], manager: AFSManager) ->
     store, context_path = _work_store(arguments, manager)
     limit = _coerce_int(arguments.get("limit"), default=50, minimum=1, maximum=100)
     status_arg = arguments.get("status")
-    status = status_arg if isinstance(status_arg, str) and status_arg.strip() else "pending"
+    status: str | None = (
+        status_arg if isinstance(status_arg, str) and status_arg.strip() else "pending"
+    )
     if bool(arguments.get("all", False)):
         status = None
     approvals = store.list_approvals(status=status, limit=limit)
@@ -1042,12 +1127,14 @@ def _tool_fs_write(arguments: dict[str, Any], manager: AFSManager) -> dict[str, 
     with path.open(mode, encoding="utf-8") as handle:
         handle.write(content)
     index_updated = _sync_context_index_for_path(path, manager, scoped=scoped)
-    return {
+    payload: dict[str, Any] = {
         "path": str(path),
         "bytes": len(content.encode("utf-8")),
         "append": append,
         "index_updated": index_updated,
     }
+    _add_index_sync_warning(payload, manager=manager)
+    return payload
 
 
 def _tool_fs_delete(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
@@ -1079,12 +1166,14 @@ def _tool_fs_delete(arguments: dict[str, Any], manager: AFSManager) -> dict[str,
         raise OSError(f"Unsupported path type: {path}")
 
     index_updated = _sync_context_index_for_path(path, manager, scoped=scoped)
-    return {
+    payload: dict[str, Any] = {
         "path": str(path),
         "deleted": True,
         "recursive": recursive,
         "index_updated": index_updated,
     }
+    _add_index_sync_warning(payload, manager=manager)
+    return payload
 
 
 def _tool_fs_move(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
@@ -1135,13 +1224,15 @@ def _tool_fs_move(arguments: dict[str, Any], manager: AFSManager) -> dict[str, A
         scoped=scoped,
     )
 
-    return {
+    payload: dict[str, Any] = {
         "source": str(source),
         "destination": str(destination),
         "index_updated": bool(source_synced or destination_synced),
         "source_index_updated": source_synced,
         "destination_index_updated": destination_synced,
     }
+    _add_index_sync_warning(payload, manager=manager)
+    return payload
 
 
 def _tool_fs_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
@@ -1210,7 +1301,7 @@ def _tool_fs_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, A
         for candidate in root.rglob("*"):
             try:
                 depth = len(candidate.relative_to(root).parts)
-            except Exception:
+            except ValueError:
                 continue
             if max_depth >= 0 and depth > max_depth:
                 continue
@@ -1354,17 +1445,22 @@ def _tool_context_index_rebuild(arguments: dict[str, Any], manager: AFSManager) 
         minimum=0,
     )
     index = ContextSQLiteIndex(manager, context_path)
-    rebuild_kwargs = {
-        "mount_types": mount_types,
-        "include_content": include_content,
-        "max_file_size_bytes": max_file_size_bytes,
-        "max_content_chars": max_content_chars,
-    }
     allow_all_projects = arguments.get("all_projects") is True
     summary = (
-        index.rebuild(**rebuild_kwargs)
+        index.rebuild(
+            mount_types=mount_types,
+            include_content=include_content,
+            max_file_size_bytes=max_file_size_bytes,
+            max_content_chars=max_content_chars,
+        )
         if scoped.layout_version != LAYOUT_VERSION or allow_all_projects
-        else index.rebuild_scoped(scoped, **rebuild_kwargs)
+        else index.rebuild_scoped(
+            scoped,
+            mount_types=mount_types,
+            include_content=include_content,
+            max_file_size_bytes=max_file_size_bytes,
+            max_content_chars=max_content_chars,
+        )
     )
     payload = summary.to_dict()
     payload["mount_types"] = list(summary.by_mount_type)
@@ -2427,12 +2523,12 @@ def _tool_handoff_revise(arguments: dict[str, Any], manager: AFSManager) -> dict
 
 
 def _tool_handoff_threads(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
-    from .handoff import HandoffStore
+    from .handoff import HandoffStore, HandoffStream
 
     context_path, scoped = _resolve_mcp_scope(arguments, manager)
     store = HandoffStore(context_path, scope_id=scoped.scope_id, config=manager.config)
     limit = _coerce_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
-    streams = store.list_streams(limit=limit)
+    streams: list[HandoffStream] = store.list_streams(limit=limit)
     return {"threads": [stream.to_dict() for stream in streams], "count": len(streams)}
 
 
@@ -2667,16 +2763,16 @@ def _resolve_embedding_index_dir(context_path: Path, manager: AFSManager) -> Pat
         candidate = knowledge / "embeddings"
         if (candidate / "embedding_index.json").exists():
             return candidate
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - optional embedding-index boundary
+        _warn_fallback(f"knowledge embedding index discovery failed for {context_path}", exc)
     # Fallback: look in scratchpad
     try:
         scratchpad = resolve_mount_root(context_path, MountType.SCRATCHPAD)
         candidate = scratchpad / "embeddings"
         if (candidate / "embedding_index.json").exists():
             return candidate
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - optional embedding-index boundary
+        _warn_fallback(f"scratchpad embedding index discovery failed for {context_path}", exc)
     return None
 
 
@@ -2821,8 +2917,8 @@ def _tool_afs_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str
             fts_entries = payload.get("entries", [])
             if fts_entries:
                 sources_used.append("fts")
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - optional search-provider boundary
+            _warn_fallback("FTS search unavailable", exc)
 
     # Embedding leg
     if include_embeddings:
@@ -2855,7 +2951,7 @@ def _tool_afs_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str
                     sources_used.append(
                         "semantic" if semantic_status == "ready" else "indexed_text"
                     )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - reported through semantic status
                 semantic_status = "fallback"
                 semantic_reason = f"embedding search unavailable: {exc}"
         else:
@@ -2873,8 +2969,8 @@ def _tool_afs_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str
                 sym_entries = [r.to_dict() for r in sym_results]
                 if sym_entries:
                     sources_used.append("symbol")
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - optional search-provider boundary
+                _warn_fallback("symbol search unavailable", exc)
 
     results = _fuse_search_results(fts_entries, emb_entries, sym_entries, limit)
 
@@ -3023,21 +3119,47 @@ def _require_known_skill_arguments(
         )
 
 
-def _has_ascii_or_c1_controls(value: str) -> bool:
-    return any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in value)
+def _has_unsafe_skill_name_characters(value: str) -> bool:
+    return any(
+        unicodedata.category(char) in _LOG_ESCAPE_CATEGORIES
+        for char in value
+    )
 
 
 def _safe_skill_error_label(value: str, *, max_chars: int) -> str:
     """Render one bounded label without terminal control characters."""
-    escaped = "".join(
-        f"\\u{ord(char):04x}" if _has_ascii_or_c1_controls(char) else char
-        for char in str(value).strip()
+    return escape_skill_diagnostic_text(
+        value,
+        max_chars=max_chars,
     )
-    if len(escaped) <= max_chars:
-        return escaped
-    if max_chars <= 3:
-        return escaped[:max_chars]
-    return escaped[: max_chars - 3].rstrip() + "..."
+
+
+def _skill_diagnostic_error_suffix(
+    diagnostic_payload: dict[str, Any],
+) -> str:
+    count = diagnostic_payload["diagnostic_count"]
+    if not isinstance(count, int) or count <= 0:
+        return ""
+    diagnostics = diagnostic_payload["diagnostics"]
+    examples: list[str] = []
+    if isinstance(diagnostics, list):
+        for item in diagnostics[:3]:
+            if not isinstance(item, dict):
+                continue
+            code = _safe_skill_error_label(
+                str(item.get("code") or "skill_warning"),
+                max_chars=80,
+            )
+            path = _safe_skill_error_label(
+                str(item.get("path") or item.get("root") or ""),
+                max_chars=120,
+            )
+            examples.append(f"{code}: {path}")
+    detail = f": {'; '.join(examples)}" if examples else ""
+    return " " + _safe_skill_error_label(
+        f"Skill discovery warnings: {count}{detail}.",
+        max_chars=MAX_SKILL_DIAGNOSTIC_ERROR_CHARS,
+    )
 
 
 def _skill_match_top_k(raw: Any) -> int:
@@ -3047,7 +3169,7 @@ def _skill_match_top_k(raw: Any) -> int:
         raise ValueError("top_k must be an integer from 1 to 10")
     if not 1 <= raw <= MAX_SKILL_MATCHES:
         raise ValueError("top_k must be an integer from 1 to 10")
-    return raw
+    return int(raw)
 
 
 def _skill_match_include_bodies(raw: Any) -> bool:
@@ -3081,7 +3203,7 @@ def _tool_skill_match(arguments: dict[str, Any], manager: AFSManager) -> dict[st
     except ValueError as exc:
         _reject_skill_arguments(arguments, str(exc))
     profile_name, roots = _profile_skill_roots(manager)
-    matches = build_skill_matches(
+    match_result = build_skill_matches_with_diagnostics(
         prompt,
         roots,
         profile=profile_name,
@@ -3090,24 +3212,31 @@ def _tool_skill_match(arguments: dict[str, Any], manager: AFSManager) -> dict[st
         max_total_body_chars=MAX_SKILL_BODIES_CHARS if include_bodies else 0,
         max_body_matches=MAX_SKILL_BODY_MATCHES if include_bodies else 0,
     )
+    matches = match_result.matches
     if not include_bodies:
         for match in matches:
             match["body_omitted"] = "not_requested"
+    diagnostic_payload = bounded_skill_diagnostics(
+        match_result.diagnostics,
+        diagnostic_count=match_result.diagnostic_count,
+        limit=MAX_MCP_SKILL_DIAGNOSTICS,
+    )
     return {
         "profile": profile_name,
         "prompt": prompt,
         "include_bodies": include_bodies,
         "matches": matches,
+        **diagnostic_payload,
     }
 
 
 def _skill_path_within_roots(path: Path, roots: list[Path]) -> tuple[Path, Path]:
     resolved = path.expanduser().resolve()
     for root in roots:
-        resolved_root = root.expanduser().resolve()
         try:
+            resolved_root = root.expanduser().resolve()
             resolved.relative_to(resolved_root)
-        except (OSError, ValueError):
+        except (OSError, RuntimeError, ValueError):
             continue
         return resolved, resolved_root
     raise PermissionError(f"Skill path outside configured roots: {resolved}")
@@ -3127,17 +3256,24 @@ def _tool_skill_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str
             arguments,
             f"name must be at most {MAX_SKILL_NAME_CHARS} characters",
         )
-    if _has_ascii_or_c1_controls(raw_name):
+    if _has_unsafe_skill_name_characters(raw_name):
         _reject_skill_arguments(
             arguments,
-            "name must not contain ASCII or C1 control characters",
+            "name must not contain Unicode control, format, surrogate, "
+            "or separator characters",
         )
     name = raw_name.strip()
     if not name:
         _reject_skill_arguments(arguments, "name must be a non-empty string")
     wanted = name.casefold()
     profile_name, roots = _profile_skill_roots(manager)
-    skills = discover_skills(roots, profile=profile_name)
+    discovery = discover_skills_with_diagnostics(roots, profile=profile_name)
+    skills = discovery.skills
+    diagnostic_payload = bounded_skill_diagnostics(
+        discovery.diagnostics,
+        diagnostic_count=discovery.diagnostic_count,
+        limit=MAX_MCP_SKILL_DIAGNOSTICS,
+    )
     for skill in skills:
         if skill.name.casefold() != wanted:
             continue
@@ -3153,6 +3289,7 @@ def _tool_skill_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str
             "body": body,
             "body_truncated": body_truncated,
             "body_chars": len(body),
+            **diagnostic_payload,
         }
 
     known = sorted({skill.name for skill in skills}, key=str.casefold)
@@ -3169,7 +3306,10 @@ def _tool_skill_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str
     suffix = (
         f" (and {len(known) - MAX_SKILL_MATCHES} more)" if len(known) > MAX_SKILL_MATCHES else ""
     )
-    raise ValueError(f"Unknown skill '{name}'. Known skills: {preview}{suffix}")
+    diagnostic_suffix = _skill_diagnostic_error_suffix(diagnostic_payload)
+    raise ValueError(
+        f"Unknown skill '{name}'. Known skills: {preview}{suffix}{diagnostic_suffix}"
+    )
 
 
 def _tool_alias_definition(
@@ -5039,11 +5179,14 @@ def _invoke_tool_handler(
     arguments: dict[str, Any],
     manager: AFSManager,
 ) -> dict[str, Any]:
-    return _invoke_extension_callable(
-        handler,
-        manager=manager,
-        arguments=arguments,
-        fallback_roles=["arguments", "manager"],
+    return cast(
+        dict[str, Any],
+        _invoke_extension_callable(
+            handler,
+            manager=manager,
+            arguments=arguments,
+            fallback_roles=["arguments", "manager"],
+        ),
     )
 
 
@@ -5052,11 +5195,14 @@ def _invoke_resource_handler(
     uri: str,
     manager: AFSManager,
 ) -> dict[str, Any]:
-    return _invoke_extension_callable(
-        handler,
-        manager=manager,
-        uri=uri,
-        fallback_roles=["uri", "manager"],
+    return cast(
+        dict[str, Any],
+        _invoke_extension_callable(
+            handler,
+            manager=manager,
+            uri=uri,
+            fallback_roles=["uri", "manager"],
+        ),
     )
 
 
@@ -5065,11 +5211,14 @@ def _invoke_prompt_handler(
     arguments: dict[str, Any],
     manager: AFSManager,
 ) -> list[dict[str, Any]]:
-    return _invoke_extension_callable(
-        handler,
-        manager=manager,
-        arguments=arguments,
-        fallback_roles=["arguments", "manager"],
+    return cast(
+        list[dict[str, Any]],
+        _invoke_extension_callable(
+            handler,
+            manager=manager,
+            arguments=arguments,
+            fallback_roles=["arguments", "manager"],
+        ),
     )
 
 
@@ -5101,6 +5250,7 @@ def _normalize_extension_tools(
     default_catalog: str = "full",
 ) -> list[MCPToolDefinition]:
     default_catalog = _normalize_tool_catalog(default_catalog, allow_inherit=False)
+    payloads: list[Any]
     if definitions is None:
         return []
     if isinstance(definitions, MCPToolDefinition):
@@ -5144,7 +5294,7 @@ def _normalize_extension_tools(
         name = payload.get("name")
         description = payload.get("description")
         input_schema = payload.get("inputSchema", payload.get("input_schema"))
-        handler = payload.get("handler")
+        raw_handler = payload.get("handler")
         catalog = (
             _normalize_tool_catalog(
                 payload["catalog"],
@@ -5165,13 +5315,13 @@ def _normalize_extension_tools(
                 "properties": {},
                 "additionalProperties": True,
             }
-        if not callable(handler):
+        if not callable(raw_handler):
             raise ValueError(f"Extension {extension_name} tool '{name}' missing callable handler")
 
         def _wrapped(
             arguments: dict[str, Any],
             manager: AFSManager,
-            _handler=handler,
+            _handler=raw_handler,
         ) -> dict[str, Any]:
             return _invoke_tool_handler(_handler, arguments, manager)
 
@@ -5194,6 +5344,7 @@ def _normalize_extension_resources(
     *,
     source: str,
 ) -> list[MCPResourceDefinition]:
+    payloads: list[Any]
     if definitions is None:
         return []
     if isinstance(definitions, MCPResourceDefinition):
@@ -5239,40 +5390,41 @@ def _normalize_extension_resources(
         if not isinstance(payload, dict):
             raise TypeError(f"Extension {extension_name} returned non-dict MCP resource payload")
 
-        uri = payload.get("uri")
+        raw_uri = payload.get("uri")
         name = payload.get("name")
         description = payload.get("description")
         mime_type = payload.get("mimeType", payload.get("mime_type"))
-        handler = payload.get("handler", payload.get("reader"))
+        raw_handler = payload.get("handler", payload.get("reader"))
 
-        if not isinstance(uri, str) or not uri.strip():
+        if not isinstance(raw_uri, str) or not raw_uri.strip():
             raise ValueError(f"Extension {extension_name} returned resource without valid uri")
         if not isinstance(name, str) or not name.strip():
             raise ValueError(
-                f"Extension {extension_name} returned resource '{uri}' without valid name"
+                f"Extension {extension_name} returned resource '{raw_uri}' without valid name"
             )
         if not isinstance(description, str):
             description = ""
         if not isinstance(mime_type, str) or not mime_type.strip():
             mime_type = "application/json"
-        if not callable(handler):
+        if not callable(raw_handler):
             raise ValueError(
-                f"Extension {extension_name} resource '{uri}' missing callable handler"
+                f"Extension {extension_name} resource '{raw_uri}' missing callable handler"
             )
+        normalized_uri = raw_uri.strip()
 
         def _wrapped(
             resource_uri: str,
             manager: AFSManager,
-            _handler=handler,
+            _handler=raw_handler,
             _mime_type=mime_type,
-            _uri=uri.strip(),
+            _uri=normalized_uri,
         ) -> dict[str, Any]:
             result = _invoke_resource_handler(_handler, resource_uri, manager)
             return _coerce_resource_result(result, uri=_uri, mime_type=_mime_type)
 
         resources.append(
             MCPResourceDefinition(
-                uri=uri.strip(),
+                uri=normalized_uri,
                 name=name.strip(),
                 description=description.strip(),
                 mime_type=mime_type.strip(),
@@ -5329,6 +5481,7 @@ def _normalize_extension_prompts(
     *,
     source: str,
 ) -> list[MCPPromptDefinition]:
+    payloads: list[Any]
     if definitions is None:
         return []
     if isinstance(definitions, MCPPromptDefinition):
@@ -5347,7 +5500,7 @@ def _normalize_extension_prompts(
         if isinstance(payload, MCPPromptDefinition):
             handler = payload.handler
 
-            def _wrapped(
+            def _wrapped_prompt_definition(
                 arguments: dict[str, Any],
                 manager: AFSManager,
                 _handler=handler,
@@ -5360,7 +5513,7 @@ def _normalize_extension_prompts(
                     name=payload.name.strip(),
                     description=payload.description.strip(),
                     arguments=list(payload.arguments),
-                    handler=_wrapped,
+                    handler=_wrapped_prompt_definition,
                     source=source,
                 )
             )
@@ -5372,19 +5525,19 @@ def _normalize_extension_prompts(
         name = payload.get("name")
         description = payload.get("description")
         arguments = payload.get("arguments")
-        handler = payload.get("handler", payload.get("get_messages"))
+        raw_handler = payload.get("handler", payload.get("get_messages"))
 
         if not isinstance(name, str) or not name.strip():
             raise ValueError(f"Extension {extension_name} returned prompt without valid name")
         if not isinstance(description, str):
             description = ""
-        if not callable(handler):
+        if not callable(raw_handler):
             raise ValueError(f"Extension {extension_name} prompt '{name}' missing callable handler")
 
-        def _wrapped(
+        def _wrapped_prompt_payload(
             prompt_arguments: dict[str, Any],
             manager: AFSManager,
-            _handler=handler,
+            _handler=raw_handler,
         ) -> list[dict[str, Any]]:
             result = _invoke_prompt_handler(_handler, prompt_arguments, manager)
             return _coerce_prompt_result(result)
@@ -5394,7 +5547,7 @@ def _normalize_extension_prompts(
                 name=name.strip(),
                 description=description.strip(),
                 arguments=_normalize_prompt_arguments(arguments),
-                handler=_wrapped,
+                handler=_wrapped_prompt_payload,
                 source=source,
             )
         )
@@ -5488,7 +5641,7 @@ def _load_extension_surface(
         _purge_extension_module_cache(module_name, search_roots)
         try:
             module = importlib.import_module(module_name)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - extension import boundary
             status.error = f"import failed: {exc}"
             return MCPExtensionContribution(), status
 
@@ -5509,7 +5662,7 @@ def _load_extension_surface(
                 source=source,
                 default_catalog=default_catalog,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - extension factory boundary
             status.error = str(exc)
             return MCPExtensionContribution(), status
 
@@ -5598,7 +5751,7 @@ def _load_profile_mcp_definitions(
         _purge_extension_module_cache(normalized, [])
         try:
             module = importlib.import_module(normalized)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - profile plugin import boundary
             status.error = f"import failed: {exc}"
             continue
 
@@ -5626,7 +5779,7 @@ def _load_profile_mcp_definitions(
                 definitions,
                 source=f"profile:{resolved_profile.name}",
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - profile plugin factory boundary
             status.error = str(exc)
             continue
 
@@ -5913,7 +6066,7 @@ def _read_resource(
 ) -> dict[str, Any]:
     """Read a single MCP resource by URI."""
     if uri == "afs://contexts":
-        data = [
+        contexts_data = [
             {
                 "project": ctx.project_name,
                 "path": str(ctx.path),
@@ -5922,7 +6075,11 @@ def _read_resource(
             }
             for ctx in _discover_allowed_contexts(manager)
         ]
-        return {"uri": uri, "mimeType": "application/json", "text": json.dumps(data)}
+        return {
+            "uri": uri,
+            "mimeType": "application/json",
+            "text": json.dumps(contexts_data),
+        }
 
     if uri == "afs://claude/bootstrap":
         context_path = _resolve_context_path({}, manager)
@@ -6345,43 +6502,47 @@ def _get_prompt(
         )
         context_available = True
         ctx_root = None
-        context_path = None
+        overview_context_path: Path | None = None
+        overview_project_path: Path | None
         common_v2 = False
         scoped_project_name = ""
         overview_scope: ResolvedScope | None = None
         if explicit_context:
-            context_path = _resolve_prompt_context_path(arguments, manager)
-            ctx_root = manager.list_context(context_path=context_path)
-            project_path = Path(context_path).parent
+            overview_context_path = _resolve_prompt_context_path(arguments, manager)
+            ctx_root = manager.list_context(context_path=overview_context_path)
+            overview_project_path = overview_context_path.parent
         elif explicit_project:
-            project_path = _assert_allowed(_resolve_project_path(arguments), manager)
+            resolved_project_path = _resolve_project_path(arguments)
+            if resolved_project_path is None:  # pragma: no cover - guarded above
+                raise ValueError("project path is required")
+            overview_project_path = _assert_allowed(resolved_project_path, manager)
             try:
-                context_path = _resolve_context_path(arguments, manager)
-                ctx_root = manager.list_context(context_path=context_path)
+                overview_context_path = _resolve_context_path(arguments, manager)
+                ctx_root = manager.list_context(context_path=overview_context_path)
             except FileNotFoundError:
                 context_available = False
                 ctx_root = None
-                context_path = None
+                overview_context_path = None
         else:
-            context_path = _resolve_prompt_context_path(arguments, manager)
-            ctx_root = manager.list_context(context_path=context_path)
-            project_path = Path(context_path).parent
+            overview_context_path = _resolve_prompt_context_path(arguments, manager)
+            ctx_root = manager.list_context(context_path=overview_context_path)
+            overview_project_path = overview_context_path.parent
         if (
             ctx_root is not None
-            and context_path is not None
-            and detect_layout_version(context_path) == LAYOUT_VERSION
+            and overview_context_path is not None
+            and detect_layout_version(overview_context_path) == LAYOUT_VERSION
         ):
             scope_arguments = dict(arguments)
-            scope_arguments["context_path"] = str(context_path)
+            scope_arguments["context_path"] = str(overview_context_path)
             if not scope_arguments.get("project_path") and explicit_project:
-                scope_arguments["project_path"] = str(project_path)
+                scope_arguments["project_path"] = str(overview_project_path)
             _scope_root, overview_scope = _resolve_mcp_scope(scope_arguments, manager)
             if overview_scope.requester_path is not None:
-                project_path = overview_scope.requester_path
+                overview_project_path = overview_scope.requester_path
                 scoped_project_name = overview_scope.project_name
             else:
                 common_v2 = True
-                project_path = None
+                overview_project_path = None
 
         if common_v2:
             codebase = {
@@ -6402,19 +6563,29 @@ def _get_prompt(
                     project_id=overview_scope.project_id,
                 )
             else:
-                codebase_target = (
-                    project_path if explicit_project or ctx_root is None else context_path
+                fallback_codebase_target = (
+                    overview_project_path
+                    if explicit_project or ctx_root is None
+                    else overview_context_path
                 )
-                codebase = build_codebase_summary(codebase_target)
+                if fallback_codebase_target is None:  # pragma: no cover - guarded by scope state
+                    raise FileNotFoundError("No project path is available for context overview")
+                codebase = build_codebase_summary(fallback_codebase_target)
+            fallback_project_name = (
+                overview_project_path.name
+                if overview_project_path is not None
+                else COMMON_SCOPE_ID
+            )
             project_name = scoped_project_name or (
-                project_path.name
+                fallback_project_name
                 if explicit_project or ctx_root is None
                 else ctx_root.project_name
             )
         lines = [
             f"# AFS Context: {project_name}",
             f"Context available: {'yes' if context_available else 'no'}",
-            f"Project path: {project_path or '(common scope; no project selected)'}",
+            "Project path: "
+            f"{overview_project_path or '(common scope; no project selected)'}",
         ]
         if ctx_root is not None:
             lines.extend(
@@ -6695,7 +6866,7 @@ def _handle_request(
 
         try:
             payload = active_registry.call(registry_name, arguments, manager)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - MCP tool transport boundary
             print(f"[afs-mcp] tool error: {registry_name}: {exc}", file=sys.stderr)
             error_msg = _annotate_error(exc)
             return _error_response(request_id, -32000, error_msg)
@@ -6716,7 +6887,7 @@ def _handle_request(
             return _error_response(request_id, -32602, "uri must be a string")
         try:
             content = _read_resource(uri, manager, registry=active_registry)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - MCP resource transport boundary
             print(f"[afs-mcp] resource error: {uri}: {exc}", file=sys.stderr)
             return _error_response(request_id, -32000, _annotate_error(exc))
         return _success_response(request_id, {"contents": [content]})
@@ -6741,7 +6912,7 @@ def _handle_request(
                 manager,
                 registry=active_registry,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - MCP prompt transport boundary
             print(f"[afs-mcp] prompt error: {prompt_name}: {exc}", file=sys.stderr)
             return _error_response(request_id, -32000, _annotate_error(exc))
         return _success_response(request_id, {"messages": messages})
@@ -6811,7 +6982,7 @@ def _startup_diagnostics(config_path: Path | None = None) -> None:
                 print(f"[afs-mcp] ERROR: {result.name}: {result.message}", file=sys.stderr)
             elif result.status == "warn":
                 print(f"[afs-mcp] WARN: {result.name}: {result.message}", file=sys.stderr)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - startup diagnostics must not block serving
         print(f"[afs-mcp] startup diagnostics failed: {exc}", file=sys.stderr)
 
 
@@ -6849,7 +7020,7 @@ def serve(config_path: Path | None = None, *, demo: bool = False) -> int:
             continue
         except BrokenPipeError:
             break
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - per-message transport boundary
             print(f"[afs-mcp] message loop error: {exc}", file=sys.stderr)
             continue
 

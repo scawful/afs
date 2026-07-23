@@ -7,9 +7,9 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from ..cli._utils import load_runtime_config_from_args, resolve_context_paths
-from ..config import load_config_model
 from ..manager import AFSManager
 from ..profiles import resolve_active_profile
 from ..skill_mining import (
@@ -23,10 +23,15 @@ from ..skill_mining import (
     write_skill_candidate_artifacts,
 )
 from ..skills import (
-    discover_skills,
+    bounded_skill_diagnostics,
+    discover_skills_with_diagnostics,
+    escape_skill_diagnostic_text,
     resolve_skill_roots,
     score_skill_relevance,
 )
+
+_MAX_DIAGNOSTICS_JSON = 100
+_MAX_DIAGNOSTICS_TEXT = 20
 
 
 def _print_hint(text: str) -> None:
@@ -37,9 +42,40 @@ def _print_hint(text: str) -> None:
         print(f"  {text}")
 
 
+def _print_skill_diagnostics(
+    diagnostics: list[dict[str, object]],
+    *,
+    diagnostic_count: int,
+) -> None:
+    if not diagnostics:
+        return
+    print(f"warnings: {diagnostic_count}")
+    for diagnostic in diagnostics[:_MAX_DIAGNOSTICS_TEXT]:
+        code = escape_skill_diagnostic_text(
+            diagnostic["code"],
+            max_chars=80,
+        )
+        path = escape_skill_diagnostic_text(
+            diagnostic["path"] or diagnostic["root"],
+            max_chars=512,
+        )
+        message = escape_skill_diagnostic_text(
+            diagnostic["message"],
+            max_chars=512,
+        )
+        print(f"  [{code}] {path}: {message}")
+    omitted = diagnostic_count - min(
+        len(diagnostics),
+        _MAX_DIAGNOSTICS_TEXT,
+    )
+    if omitted:
+        print(f"  ... {omitted} more warning(s) omitted")
+    _print_hint("run `afs skills list --json` for structured diagnostics")
+
+
 def _resolve_skill_roots(args: argparse.Namespace, profile_roots: list[Path]) -> list[Path]:
     explicit_roots = (
-        [Path(path).expanduser().resolve() for path in args.root]
+        [Path(path) for path in args.root]
         if args.root
         else None
     )
@@ -51,17 +87,27 @@ def _resolve_skill_roots(args: argparse.Namespace, profile_roots: list[Path]) ->
 
 
 def skills_list_command(args: argparse.Namespace) -> int:
-    config_path = Path(args.config) if args.config else None
-    config = load_config_model(config_path=config_path, merge_user=True)
+    config, _config_path = load_runtime_config_from_args(
+        args,
+        start_dir=Path.cwd(),
+    )
     profile = resolve_active_profile(config, profile_name=args.profile)
 
     roots = _resolve_skill_roots(args, list(profile.skill_roots))
 
-    skills = discover_skills(roots, profile=profile.name)
+    discovery = discover_skills_with_diagnostics(roots, profile=profile.name)
+    skills = discovery.skills
+    diagnostic_payload = bounded_skill_diagnostics(
+        discovery.diagnostics,
+        diagnostic_count=discovery.diagnostic_count,
+        limit=_MAX_DIAGNOSTICS_JSON,
+    )
+    diagnostics = diagnostic_payload["diagnostics"]
     if args.json:
         payload = {
             "profile": profile.name,
             "roots": [str(path) for path in roots],
+            **diagnostic_payload,
             "skills": [
                 {
                     "name": skill.name,
@@ -79,6 +125,10 @@ def skills_list_command(args: argparse.Namespace) -> int:
         return 0
 
     print(f"profile: {profile.name}")
+    _print_skill_diagnostics(
+        diagnostics,
+        diagnostic_count=discovery.diagnostic_count,
+    )
     if not skills:
         print("(no skills)")
         _print_hint("add SKILL.md files to profile skill_roots, extensions, or AFS_ROOT/skills")
@@ -93,13 +143,21 @@ def skills_list_command(args: argparse.Namespace) -> int:
 
 
 def skills_match_command(args: argparse.Namespace) -> int:
-    config_path = Path(args.config) if args.config else None
-    config = load_config_model(config_path=config_path, merge_user=True)
+    config, _config_path = load_runtime_config_from_args(
+        args,
+        start_dir=Path.cwd(),
+    )
     profile = resolve_active_profile(config, profile_name=args.profile)
 
     roots = _resolve_skill_roots(args, list(profile.skill_roots))
 
-    skills = discover_skills(roots, profile=profile.name)
+    discovery = discover_skills_with_diagnostics(roots, profile=profile.name)
+    skills = discovery.skills
+    diagnostic_payload = bounded_skill_diagnostics(
+        discovery.diagnostics,
+        diagnostic_count=discovery.diagnostic_count,
+        limit=_MAX_DIAGNOSTICS_JSON,
+    )
     ranked = []
     for skill in skills:
         score = score_skill_relevance(args.prompt, skill)
@@ -111,6 +169,7 @@ def skills_match_command(args: argparse.Namespace) -> int:
         payload = {
             "profile": profile.name,
             "prompt": args.prompt,
+            **diagnostic_payload,
             "matches": [
                 {
                     "score": score,
@@ -131,6 +190,10 @@ def skills_match_command(args: argparse.Namespace) -> int:
         print(f"{score}\t{skill.name}\t{skill.path}")
     if not ranked:
         print("(no matches)")
+    _print_skill_diagnostics(
+        diagnostic_payload["diagnostics"],
+        diagnostic_count=discovery.diagnostic_count,
+    )
     return 0
 
 
@@ -145,7 +208,7 @@ def skills_mine_command(args: argparse.Namespace) -> int:
             manager,
             prefer_existing=True,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary reports context failures.
         print(str(exc), file=sys.stderr)
         return 1
 
@@ -201,7 +264,7 @@ def skills_review_command(args: argparse.Namespace) -> int:
             manager,
             prefer_existing=True,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary reports context failures.
         print(str(exc), file=sys.stderr)
         return 1
 
@@ -252,7 +315,7 @@ def _record_candidate_decision_command(
             status_filter="",
             limit=max(args.limit, 1),
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary reports review failures.
         print(str(exc), file=sys.stderr)
         return 1
 
@@ -271,7 +334,7 @@ def _record_candidate_decision_command(
     candidate_id = str(candidate.get("id", "")).strip() or str(candidate.get("name", "")).strip()
 
     try:
-        payload = {
+        payload: dict[str, Any] = {
             "artifact_path": str(review.get("artifact_path", "")).strip(),
             "candidate_id": candidate_id,
             "candidate_name": str(candidate.get("name", "")).strip(),
@@ -284,7 +347,7 @@ def _record_candidate_decision_command(
             status=status,
             artifact_path=payload["artifact_path"],
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary reports persistence failures.
         print(str(exc), file=sys.stderr)
         return 1
 
@@ -336,7 +399,7 @@ def skills_promote_command(args: argparse.Namespace) -> int:
             status_filter="",
             limit=max(args.limit, 1),
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary reports review failures.
         print(str(exc), file=sys.stderr)
         return 1
 
@@ -365,7 +428,7 @@ def skills_promote_command(args: argparse.Namespace) -> int:
             profile_name=profile_name,
             artifact_path=str(review.get("artifact_path", "")).strip(),
         )
-        payload = {
+        payload: dict[str, Any] = {
             "artifact_path": str(review.get("artifact_path", "")).strip(),
             "candidate_id": str(candidate.get("id", "")).strip(),
             "skill_name": skill_name,
@@ -401,7 +464,7 @@ def skills_promote_command(args: argparse.Namespace) -> int:
                     "overwritten": False,
                 }
             )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary reports promotion failures.
         print(str(exc), file=sys.stderr)
         return 1
 

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from afs.extensions import discover_extension_manifests, load_extensions
 from afs.schema import ExtensionsConfig
+from afs.skills import discover_skills_with_diagnostics
 
 
 def _clear_extension_env(monkeypatch) -> None:
@@ -58,6 +59,32 @@ def test_discover_and_load_extension_manifest(tmp_path: Path) -> None:
     assert manifest.mcp_tools_factory == "register_mcp_tools"
     assert manifest.mcp_server_module == "workspace_adapter_test.server"
     assert manifest.mcp_server_factory == "register_mcp_server"
+
+
+def test_extension_unknown_tilde_skill_root_remains_diagnosable(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "extensions"
+    extension = root / "unknown_skill_root"
+    extension.mkdir(parents=True)
+    unknown_root = Path("~afs-extension-user-that-cannot-exist-48ba775/skills")
+    (extension / "extension.toml").write_text(
+        'name = "unknown_skill_root"\n'
+        f'skill_roots = ["{unknown_root}"]\n',
+        encoding="utf-8",
+    )
+    config = ExtensionsConfig(
+        enabled_extensions=["unknown_skill_root"],
+        extension_dirs=[root],
+    )
+
+    manifest = load_extensions(config)["unknown_skill_root"]
+    result = discover_skills_with_diagnostics(manifest.skill_roots)
+
+    assert manifest.skill_roots == [unknown_root]
+    assert result.diagnostic_count == 1
+    assert result.diagnostics[0].code == "root_unreadable"
+    assert result.diagnostics[0].root == unknown_root
 
 
 def test_discover_extension_prefers_earlier_directories(tmp_path: Path) -> None:
