@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..human_provenance import HumanAuthorization, _broker_for_reader
+from ..model_retention import audit_model_retention
 from ..storage_doctor import (
     DEFAULT_STALE_DAYS,
     StorageApplyError,
@@ -126,6 +127,74 @@ def _render_audit(payload: dict[str, Any]) -> None:
     print(_terminal_text(payload["safety"]["note"]))
 
 
+def _render_model_audit(payload: dict[str, Any]) -> None:
+    summary = payload["summary"]
+    print("AFS model retention audit (read-only)")
+    print(f"Home: {_terminal_text(payload['home'])}")
+    policy = payload["policy"]
+    print(
+        "Policy: "
+        f"{_terminal_text(policy['path']) if policy['path'] else 'none'} "
+        f"({policy['entries']} explicit decision(s))"
+    )
+    print(
+        f"Artifacts: {summary['keep']} keep, "
+        f"{summary['review']} review, "
+        f"{summary['unknown']} unknown"
+    )
+    print(f"Review upper bound: {_gib(summary['review_reclaimable_bytes_upper_bound'])}")
+
+    active_scan = payload["active_scan"]
+    active_detail = active_scan.get("detail")
+    detail_suffix = f" ({_terminal_text(active_detail)})" if active_detail else ""
+    print(f"Active scan: {_terminal_text(active_scan['status'])}{detail_suffix}")
+    registry_scan = payload["registry_scan"]
+    registry_detail = registry_scan.get("detail")
+    registry_suffix = f" ({_terminal_text(registry_detail)})" if registry_detail else ""
+    print(f"Registry scan: {_terminal_text(registry_scan['status'])}{registry_suffix}")
+    for source in registry_scan["sources"]:
+        print(f"  source: {_terminal_text(source)}")
+    for root in payload["roots"]:
+        root_issues = ", ".join(_terminal_text(issue) for issue in root.get("issues", []))
+        root_suffix = f" ({root_issues})" if root_issues else ""
+        print(
+            f"Root: {_terminal_text(root['path'])} [{_terminal_text(root['status'])}]{root_suffix}"
+        )
+    print()
+    print("Model artifacts:")
+    if not payload["artifacts"]:
+        print("  none")
+    for artifact in payload["artifacts"]:
+        reasons = ", ".join(
+            _terminal_text(reason)
+            for reason in (*artifact["evidence"], *artifact["blocked_reasons"])
+        )
+        suffix = f" ({reasons})" if reasons else ""
+        print(
+            f"  [{_terminal_text(artifact['status'])}] "
+            f"{_terminal_text(artifact['path'])} "
+            f"[allocated {_gib(artifact['allocated_bytes_upper_bound'])}; "
+            "review upper bound "
+            f"{_gib(artifact['reclaimable_bytes_upper_bound'])}]"
+            f"{suffix}"
+        )
+        if artifact["status"] == "review" and artifact["policy"] is not None:
+            print(f"    because: {_terminal_text(artifact['policy']['because'])}")
+            print(f"    replacement: {_terminal_text(artifact['policy']['superseded_by'])}")
+
+    issues = payload.get("issues", [])
+    if issues:
+        print()
+        print("Incomplete evidence:")
+        for issue in issues:
+            print(f"  {_terminal_text(issue)}")
+
+    print()
+    print("No model was changed or deleted.")
+    print("`afs storage plan` and `afs storage apply` cannot accept model artifacts.")
+    print(_terminal_text(payload["estimate_note"]))
+
+
 def storage_audit_command(args: argparse.Namespace) -> int:
     try:
         payload = audit_storage(
@@ -143,6 +212,32 @@ def storage_audit_command(args: argparse.Namespace) -> int:
         _print_json(payload)
     else:
         _render_audit(payload)
+    return 0
+
+
+def storage_models_command(args: argparse.Namespace) -> int:
+    roots = [Path(value) for value in args.root] or None
+    policy_path = Path(args.policy) if args.policy else None
+    registry_paths = [Path(value) for value in args.registry] or None
+    try:
+        payload = audit_model_retention(
+            _home(args),
+            roots=roots,
+            policy_path=policy_path,
+            registry_paths=registry_paths,
+            recent_days=args.recent_days,
+        )
+    except (OSError, ValueError) as exc:
+        error = {"status": "blocked", "error": f"{type(exc).__name__}: {exc}"}
+        if args.json:
+            _print_json(error)
+        else:
+            print(f"Model retention audit blocked: {_terminal_text(error['error'])}")
+        return 2
+    if args.json:
+        _print_json(payload)
+    else:
+        _render_model_audit(payload)
     return 0
 
 
@@ -248,11 +343,11 @@ def storage_apply_command(args: argparse.Namespace) -> int:
 
 
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
-    """Register the storage audit/plan/apply command group."""
+    """Register the storage audit/models/plan/apply command group."""
 
     parser = subparsers.add_parser(
         "storage",
-        help="Audit storage and apply narrow, human-confirmed cleanup plans.",
+        help="Audit storage/model retention and apply narrow, human-confirmed cleanup plans.",
     )
     commands = parser.add_subparsers(dest="storage_command")
 
@@ -269,6 +364,36 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     audit.add_argument("--json", action="store_true", help="Output JSON.")
     audit.set_defaults(func=storage_audit_command, _skip_cli_history=True)
+
+    models = commands.add_parser(
+        "models",
+        help="Audit model retention evidence without deleting or planning deletion.",
+    )
+    models.add_argument("--home", help="Home root override (default: current home).")
+    models.add_argument(
+        "--root",
+        action="append",
+        default=[],
+        help="Model root to inspect (repeatable; defaults to known local roots).",
+    )
+    models.add_argument(
+        "--policy",
+        help="Optional model-retention policy TOML path.",
+    )
+    models.add_argument(
+        "--registry",
+        action="append",
+        default=[],
+        help="Model registry/config path to scan for references (repeatable).",
+    )
+    models.add_argument(
+        "--recent-days",
+        type=int,
+        default=7,
+        help="Keep artifacts modified within this many days (default: 7).",
+    )
+    models.add_argument("--json", action="store_true", help="Output JSON.")
+    models.set_defaults(func=storage_models_command, _skip_cli_history=True)
 
     plan = commands.add_parser(
         "plan",

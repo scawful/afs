@@ -12,6 +12,23 @@ from afs.storage_doctor import StorageApplyError
 def test_storage_commands_are_registered() -> None:
     parser = build_parser([])
     audit = parser.parse_args(["storage", "audit", "--json"])
+    models = parser.parse_args(
+        [
+            "storage",
+            "models",
+            "--root",
+            "~/models/gguf",
+            "--root",
+            "~/models/mlx",
+            "--policy",
+            "~/model-retention.toml",
+            "--registry",
+            "~/models/registry.json",
+            "--recent-days",
+            "14",
+            "--json",
+        ]
+    )
     plan = parser.parse_args(["storage", "plan", "--output", "/tmp/afs-storage-plan.json"])
     apply = parser.parse_args(
         [
@@ -26,8 +43,155 @@ def test_storage_commands_are_registered() -> None:
         ]
     )
     assert audit.storage_command == "audit"
+    assert models.storage_command == "models"
+    assert models.root == ["~/models/gguf", "~/models/mlx"]
+    assert models.policy == "~/model-retention.toml"
+    assert models.registry == ["~/models/registry.json"]
+    assert models.recent_days == 14
     assert plan.storage_command == "plan"
     assert apply.storage_command == "apply"
+
+
+def test_storage_models_reports_read_only_review_evidence(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    unsafe_path = tmp_path / "old\x1b[31m\nmodel.gguf"
+    payload = {
+        "schema": "afs.storage.models.v1",
+        "generated_at": "2026-07-24T00:00:00Z",
+        "home": f"{tmp_path}\nspoof-home",
+        "recent_days": 14,
+        "roots": [{"path": str(tmp_path / "models"), "status": "ok"}],
+        "policy": {
+            "path": str(tmp_path / "model-retention.toml"),
+            "schema": "afs.model-retention.v1",
+            "entries": 1,
+        },
+        "active_scan": {
+            "status": "partial",
+            "detail": "lms unavailable\x1b[0m\nspoof",
+            "reference_count": 0,
+            "matched_artifacts": [],
+        },
+        "registry_scan": {
+            "status": "ok",
+            "detail": "",
+            "sources": [str(tmp_path / "registry.json")],
+            "reference_count": 0,
+            "matched_artifacts": [],
+        },
+        "summary": {
+            "artifacts": 3,
+            "keep": 1,
+            "review": 1,
+            "unknown": 1,
+            "allocated_bytes_upper_bound": 4096,
+            "review_reclaimable_bytes_upper_bound": 2048,
+        },
+        "estimate_note": "Review is not deletion permission.\nspoof",
+        "artifacts": [
+            {
+                "path": str(unsafe_path),
+                "kind": "gguf",
+                "status": "review",
+                "logical_bytes": 4096,
+                "allocated_bytes_upper_bound": 4096,
+                "reclaimable_bytes_upper_bound": 2048,
+                "mtime": "2026-01-01T00:00:00Z",
+                "policy": {
+                    "decision": "review",
+                    "because": "Superseded.",
+                    "superseded_by": str(tmp_path / "new-model.gguf"),
+                },
+                "evidence": ["explicitly superseded\x1b[0m\nfake"],
+                "blocked_reasons": [],
+            }
+        ],
+    }
+    received: dict[str, object] = {}
+
+    def fake_audit(
+        home: Path,
+        *,
+        roots: list[Path] | None,
+        policy_path: Path | None,
+        registry_paths: list[Path] | None,
+        recent_days: int,
+    ) -> dict[str, object]:
+        received.update(
+            {
+                "home": home,
+                "roots": roots,
+                "policy_path": policy_path,
+                "registry_paths": registry_paths,
+                "recent_days": recent_days,
+            }
+        )
+        return payload
+
+    monkeypatch.setattr(storage_cli, "audit_model_retention", fake_audit)
+    assert (
+        main(
+            [
+                "storage",
+                "models",
+                "--home",
+                str(tmp_path),
+                "--root",
+                "~/models/gguf",
+                "--root",
+                "~/models/mlx",
+                "--policy",
+                "~/model-retention.toml",
+                "--registry",
+                "~/models/registry.json",
+                "--recent-days",
+                "14",
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+
+    assert received == {
+        "home": tmp_path,
+        "roots": [
+            Path("~/models/gguf"),
+            Path("~/models/mlx"),
+        ],
+        "policy_path": Path("~/model-retention.toml"),
+        "registry_paths": [Path("~/models/registry.json")],
+        "recent_days": 14,
+    }
+    assert "AFS model retention audit (read-only)" in output
+    assert "1 keep, 1 review, 1 unknown" in output
+    assert "Review upper bound: 0.00 GiB" in output
+    assert f"Policy: {tmp_path / 'model-retention.toml'}" in output
+    assert f"source: {tmp_path / 'registry.json'}" in output
+    assert "[review]" in output
+    assert "because: Superseded." in output
+    assert f"replacement: {tmp_path / 'new-model.gguf'}" in output
+    assert "\x1b" not in output
+    assert "old�[31m�model.gguf" in output
+    assert "explicitly superseded�[0m�fake" in output
+    assert "No model was changed or deleted." in output
+    assert "`afs storage plan` and `afs storage apply` cannot accept model artifacts." in output
+
+    assert (
+        main(
+            [
+                "storage",
+                "models",
+                "--home",
+                str(tmp_path),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == payload
 
 
 def test_storage_audit_and_empty_plan_are_readable(

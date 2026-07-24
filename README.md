@@ -51,6 +51,7 @@ make check                            # lint, tests, package smoke
 ./scripts/afs doctor                  # Diagnose issues (`--fix` applies supported repairs)
 ./scripts/afs health                  # Health check
 ./scripts/afs storage audit           # Online, read-only disk pressure report
+./scripts/afs storage models          # Read-only model retention evidence
 ```
 
 Refresh local agent harnesses, MCP setup, copied skills, hooks, and context
@@ -110,9 +111,11 @@ security sandbox.
 
 **Storage Maintenance** — Online, read-only allocated-byte auditing plus a
 narrow, expiring plan/apply workflow for rebuildable artifacts. Planning
-writes only the requested plan artifact; models, Archives, Trash, contexts,
-applications, and APFS snapshots stay informational. Cleanup never stops
-running agents or model servers.
+writes only the requested plan artifact. A separate model-retention audit
+classifies evidence as keep, review, or unknown, but cannot delete models or
+feed them into plan/apply. Archives, Trash, contexts, applications, and APFS
+snapshots also stay informational. Cleanup never stops running agents or model
+servers.
 
 ## Professional/project docs
 
