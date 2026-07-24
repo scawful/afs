@@ -13,9 +13,10 @@ import logging
 import os
 import shlex
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import cast
 
 from ..config import load_runtime_config_model
 from ..health import cli as health_cli
@@ -55,6 +56,7 @@ from . import (
     setup_wizard,
     skills,
     sources,
+    storage,
     training,
     verify,
     watch,
@@ -66,7 +68,7 @@ logger = logging.getLogger(__name__)
 
 
 @contextmanager
-def _extension_import_path(extension_root: Path) -> Iterable[None]:
+def _extension_import_path(extension_root: Path) -> Iterator[None]:
     candidates = [
         str(extension_root),
         str(extension_root.parent),
@@ -123,7 +125,7 @@ def _register_cli_module(
 
 
 @contextmanager
-def _multi_extension_import_path(search_roots: Iterable[Path]) -> Iterable[None]:
+def _multi_extension_import_path(search_roots: Iterable[Path]) -> Iterator[None]:
     candidates: list[str] = []
     for root in search_roots:
         candidates.extend([str(root), str(root.parent)])
@@ -249,6 +251,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
     # Register cache management commands
     cache.register_parsers(subparsers)
 
+    # Register read-only storage diagnostics and exact cleanup plans.
+    storage.register_parsers(subparsers)
+
     # Register context commands (context, graph, workspace)
     context.register_parsers(subparsers)
 
@@ -352,7 +357,7 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
             merge_user=True,
             start_dir=Path.cwd(),
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - optional CLI extension boundary.
         logger.debug(
             "CLI plugin/extension registration skipped: config load failed (%s)",
             type(exc).__name__,
@@ -365,7 +370,7 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
             plugins = load_enabled_plugins(config=config)
             call_plugin_hook("register_cli", subparsers, plugins=plugins.values())
             call_plugin_hook("register_parsers", subparsers, plugins=plugins.values())
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - optional plugin boundary.
             logger.warning(
                 "Plugin CLI registration failed (%s)", type(exc).__name__
             )
@@ -389,14 +394,14 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
                         module_name,
                         search_roots=extension_roots.get(module_name, []),
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - isolate each extension.
                     logger.warning(
                         "Extension CLI module %r failed to register (%s)",
                         module_name,
                         type(exc).__name__,
                     )
                     continue
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - optional extension boundary.
             logger.warning(
                 "Extension CLI registration failed (%s)", type(exc).__name__
             )
@@ -466,7 +471,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 1
 
     try:
-        exit_code = args.func(args)
+        exit_code = cast(int, args.func(args))
     except ImportError as exc:
         print(f"afs: missing dependency: {exc}", file=sys.stderr)
         print("  hint: run `afs doctor` to diagnose", file=sys.stderr)
@@ -480,7 +485,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 1
     except KeyboardInterrupt:
         return 130
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - top-level CLI failure boundary.
         print(f"afs: {type(exc).__name__}: {exc}", file=sys.stderr)
         print("  hint: run `afs doctor` to diagnose", file=sys.stderr)
         return 1
@@ -488,8 +493,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     if not getattr(args, "_skip_cli_history", False):
         try:
             log_cli_invocation(argv_list, exit_code)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - telemetry must not change command status.
+            logger.debug("Unable to record CLI invocation", exc_info=True)
     return exit_code
 
 

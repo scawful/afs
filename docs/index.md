@@ -56,6 +56,7 @@ It provides filesystem-native primitives for:
 - [Work Assistant Upgrade Guide](WORK_ASSISTANT_UPGRADE.md)
 - [Engagement Primitives](ENGAGEMENT.md) — rationale gates, mission acceptance, calibration trail
 - [Embeddings](EMBEDDINGS.md)
+- [Storage Maintenance](STORAGE_MAINTENANCE.md) — online audit and exact-plan cleanup
 - [Knowledge System & Gemini Setup Guide](KNOWLEDGE_SYSTEM_GUIDE.md)
 - [VSCode Extension Review](VSCODE_EXTENSION_REVIEW.md)
 - [Memory and Context Layout](MEMORY_SYSTEM.md)
