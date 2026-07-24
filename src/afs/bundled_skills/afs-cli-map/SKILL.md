@@ -33,6 +33,7 @@ When unsure, start with
 | Coordination | `messages`, `tasks`, `missions`, `approvals`, `work`, `calibration` |
 | Agents | `agents list/ps/run/watch`, `jobs`, `agent-runs`, `agent-hooks`, `agent-manifest` |
 | Quality | `verify plan/run`, `schema list/show/validate`, `review`, `optimize decide`, `execution inspect` |
+| Storage | `storage audit/models/plan/apply` |
 | Knowledge | `memory consolidate/status/search`, `skills list/match/mine/promote`, `insights research/reflect/list/show/accept/reject`, `events`, `graph`, `sources` |
 | Serving | `mcp serve`, `plugins`, `services`, `orchestrator` |
 | Integrations | `personal`, `briefing`, `claude`, `gemini`, `antigravity`, `gws`, `studio`, `training` |
@@ -43,5 +44,6 @@ When unsure, start with
   (machine-readable), and `--config <afs.toml>`
 - `afs help <command>` or `afs <command> --help` for full flags
 - `afs guide` prints friendly workflow guides; `afs manager` opens the GUI
+- `afs storage models` is read-only; model artifacts never enter `storage plan/apply`
 - Deeper usage lives in dedicated skills: session-workflows, context-search,
   health-repair, mission-tracking, skill-authoring, extension-authoring
