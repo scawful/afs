@@ -23,6 +23,7 @@ Also supported once installed into the active environment:
 - `./scripts/afs status --json`
 - `./scripts/afs doctor`
 - `./scripts/afs storage audit`
+- `./scripts/afs storage models`
 - `./scripts/afs context init --path ~/src`
 - `./scripts/afs context discover --path ~/src`
 - `./scripts/afs context ensure-all --path ~/src`
@@ -85,6 +86,15 @@ v2. The separate legacy mission-runner agent still reads TOML definitions from
 ./scripts/afs storage audit
 ./scripts/afs storage audit --json
 
+# Classify model-retention evidence without changing or deleting a model.
+./scripts/afs storage models
+./scripts/afs storage models \
+  --root ~/models/gguf \
+  --registry ~/src/lab/afs-scawful/config/chat_registry.toml \
+  --policy ~/models/model-retention.toml \
+  --recent-days 14 \
+  --json
+
 # Freeze only currently eligible, rebuildable paths into an expiring plan.
 ./scripts/afs storage plan --output ~/.afs/storage-plan.json
 
@@ -101,12 +111,22 @@ candidate is revalidated before removal, and the frozen plan, claim,
 per-candidate journal, same-filesystem quarantine, and receipt remain under
 `~/.afs/storage/transactions/<transaction>/`.
 
+`storage models` is a separate, read-only evidence report. It counts artifacts
+classified as `keep`, `review`, or `unknown`, reports an allocated-byte upper
+bound for the review set, and records the reasons for every classification.
+Use repeatable `--root` and `--registry` flags to make the inspected stores and
+reference sources explicit; `--policy` supplies reviewed lifecycle intent.
+Recent, referenced, active, ambiguous, or incompletely described artifacts
+fail closed to `keep` or `unknown`. A `review` status is not deletion
+permission, and its upper bound is not a reclaim promise.
+
 The only cleanup candidates are stale Yaze `build-nightly*` directories,
 OpenCode `tmp_pack_*`/`gc.pid` files, old LM Studio logs, and broken LM Studio
-model links. Models, general caches, Archives, Trash, AFS context, applications,
-and APFS/Time Machine snapshots are informational only. Open or ambiguous paths
-are blocked, apply revalidates every identity, no process is stopped, and a
-claimed transaction cannot be replayed. See
+model links. Model artifacts can never enter `storage plan` or `storage apply`.
+General caches, Archives, Trash, AFS context, applications, and APFS/Time
+Machine snapshots are informational only. Open or ambiguous paths are blocked,
+apply revalidates every identity, no process is stopped, and a claimed
+transaction cannot be replayed. See
 [Storage Maintenance](STORAGE_MAINTENANCE.md) for the full safety contract.
 
 ## Profiles
