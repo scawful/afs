@@ -50,6 +50,7 @@ make check                            # lint, tests, package smoke
 ./scripts/afs status --start-dir "$PWD"  # Show context, mount, and index health
 ./scripts/afs doctor                  # Diagnose issues (`--fix` applies supported repairs)
 ./scripts/afs health                  # Health check
+./scripts/afs storage audit           # Online, read-only disk pressure report
 ```
 
 Refresh local agent harnesses, MCP setup, copied skills, hooks, and context
@@ -107,6 +108,12 @@ against trusted policy before a portable process backend launches them. The
 current backend scrubs environment state and bounds time/output, but is not a
 security sandbox.
 
+**Storage Maintenance** — Online, read-only allocated-byte auditing plus a
+narrow, expiring plan/apply workflow for rebuildable artifacts. Planning
+writes only the requested plan artifact; models, Archives, Trash, contexts,
+applications, and APFS snapshots stay informational. Cleanup never stops
+running agents or model servers.
+
 ## Professional/project docs
 
 - [Executive Summary](docs/EXECUTIVE_SUMMARY.md)
@@ -117,6 +124,7 @@ security sandbox.
 - [Extension Authoring](docs/EXTENSION_AUTHORING.md)
 - [Autonomous Optimization Protocol](docs/OPTIMIZATION_PROTOCOL.md)
 - [Policy-Checked Execution](docs/EXECUTION_BROKER.md)
+- [Storage Maintenance](docs/STORAGE_MAINTENANCE.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
 - [Release Process](RELEASE.md)

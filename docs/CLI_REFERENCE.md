@@ -22,6 +22,7 @@ Also supported once installed into the active environment:
 - `./scripts/afs status`
 - `./scripts/afs status --json`
 - `./scripts/afs doctor`
+- `./scripts/afs storage audit`
 - `./scripts/afs context init --path ~/src`
 - `./scripts/afs context discover --path ~/src`
 - `./scripts/afs context ensure-all --path ~/src`
@@ -76,6 +77,37 @@ Durable `afs mission` records use `.context/.afs/compat/items/missions/` in
 v2. The separate legacy mission-runner agent still reads TOML definitions from
 `.context/scratchpad/missions/`; its v2 run output is written under
 `.context/scratchpad/common/missions/`.
+
+## Storage maintenance
+
+```bash
+# Read-only and safe while agents/model servers remain online.
+./scripts/afs storage audit
+./scripts/afs storage audit --json
+
+# Freeze only currently eligible, rebuildable paths into an expiring plan.
+./scripts/afs storage plan --output ~/.afs/storage-plan.json
+
+# Review the JSON, then copy its exact transaction and explain the decision.
+./scripts/afs storage apply \
+  --plan ~/.afs/storage-plan.json \
+  --confirm storage_<exact-token> \
+  --because "Remove reviewed rebuildable artifacts."
+```
+
+`storage apply` also requires the person at the controlling terminal to
+re-type the exact transaction. It never stops agents or model servers. Each
+candidate is revalidated before removal, and the frozen plan, claim,
+per-candidate journal, same-filesystem quarantine, and receipt remain under
+`~/.afs/storage/transactions/<transaction>/`.
+
+The only cleanup candidates are stale Yaze `build-nightly*` directories,
+OpenCode `tmp_pack_*`/`gc.pid` files, old LM Studio logs, and broken LM Studio
+model links. Models, general caches, Archives, Trash, AFS context, applications,
+and APFS/Time Machine snapshots are informational only. Open or ambiguous paths
+are blocked, apply revalidates every identity, no process is stopped, and a
+claimed transaction cannot be replayed. See
+[Storage Maintenance](STORAGE_MAINTENANCE.md) for the full safety contract.
 
 ## Profiles
 

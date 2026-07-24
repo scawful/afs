@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from pathlib import Path
@@ -265,3 +266,124 @@ def test_secure_mkdir_is_idempotent(tmp_path: Path) -> None:
     secure_mkdir(target)
     secure_mkdir(target)
     assert target.is_dir()
+
+
+def test_secure_mkdir_refuses_existing_non_directory(tmp_path: Path) -> None:
+    target = tmp_path / "state"
+    target.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        secure_mkdir(target, durable=True)
+
+
+def test_secure_mkdir_refuses_existing_symlink_to_directory(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        secure_mkdir(linked / "child", durable=True)
+
+    assert not (outside / "child").exists()
+
+
+def test_secure_mkdir_detects_component_replacement_before_chmod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = tmp_path / "base"
+    base.mkdir()
+    victim = base / "victim"
+    displaced = base / "displaced"
+    real_open = atomic_io.os.open
+    victim_open_count = 0
+
+    def racing_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal victim_open_count
+        if path == "victim" and dir_fd is not None:
+            victim_open_count += 1
+            if victim_open_count == 2:
+                victim.rename(displaced)
+                victim.mkdir(mode=0o755)
+                victim.chmod(0o755)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(atomic_io.os, "open", racing_open)
+    monkeypatch.setattr(atomic_io, "_supports_anchored_mkdir", lambda: True)
+
+    with pytest.raises(OSError, match="changed while opening"):
+        secure_mkdir(victim / "leaf", mode=0o700, durable=True)
+
+    assert _mode_of(victim) == 0o755
+    assert not (victim / "leaf").exists()
+    assert displaced.is_dir()
+
+
+def test_secure_mkdir_portable_fallback_rejects_durable_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(atomic_io, "_supports_anchored_mkdir", lambda: False)
+
+    with pytest.raises(OSError) as raised:
+        secure_mkdir(tmp_path / "state", durable=True)
+
+    assert raised.value.errno == errno.ENOTSUP
+    assert not (tmp_path / "state").exists()
+
+
+def test_secure_mkdir_portable_fallback_refuses_linklike_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redirected = tmp_path / "redirected"
+    redirected.mkdir()
+    redirected_identity = (redirected.stat().st_dev, redirected.stat().st_ino)
+    real_is_linklike = atomic_io.is_linklike
+
+    def mark_redirected_linklike(path_stat: os.stat_result) -> bool:
+        identity = (path_stat.st_dev, path_stat.st_ino)
+        return identity == redirected_identity or real_is_linklike(path_stat)
+
+    monkeypatch.setattr(atomic_io, "_supports_anchored_mkdir", lambda: False)
+    monkeypatch.setattr(atomic_io, "is_linklike", mark_redirected_linklike)
+
+    with pytest.raises(FileExistsError):
+        secure_mkdir(redirected / "child")
+
+    assert not (redirected / "child").exists()
+
+
+def test_secure_mkdir_durably_syncs_each_new_parent_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = tmp_path / "base"
+    base.mkdir()
+    synced: list[tuple[int, int]] = []
+
+    def record_fsync(descriptor: int) -> None:
+        path_stat = os.fstat(descriptor)
+        synced.append((path_stat.st_dev, path_stat.st_ino))
+
+    monkeypatch.setattr(atomic_io.os, "fsync", record_fsync)
+
+    secure_mkdir(base / "a" / "b", durable=True)
+
+    def identity(path: Path) -> tuple[int, int]:
+        path_stat = path.stat()
+        return path_stat.st_dev, path_stat.st_ino
+
+    assert synced == [
+        identity(base / "a"),
+        identity(base),
+        identity(base / "a" / "b"),
+        identity(base / "a"),
+    ]

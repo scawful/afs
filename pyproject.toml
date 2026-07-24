@@ -129,7 +129,6 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/benchmarks/resources.py" = ["BLE001"]
 "src/afs/bundler.py" = ["BLE001", "S112"]
 "src/afs/calibration.py" = ["BLE001", "S110"]
-"src/afs/cli/__init__.py" = ["BLE001", "S110"]
 "src/afs/cli/_help.py" = ["BLE001"]
 "src/afs/cli/_utils.py" = ["BLE001"]
 "src/afs/cli/briefing.py" = ["BLE001"]
@@ -273,7 +272,6 @@ module = [
     "afs.bundler",
     "afs.claude.doctor",
     "afs.claude.session_report",
-    "afs.cli",
     "afs.cli._help",
     "afs.cli.antigravity",
     "afs.cli.briefing",

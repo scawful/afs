@@ -17,7 +17,10 @@ import os
 import stat
 import sys
 import uuid
+from collections.abc import Collection
 from pathlib import Path
+
+from .path_safety import is_linklike
 
 __all__ = [
     "atomic_create_text",
@@ -206,20 +209,167 @@ def exclusive_create_text(
     os.chmod(path, mode)
 
 
-def secure_mkdir(path: Path, *, mode: int = 0o700) -> Path:
-    """``mkdir -p`` that applies ``mode`` to every directory it creates.
+def _supports_anchored_mkdir() -> bool:
+    supports_dir_fd: Collection[object] = getattr(
+        os,
+        "supports_dir_fd",
+        frozenset(),
+    )
+    supports_follow_symlinks: Collection[object] = getattr(
+        os,
+        "supports_follow_symlinks",
+        frozenset(),
+    )
+    return (
+        os.open in supports_dir_fd
+        and os.mkdir in supports_dir_fd
+        and os.stat in supports_dir_fd
+        and os.stat in supports_follow_symlinks
+        and hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "fchmod")
+    )
 
-    ``Path.mkdir(mode=..., parents=True)`` applies the mode only to the
-    leaf; intermediate directories get umask defaults. This helper chmods
-    each directory this call actually created, leaving pre-existing
-    ancestors untouched.
+
+def _anchored_directory_flags() -> int:
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _component_identity(path_stat: os.stat_result) -> tuple[int, int]:
+    return path_stat.st_dev, path_stat.st_ino
+
+
+def _secure_mkdir_anchored(path: Path, *, mode: int, durable: bool) -> None:
+    target = Path(os.path.abspath(path))
+    components = target.parts[1:]
+    parent_fd = os.open(target.anchor, _anchored_directory_flags())
+    try:
+        for component in components:
+            created = False
+            created_identity: tuple[int, int] | None = None
+            try:
+                child_fd = os.open(
+                    component,
+                    _anchored_directory_flags(),
+                    dir_fd=parent_fd,
+                )
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, mode=mode, dir_fd=parent_fd)
+                    created = True
+                except FileExistsError:
+                    # A concurrent creator won. Open and validate its entry,
+                    # but do not change permissions on a directory we did not
+                    # create.
+                    pass
+                if created:
+                    created_stat = os.stat(
+                        component,
+                        dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                    if not stat.S_ISDIR(created_stat.st_mode):
+                        raise OSError(
+                            errno.ESTALE,
+                            "new directory component was replaced",
+                            component,
+                        ) from None
+                    created_identity = _component_identity(created_stat)
+                child_fd = os.open(
+                    component,
+                    _anchored_directory_flags(),
+                    dir_fd=parent_fd,
+                )
+            except OSError as exc:
+                if exc.errno == errno.ENOTDIR:
+                    raise FileExistsError(
+                        errno.EEXIST,
+                        "path component is not a real directory",
+                        component,
+                    ) from exc
+                raise
+
+            advance = False
+            try:
+                child_stat = os.fstat(child_fd)
+                child_identity = _component_identity(child_stat)
+                if created_identity is not None and child_identity != created_identity:
+                    raise OSError(
+                        errno.ESTALE,
+                        "new directory component changed while opening",
+                        component,
+                    )
+                if created:
+                    os.fchmod(child_fd, mode)
+                    if durable:
+                        os.fsync(child_fd)
+                        os.fsync(parent_fd)
+                linked_stat = os.stat(
+                    component,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                if _component_identity(linked_stat) != child_identity:
+                    raise OSError(
+                        errno.ESTALE,
+                        "directory component changed during traversal",
+                        component,
+                    )
+                advance = True
+            finally:
+                if not advance:
+                    os.close(child_fd)
+            os.close(parent_fd)
+            parent_fd = child_fd
+    finally:
+        os.close(parent_fd)
+
+
+def _secure_mkdir_portable(path: Path, *, mode: int, durable: bool) -> None:
+    if durable:
+        raise OSError(
+            errno.ENOTSUP,
+            "durable secure directory creation requires dir_fd and O_NOFOLLOW",
+            path,
+        )
+    target = Path(os.path.abspath(path))
+    current = Path(target.anchor)
+    for component in target.parts[1:]:
+        current /= component
+        created = False
+        try:
+            current.mkdir(mode=mode)
+            created = True
+        except FileExistsError:
+            pass
+        path_stat = os.lstat(current)
+        if is_linklike(path_stat) or not stat.S_ISDIR(path_stat.st_mode):
+            raise FileExistsError(
+                errno.EEXIST,
+                "path component is not a real directory",
+                current,
+            )
+        if created:
+            os.chmod(current, mode)
+
+
+def secure_mkdir(
+    path: Path,
+    *,
+    mode: int = 0o700,
+    durable: bool = False,
+) -> Path:
+    """Create a no-follow directory path and chmod only new components.
+
+    Supported POSIX platforms walk from the filesystem anchor using directory
+    file descriptors, ``mkdirat``/``openat`` semantics, and ``O_NOFOLLOW``.
+    Durable creation fsyncs each new directory and its pinned parent before
+    continuing. Platforms without those primitives retain non-durable
+    ``mkdir -p`` behavior but reject durable creation rather than weakening it.
     """
-    missing: list[Path] = []
-    current = path
-    while not current.exists():
-        missing.append(current)
-        current = current.parent
-    path.mkdir(parents=True, exist_ok=True)
-    for directory in missing:
-        os.chmod(directory, mode)
+
+    if _supports_anchored_mkdir():
+        _secure_mkdir_anchored(path, mode=mode, durable=durable)
+    else:
+        _secure_mkdir_portable(path, mode=mode, durable=durable)
     return path
