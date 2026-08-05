@@ -1040,17 +1040,12 @@ def _read_owned_session_pack_cache_file(
 
 def _remove_session_pack_cache_file(entry: _OwnedSessionPackCacheEntry) -> bool:
     path = entry.path
-    try:
-        current = os.stat(path, follow_symlinks=False)
-    except FileNotFoundError:
-        return False
-    except OSError:
-        logger.debug("session pack cache: failed to inspect %s", path, exc_info=True)
-        return False
+    current = _read_owned_session_pack_cache_file(path)
     if (
-        not stat.S_ISREG(current.st_mode)
-        or current.st_dev != entry.device
-        or current.st_ino != entry.inode
+        current is None
+        or current.device != entry.device
+        or current.inode != entry.inode
+        or current.payload != entry.payload
     ):
         logger.debug("session pack cache: refused to remove replaced entry %s", path)
         return False
