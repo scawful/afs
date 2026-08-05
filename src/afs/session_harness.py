@@ -1144,6 +1144,7 @@ def _pack_summary(
     max_embedding_results: int,
     write_artifacts: bool,
     project_path: Path | None = None,
+    precomputed_bootstrap: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     pack = build_context_pack(
         manager,
@@ -1160,9 +1161,12 @@ def _pack_summary(
         semantic=semantic,
         max_query_results=max_query_results,
         max_embedding_results=max_embedding_results,
+        precomputed_bootstrap=precomputed_bootstrap,
     )
     artifact_paths = pack.get("artifact_paths") or {}
-    if write_artifacts and not bool((pack.get("cache") or {}).get("hit")):
+    if write_artifacts and (
+        not bool((pack.get("cache") or {}).get("hit")) or not artifact_paths
+    ):
         artifact_paths = write_context_pack_artifacts(manager, context_path, pack)
     return {
         "available": True,
@@ -1196,28 +1200,53 @@ def _skills_summary(
     fallback_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile = resolve_active_profile(manager.config)
-    roots = resolve_skill_roots(
-        list(profile.skill_roots),
-        afs_root=os.getenv("AFS_ROOT", "").strip() or None,
+    reusable_state = (
+        fallback_state
+        if isinstance(fallback_state, dict)
+        and fallback_state.get("available") is True
+        and fallback_state.get("profile") == profile.name
+        and isinstance(fallback_state.get("roots"), list)
+        and isinstance(fallback_state.get("matches"), list)
+        else None
     )
-    match_result = build_skill_matches_with_diagnostics(
-        prompt,
-        roots,
-        profile=profile.name,
-        top_k=top_k,
-    )
-    matches = match_result.matches
-    diagnostics = bounded_skill_diagnostics(
-        match_result.diagnostics,
-        diagnostic_count=match_result.diagnostic_count,
-        limit=20,
-    )
-    prompt_source = "explicit" if prompt.strip() else "none"
-    if not matches and not prompt.strip() and isinstance(fallback_state, dict):
-        fallback_matches = fallback_state.get("matches")
-        if isinstance(fallback_matches, list):
-            matches = [dict(match) for match in fallback_matches if isinstance(match, dict)]
-            prompt_source = str(fallback_state.get("prompt_source") or "session_state")
+    if reusable_state is not None:
+        roots = [str(path) for path in reusable_state["roots"]]
+        matches = [
+            dict(match)
+            for match in reusable_state["matches"]
+            if isinstance(match, dict)
+        ]
+        diagnostics = {
+            "diagnostic_count": int(reusable_state.get("diagnostic_count", 0) or 0),
+            "diagnostics_omitted": int(
+                reusable_state.get("diagnostics_omitted", 0) or 0
+            ),
+            "diagnostics": [
+                dict(item)
+                for item in reusable_state.get("diagnostics", [])
+                if isinstance(item, dict)
+            ],
+        }
+        prompt_source = str(reusable_state.get("prompt_source") or "none")
+    else:
+        resolved_roots = resolve_skill_roots(
+            list(profile.skill_roots),
+            afs_root=os.getenv("AFS_ROOT", "").strip() or None,
+        )
+        roots = [str(path) for path in resolved_roots]
+        match_result = build_skill_matches_with_diagnostics(
+            prompt,
+            resolved_roots,
+            profile=profile.name,
+            top_k=top_k,
+        )
+        matches = match_result.matches
+        diagnostics = bounded_skill_diagnostics(
+            match_result.diagnostics,
+            diagnostic_count=match_result.diagnostic_count,
+            limit=20,
+        )
+        prompt_source = "explicit" if prompt.strip() else "none"
 
     payload = {
         "available": True,
@@ -1225,7 +1254,7 @@ def _skills_summary(
         "profile": profile.name,
         "prompt": prompt,
         "prompt_source": prompt_source,
-        "roots": [str(path) for path in roots],
+        "roots": roots,
         "matches": matches,
         **diagnostics,
         "artifact_paths": {},
@@ -1686,6 +1715,7 @@ def build_client_session_payload(
             max_embedding_results=max_embedding_results,
             write_artifacts=write_artifacts,
             project_path=resolved_cwd,
+            precomputed_bootstrap=bootstrap_state,
         )
 
     if include_skills:

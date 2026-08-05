@@ -11,13 +11,15 @@ from unittest.mock import patch
 
 import pytest
 
+import afs.diagnostics as diagnostics_module
+import afs.mcp_server as mcp_server_module
 from afs.agents.supervisor import AgentSupervisor
 from afs.context_index import ContextSQLiteIndex
 from afs.context_layout import scaffold_v2
 from afs.extensions import load_extension_manifest
 from afs.history import append_history_event
 from afs.manager import AFSManager
-from afs.mcp.registry import MCPToolDefinition
+from afs.mcp.registry import MCPToolDefinition, MCPToolRegistry
 from afs.mcp_server import (
     DEFAULT_MCP_TOOL_CATALOG,
     MAX_SKILL_MATCH_PROMPT_CHARS,
@@ -67,6 +69,61 @@ def _make_manager(tmp_path: Path) -> AFSManager:
     project_path.mkdir()
     manager.ensure(path=project_path, context_root=context_root)
     return manager
+
+
+def test_startup_diagnostics_forwards_prebuilt_registry(monkeypatch) -> None:
+    registry = MCPToolRegistry()
+    captured = {}
+
+    def fake_startup_checks(*, config_path=None, mcp_registry=None):
+        captured["config_path"] = config_path
+        captured["registry"] = mcp_registry
+        return []
+
+    monkeypatch.setattr(diagnostics_module, "run_startup_checks", fake_startup_checks)
+
+    mcp_server_module._startup_diagnostics(Path("config.toml"), registry)
+
+    assert captured == {
+        "config_path": Path("config.toml"),
+        "registry": registry,
+    }
+
+
+def test_serve_builds_registry_once_and_passes_it_to_startup(monkeypatch) -> None:
+    config = object()
+    manager = object()
+    registry = MCPToolRegistry()
+    build_calls = []
+    thread_state = {}
+
+    def build_once(resolved_manager):
+        build_calls.append(resolved_manager)
+        return registry
+
+    class FakeThread:
+        def __init__(self, *, target, args, daemon):
+            thread_state.update(target=target, args=args, daemon=daemon)
+
+        def start(self):
+            thread_state["started"] = True
+
+    monkeypatch.setattr(mcp_server_module, "load_config_model", lambda **_kwargs: config)
+    monkeypatch.setattr(mcp_server_module, "AFSManager", lambda *, config: manager)
+    monkeypatch.setattr(mcp_server_module, "build_mcp_registry", build_once)
+    monkeypatch.setattr(mcp_server_module, "_read_message", lambda _stream: (None, None))
+    monkeypatch.setattr("threading.Thread", FakeThread)
+
+    result = mcp_server_module.serve()
+
+    assert result == 0
+    assert build_calls == [manager]
+    assert thread_state == {
+        "target": mcp_server_module._startup_diagnostics,
+        "args": (None, registry),
+        "daemon": True,
+        "started": True,
+    }
 
 
 def _make_v2_manager(tmp_path: Path) -> tuple[AFSManager, Path, Path, Path, str, str]:

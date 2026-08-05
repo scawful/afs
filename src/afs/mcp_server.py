@@ -6971,12 +6971,18 @@ def _setup_demo_context(manager: AFSManager) -> None:
         print(f"[demo] auto-started agent: {agent.name} pid={agent.pid}", file=sys.stderr)
 
 
-def _startup_diagnostics(config_path: Path | None = None) -> None:
+def _startup_diagnostics(
+    config_path: Path | None = None,
+    registry: MCPToolRegistry | None = None,
+) -> None:
     """Run lightweight diagnostics on server startup, logging to stderr."""
     try:
         from .diagnostics import run_startup_checks
 
-        results = run_startup_checks(config_path=config_path)
+        results = run_startup_checks(
+            config_path=config_path,
+            mcp_registry=registry,
+        )
         for result in results:
             if result.status == "error":
                 print(f"[afs-mcp] ERROR: {result.name}: {result.message}", file=sys.stderr)
@@ -6998,7 +7004,7 @@ def serve(config_path: Path | None = None, *, demo: bool = False) -> int:
 
     threading.Thread(
         target=_startup_diagnostics,
-        args=(config_path,),
+        args=(config_path, registry),
         daemon=True,
     ).start()
 

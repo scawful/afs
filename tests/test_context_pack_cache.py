@@ -3,22 +3,40 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
+import afs.context_pack as context_pack_module
 from afs.context_index import ContextSQLiteIndex
 from afs.context_pack import (
     CONTEXT_PACK_CACHE_VERSION,
+    SESSION_PACK_CACHE_OWNER,
     _context_pack_artifact_paths,
     _context_pack_cache_key,
     _load_cached_context_pack,
+    _prune_session_pack_cache,
+    _read_owned_session_pack_cache_file,
+    _remove_session_pack_cache_file,
     build_context_pack,
     write_context_pack_artifacts,
 )
+from afs.index_storage import IndexLockTimeout, index_file_lock
 from afs.manager import AFSManager
 from afs.models import MountType
-from afs.schema import AFSConfig, GeneralConfig, SensitivityConfig, SessionPackCacheConfig
+from afs.schema import (
+    AFSConfig,
+    GeneralConfig,
+    ProfileConfig,
+    ProfilesConfig,
+    SensitivityConfig,
+    SessionPackCacheConfig,
+)
+from afs.session_bootstrap import build_session_bootstrap
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -44,6 +62,24 @@ def _seed_knowledge(manager: AFSManager, context_root: Path, content: str = "hel
     knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
     knowledge_root.mkdir(parents=True, exist_ok=True)
     (knowledge_root / "doc.md").write_text(content, encoding="utf-8")
+
+
+def _write_owned_session_cache(path: Path, *, context_path: Path | None = None) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "_session_cache_meta": {
+                    "owner": SESSION_PACK_CACHE_OWNER,
+                    "version": CONTEXT_PACK_CACHE_VERSION,
+                    "cache_key": path.stem,
+                    "context_path": str(context_path or ""),
+                },
+                "pack": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +217,131 @@ def test_cache_hit_returns_without_rebuild(tmp_path: Path, monkeypatch) -> None:
     assert second["cache"]["key"] == first["cache"]["key"]
 
 
+def test_session_cache_hit_exposes_only_a_matching_latest_artifact(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    common = {
+        "task": "Keep keyed cache entries separate from the latest artifact.",
+        "model": "codex",
+        "token_budget": 400,
+    }
+
+    first = build_context_pack(manager, context_root, query="query A", **common)
+    write_context_pack_artifacts(manager, context_root, first)
+    second = build_context_pack(manager, context_root, query="query B", **common)
+    write_context_pack_artifacts(manager, context_root, second)
+
+    cached_first = build_context_pack(manager, context_root, query="query A", **common)
+
+    assert cached_first["cache"]["hit"] is True
+    assert "artifact_paths" not in cached_first
+
+
+def test_artifact_cache_rejects_mismatched_json_and_markdown_keys(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    common = {
+        "task": "Validate both halves of the latest artifact pair.",
+        "model": "codex",
+        "token_budget": 400,
+    }
+    first = build_context_pack(manager, context_root, query="query A", **common)
+    first_paths = write_context_pack_artifacts(manager, context_root, first)
+    first_json = Path(first_paths["json"]).read_text(encoding="utf-8")
+    second = build_context_pack(manager, context_root, query="query B", **common)
+    write_context_pack_artifacts(manager, context_root, second)
+    Path(first_paths["json"]).write_text(first_json, encoding="utf-8")
+
+    assert (
+        _load_cached_context_pack(
+            manager,
+            context_root,
+            model="codex",
+            cache_key=str(first["cache"]["key"]),
+        )
+        is None
+    )
+
+
+def test_artifact_reader_waits_for_coherent_pair_during_publication(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    common = {
+        "task": "Serialize context pack artifact publication.",
+        "model": "codex",
+        "token_budget": 400,
+    }
+    first = build_context_pack(manager, context_root, query="query A", **common)
+    write_context_pack_artifacts(manager, context_root, first)
+    second = build_context_pack(manager, context_root, query="query B", **common)
+
+    original_lock = context_pack_module.index_file_lock
+    original_write = context_pack_module._atomic_write_text
+    json_published = threading.Event()
+    reader_waiting = threading.Event()
+    release_writer = threading.Event()
+    loaded: list[dict | None] = []
+    errors: list[BaseException] = []
+
+    @contextmanager
+    def observed_lock(path, *args, **kwargs):
+        if (
+            path.name == context_pack_module.CONTEXT_PACK_ARTIFACT_LOCK_NAME
+            and threading.current_thread().name == "artifact-reader"
+        ):
+            reader_waiting.set()
+        with original_lock(path, *args, **kwargs):
+            yield
+
+    def paused_write(path: Path, text: str) -> None:
+        original_write(path, text)
+        if path.suffix == ".json" and threading.current_thread().name == "artifact-writer":
+            json_published.set()
+            assert release_writer.wait(5)
+
+    monkeypatch.setattr(context_pack_module, "index_file_lock", observed_lock)
+    monkeypatch.setattr(context_pack_module, "_atomic_write_text", paused_write)
+
+    def publish() -> None:
+        try:
+            write_context_pack_artifacts(manager, context_root, second)
+        except BaseException as exc:  # noqa: BLE001 - report worker failures in this test.
+            errors.append(exc)
+
+    def load() -> None:
+        try:
+            loaded.append(
+                _load_cached_context_pack(
+                    manager,
+                    context_root,
+                    model="codex",
+                    cache_key=str(second["cache"]["key"]),
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 - report worker failures in this test.
+            errors.append(exc)
+
+    writer = threading.Thread(target=publish, name="artifact-writer")
+    reader = threading.Thread(target=load, name="artifact-reader")
+    writer.start()
+    assert json_published.wait(5)
+    reader.start()
+    assert reader_waiting.wait(5)
+    assert reader.is_alive()
+    release_writer.set()
+    writer.join(10)
+    reader.join(10)
+
+    assert not writer.is_alive() and not reader.is_alive()
+    assert errors == []
+    assert loaded and loaded[0] is not None
+    assert loaded[0]["query"] == "query B"
+    assert loaded[0]["cache"]["key"] == second["cache"]["key"]
+
+
 # ---------------------------------------------------------------------------
 # Stale cache — triggers rebuild when inputs change
 # ---------------------------------------------------------------------------
@@ -249,6 +410,199 @@ def test_cache_invalidation_when_bootstrap_content_changes(tmp_path: Path) -> No
     assert second["cache"]["hit"] is False
 
 
+def test_stale_session_cache_reuses_computed_mount_fingerprint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    scratchpad_root = manager.resolve_mount_root(context_root, MountType.SCRATCHPAD)
+    state_path = scratchpad_root / "state.md"
+    state_path.write_text("version A", encoding="utf-8")
+    kwargs = {
+        "query": "state check",
+        "task": "Reuse the cache probe fingerprint.",
+        "model": "codex",
+        "token_budget": 400,
+    }
+
+    first = build_context_pack(manager, context_root, **kwargs)
+    assert first["cache"]["hit"] is False
+    state_path.write_text("version B", encoding="utf-8")
+
+    fingerprint_calls = 0
+    original_fingerprint = context_pack_module._mount_fingerprint
+
+    def counted_fingerprint(*args, **kwargs):
+        nonlocal fingerprint_calls
+        fingerprint_calls += 1
+        return original_fingerprint(*args, **kwargs)
+
+    monkeypatch.setattr(
+        context_pack_module,
+        "_mount_fingerprint",
+        counted_fingerprint,
+    )
+
+    second = build_context_pack(manager, context_root, **kwargs)
+
+    assert second["cache"]["hit"] is False
+    assert fingerprint_calls == 1
+
+
+def test_precomputed_bootstrap_rejects_a_different_context(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    build_context_pack(manager, context_root)
+
+    with pytest.raises(ValueError, match="different context"):
+        build_context_pack(
+            manager,
+            context_root,
+            precomputed_bootstrap={
+                "context_path": str(tmp_path / "other-context"),
+                "scope_id": "common",
+                "project_id": "",
+            },
+        )
+
+
+def test_precomputed_bootstrap_bypasses_existing_reusable_caches(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    kwargs = {
+        "query": "snapshot input",
+        "task": "Use exactly the supplied bootstrap snapshot.",
+        "model": "codex",
+        "token_budget": 400,
+    }
+    reusable = build_context_pack(manager, context_root, **kwargs)
+    write_context_pack_artifacts(manager, context_root, reusable)
+    bootstrap = build_session_bootstrap(manager, context_root, record_event=False)
+    bootstrap["project"] = "PRECOMPUTED_SENTINEL"
+
+    snapshot = build_context_pack(
+        manager,
+        context_root,
+        precomputed_bootstrap=bootstrap,
+        **kwargs,
+    )
+
+    assert snapshot["project"] == "PRECOMPUTED_SENTINEL"
+    assert snapshot["cache"]["hit"] is False
+    assert snapshot["cache"]["snapshot_only"] is True
+
+
+def test_session_cache_invalidates_when_resolved_profile_changes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context_root = tmp_path / ".context"
+    manager = AFSManager(
+        config=AFSConfig(
+            general=GeneralConfig(context_root=context_root),
+            profiles=ProfilesConfig(
+                active_profile="one",
+                profiles={"one": ProfileConfig(), "two": ProfileConfig()},
+            ),
+            sensitivity=SensitivityConfig(never_export=[]),
+            session_pack_cache=SessionPackCacheConfig(cache_dir=tmp_path / "cache"),
+        )
+    )
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    manager.ensure(path=project_path, context_root=context_root)
+    kwargs = {
+        "query": "profile state",
+        "task": "Honor the currently resolved profile.",
+        "model": "codex",
+        "token_budget": 400,
+    }
+
+    monkeypatch.setenv("AFS_PROFILE", "one")
+    first_fingerprint = context_pack_module._context_pack_config_fingerprint(manager)
+    first = build_context_pack(manager, context_root, **kwargs)
+    write_context_pack_artifacts(manager, context_root, first)
+    monkeypatch.setenv("AFS_PROFILE", "two")
+    second_fingerprint = context_pack_module._context_pack_config_fingerprint(manager)
+    second = build_context_pack(manager, context_root, **kwargs)
+
+    assert first["profile"] == "one"
+    assert first_fingerprint != second_fingerprint
+    assert second["cache"]["hit"] is False
+
+
+@pytest.mark.parametrize(
+    ("env_name", "first_value", "second_value"),
+    [
+        ("AFS_ROOT", "afs-root-one", "afs-root-two"),
+        ("AFS_AGENT_MANIFEST", "manifest-one.toml", "manifest-two.toml"),
+    ],
+)
+def test_session_cache_invalidates_when_ambient_bootstrap_inputs_change(
+    tmp_path: Path,
+    monkeypatch,
+    env_name: str,
+    first_value: str,
+    second_value: str,
+) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    kwargs = {
+        "query": "ambient inputs",
+        "task": "Honor ambient bootstrap routing.",
+        "model": "codex",
+        "token_budget": 400,
+    }
+
+    monkeypatch.setenv(env_name, str(tmp_path / first_value))
+    first = build_context_pack(manager, context_root, **kwargs)
+    write_context_pack_artifacts(manager, context_root, first)
+    monkeypatch.setenv(env_name, str(tmp_path / second_value))
+    second = build_context_pack(manager, context_root, **kwargs)
+
+    assert first["cache"]["key"] != second["cache"]["key"]
+    assert second["cache"]["hit"] is False
+
+
+def test_precomputed_bootstrap_is_never_reused_after_mount_changes(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    scratchpad_root = manager.resolve_mount_root(context_root, MountType.SCRATCHPAD)
+    state_path = scratchpad_root / "state.md"
+    state_path.write_text("VERSION_A", encoding="utf-8")
+    bootstrap_a = build_session_bootstrap(
+        manager,
+        context_root,
+        record_event=False,
+    )
+    state_path.write_text("VERSION_B", encoding="utf-8")
+    kwargs = {
+        "query": "snapshot validity",
+        "task": "Do not reuse a precomputed bootstrap after mount changes.",
+        "model": "codex",
+        "token_budget": 800,
+    }
+
+    first = build_context_pack(
+        manager,
+        context_root,
+        precomputed_bootstrap=bootstrap_a,
+        **kwargs,
+    )
+    assert first["cache"]["snapshot_only"] is True
+    assert "VERSION_A" in json.dumps(first)
+    assert not list((tmp_path / "cache").glob("*.json"))
+    write_context_pack_artifacts(manager, context_root, first)
+
+    second = build_context_pack(manager, context_root, **kwargs)
+
+    assert second["cache"]["hit"] is False
+    assert second["cache"]["snapshot_only"] is False
+    assert "VERSION_B" in json.dumps(second)
+    assert "VERSION_A" not in json.dumps(second)
+
+
 def test_session_cache_invalidates_when_sensitivity_changes(tmp_path: Path) -> None:
     context_root = tmp_path / ".context"
     cache_dir = tmp_path / "cache"
@@ -296,6 +650,172 @@ def test_session_cache_invalidates_when_sensitivity_changes(tmp_path: Path) -> N
     second = build_context_pack(restricted_manager, context_root, **kwargs)
     assert second["cache"]["hit"] is False
     assert "private cache leak marker" not in json.dumps(second)
+
+
+def test_session_cache_prune_removes_expired_entries_and_bounds_survivors(
+    tmp_path: Path,
+) -> None:
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    now = time.time()
+    paths = [cache_dir / f"{index:064x}.json" for index in range(5)]
+    ages = [600, 50, 40, 30, 20]
+    for path, age in zip(paths, ages, strict=True):
+        _write_owned_session_cache(path)
+        os.utime(path, (now - age, now - age))
+    unrelated = cache_dir / "keep-me.json"
+    unrelated.write_text("not an AFS cache key\n", encoding="utf-8")
+    foreign_hash = cache_dir / f"{'f' * 64}.json"
+    foreign_hash.write_text('{"owner": "some-other-tool"}\n', encoding="utf-8")
+    os.utime(foreign_hash, (now - 700, now - 700))
+
+    removed = _prune_session_pack_cache(
+        cache_dir,
+        ttl_seconds=60,
+        max_entries=3,
+        protected=paths[-1],
+    )
+
+    assert removed == 2
+    assert not paths[0].exists()
+    assert not paths[1].exists()
+    assert all(path.exists() for path in paths[2:])
+    assert unrelated.exists()
+    assert foreign_hash.exists()
+
+
+def test_session_cache_removal_refuses_a_replaced_file(tmp_path: Path) -> None:
+    cache_file = tmp_path / f"{'a' * 64}.json"
+    _write_owned_session_cache(cache_file)
+    owned_entry = _read_owned_session_pack_cache_file(cache_file)
+    assert owned_entry is not None
+
+    cache_file.unlink()
+    cache_file.write_text('{"owner": "some-other-tool"}\n', encoding="utf-8")
+
+    assert _remove_session_pack_cache_file(owned_entry) is False
+    assert json.loads(cache_file.read_text(encoding="utf-8")) == {
+        "owner": "some-other-tool"
+    }
+
+
+def test_session_cache_recognizes_strict_legacy_v8_ownership(tmp_path: Path) -> None:
+    cache_file = tmp_path / f"{'d' * 64}.json"
+    cache_file.write_text(
+        json.dumps(
+            {
+                "_session_cache_meta": {
+                    "version": CONTEXT_PACK_CACHE_VERSION,
+                    "cache_key": cache_file.stem,
+                    "cached_at_epoch": time.time(),
+                    "context_path": str(tmp_path / ".context"),
+                    "project_path": "",
+                    "scope_id": "common",
+                    "project_id": "",
+                    "mount_fingerprint": "0" * 64,
+                    "sensitivity": {},
+                },
+                "pack": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _read_owned_session_pack_cache_file(cache_file) is not None
+
+
+def test_session_cache_removal_holds_the_afs_lock_through_unlink(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cache_file = tmp_path / f"{'c' * 64}.json"
+    _write_owned_session_cache(cache_file)
+    owned_entry = _read_owned_session_pack_cache_file(cache_file)
+    assert owned_entry is not None
+    real_unlink = Path.unlink
+    lock_was_held = False
+
+    def unlink_while_probing_lock(path: Path, *args, **kwargs) -> None:
+        nonlocal lock_was_held
+        if path == cache_file:
+            with pytest.raises(IndexLockTimeout):
+                with index_file_lock(
+                    context_pack_module._session_pack_cache_lock_path(tmp_path),
+                    timeout=0,
+                ):
+                    pass
+            lock_was_held = True
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink_while_probing_lock)
+
+    assert _remove_session_pack_cache_file(owned_entry) is True
+    assert lock_was_held is True
+    assert not cache_file.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are required")
+def test_session_cache_uses_private_directory_and_file_modes(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    build_context_pack(manager, manager.config.general.context_root)
+    cache_files = list((tmp_path / "cache").glob("*.json"))
+
+    assert len(cache_files) == 1
+    assert (tmp_path / "cache").stat().st_mode & 0o777 == 0o700
+    assert cache_files[0].stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO support is unavailable")
+def test_session_cache_prune_ignores_hash_named_fifo(tmp_path: Path) -> None:
+    fifo = tmp_path / f"{'b' * 64}.json"
+    os.mkfifo(fifo)
+
+    assert _prune_session_pack_cache(
+        tmp_path,
+        ttl_seconds=0,
+        max_entries=1,
+    ) == 0
+    assert fifo.exists()
+
+
+def test_expired_session_cache_entry_is_removed_before_rebuild(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    kwargs = {
+        "query": "expired entry",
+        "task": "Replace the expired cache entry.",
+        "model": "codex",
+        "token_budget": 400,
+    }
+    build_context_pack(manager, context_root, **kwargs)
+    cache_files = list((tmp_path / "cache").glob("*.json"))
+    assert len(cache_files) == 1
+    cache_file = cache_files[0]
+    payload = json.loads(cache_file.read_text(encoding="utf-8"))
+    payload["_session_cache_meta"]["cached_at_epoch"] = 0
+    cache_file.write_text(json.dumps(payload), encoding="utf-8")
+
+    removed = []
+    original_remove = context_pack_module._remove_session_pack_cache_file
+
+    def record_remove(entry) -> bool:
+        removed.append(entry.path)
+        return original_remove(entry)
+
+    monkeypatch.setattr(
+        context_pack_module,
+        "_remove_session_pack_cache_file",
+        record_remove,
+    )
+
+    rebuilt = build_context_pack(manager, context_root, **kwargs)
+
+    assert rebuilt["cache"]["hit"] is False
+    assert removed == [cache_file]
+    assert cache_file.exists()
 
 
 # ---------------------------------------------------------------------------
