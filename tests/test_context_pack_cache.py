@@ -464,6 +464,19 @@ def test_session_cache_removal_refuses_a_replaced_file(tmp_path: Path) -> None:
     }
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO support is unavailable")
+def test_session_cache_prune_ignores_hash_named_fifo(tmp_path: Path) -> None:
+    fifo = tmp_path / f"{'b' * 64}.json"
+    os.mkfifo(fifo)
+
+    assert _prune_session_pack_cache(
+        tmp_path,
+        ttl_seconds=0,
+        max_entries=1,
+    ) == 0
+    assert fifo.exists()
+
+
 def test_expired_session_cache_entry_is_removed_before_rebuild(
     tmp_path: Path,
     monkeypatch,

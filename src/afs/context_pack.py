@@ -976,7 +976,8 @@ def _read_owned_session_pack_cache_file(
     if not _is_managed_session_pack_cache_file(path):
         return None
 
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except FileNotFoundError:
