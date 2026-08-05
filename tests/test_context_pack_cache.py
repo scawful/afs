@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
 
+import afs.context_pack as context_pack_module
 from afs.context_index import ContextSQLiteIndex
 from afs.context_pack import (
     CONTEXT_PACK_CACHE_VERSION,
     _context_pack_artifact_paths,
     _context_pack_cache_key,
     _load_cached_context_pack,
+    _prune_session_pack_cache,
     build_context_pack,
     write_context_pack_artifacts,
 )
@@ -249,6 +253,63 @@ def test_cache_invalidation_when_bootstrap_content_changes(tmp_path: Path) -> No
     assert second["cache"]["hit"] is False
 
 
+def test_stale_session_cache_reuses_computed_mount_fingerprint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    scratchpad_root = manager.resolve_mount_root(context_root, MountType.SCRATCHPAD)
+    state_path = scratchpad_root / "state.md"
+    state_path.write_text("version A", encoding="utf-8")
+    kwargs = {
+        "query": "state check",
+        "task": "Reuse the cache probe fingerprint.",
+        "model": "codex",
+        "token_budget": 400,
+    }
+
+    first = build_context_pack(manager, context_root, **kwargs)
+    assert first["cache"]["hit"] is False
+    state_path.write_text("version B", encoding="utf-8")
+
+    fingerprint_calls = 0
+    original_fingerprint = context_pack_module._mount_fingerprint
+
+    def counted_fingerprint(*args, **kwargs):
+        nonlocal fingerprint_calls
+        fingerprint_calls += 1
+        return original_fingerprint(*args, **kwargs)
+
+    monkeypatch.setattr(
+        context_pack_module,
+        "_mount_fingerprint",
+        counted_fingerprint,
+    )
+
+    second = build_context_pack(manager, context_root, **kwargs)
+
+    assert second["cache"]["hit"] is False
+    assert fingerprint_calls == 1
+
+
+def test_precomputed_bootstrap_rejects_a_different_context(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    manager.config.session_pack_cache.enabled = False
+    context_root = manager.config.general.context_root
+
+    with pytest.raises(ValueError, match="different context"):
+        build_context_pack(
+            manager,
+            context_root,
+            precomputed_bootstrap={
+                "context_path": str(tmp_path / "other-context"),
+                "scope_id": "common",
+                "project_id": "",
+            },
+        )
+
+
 def test_session_cache_invalidates_when_sensitivity_changes(tmp_path: Path) -> None:
     context_root = tmp_path / ".context"
     cache_dir = tmp_path / "cache"
@@ -296,6 +357,74 @@ def test_session_cache_invalidates_when_sensitivity_changes(tmp_path: Path) -> N
     second = build_context_pack(restricted_manager, context_root, **kwargs)
     assert second["cache"]["hit"] is False
     assert "private cache leak marker" not in json.dumps(second)
+
+
+def test_session_cache_prune_removes_expired_entries_and_bounds_survivors(
+    tmp_path: Path,
+) -> None:
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    now = time.time()
+    paths = [cache_dir / f"{index:064x}.json" for index in range(5)]
+    ages = [600, 50, 40, 30, 20]
+    for path, age in zip(paths, ages, strict=True):
+        path.write_text("{}\n", encoding="utf-8")
+        os.utime(path, (now - age, now - age))
+    unrelated = cache_dir / "keep-me.json"
+    unrelated.write_text("not an AFS cache key\n", encoding="utf-8")
+
+    removed = _prune_session_pack_cache(
+        cache_dir,
+        ttl_seconds=60,
+        max_entries=3,
+        protected=paths[-1],
+    )
+
+    assert removed == 2
+    assert not paths[0].exists()
+    assert not paths[1].exists()
+    assert all(path.exists() for path in paths[2:])
+    assert unrelated.exists()
+
+
+def test_expired_session_cache_entry_is_removed_before_rebuild(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    kwargs = {
+        "query": "expired entry",
+        "task": "Replace the expired cache entry.",
+        "model": "codex",
+        "token_budget": 400,
+    }
+    build_context_pack(manager, context_root, **kwargs)
+    cache_files = list((tmp_path / "cache").glob("*.json"))
+    assert len(cache_files) == 1
+    cache_file = cache_files[0]
+    payload = json.loads(cache_file.read_text(encoding="utf-8"))
+    payload["_session_cache_meta"]["cached_at_epoch"] = 0
+    cache_file.write_text(json.dumps(payload), encoding="utf-8")
+
+    removed = []
+    original_remove = context_pack_module._remove_session_pack_cache_file
+
+    def record_remove(path: Path) -> bool:
+        removed.append(path)
+        return original_remove(path)
+
+    monkeypatch.setattr(
+        context_pack_module,
+        "_remove_session_pack_cache_file",
+        record_remove,
+    )
+
+    rebuilt = build_context_pack(manager, context_root, **kwargs)
+
+    assert rebuilt["cache"]["hit"] is False
+    assert removed == [cache_file]
+    assert cache_file.exists()
 
 
 # ---------------------------------------------------------------------------

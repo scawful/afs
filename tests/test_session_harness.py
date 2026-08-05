@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 
 import afs.cli.core as cli_core_module
+import afs.context_pack as context_pack_module
+import afs.session_bootstrap as session_bootstrap_module
+import afs.session_harness as session_harness_module
 import afs.verification as verification_module
 from afs.cli.core import (
     session_event_command,
@@ -284,6 +287,55 @@ def test_session_prepare_client_command_outputs_artifacts(
     supported_names = {entry["name"] for entry in payload["integration"]["supported_events"]}
     assert "user_prompt_submit" in supported_names
     assert "task_completed" in supported_names
+
+
+def test_prepare_client_reuses_bootstrap_and_skill_matches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager, context_root = _make_manager(tmp_path)
+    manager.config.session_pack_cache.enabled = False
+    bootstrap_calls = 0
+    skill_match_calls = 0
+    original_bootstrap = session_harness_module.build_session_bootstrap
+    original_skill_match = session_bootstrap_module.build_skill_matches_with_diagnostics
+
+    def counted_bootstrap(*args, **kwargs):
+        nonlocal bootstrap_calls
+        bootstrap_calls += 1
+        return original_bootstrap(*args, **kwargs)
+
+    def counted_skill_match(*args, **kwargs):
+        nonlocal skill_match_calls
+        skill_match_calls += 1
+        return original_skill_match(*args, **kwargs)
+
+    monkeypatch.setattr(session_harness_module, "build_session_bootstrap", counted_bootstrap)
+    monkeypatch.setattr(context_pack_module, "build_session_bootstrap", counted_bootstrap)
+    monkeypatch.setattr(
+        session_bootstrap_module,
+        "build_skill_matches_with_diagnostics",
+        counted_skill_match,
+    )
+    monkeypatch.setattr(
+        session_harness_module,
+        "build_skill_matches_with_diagnostics",
+        counted_skill_match,
+    )
+
+    payload = build_client_session_payload(
+        manager,
+        context_root,
+        client="codex",
+        cwd=tmp_path / "project",
+        task="Improve the background agents harness.",
+        write_artifacts=False,
+    )
+
+    assert bootstrap_calls == 1
+    assert skill_match_calls == 1
+    assert payload["skills"]["matches"] == payload["bootstrap"]["skills"]["matches"]
+    assert payload["skills"]["diagnostics"] == payload["bootstrap"]["skills"]["diagnostics"]
 
 
 def test_prepare_client_survives_unresolvable_skill_root(

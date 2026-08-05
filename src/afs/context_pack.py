@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import stat
 import tempfile
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -52,6 +53,7 @@ DEFAULT_SEARCH_MOUNTS = (
 )
 CONTEXT_PACK_CACHE_VERSION = 8
 EMBEDDING_HIT_PREVIEW_CHARS = 360
+SESSION_PACK_CACHE_MAX_ENTRIES = 512
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +90,12 @@ class PackSelection:
     estimated_tokens: int
 
 
+@dataclass(frozen=True, slots=True)
+class _SessionPackCacheProbe:
+    pack: dict[str, Any] | None = None
+    mount_fingerprint: str | None = None
+
+
 def estimate_tokens(text: str) -> int:
     """Approximate token count cheaply for context budgeting."""
     if not text or not text.strip():
@@ -112,8 +120,14 @@ def build_context_pack(
     semantic: bool = False,
     max_query_results: int = 6,
     max_embedding_results: int = 4,
+    precomputed_bootstrap: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a model-aware context pack from AFS state."""
+    """Build a model-aware context pack from AFS state.
+
+    ``precomputed_bootstrap`` lets the session harness reuse the bootstrap it
+    already collected. It is validated against the resolved context and scope
+    before use so state from another project cannot enter this pack.
+    """
     context_path = context_path.expanduser().resolve()
     resolved_project = project_path.expanduser().resolve() if project_path else None
     scoped = _resolve_pack_scope(
@@ -135,7 +149,7 @@ def build_context_pack(
     sensitivity_state = _sensitivity_cache_state(manager)
 
     # --- Session pack cache: early return before expensive bootstrap/scan ---
-    session_cached = _load_session_pack_cache(
+    session_cache_probe = _load_session_pack_cache(
         manager,
         context_path,
         query=query,
@@ -152,20 +166,28 @@ def build_context_pack(
         sensitivity_state=sensitivity_state,
         scoped=scoped,
     )
-    if session_cached is not None:
-        return session_cached
+    if session_cache_probe.pack is not None:
+        return session_cache_probe.pack
 
     execution_profile = build_session_execution_profile(
         model=normalized_model,
         workflow=workflow,
         tool_profile=tool_profile,
     )
-    bootstrap = build_session_bootstrap(
-        manager,
-        context_path,
-        project_path=scoped.requester_path,
-        record_event=False,
-    )
+    if precomputed_bootstrap is None:
+        bootstrap = build_session_bootstrap(
+            manager,
+            context_path,
+            project_path=scoped.requester_path,
+            record_event=False,
+        )
+    else:
+        _validate_precomputed_bootstrap(
+            precomputed_bootstrap,
+            context_path=context_path,
+            scoped=scoped,
+        )
+        bootstrap = precomputed_bootstrap
     cached_bootstrap = _cache_bootstrap(manager, context_path, bootstrap, scoped=scoped)
     cache_key = _context_pack_cache_key(
         context_path,
@@ -267,6 +289,7 @@ def build_context_pack(
         max_embedding_results=resolved_max_embedding_results,
         sensitivity_state=sensitivity_state,
         scoped=scoped,
+        mount_fingerprint=session_cache_probe.mount_fingerprint,
     )
     return pack
 
@@ -335,13 +358,14 @@ def write_context_pack_artifacts(
     cache["hit"] = False
     payload["cache"] = cache
     payload["generated_at"] = datetime.now(timezone.utc).isoformat()
-    payload["artifact_paths"] = {
+    artifact_paths = {
         "json": str(json_path),
         "markdown": str(markdown_path),
     }
+    payload["artifact_paths"] = artifact_paths
     _atomic_write_text(json_path, json.dumps(payload, indent=2) + "\n")
     _atomic_write_text(markdown_path, render_context_pack(payload) + "\n")
-    return payload["artifact_paths"]
+    return artifact_paths
 
 
 def _context_pack_artifact_paths(
@@ -414,7 +438,10 @@ def _cache_bootstrap(
     scoped: ResolvedScope | None = None,
 ) -> dict[str, Any]:
     scope = scoped or resolve_scope(context_path)
-    result = json.loads(json.dumps(bootstrap, default=str))
+    decoded = json.loads(json.dumps(bootstrap, default=str))
+    if not isinstance(decoded, dict):
+        raise ValueError("serialized bootstrap must remain an object")
+    result: dict[str, Any] = decoded
     scratch = resolve_mount_root(context_path, MountType.SCRATCHPAD, config=manager.config)
     output = resolve_agent_output_root(
         context_path,
@@ -717,15 +744,17 @@ def _load_session_pack_cache(
     max_embedding_results: int,
     sensitivity_state: dict[str, Any],
     scoped: ResolvedScope | None = None,
-) -> dict[str, Any] | None:
+) -> _SessionPackCacheProbe:
     """Attempt to load a fresh session pack from the file-based cache.
 
-    Returns the cached pack dict on hit, or None on miss/stale/disabled.
+    The probe retains a fingerprint computed for a stale entry so a rebuild
+    can write its replacement without walking every visible file a second
+    time.
     """
     cache_cfg = manager.config.session_pack_cache
     if not cache_cfg.enabled:
         logger.debug("session pack cache disabled")
-        return None
+        return _SessionPackCacheProbe()
 
     cache_key = _session_pack_cache_key(
         context_path,
@@ -746,24 +775,24 @@ def _load_session_pack_cache(
     cache_file = _session_pack_cache_path(manager, cache_key)
     if not cache_file.exists():
         logger.debug("session pack cache miss: no cache file for key %s", cache_key[:12])
-        return None
+        return _SessionPackCacheProbe()
 
     try:
         payload = json.loads(cache_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         logger.debug("session pack cache miss: unreadable cache file %s", cache_file)
-        return None
+        return _SessionPackCacheProbe()
 
     meta = payload.get("_session_cache_meta")
     if not isinstance(meta, dict):
         logger.debug("session pack cache miss: missing metadata in %s", cache_file)
-        return None
+        return _SessionPackCacheProbe()
 
     # TTL check
     cached_at = meta.get("cached_at_epoch")
     if not isinstance(cached_at, (int, float)):
         logger.debug("session pack cache miss: no cached_at timestamp")
-        return None
+        return _SessionPackCacheProbe()
     now = datetime.now(timezone.utc).timestamp()
     age_seconds = now - cached_at
     if age_seconds > cache_cfg.ttl_seconds:
@@ -772,7 +801,8 @@ def _load_session_pack_cache(
             age_seconds,
             cache_cfg.ttl_seconds,
         )
-        return None
+        _remove_session_pack_cache_file(cache_file)
+        return _SessionPackCacheProbe()
 
     # Mount fingerprint invalidation: recompute a lightweight hash of mount
     # file mtimes/sizes and compare against the stored fingerprint.
@@ -788,13 +818,13 @@ def _load_session_pack_cache(
             stored_fingerprint[:12],
             current_fingerprint[:12],
         )
-        return None
+        return _SessionPackCacheProbe(mount_fingerprint=current_fingerprint)
 
     # Valid cache hit
     pack = payload.get("pack")
     if not isinstance(pack, dict):
         logger.debug("session pack cache miss: no pack data in cache file")
-        return None
+        return _SessionPackCacheProbe(mount_fingerprint=current_fingerprint)
 
     pack["cache"] = dict(pack.get("cache") or {})
     pack["cache"]["hit"] = True
@@ -823,7 +853,10 @@ def _load_session_pack_cache(
         cache_key[:12],
         age_seconds,
     )
-    return pack
+    return _SessionPackCacheProbe(
+        pack=pack,
+        mount_fingerprint=current_fingerprint,
+    )
 
 
 def _write_session_pack_cache(
@@ -844,6 +877,7 @@ def _write_session_pack_cache(
     max_embedding_results: int,
     sensitivity_state: dict[str, Any],
     scoped: ResolvedScope | None = None,
+    mount_fingerprint: str | None = None,
 ) -> None:
     """Persist a context pack to the session cache for future reuse."""
     cache_cfg = manager.config.session_pack_cache
@@ -870,11 +904,13 @@ def _write_session_pack_cache(
 
     now = datetime.now(timezone.utc)
     scope = scoped or resolve_scope(context_path)
-    fingerprint = _mount_fingerprint(
-        context_path,
-        config=manager.config,
-        scoped=scope,
-    )
+    fingerprint = mount_fingerprint
+    if fingerprint is None:
+        fingerprint = _mount_fingerprint(
+            context_path,
+            config=manager.config,
+            scoped=scope,
+        )
     payload = {
         "_session_cache_meta": {
             "cached_at": now.isoformat(),
@@ -897,7 +933,95 @@ def _write_session_pack_cache(
             encoding="utf-8",
         )
     except OSError:
-        logger.debug("session pack cache: failed to write %s", cache_file)
+        logger.debug("session pack cache: failed to write %s", cache_file, exc_info=True)
+        return
+    _prune_session_pack_cache(
+        cache_file.parent,
+        ttl_seconds=cache_cfg.ttl_seconds,
+        max_entries=SESSION_PACK_CACHE_MAX_ENTRIES,
+        protected=cache_file,
+    )
+
+
+def _is_managed_session_pack_cache_file(path: Path) -> bool:
+    stem = path.stem
+    return (
+        path.suffix == ".json"
+        and len(stem) == 64
+        and all(character in "0123456789abcdef" for character in stem)
+    )
+
+
+def _remove_session_pack_cache_file(path: Path) -> bool:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        logger.debug("session pack cache: failed to remove %s", path, exc_info=True)
+        return False
+    return True
+
+
+def _prune_session_pack_cache(
+    cache_dir: Path,
+    *,
+    ttl_seconds: int,
+    max_entries: int,
+    protected: Path | None = None,
+) -> int:
+    """Best-effort pruning for rebuildable, hash-named cache entries."""
+    if max_entries < 1:
+        return 0
+    try:
+        candidates = sorted(cache_dir.glob("*.json"))
+    except OSError:
+        logger.debug("session pack cache: failed to list %s", cache_dir, exc_info=True)
+        return 0
+
+    now = datetime.now(timezone.utc).timestamp()
+    entries: list[tuple[float, Path]] = []
+    for candidate in candidates:
+        if not _is_managed_session_pack_cache_file(candidate) or candidate.is_symlink():
+            continue
+        try:
+            metadata = candidate.stat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            logger.debug(
+                "session pack cache: failed to inspect %s",
+                candidate,
+                exc_info=True,
+            )
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            continue
+        entries.append((metadata.st_mtime, candidate))
+
+    removed = 0
+    survivors: list[tuple[float, Path]] = []
+    for modified_at, candidate in entries:
+        expired = now - modified_at > ttl_seconds
+        if expired and candidate != protected and _remove_session_pack_cache_file(candidate):
+            removed += 1
+            continue
+        survivors.append((modified_at, candidate))
+
+    excess = max(0, len(survivors) - max_entries)
+    if excess:
+        for _modified_at, candidate in sorted(survivors):
+            if excess <= 0:
+                break
+            if candidate == protected:
+                continue
+            if _remove_session_pack_cache_file(candidate):
+                removed += 1
+                excess -= 1
+
+    if removed:
+        logger.debug("session pack cache: pruned %d file(s) from %s", removed, cache_dir)
+    return removed
 
 
 def clear_pack_cache(context_path: Path | None = None, *, config: Any = None) -> int:
@@ -982,6 +1106,30 @@ def _resolve_pack_scope(
     if requested != current.scope_id:
         raise PermissionError(f"scope {requested!r} is not authorized for this context pack")
     return current
+
+
+def _validate_precomputed_bootstrap(
+    bootstrap: dict[str, Any],
+    *,
+    context_path: Path,
+    scoped: ResolvedScope,
+) -> None:
+    raw_context_path = bootstrap.get("context_path")
+    if not isinstance(raw_context_path, str) or not raw_context_path.strip():
+        raise ValueError("precomputed bootstrap is missing context_path")
+    try:
+        bootstrap_context = Path(raw_context_path).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("precomputed bootstrap context_path cannot be resolved") from exc
+    if bootstrap_context != context_path:
+        raise ValueError("precomputed bootstrap belongs to a different context")
+
+    bootstrap_scope = str(bootstrap.get("scope_id") or "common")
+    if bootstrap_scope != scoped.scope_id:
+        raise ValueError("precomputed bootstrap belongs to a different scope")
+    bootstrap_project = str(bootstrap.get("project_id") or "")
+    if bootstrap_project != scoped.project_id:
+        raise ValueError("precomputed bootstrap belongs to a different project")
 
 
 def _normalize_pack_mode(pack_mode: str | None) -> str:
@@ -1339,16 +1487,21 @@ def _query_sections(
         if (not has_entries and settings.auto_index) or (
             settings.auto_refresh and has_entries and needs_refresh
         ):
-            rebuild_kwargs = {
-                "mount_types": mount_types,
-                "include_content": settings.include_content,
-                "max_file_size_bytes": settings.max_file_size_bytes,
-                "max_content_chars": settings.max_content_chars,
-            }
             if is_scoped_v2:
-                index.rebuild_scoped(scoped, **rebuild_kwargs)
+                index.rebuild_scoped(
+                    scoped,
+                    mount_types=mount_types,
+                    include_content=settings.include_content,
+                    max_file_size_bytes=settings.max_file_size_bytes,
+                    max_content_chars=settings.max_content_chars,
+                )
             else:
-                index.rebuild(**rebuild_kwargs)
+                index.rebuild(
+                    mount_types=mount_types,
+                    include_content=settings.include_content,
+                    max_file_size_bytes=settings.max_file_size_bytes,
+                    max_content_chars=settings.max_content_chars,
+                )
             has_entries = (
                 index.has_entries_scoped(scoped, mount_types=mount_types)
                 if is_scoped_v2
@@ -1712,11 +1865,11 @@ def _fused_retrieval_section(
     on top. Emitted only when both signals produced hits — with a single signal the
     existing section already conveys the ranking and fusion would add nothing.
     """
-    bm25_paths = [
-        section.sources[0]
-        for section in query_sections
-        if getattr(section, "sources", None)
-    ]
+    bm25_paths: list[str] = []
+    for section in query_sections:
+        first_source = next(iter(section.sources), "")
+        if first_source:
+            bm25_paths.append(first_source)
     cosine_paths = (
         list(embedding_section.sources)
         if embedding_section and embedding_section.title == "Semantic Hits"
