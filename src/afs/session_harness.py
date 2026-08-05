@@ -1164,7 +1164,9 @@ def _pack_summary(
         precomputed_bootstrap=precomputed_bootstrap,
     )
     artifact_paths = pack.get("artifact_paths") or {}
-    if write_artifacts and not bool((pack.get("cache") or {}).get("hit")):
+    if write_artifacts and (
+        not bool((pack.get("cache") or {}).get("hit")) or not artifact_paths
+    ):
         artifact_paths = write_context_pack_artifacts(manager, context_path, pack)
     return {
         "available": True,

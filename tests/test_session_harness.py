@@ -338,6 +338,79 @@ def test_prepare_client_reuses_bootstrap_and_skill_matches(
     assert payload["skills"]["diagnostics"] == payload["bootstrap"]["skills"]["diagnostics"]
 
 
+def test_pack_summary_rewrites_a_mismatched_latest_artifact(tmp_path: Path) -> None:
+    manager, context_root = _make_manager(tmp_path)
+    manager.config.session_pack_cache.cache_dir = tmp_path / "pack-cache"
+    project_path = tmp_path / "project"
+    common = {
+        "project_path": project_path,
+        "task": "Keep the latest artifact aligned with the returned cache entry.",
+        "model": "codex",
+        "token_budget": 400,
+    }
+    first = context_pack_module.build_context_pack(
+        manager,
+        context_root,
+        query="query A",
+        **common,
+    )
+    context_pack_module.write_context_pack_artifacts(manager, context_root, first)
+    second = context_pack_module.build_context_pack(
+        manager,
+        context_root,
+        query="query B",
+        **common,
+    )
+    context_pack_module.write_context_pack_artifacts(manager, context_root, second)
+
+    summary = session_harness_module._pack_summary(
+        manager,
+        context_root,
+        query="query A",
+        task=str(common["task"]),
+        model="codex",
+        workflow="general",
+        tool_profile="default",
+        pack_mode="focused",
+        token_budget=400,
+        include_content=False,
+        semantic=False,
+        max_query_results=6,
+        max_embedding_results=4,
+        write_artifacts=True,
+        project_path=project_path,
+    )
+
+    artifact = json.loads(
+        Path(summary["artifact_paths"]["json"]).read_text(encoding="utf-8")
+    )
+    assert summary["cache"]["hit"] is True
+    assert artifact["query"] == "query A"
+    assert artifact["cache"]["key"] == summary["cache"]["key"]
+
+    markdown_path = Path(artifact["artifact_paths"]["markdown"])
+    markdown_path.unlink()
+    repaired = session_harness_module._pack_summary(
+        manager,
+        context_root,
+        query="query A",
+        task=str(common["task"]),
+        model="codex",
+        workflow="general",
+        tool_profile="default",
+        pack_mode="focused",
+        token_budget=400,
+        include_content=False,
+        semantic=False,
+        max_query_results=6,
+        max_embedding_results=4,
+        write_artifacts=True,
+        project_path=project_path,
+    )
+    assert repaired["cache"]["hit"] is True
+    assert markdown_path.is_file()
+
+
 def test_prepare_client_survives_unresolvable_skill_root(
     tmp_path: Path,
     monkeypatch,
