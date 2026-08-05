@@ -54,6 +54,7 @@ DEFAULT_SEARCH_MOUNTS = (
 CONTEXT_PACK_CACHE_VERSION = 8
 EMBEDDING_HIT_PREVIEW_CHARS = 360
 SESSION_PACK_CACHE_MAX_ENTRIES = 512
+SESSION_PACK_CACHE_MAX_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +95,15 @@ class PackSelection:
 class _SessionPackCacheProbe:
     pack: dict[str, Any] | None = None
     mount_fingerprint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnedSessionPackCacheEntry:
+    path: Path
+    payload: dict[str, Any]
+    modified_at: float
+    device: int
+    inode: int
 
 
 def estimate_tokens(text: str) -> int:
@@ -206,15 +216,17 @@ def build_context_pack(
         sensitivity_state=sensitivity_state,
         scoped=scoped,
     )
-    cached = _load_cached_context_pack(
-        manager,
-        context_path,
-        model=normalized_model,
-        cache_key=cache_key,
-        scoped=scoped,
-    )
-    if cached is not None:
-        return cached
+    snapshot_only = precomputed_bootstrap is not None
+    if not snapshot_only:
+        cached = _load_cached_context_pack(
+            manager,
+            context_path,
+            model=normalized_model,
+            cache_key=cache_key,
+            scoped=scoped,
+        )
+        if cached is not None:
+            return cached
     execution_profile_text = _render_execution_profile_block(execution_profile)
     focus_block = _render_focus_block(task=task, query=query)
     guidance = _model_guidance(normalized_model)
@@ -268,29 +280,31 @@ def build_context_pack(
             "version": CONTEXT_PACK_CACHE_VERSION,
             "key": cache_key,
             "hit": False,
+            "snapshot_only": snapshot_only,
         },
     }
     pack["cache"]["prefix_hash"] = _context_pack_prefix_hash(pack)
     pack["cache"]["stable_prefix_hash"] = _context_pack_stable_prefix_hash(pack)
-    _write_session_pack_cache(
-        manager,
-        context_path,
-        pack,
-        query=query,
-        task=task,
-        model=normalized_model,
-        workflow=workflow,
-        tool_profile=tool_profile,
-        pack_mode=normalized_pack_mode,
-        token_budget=resolved_budget,
-        include_content=resolved_include_content,
-        semantic=semantic,
-        max_query_results=resolved_max_query_results,
-        max_embedding_results=resolved_max_embedding_results,
-        sensitivity_state=sensitivity_state,
-        scoped=scoped,
-        mount_fingerprint=session_cache_probe.mount_fingerprint,
-    )
+    if not snapshot_only:
+        _write_session_pack_cache(
+            manager,
+            context_path,
+            pack,
+            query=query,
+            task=task,
+            model=normalized_model,
+            workflow=workflow,
+            tool_profile=tool_profile,
+            pack_mode=normalized_pack_mode,
+            token_budget=resolved_budget,
+            include_content=resolved_include_content,
+            semantic=semantic,
+            max_query_results=resolved_max_query_results,
+            max_embedding_results=resolved_max_embedding_results,
+            sensitivity_state=sensitivity_state,
+            scoped=scoped,
+            mount_fingerprint=session_cache_probe.mount_fingerprint,
+        )
     return pack
 
 
@@ -567,6 +581,8 @@ def _load_cached_context_pack(
         return None
     if cache.get("key") != cache_key:
         return None
+    if cache.get("snapshot_only") is True:
+        return None
     result = dict(payload)
     result["artifact_paths"] = {
         "json": str(json_path),
@@ -773,20 +789,14 @@ def _load_session_pack_cache(
         scoped=scoped,
     )
     cache_file = _session_pack_cache_path(manager, cache_key)
-    if not cache_file.exists():
-        logger.debug("session pack cache miss: no cache file for key %s", cache_key[:12])
+    owned_entry = _read_owned_session_pack_cache_file(cache_file)
+    if owned_entry is None:
+        logger.debug("session pack cache miss: no owned cache file for key %s", cache_key[:12])
         return _SessionPackCacheProbe()
-
-    try:
-        payload = json.loads(cache_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        logger.debug("session pack cache miss: unreadable cache file %s", cache_file)
-        return _SessionPackCacheProbe()
+    payload = owned_entry.payload
 
     meta = payload.get("_session_cache_meta")
-    if not isinstance(meta, dict):
-        logger.debug("session pack cache miss: missing metadata in %s", cache_file)
-        return _SessionPackCacheProbe()
+    assert isinstance(meta, dict)
 
     # TTL check
     cached_at = meta.get("cached_at_epoch")
@@ -801,7 +811,7 @@ def _load_session_pack_cache(
             age_seconds,
             cache_cfg.ttl_seconds,
         )
-        _remove_session_pack_cache_file(cache_file)
+        _remove_session_pack_cache_file(owned_entry)
         return _SessionPackCacheProbe()
 
     # Mount fingerprint invalidation: recompute a lightweight hash of mount
@@ -822,9 +832,7 @@ def _load_session_pack_cache(
 
     # Valid cache hit
     pack = payload.get("pack")
-    if not isinstance(pack, dict):
-        logger.debug("session pack cache miss: no pack data in cache file")
-        return _SessionPackCacheProbe(mount_fingerprint=current_fingerprint)
+    assert isinstance(pack, dict)
 
     pack["cache"] = dict(pack.get("cache") or {})
     pack["cache"]["hit"] = True
@@ -952,7 +960,99 @@ def _is_managed_session_pack_cache_file(path: Path) -> bool:
     )
 
 
-def _remove_session_pack_cache_file(path: Path) -> bool:
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        stat.S_ISREG(left.st_mode)
+        and stat.S_ISREG(right.st_mode)
+        and left.st_dev == right.st_dev
+        and left.st_ino == right.st_ino
+    )
+
+
+def _read_owned_session_pack_cache_file(
+    path: Path,
+) -> _OwnedSessionPackCacheEntry | None:
+    """Read one positively identified AFS session-cache file without links."""
+    if not _is_managed_session_pack_cache_file(path):
+        return None
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        logger.debug("session pack cache: failed to open %s", path, exc_info=True)
+        return None
+
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size > SESSION_PACK_CACHE_MAX_BYTES:
+            return None
+        chunks: list[bytes] = []
+        remaining = SESSION_PACK_CACHE_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw_payload = b"".join(chunks)
+        if len(raw_payload) > SESSION_PACK_CACHE_MAX_BYTES:
+            return None
+    except OSError:
+        logger.debug("session pack cache: failed to read %s", path, exc_info=True)
+        return None
+    finally:
+        os.close(descriptor)
+
+    try:
+        payload = json.loads(raw_payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    meta = payload.get("_session_cache_meta")
+    if not isinstance(meta, dict):
+        return None
+    if meta.get("version") != CONTEXT_PACK_CACHE_VERSION:
+        return None
+    if meta.get("cache_key") != path.stem:
+        return None
+    if not isinstance(payload.get("pack"), dict):
+        return None
+
+    try:
+        current = os.stat(path, follow_symlinks=False)
+    except (FileNotFoundError, OSError):
+        return None
+    if not _same_file_identity(opened, current):
+        return None
+    return _OwnedSessionPackCacheEntry(
+        path=path,
+        payload=payload,
+        modified_at=opened.st_mtime,
+        device=opened.st_dev,
+        inode=opened.st_ino,
+    )
+
+
+def _remove_session_pack_cache_file(entry: _OwnedSessionPackCacheEntry) -> bool:
+    path = entry.path
+    try:
+        current = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        logger.debug("session pack cache: failed to inspect %s", path, exc_info=True)
+        return False
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or current.st_dev != entry.device
+        or current.st_ino != entry.inode
+    ):
+        logger.debug("session pack cache: refused to remove replaced entry %s", path)
+        return False
     try:
         path.unlink()
     except FileNotFoundError:
@@ -980,42 +1080,33 @@ def _prune_session_pack_cache(
         return 0
 
     now = datetime.now(timezone.utc).timestamp()
-    entries: list[tuple[float, Path]] = []
+    entries: list[_OwnedSessionPackCacheEntry] = []
     for candidate in candidates:
-        if not _is_managed_session_pack_cache_file(candidate) or candidate.is_symlink():
-            continue
-        try:
-            metadata = candidate.stat()
-        except FileNotFoundError:
-            continue
-        except OSError:
-            logger.debug(
-                "session pack cache: failed to inspect %s",
-                candidate,
-                exc_info=True,
-            )
-            continue
-        if not stat.S_ISREG(metadata.st_mode):
-            continue
-        entries.append((metadata.st_mtime, candidate))
+        owned_entry = _read_owned_session_pack_cache_file(candidate)
+        if owned_entry is not None:
+            entries.append(owned_entry)
 
     removed = 0
-    survivors: list[tuple[float, Path]] = []
-    for modified_at, candidate in entries:
-        expired = now - modified_at > ttl_seconds
-        if expired and candidate != protected and _remove_session_pack_cache_file(candidate):
+    survivors: list[_OwnedSessionPackCacheEntry] = []
+    for entry in entries:
+        expired = now - entry.modified_at > ttl_seconds
+        if (
+            expired
+            and entry.path != protected
+            and _remove_session_pack_cache_file(entry)
+        ):
             removed += 1
             continue
-        survivors.append((modified_at, candidate))
+        survivors.append(entry)
 
     excess = max(0, len(survivors) - max_entries)
     if excess:
-        for _modified_at, candidate in sorted(survivors):
+        for entry in sorted(survivors, key=lambda item: item.modified_at):
             if excess <= 0:
                 break
-            if candidate == protected:
+            if entry.path == protected:
                 continue
-            if _remove_session_pack_cache_file(candidate):
+            if _remove_session_pack_cache_file(entry):
                 removed += 1
                 excess -= 1
 
@@ -1045,24 +1136,19 @@ def clear_pack_cache(context_path: Path | None = None, *, config: Any = None) ->
 
     removed = 0
     for cache_file in sorted(cache_dir.glob("*.json")):
-        if not cache_file.is_file():
+        owned_entry = _read_owned_session_pack_cache_file(cache_file)
+        if owned_entry is None:
             continue
         if context_path is not None:
             # Only remove files that belong to this context_path
-            try:
-                payload = json.loads(cache_file.read_text(encoding="utf-8"))
-                meta = payload.get("_session_cache_meta", {})
-                cached_context = meta.get("context_path", "")
-                resolved = str(context_path.expanduser().resolve())
-                if cached_context != resolved:
-                    continue
-            except (OSError, json.JSONDecodeError):
-                pass
-        try:
-            cache_file.unlink()
+            meta = owned_entry.payload["_session_cache_meta"]
+            assert isinstance(meta, dict)
+            cached_context = meta.get("context_path", "")
+            resolved = str(context_path.expanduser().resolve())
+            if cached_context != resolved:
+                continue
+        if _remove_session_pack_cache_file(owned_entry):
             removed += 1
-        except OSError:
-            pass
 
     logger.debug("session pack cache: cleared %d files", removed)
     return removed

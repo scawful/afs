@@ -17,12 +17,15 @@ from afs.context_pack import (
     _context_pack_cache_key,
     _load_cached_context_pack,
     _prune_session_pack_cache,
+    _read_owned_session_pack_cache_file,
+    _remove_session_pack_cache_file,
     build_context_pack,
     write_context_pack_artifacts,
 )
 from afs.manager import AFSManager
 from afs.models import MountType
 from afs.schema import AFSConfig, GeneralConfig, SensitivityConfig, SessionPackCacheConfig
+from afs.session_bootstrap import build_session_bootstrap
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,6 +51,23 @@ def _seed_knowledge(manager: AFSManager, context_root: Path, content: str = "hel
     knowledge_root = manager.resolve_mount_root(context_root, MountType.KNOWLEDGE)
     knowledge_root.mkdir(parents=True, exist_ok=True)
     (knowledge_root / "doc.md").write_text(content, encoding="utf-8")
+
+
+def _write_owned_session_cache(path: Path, *, context_path: Path | None = None) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "_session_cache_meta": {
+                    "version": CONTEXT_PACK_CACHE_VERSION,
+                    "cache_key": path.stem,
+                    "context_path": str(context_path or ""),
+                },
+                "pack": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +330,44 @@ def test_precomputed_bootstrap_rejects_a_different_context(tmp_path: Path) -> No
         )
 
 
+def test_precomputed_bootstrap_is_never_reused_after_mount_changes(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    scratchpad_root = manager.resolve_mount_root(context_root, MountType.SCRATCHPAD)
+    state_path = scratchpad_root / "state.md"
+    state_path.write_text("VERSION_A", encoding="utf-8")
+    bootstrap_a = build_session_bootstrap(
+        manager,
+        context_root,
+        record_event=False,
+    )
+    state_path.write_text("VERSION_B", encoding="utf-8")
+    kwargs = {
+        "query": "snapshot validity",
+        "task": "Do not reuse a precomputed bootstrap after mount changes.",
+        "model": "codex",
+        "token_budget": 800,
+    }
+
+    first = build_context_pack(
+        manager,
+        context_root,
+        precomputed_bootstrap=bootstrap_a,
+        **kwargs,
+    )
+    assert first["cache"]["snapshot_only"] is True
+    assert "VERSION_A" in json.dumps(first)
+    assert not list((tmp_path / "cache").glob("*.json"))
+    write_context_pack_artifacts(manager, context_root, first)
+
+    second = build_context_pack(manager, context_root, **kwargs)
+
+    assert second["cache"]["hit"] is False
+    assert second["cache"]["snapshot_only"] is False
+    assert "VERSION_B" in json.dumps(second)
+    assert "VERSION_A" not in json.dumps(second)
+
+
 def test_session_cache_invalidates_when_sensitivity_changes(tmp_path: Path) -> None:
     context_root = tmp_path / ".context"
     cache_dir = tmp_path / "cache"
@@ -368,10 +426,13 @@ def test_session_cache_prune_removes_expired_entries_and_bounds_survivors(
     paths = [cache_dir / f"{index:064x}.json" for index in range(5)]
     ages = [600, 50, 40, 30, 20]
     for path, age in zip(paths, ages, strict=True):
-        path.write_text("{}\n", encoding="utf-8")
+        _write_owned_session_cache(path)
         os.utime(path, (now - age, now - age))
     unrelated = cache_dir / "keep-me.json"
     unrelated.write_text("not an AFS cache key\n", encoding="utf-8")
+    foreign_hash = cache_dir / f"{'f' * 64}.json"
+    foreign_hash.write_text('{"owner": "some-other-tool"}\n', encoding="utf-8")
+    os.utime(foreign_hash, (now - 700, now - 700))
 
     removed = _prune_session_pack_cache(
         cache_dir,
@@ -385,6 +446,22 @@ def test_session_cache_prune_removes_expired_entries_and_bounds_survivors(
     assert not paths[1].exists()
     assert all(path.exists() for path in paths[2:])
     assert unrelated.exists()
+    assert foreign_hash.exists()
+
+
+def test_session_cache_removal_refuses_a_replaced_file(tmp_path: Path) -> None:
+    cache_file = tmp_path / f"{'a' * 64}.json"
+    _write_owned_session_cache(cache_file)
+    owned_entry = _read_owned_session_pack_cache_file(cache_file)
+    assert owned_entry is not None
+
+    cache_file.unlink()
+    cache_file.write_text('{"owner": "some-other-tool"}\n', encoding="utf-8")
+
+    assert _remove_session_pack_cache_file(owned_entry) is False
+    assert json.loads(cache_file.read_text(encoding="utf-8")) == {
+        "owner": "some-other-tool"
+    }
 
 
 def test_expired_session_cache_entry_is_removed_before_rebuild(
@@ -410,9 +487,9 @@ def test_expired_session_cache_entry_is_removed_before_rebuild(
     removed = []
     original_remove = context_pack_module._remove_session_pack_cache_file
 
-    def record_remove(path: Path) -> bool:
-        removed.append(path)
-        return original_remove(path)
+    def record_remove(entry) -> bool:
+        removed.append(entry.path)
+        return original_remove(entry)
 
     monkeypatch.setattr(
         context_pack_module,
