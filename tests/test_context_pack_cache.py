@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -259,6 +261,85 @@ def test_artifact_cache_rejects_mismatched_json_and_markdown_keys(tmp_path: Path
         )
         is None
     )
+
+
+def test_artifact_reader_waits_for_coherent_pair_during_publication(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    common = {
+        "task": "Serialize context pack artifact publication.",
+        "model": "codex",
+        "token_budget": 400,
+    }
+    first = build_context_pack(manager, context_root, query="query A", **common)
+    write_context_pack_artifacts(manager, context_root, first)
+    second = build_context_pack(manager, context_root, query="query B", **common)
+
+    original_lock = context_pack_module.index_file_lock
+    original_write = context_pack_module._atomic_write_text
+    json_published = threading.Event()
+    reader_waiting = threading.Event()
+    release_writer = threading.Event()
+    loaded: list[dict | None] = []
+    errors: list[BaseException] = []
+
+    @contextmanager
+    def observed_lock(path, *args, **kwargs):
+        if (
+            path.name == context_pack_module.CONTEXT_PACK_ARTIFACT_LOCK_NAME
+            and threading.current_thread().name == "artifact-reader"
+        ):
+            reader_waiting.set()
+        with original_lock(path, *args, **kwargs):
+            yield
+
+    def paused_write(path: Path, text: str) -> None:
+        original_write(path, text)
+        if path.suffix == ".json" and threading.current_thread().name == "artifact-writer":
+            json_published.set()
+            assert release_writer.wait(5)
+
+    monkeypatch.setattr(context_pack_module, "index_file_lock", observed_lock)
+    monkeypatch.setattr(context_pack_module, "_atomic_write_text", paused_write)
+
+    def publish() -> None:
+        try:
+            write_context_pack_artifacts(manager, context_root, second)
+        except BaseException as exc:  # noqa: BLE001 - report worker failures in this test.
+            errors.append(exc)
+
+    def load() -> None:
+        try:
+            loaded.append(
+                _load_cached_context_pack(
+                    manager,
+                    context_root,
+                    model="codex",
+                    cache_key=str(second["cache"]["key"]),
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 - report worker failures in this test.
+            errors.append(exc)
+
+    writer = threading.Thread(target=publish, name="artifact-writer")
+    reader = threading.Thread(target=load, name="artifact-reader")
+    writer.start()
+    assert json_published.wait(5)
+    reader.start()
+    assert reader_waiting.wait(5)
+    assert reader.is_alive()
+    release_writer.set()
+    writer.join(10)
+    reader.join(10)
+
+    assert not writer.is_alive() and not reader.is_alive()
+    assert errors == []
+    assert loaded and loaded[0] is not None
+    assert loaded[0]["query"] == "query B"
+    assert loaded[0]["cache"]["key"] == second["cache"]["key"]
 
 
 # ---------------------------------------------------------------------------

@@ -62,6 +62,8 @@ SESSION_PACK_CACHE_MAX_BYTES = 8 * 1024 * 1024
 SESSION_PACK_CACHE_OWNER = "afs.session-pack-cache"
 SESSION_PACK_CACHE_LOCK_NAME = ".session-pack-cache.lock"
 SESSION_PACK_CACHE_LOCK_TIMEOUT_SECONDS = 1.0
+CONTEXT_PACK_ARTIFACT_LOCK_NAME = ".session-pack-artifacts.lock"
+CONTEXT_PACK_ARTIFACT_LOCK_TIMEOUT_SECONDS = 5.0
 CONTEXT_PACK_ARTIFACT_KEY_PREFIX = "<!-- afs-context-pack-key:"
 
 
@@ -393,10 +395,14 @@ def write_context_pack_artifacts(
         "markdown": str(markdown_path),
     }
     payload["artifact_paths"] = artifact_paths
-    _atomic_write_text(json_path, json.dumps(payload, indent=2) + "\n")
     cache_key = str(cache.get("key", ""))
     marker = f"{CONTEXT_PACK_ARTIFACT_KEY_PREFIX}{cache_key} -->"
-    _atomic_write_text(markdown_path, f"{render_context_pack(payload)}\n\n{marker}\n")
+    with index_file_lock(
+        json_path.parent / CONTEXT_PACK_ARTIFACT_LOCK_NAME,
+        timeout=CONTEXT_PACK_ARTIFACT_LOCK_TIMEOUT_SECONDS,
+    ):
+        _atomic_write_text(json_path, json.dumps(payload, indent=2) + "\n")
+        _atomic_write_text(markdown_path, f"{render_context_pack(payload)}\n\n{marker}\n")
     return artifact_paths
 
 
@@ -588,24 +594,29 @@ def _load_cached_context_pack(
         )
     except (OSError, ValueError):
         return None
-    if not json_path.exists() or not markdown_path.is_file():
-        return None
     try:
-        payload = json.loads(json_path.read_text(encoding="utf-8"))
-        markdown = markdown_path.read_text(encoding="utf-8")
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    cache = payload.get("cache")
-    if not isinstance(cache, dict):
-        return None
-    if cache.get("version") != CONTEXT_PACK_CACHE_VERSION:
-        return None
-    if cache.get("key") != cache_key:
-        return None
-    marker = f"{CONTEXT_PACK_ARTIFACT_KEY_PREFIX}{cache_key} -->"
-    if marker not in markdown.splitlines():
-        return None
-    if cache.get("snapshot_only") is True:
+        with index_file_lock(
+            json_path.parent / CONTEXT_PACK_ARTIFACT_LOCK_NAME,
+            shared=True,
+            timeout=CONTEXT_PACK_ARTIFACT_LOCK_TIMEOUT_SECONDS,
+        ):
+            if not json_path.exists() or not markdown_path.is_file():
+                return None
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+            markdown = markdown_path.read_text(encoding="utf-8")
+            cache = payload.get("cache")
+            if not isinstance(cache, dict):
+                return None
+            if cache.get("version") != CONTEXT_PACK_CACHE_VERSION:
+                return None
+            if cache.get("key") != cache_key:
+                return None
+            marker = f"{CONTEXT_PACK_ARTIFACT_KEY_PREFIX}{cache_key} -->"
+            if marker not in markdown.splitlines():
+                return None
+            if cache.get("snapshot_only") is True:
+                return None
+    except (IndexLockTimeout, OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     result = dict(payload)
     result["artifact_paths"] = {
