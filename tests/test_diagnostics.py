@@ -17,6 +17,7 @@ from afs.diagnostics import (
     check_context_root,
     check_dependencies,
     check_mcp_registration,
+    check_mcp_server,
     check_python_environment,
     check_services,
     check_skills,
@@ -26,6 +27,7 @@ from afs.diagnostics import (
     write_doctor_snapshot,
 )
 from afs.manager import AFSManager
+from afs.mcp.registry import MCPToolRegistry
 from afs.models import MountType, ProjectMetadata
 from afs.schema import (
     AFSConfig,
@@ -79,6 +81,23 @@ def test_check_dependencies() -> None:
     result = check_dependencies()
     assert result.status in {"ok", "warn"}
     assert result.name == "dependencies"
+
+
+def test_check_mcp_server_uses_prebuilt_registry_without_rebuild(
+    monkeypatch,
+) -> None:
+    registry = MCPToolRegistry(load_errors={"broken-extension": "load failed"})
+
+    def unexpected_rebuild(_manager):
+        raise AssertionError("prebuilt registry should be reused")
+
+    monkeypatch.setattr("afs.mcp_server.build_mcp_registry", unexpected_rebuild)
+
+    result = check_mcp_server(registry=registry)
+
+    assert result.status == "warn"
+    assert "1 load error(s)" in result.message
+    assert "broken-extension: load failed" in result.message
 
 
 def test_check_skills_warns_with_structured_details_but_counts_good_skills(

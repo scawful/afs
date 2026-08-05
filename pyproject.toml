@@ -296,7 +296,6 @@ module = [
     "afs.config_loader",
     "afs.context_freshness",
     "afs.context_index",
-    "afs.context_pack",
     "afs.deployment.cli",
     "afs.embeddings",
     "afs.evaluation.harness",

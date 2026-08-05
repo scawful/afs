@@ -23,12 +23,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from .context_layout import LAYOUT_VERSION, _atomic_write_text, detect_layout_version
 from .context_paths import resolve_agent_output_root
 from .models import MountType
 from .path_safety import assert_no_linklike_components
+
+if TYPE_CHECKING:
+    from .mcp.registry import MCPToolRegistry
 
 _REQUIRED_CONTEXT_MOUNTS = (
     MountType.MEMORY,
@@ -718,22 +721,27 @@ def check_python_environment() -> DiagnosticResult:
     )
 
 
-def check_mcp_server(config_path: Path | None = None) -> DiagnosticResult:
+def check_mcp_server(
+    config_path: Path | None = None,
+    *,
+    registry: MCPToolRegistry | None = None,
+) -> DiagnosticResult:
     """Check that the MCP server module loads and can build its registry."""
-    try:
-        from .config import load_config_model
-        from .manager import AFSManager
-        from .mcp_server import build_mcp_registry
+    if registry is None:
+        try:
+            from .config import load_config_model
+            from .manager import AFSManager
+            from .mcp_server import build_mcp_registry
 
-        config = load_config_model(config_path=config_path, merge_user=True)
-        manager = AFSManager(config=config)
-        registry = build_mcp_registry(manager)
-    except Exception as exc:  # noqa: BLE001 - diagnostics isolate MCP build failures.
-        return DiagnosticResult(
-            name="mcp_server",
-            status="error",
-            message=f"MCP server build failed: {exc}",
-        )
+            config = load_config_model(config_path=config_path, merge_user=True)
+            manager = AFSManager(config=config)
+            registry = build_mcp_registry(manager)
+        except Exception as exc:  # noqa: BLE001 - diagnostics isolate MCP build failures.
+            return DiagnosticResult(
+                name="mcp_server",
+                status="error",
+                message=f"MCP server build failed: {exc}",
+            )
 
     errors = registry.load_errors
     if errors:
@@ -913,7 +921,11 @@ def run_all_checks(
     return _run_checks(checks, auto_fix=auto_fix)
 
 
-def run_startup_checks(config_path: Path | None = None) -> list[DiagnosticResult]:
+def run_startup_checks(
+    config_path: Path | None = None,
+    *,
+    mcp_registry: MCPToolRegistry | None = None,
+) -> list[DiagnosticResult]:
     """Run a lightweight subset of checks suitable for MCP server startup."""
     checks: list[tuple[str, Callable[[], DiagnosticResult]]] = [
         ("python", lambda: check_python_environment()),
@@ -924,7 +936,10 @@ def run_startup_checks(config_path: Path | None = None) -> list[DiagnosticResult
         ("agent_manifest", lambda: check_agent_manifest()),
         ("extensions", lambda: check_extensions(config_path)),
         ("context_index", lambda: check_context_index(config_path)),
-        ("mcp_server", lambda: check_mcp_server(config_path)),
+        (
+            "mcp_server",
+            lambda: check_mcp_server(config_path, registry=mcp_registry),
+        ),
     ]
     return _run_checks(checks, auto_fix=False)
 
