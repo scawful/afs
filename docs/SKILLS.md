@@ -106,6 +106,18 @@ Practical authoring consequences:
   the CLI preview orders the same score by name instead. Give important skills
   enough distinct triggers to win on score, not on a tiebreak.
 
+Session startup also adds up to three recognized language terms from the
+bounded codebase summary. C++ sources select `cpp-quality`, Python
+sources or `pyproject.toml` select `python-quality`, and TypeScript sources or
+`tsconfig.json` select `typescript-quality`. This supplements the explicit
+task or continuation signal so a generic request such as "fix this bug" still
+gets relevant language rules. The skill payload reports `prompt_source` as
+`codebase` or as a combined source such as `explicit+codebase`.
+
+Codebase detection is repository-wide, not a changed-file claim. Apply a
+matched language skill only to that language's touched scope, and keep using
+the repository's own build, lint, type-check, and test commands.
+
 ## Body Injection
 
 Session launch matches are delivered inline, as are `skill.match` results when
@@ -151,9 +163,16 @@ Core AFS ships 30 skills. Feature guides map one-to-one onto AFS surfaces:
 | `extension-authoring` | writing extensions |
 | `afs-cli-map` | full CLI command map |
 
-Engineering-practice skills apply across repos: `code-review`,
-`implementation-planning`, `software-design`, `cpp-quality`, `python-quality`,
-`typescript-quality`.
+Engineering-practice skills apply across repos:
+
+| Skill | Covers |
+| ----- | ------ |
+| `code-review` | correctness, regressions, safety, and missing tests |
+| `implementation-planning` | reversible slices, checks, and rollback |
+| `software-design` | invariants, state ownership, and module boundaries |
+| `cpp-quality` | ownership, lifetimes, defined behavior, API/ABI, CMake |
+| `python-quality` | typed boundaries, explicit I/O, exceptions, async behavior |
+| `typescript-quality` | strict types, runtime validation, promises, module boundaries |
 
 Team-collaboration skills cover the quality loop between engineers and
 agents:

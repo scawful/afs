@@ -35,6 +35,7 @@ _ALLOWED_HIDDEN_DIRS = {".github"}
 
 _ROOT_KEY_FILES = [
     "AGENTS.md",
+    "CMakeLists.txt",
     "README.md",
     "README.rst",
     "README.txt",
@@ -51,6 +52,7 @@ _ROOT_KEY_FILES = [
 ]
 
 _MANIFEST_ECOSYSTEMS = {
+    "CMakeLists.txt": "cmake",
     "Cargo.toml": "rust",
     "Gemfile": "ruby",
     "Package.swift": "swift",
@@ -61,6 +63,7 @@ _MANIFEST_ECOSYSTEMS = {
     "package.json": "node",
     "pom.xml": "java",
     "pyproject.toml": "python",
+    "tsconfig.json": "typescript",
 }
 
 _LANGUAGE_BY_EXTENSION = {

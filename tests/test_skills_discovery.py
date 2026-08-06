@@ -262,6 +262,39 @@ def test_quality_skills_match_engineering_prompts() -> None:
     assert score_skill_relevance(prompt, skills["implementation-planning"]) >= 1
 
 
+def test_language_quality_skills_avoid_cross_language_triggers() -> None:
+    skills_dir = Path(__file__).parent.parent / "src" / "afs" / "bundled_skills"
+    skills = {skill.name: skill for skill in discover_skills([skills_dir])}
+
+    assert (
+        score_skill_relevance(
+            "Validate an HTTP header and ownership claim in a Python service.",
+            skills["cpp-quality"],
+        )
+        == 0
+    )
+    assert (
+        score_skill_relevance(
+            "Lint this React JavaScript package with npm.",
+            skills["typescript-quality"],
+        )
+        == 0
+    )
+
+
+def test_language_quality_skill_bodies_fit_prompt_budget() -> None:
+    from afs.skills import read_skill_body
+
+    skills_dir = Path(__file__).parent.parent / "src" / "afs" / "bundled_skills"
+    skills = {skill.name: skill for skill in discover_skills([skills_dir])}
+
+    for name in ("cpp-quality", "python-quality", "typescript-quality"):
+        body, truncated = read_skill_body(skills[name].path)
+        assert truncated is False, f"{name} exceeds the per-skill prompt budget"
+        assert "## Core Rules" in body
+        assert "## Quality Gates" in body
+
+
 def test_skills_list_includes_bundled_afs_root_skills(
     monkeypatch,
     tmp_path: Path,
