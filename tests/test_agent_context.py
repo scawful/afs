@@ -151,6 +151,27 @@ def test_build_snapshot_includes_codebase_summary(tmp_path: Path):
     assert snap.codebase_summary["language_hints"]["python"] >= 2
 
 
+def test_codebase_summary_identifies_cmake_and_typescript(tmp_path: Path):
+    from afs.codebase_explorer import build_codebase_summary
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.20)\n",
+        encoding="utf-8",
+    )
+    (project / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    (project / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+    (project / "index.ts").write_text("export const value = 1;\n", encoding="utf-8")
+
+    summary = build_codebase_summary(project, infer_root=False)
+
+    assert summary["ecosystems"] == ["cmake", "typescript"]
+    assert summary["manifests"] == ["CMakeLists.txt", "tsconfig.json"]
+    assert summary["language_hints"]["cpp"] == 1
+    assert summary["language_hints"]["typescript"] == 1
+
+
 def test_build_snapshot_supports_training_repo_layout(tmp_path: Path):
     project = tmp_path / "scawfulbot"
     project.mkdir()

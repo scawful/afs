@@ -6,6 +6,11 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 
 ### Added
 
+- Codebase-aware language practice prompting for C++, Python, and TypeScript.
+  Session bootstrap now supplements task matching with bounded repository
+  language evidence, recognizes CMake and `tsconfig.json`, and ships stricter
+  quality skills for ownership and lifetimes, typed and runtime-validated
+  boundaries, async behavior, and repository-native verification.
 - An opt-in version 2 central context layout with six human-facing categories,
   stable project/common scopes, a project registry, and hash-bound private
   migration plans. Mapping schema v2 adds reason-bearing `retained_sources`

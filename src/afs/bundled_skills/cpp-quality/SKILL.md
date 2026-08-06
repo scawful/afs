@@ -4,54 +4,57 @@ triggers:
   - c++
   - cpp
   - cmake
+  - CMakeLists.txt
   - clang-tidy
   - clang-format
   - raii
-  - ownership
-  - header
+  - std::
+  - unique_ptr
+  - sanitizer
   - include-what-you-use
 profiles:
   - general
 requires:
   - afs
 enforcement:
-  - Make ownership and lifetime explicit; prefer RAII and value semantics.
-  - Avoid raw new/delete in application logic and default shared ownership.
-  - Keep headers narrow and remove avoidable dependencies.
+  - Make ownership, lifetime, aliasing, and thread safety explicit; prefer RAII and value semantics.
+  - Treat dangling references or views, data races, undefined behavior, and compiler warnings as correctness defects.
+  - Preserve public API and ABI constraints and use the repository's existing build configuration.
 verification:
-  - Build and run the existing CMake or CTest checks for touched targets.
-  - Run clang-tidy or clang-format checks when the repo already uses them.
+  - Build and test the smallest touched target with the repository's CMake presets or wrapper commands.
+  - Run configured warnings, sanitizers, clang-tidy, and format checks; state which are unavailable.
 ---
 
 # C++ Quality
 
-Optimize for explicit ownership, narrow interfaces, and low-ambiguity lifetimes.
+Optimize for explicit ownership, valid lifetimes, narrow interfaces, and defined behavior.
 
-## Prefer
+## Core Rules
 
-- RAII for every acquired resource.
-- Value semantics by default; pointers should communicate ownership or optionality.
-- `const`, `override`, `enum class`, and scoped types when they remove ambiguity.
-- Small headers, forward declarations where valid, and translation-unit-local helpers.
-- Error handling that makes failure visible at the call site.
+- Use RAII for every acquired resource and value semantics when copying is valid.
+- Use references, pointers, smart pointers, `span`, and views only when their lifetime and ownership meaning is clear.
+- Keep headers self-contained and minimal. Do not forward-declare standard-library types.
+- Make concurrency ownership and synchronization visible; avoid shared mutable state.
+- Preserve established API, ABI, exception, and allocation constraints unless the task changes them.
 
 ## Avoid
 
-- Raw `new` or `delete` in application logic.
-- `shared_ptr` as the default ownership model.
-- Non-virtual base destructors on polymorphic types.
-- Large headers that pull in unrelated dependencies.
-- Boolean parameter soup and hidden mutable global state.
+- Raw owning pointers, manual `new` or `delete`, and default `shared_ptr` ownership.
+- Dangling iterators, references, `span`, or `string_view` values.
+- Unchecked narrowing, unsafe casts, signed overflow assumptions, and other undefined behavior.
+- Warning suppression, sanitizer suppression, or ignored return values without evidence.
+- Macro utilities or boolean flags when a scoped type or separate operation is clearer.
 
 ## Quality Gates
 
-Run the checks the repo already uses. Common baselines:
+Use repository scripts and presets first. Typical focused checks:
 
 ```bash
-cmake -S . -B build
-cmake --build build
-ctest --test-dir build --output-on-failure
-clang-tidy <files> --
+cmake --preset <configure-preset>
+cmake --build --preset <build-preset> --target <target>
+ctest --preset <test-preset> --output-on-failure
+clang-tidy <files> -p <build-dir>
 clang-format --dry-run --Werror <files>
-include-what-you-use <files>
 ```
+
+Use ASan, UBSan, TSan, and include-what-you-use only when the repository supports them.

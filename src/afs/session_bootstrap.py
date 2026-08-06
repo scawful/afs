@@ -62,6 +62,16 @@ SESSION_BOOTSTRAP_MARKDOWN = "session_bootstrap.md"
 _MAX_TEXT_CHARS = 1500
 _MAX_LIST_ITEMS = 8
 _MAX_SKILL_SIGNAL_CHARS = 8_000
+_MAX_CODEBASE_SKILL_TERMS = 3
+_CODEBASE_LANGUAGE_SKILL_TERMS = {
+    "cpp": "c++",
+    "python": "python",
+    "typescript": "typescript",
+}
+_CODEBASE_ECOSYSTEM_SKILL_TERMS = {
+    "python": "python",
+    "typescript": "typescript",
+}
 
 # Private test seam; production reads the platform controlling terminal.
 _ENGAGE_READER = None
@@ -413,11 +423,31 @@ def build_session_bootstrap(
         config=manager.config,
         scope_ids=visible_scopes,
     )
+    if resolved_scope.layout_version == LAYOUT_VERSION:
+        if resolved_scope.requester_path is not None and resolved_scope.project_id:
+            codebase = build_scoped_codebase_summary(
+                context_path,
+                resolved_scope.requester_path,
+                project_id=resolved_scope.project_id,
+            )
+        else:
+            codebase = {}
+    else:
+        codebase = build_codebase_summary(context_path)
+
     skill_focus = skills_prompt.strip()
     skill_prompt_source = "explicit" if skill_focus else "session_state"
     if not skill_focus:
         skill_focus = _skill_signal(handoff=handoff, missions=missions, tasks=tasks)
-    if not skill_focus:
+    codebase_skill_focus = _codebase_skill_signal(codebase) if include_skills else ""
+    if codebase_skill_focus:
+        if skill_focus:
+            skill_focus = f"{skill_focus} {codebase_skill_focus}"
+            skill_prompt_source = f"{skill_prompt_source}+codebase"
+        else:
+            skill_focus = codebase_skill_focus
+            skill_prompt_source = "codebase"
+    elif not skill_focus:
         skill_prompt_source = "none"
     skills = _collect_skills(
         manager,
@@ -434,18 +464,6 @@ def build_session_bootstrap(
     )
     memory = _collect_memory(manager, context_path, scoped=resolved_scope)
     reports = _collect_agent_reports(manager, context_path, scoped=resolved_scope)
-    if resolved_scope.layout_version == LAYOUT_VERSION:
-        if resolved_scope.requester_path is not None and resolved_scope.project_id:
-            codebase = build_scoped_codebase_summary(
-                context_path,
-                resolved_scope.requester_path,
-                project_id=resolved_scope.project_id,
-            )
-        else:
-            codebase = {}
-    else:
-        codebase = build_codebase_summary(context_path)
-
     # Compute per-mount freshness (filesystem-based, no DB needed)
     decay_hours = manager.config.context_index.decay_hours
     freshness_map: dict[str, MountFreshness] = {}
@@ -1589,6 +1607,33 @@ def _skill_signal(
         add(item.get("title"))
 
     return " ".join(parts)[:_MAX_SKILL_SIGNAL_CHARS]
+
+
+def _codebase_skill_signal(codebase: dict[str, Any]) -> str:
+    """Return bounded language terms used only to select quality skills."""
+    terms: list[str] = []
+
+    language_hints = codebase.get("language_hints")
+    if isinstance(language_hints, dict):
+        for language, count in language_hints.items():
+            if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+                continue
+            term = _CODEBASE_LANGUAGE_SKILL_TERMS.get(str(language).casefold())
+            if term and term not in terms:
+                terms.append(term)
+            if len(terms) >= _MAX_CODEBASE_SKILL_TERMS:
+                return " ".join(terms)
+
+    ecosystems = codebase.get("ecosystems")
+    if isinstance(ecosystems, list):
+        for ecosystem in ecosystems:
+            term = _CODEBASE_ECOSYSTEM_SKILL_TERMS.get(str(ecosystem).casefold())
+            if term and term not in terms:
+                terms.append(term)
+            if len(terms) >= _MAX_CODEBASE_SKILL_TERMS:
+                break
+
+    return " ".join(terms)
 
 
 def _collect_messages(

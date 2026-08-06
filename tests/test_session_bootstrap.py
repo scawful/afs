@@ -783,6 +783,62 @@ def test_session_bootstrap_delivers_explicitly_matched_skill_body(
     assert inferred["skills"]["matches"][0]["body"] == expected_body
 
 
+def test_session_bootstrap_matches_language_quality_from_codebase(
+    tmp_path: Path,
+) -> None:
+    from afs.model_prompts import build_model_system_prompt
+    from afs.session_bootstrap import build_session_bootstrap
+
+    project_path = tmp_path / "project"
+    context_root = project_path / ".context"
+    (project_path / "src").mkdir(parents=True)
+    (project_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n",
+        encoding="utf-8",
+    )
+    (project_path / "src" / "demo.py").write_text(
+        "def demo() -> int:\n    return 1\n",
+        encoding="utf-8",
+    )
+    manager = AFSManager(
+        config=AFSConfig(general=GeneralConfig(context_root=context_root))
+    )
+    manager.ensure(path=project_path, context_root=context_root)
+
+    summary = build_session_bootstrap(
+        manager,
+        context_root,
+        record_event=False,
+    )
+
+    assert summary["skills"]["prompt_source"] == "codebase"
+    assert summary["skills"]["matches"][0]["name"] == "python-quality"
+    prompt = build_model_system_prompt(
+        base_prompt="Use the prepared repository context.",
+        session_state=summary,
+    )
+    assert "## Skill Enforcement" in prompt
+    assert "# Python Quality" in prompt
+    assert "Keep I/O, side effects, and async boundaries explicit" in prompt
+
+
+def test_codebase_skill_signal_does_not_treat_cmake_as_cpp() -> None:
+    from afs.session_bootstrap import _codebase_skill_signal
+
+    assert (
+        _codebase_skill_signal(
+            {"ecosystems": ["cmake"], "language_hints": {"c": 2}}
+        )
+        == ""
+    )
+    assert (
+        _codebase_skill_signal(
+            {"ecosystems": ["cmake"], "language_hints": {"cpp": 2}}
+        )
+        == "c++"
+    )
+
+
 def test_session_bootstrap_surfaces_skill_warnings_without_losing_matches(
     tmp_path: Path,
 ) -> None:
