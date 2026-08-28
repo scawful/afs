@@ -64,7 +64,7 @@ Companion repo discovery:
 That means a user can create a sibling repo like this:
 
 ```text
-~/src/lab/afs_example/
+/path/to/afs_example/
   extension.toml
   src/afs_example/
     __init__.py
@@ -79,7 +79,7 @@ Then enable it from core AFS without copying implementation code:
 [extensions]
 auto_discover = false
 enabled_extensions = ["afs_example"]
-extension_repo_roots = ["~/src/lab"]
+extension_repo_roots = ["/path/to/extensions"]
 # optional overrides:
 extension_repo_prefixes = ["afs_", "team_"]
 manifest_filenames = ["extension.toml", "afs-extension.toml"]

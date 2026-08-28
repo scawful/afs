@@ -26,6 +26,7 @@ from ..discovery import discover_contexts, get_project_stats
 from ..embeddings import build_embedding_index, create_ollama_embed_fn
 from ..manager import AFSManager
 from ..models import MountType
+from ..runtime_paths import default_workspace_root
 from ..workspace_sync import load_workspace_entries, resolve_config_output, sync_workspace_config
 from .base import (
     AgentResult,
@@ -112,8 +113,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = build_base_parser("Sync workspace paths, discover contexts, and refresh embeddings.")
     parser.add_argument(
         "--workspace-root",
-        default=str(Path.home() / "src"),
-        help="Workspace root for WORKSPACE.toml (default: ~/src).",
+        default=str(default_workspace_root()),
+        help="Workspace root for WORKSPACE.toml (default: discovered from the current directory).",
     )
     parser.add_argument(
         "--discover-path",
@@ -301,8 +302,7 @@ def _refresh_embeddings(args: argparse.Namespace, config) -> tuple[list[dict], l
 
         sources = [project.path, *project.knowledge_roots]
         output_dir = (
-            resolve_mount_root(context_root, MountType.KNOWLEDGE, config=config)
-            / project.name
+            resolve_mount_root(context_root, MountType.KNOWLEDGE, config=config) / project.name
         )
         result = build_embedding_index(
             sources,
@@ -367,12 +367,18 @@ def _load_embedding_projects(path: Path) -> list[EmbeddingProject]:
                 provider=entry.get("embedding_provider"),
                 model=entry.get("embedding_model"),
                 include_patterns=[
-                    pattern for pattern in entry.get("include_patterns", []) if isinstance(pattern, str)
+                    pattern
+                    for pattern in entry.get("include_patterns", [])
+                    if isinstance(pattern, str)
                 ],
                 exclude_patterns=[
-                    pattern for pattern in entry.get("exclude_patterns", []) if isinstance(pattern, str)
+                    pattern
+                    for pattern in entry.get("exclude_patterns", [])
+                    if isinstance(pattern, str)
                 ],
-                max_files=entry.get("max_files") if isinstance(entry.get("max_files"), int) else None,
+                max_files=entry.get("max_files")
+                if isinstance(entry.get("max_files"), int)
+                else None,
                 knowledge_roots=knowledge_roots,
             )
         )
@@ -417,7 +423,9 @@ def _filter_context_paths(
 ) -> list[Path]:
     selected = sorted({path.expanduser().resolve() for path in context_paths}, key=str)
     if filters:
-        needles = [item.strip().lower() for item in filters if isinstance(item, str) and item.strip()]
+        needles = [
+            item.strip().lower() for item in filters if isinstance(item, str) and item.strip()
+        ]
         if needles:
             selected = [
                 path for path in selected if any(needle in str(path).lower() for needle in needles)
@@ -699,9 +707,7 @@ def _emit_agent_result(args: argparse.Namespace, result: AgentResult) -> None:
             from ..diagnostics import write_doctor_snapshot
 
             config_path = (
-                Path(args.config).expanduser().resolve()
-                if getattr(args, "config", None)
-                else None
+                Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
             )
             write_doctor_snapshot(config_path=config_path)
         except Exception:
@@ -743,8 +749,7 @@ def _run_watch_loop(args: argparse.Namespace, config, *, agent: _WarmAgent | Non
             )
             changes = next(watcher)
             changed_paths = [
-                Path(raw_path).expanduser().resolve(strict=False)
-                for _change, raw_path in changes
+                Path(raw_path).expanduser().resolve(strict=False) for _change, raw_path in changes
             ]
             if not changed_paths:
                 continue
@@ -767,7 +772,8 @@ def run(args: argparse.Namespace) -> int:
     if ctx:
         logger.info(
             "Context-warm loaded: %d indexed, %d memory topics",
-            ctx.index_total, len(ctx.memory_topics),
+            ctx.index_total,
+            len(ctx.memory_topics),
         )
 
     if args.watch:

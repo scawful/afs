@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from pathlib import Path
 
+from .runtime_paths import default_config_root
 from .schema import AFSConfig, WorkspaceDirectory
 from .toml_compat import tomllib
 
@@ -52,7 +53,7 @@ def sync_workspace_config(
 def resolve_config_output(config_path: Path | None) -> Path:
     if config_path:
         return config_path.expanduser().resolve()
-    return Path.home() / ".config" / "afs" / "config.toml"
+    return default_config_root() / "config.toml"
 
 
 def _merge_workspace_entries(

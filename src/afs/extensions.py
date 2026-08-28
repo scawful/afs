@@ -11,6 +11,7 @@ from difflib import get_close_matches
 from pathlib import Path
 from typing import Any
 
+from .runtime_paths import default_config_root
 from .schema import AFSConfig, ExtensionsConfig
 from .skills import normalize_skill_root
 from .toml_compat import tomllib
@@ -478,6 +479,7 @@ def _as_context_source_specs(items: Any) -> list[dict[str, Any]]:
         specs.append(spec)
     return specs
 
+
 def _env_extension_dirs() -> list[Path]:
     raw = os.environ.get("AFS_EXTENSION_DIRS", "").strip()
     if not raw:
@@ -524,7 +526,7 @@ def _env_manifest_filenames() -> list[str]:
 def _default_extension_dirs() -> list[Path]:
     return [
         Path("extensions").expanduser().resolve(),
-        Path("~/.config/afs/extensions").expanduser().resolve(),
+        default_config_root() / "extensions",
         Path("~/.afs/extensions").expanduser().resolve(),
     ]
 
@@ -558,7 +560,9 @@ def _merge_unique_str(*groups: list[str]) -> list[str]:
     return merged
 
 
-def resolve_extensions_config(config: AFSConfig | ExtensionsConfig | dict | None = None) -> ExtensionsConfig:
+def resolve_extensions_config(
+    config: AFSConfig | ExtensionsConfig | dict | None = None,
+) -> ExtensionsConfig:
     """Resolve extension config with env and default dirs."""
     workspace_extension_roots: list[Path] = []
     if config is None:
@@ -575,8 +579,7 @@ def resolve_extensions_config(config: AFSConfig | ExtensionsConfig | dict | None
     elif isinstance(config, AFSConfig):
         source = config.extensions
         workspace_extension_roots = [
-            workspace.path
-            for workspace in config.general.workspace_directories
+            workspace.path for workspace in config.general.workspace_directories
         ]
         resolved = ExtensionsConfig(
             enabled_extensions=list(source.enabled_extensions),
@@ -706,9 +709,7 @@ def load_extension_manifest(path: Path) -> ExtensionManifest:
             path, [f"cannot read manifest: {_bounded_repr(str(exc))}"]
         ) from exc
     except (ValueError, UnicodeError) as exc:
-        raise ExtensionManifestError(
-            path, [f"invalid TOML: {_bounded_repr(str(exc))}"]
-        ) from exc
+        raise ExtensionManifestError(path, [f"invalid TOML: {_bounded_repr(str(exc))}"]) from exc
     except Exception as exc:
         raise _unexpected_manifest_error(path, exc) from exc
     finally:

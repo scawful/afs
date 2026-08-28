@@ -16,6 +16,7 @@ from ..context_layout import LAYOUT_VERSION, detect_layout_version
 from ..context_paths import resolve_agent_output_root, resolve_mount_root
 from ..models import MountType
 from ..path_safety import assert_no_linklike_components
+from ..runtime_paths import default_context_root
 from .base import (
     AgentResult,
     build_base_parser,
@@ -37,8 +38,13 @@ AGENT_DESCRIPTION = (
 
 AGENT_CAPABILITIES = {
     "tools": [
-        "context.read", "context.write", "context.query", "context.list",
-        "context.diff", "embedding_search", "embedding_update",
+        "context.read",
+        "context.write",
+        "context.query",
+        "context.list",
+        "context.diff",
+        "embedding_search",
+        "embedding_update",
     ],
     "topics": ["missions", "analysis", "automation"],
     "mount_types": ["scratchpad", "knowledge", "memory", "history"],
@@ -108,6 +114,7 @@ def _write_mission_json(
 # Mission model
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class MissionPhase:
     name: str
@@ -166,13 +173,15 @@ def _load_mission(path: Path) -> Mission | None:
 
     phases = []
     for phase_data in phases_data:
-        phases.append(MissionPhase(
-            name=phase_data.get("name", ""),
-            description=phase_data.get("description", ""),
-            tools=phase_data.get("tools", []),
-            outputs=phase_data.get("outputs", []),
-            requires_approval=phase_data.get("requires_approval", False),
-        ))
+        phases.append(
+            MissionPhase(
+                name=phase_data.get("name", ""),
+                description=phase_data.get("description", ""),
+                tools=phase_data.get("tools", []),
+                outputs=phase_data.get("outputs", []),
+                requires_approval=phase_data.get("requires_approval", False),
+            )
+        )
 
     return Mission(
         name=m.get("name", path.stem),
@@ -216,6 +225,7 @@ def _discover_missions(context_root: Path) -> list[tuple[Path, Mission]]:
 # Context-aware mission agent
 # ---------------------------------------------------------------------------
 
+
 class _MissionAgent(ContextAwareAgent):
     """Mission runner with context-aware observation and orientation."""
 
@@ -245,6 +255,7 @@ _agent: _MissionAgent | None = None
 # ---------------------------------------------------------------------------
 # Phase tool execution — real AFS operations
 # ---------------------------------------------------------------------------
+
 
 def _run_phase_tools(
     phase: MissionPhase,
@@ -295,6 +306,7 @@ def _phase_observe(
     try:
         from ..config import load_config_model
         from ..manager import AFSManager
+
         config = load_config_model(merge_user=True)
         manager = AFSManager(config=config)
         health = manager.context_health(context_path=context_path)
@@ -329,6 +341,7 @@ def _phase_observe(
             from ..config import load_config_model
             from ..context_index import ContextSQLiteIndex
             from ..manager import AFSManager
+
             config = load_config_model(merge_user=True)
             manager = AFSManager(config=config)
             index = ContextSQLiteIndex(manager, context_path)
@@ -364,12 +377,17 @@ def _phase_observe(
             from ..context_paths import resolve_mount_root
             from ..history import query_events
             from ..models import MountType
+
             history_root = resolve_mount_root(context_path, MountType.HISTORY)
             if history_root.exists():
                 events = query_events(history_root, limit=20)
                 data["recent_events"] = [
-                    {"type": e.get("type", ""), "source": e.get("source", ""),
-                     "op": e.get("op", ""), "timestamp": e.get("timestamp", "")}
+                    {
+                        "type": e.get("type", ""),
+                        "source": e.get("source", ""),
+                        "op": e.get("op", ""),
+                        "timestamp": e.get("timestamp", ""),
+                    }
                     for e in events
                 ]
                 notes.append(f"History: {len(events)} recent events")
@@ -426,6 +444,7 @@ def _phase_orient(
         from ..manager import AFSManager
         from ..models import MountType
         from ..scopes import resolve_scope
+
         config = load_config_model(merge_user=True)
         manager = AFSManager(config=config)
         index = ContextSQLiteIndex(manager, context_path)
@@ -442,8 +461,11 @@ def _phase_orient(
                 include_content=False,
             )
             data["query_results"] = [
-                {"path": r.get("relative_path", ""), "mount": r.get("mount_type", ""),
-                 "excerpt": r.get("content_excerpt", "")[:200]}
+                {
+                    "path": r.get("relative_path", ""),
+                    "mount": r.get("mount_type", ""),
+                    "excerpt": r.get("content_excerpt", "")[:200],
+                }
                 for r in results
             ]
             notes.append(f"Orient: found {len(results)} relevant context entries")
@@ -458,30 +480,39 @@ def _phase_orient(
     if index_diff:
         total_changes = index_diff.get("added", 0) + index_diff.get("modified", 0)
         if total_changes > 0:
-            data["findings"].append({
-                "type": "index_drift",
-                "severity": "info" if total_changes < 10 else "warning",
-                "detail": f"{total_changes} files changed since last index",
-            })
+            data["findings"].append(
+                {
+                    "type": "index_drift",
+                    "severity": "info" if total_changes < 10 else "warning",
+                    "detail": f"{total_changes} files changed since last index",
+                }
+            )
 
     health = obs_data.get("context_health", {})
     if health.get("missing_directories"):
-        data["findings"].append({
-            "type": "missing_dirs",
-            "severity": "warning",
-            "detail": f"Missing: {', '.join(health['missing_directories'])}",
-        })
+        data["findings"].append(
+            {
+                "type": "missing_dirs",
+                "severity": "warning",
+                "detail": f"Missing: {', '.join(health['missing_directories'])}",
+            }
+        )
 
     notes.append(f"Orient: {len(data['findings'])} findings")
 
     # LLM enrichment — optional, never gates the phase
     try:
         from .llm_bridge import query_llm
+
         model = guard.resolve_model(task_tier="background")
-        findings_json = json.dumps({
-            "query_results": data.get("query_results", []),
-            "findings": data.get("findings", []),
-        }, indent=2, default=str)
+        findings_json = json.dumps(
+            {
+                "query_results": data.get("query_results", []),
+                "findings": data.get("findings", []),
+            },
+            indent=2,
+            default=str,
+        )
         llm_response = query_llm(
             prompt=(
                 "Analyze these findings from the observe phase and identify "
@@ -528,44 +559,53 @@ def _phase_decide(
         finding_type = finding.get("type", "unknown")
 
         if finding_type == "index_drift":
-            data["actions"].append({
-                "action": "embedding_update",
-                "reason": finding["detail"],
-                "auto_approve": True,
-            })
+            data["actions"].append(
+                {
+                    "action": "embedding_update",
+                    "reason": finding["detail"],
+                    "auto_approve": True,
+                }
+            )
         elif finding_type == "missing_dirs":
-            data["deferred"].append({
-                "action": "context_repair",
-                "reason": finding["detail"],
-                "requires_approval": True,
-            })
+            data["deferred"].append(
+                {
+                    "action": "context_repair",
+                    "reason": finding["detail"],
+                    "requires_approval": True,
+                }
+            )
         elif severity == "warning":
-            data["deferred"].append({
-                "action": "investigate",
-                "reason": finding.get("detail", ""),
-                "requires_approval": True,
-            })
+            data["deferred"].append(
+                {
+                    "action": "investigate",
+                    "reason": finding.get("detail", ""),
+                    "requires_approval": True,
+                }
+            )
 
     notes.append(
-        f"Decide: {len(data['actions'])} auto-actions, "
-        f"{len(data['deferred'])} deferred for review"
+        f"Decide: {len(data['actions'])} auto-actions, {len(data['deferred'])} deferred for review"
     )
 
     # LLM enrichment — optional, never gates the phase
     try:
         from .llm_bridge import query_llm
+
         model = guard.resolve_model(task_tier="background")
-        analysis_json = json.dumps({
-            "findings": findings,
-            "current_actions": data.get("actions", []),
-            "current_deferred": data.get("deferred", []),
-            "llm_analysis": analysis.get("data", {}).get("llm_analysis", ""),
-        }, indent=2, default=str)
+        analysis_json = json.dumps(
+            {
+                "findings": findings,
+                "current_actions": data.get("actions", []),
+                "current_deferred": data.get("deferred", []),
+                "llm_analysis": analysis.get("data", {}).get("llm_analysis", ""),
+            },
+            indent=2,
+            default=str,
+        )
         llm_response = query_llm(
             prompt=(
                 "Based on this analysis, produce a JSON action plan with "
-                "'actions' (auto-approvable) and 'deferred' (needs review): "
-                + analysis_json
+                "'actions' (auto-approvable) and 'deferred' (needs review): " + analysis_json
             ),
             context={"findings": findings},
             model_route=model,
@@ -633,17 +673,20 @@ def _phase_act(
                 from ..config import load_config_model
                 from ..context_index import ContextSQLiteIndex
                 from ..manager import AFSManager
+
                 config = load_config_model(merge_user=True)
                 manager = AFSManager(config=config)
                 index = ContextSQLiteIndex(manager, context_path)
                 summary = index.rebuild()
-                data["executed"].append({
-                    "action": action,
-                    "result": {
-                        "total_entries": summary.rows_written,
-                        "mount_types": summary.by_mount_type,
-                    },
-                })
+                data["executed"].append(
+                    {
+                        "action": action,
+                        "result": {
+                            "total_entries": summary.rows_written,
+                            "mount_types": summary.by_mount_type,
+                        },
+                    }
+                )
                 notes.append(f"Rebuilt index: {summary.rows_written} entries")
 
             elif action == "context_write":
@@ -681,6 +724,7 @@ def _phase_act(
 # ---------------------------------------------------------------------------
 # Phase dispatch
 # ---------------------------------------------------------------------------
+
 
 def _execute_phase(
     phase: MissionPhase,
@@ -755,6 +799,7 @@ def _execute_phase(
 # Main loop
 # ---------------------------------------------------------------------------
 
+
 def _run_mission(
     mission_path: Path,
     mission: Mission,
@@ -795,9 +840,13 @@ def _run_mission(
     for phase in mission.phases:
         if not guard.should_continue():
             mission_result["status"] = "iteration_cap"
-            mission_result["phases"].append({
-                "phase": phase.name, "status": "skipped", "reason": "iteration cap",
-            })
+            mission_result["phases"].append(
+                {
+                    "phase": phase.name,
+                    "status": "skipped",
+                    "reason": "iteration cap",
+                }
+            )
             break
 
         phase_result = _execute_phase(phase, mission, guard, output_dir, context_root)
@@ -841,7 +890,7 @@ def build_parser():
     )
     parser.add_argument(
         "--context-root",
-        default=str(Path.home() / "src" / "lab" / ".context"),
+        default=str(default_context_root()),
         help="Context root directory.",
     )
     parser.add_argument(
@@ -865,7 +914,9 @@ def run(args) -> int:
     if ctx:
         logger.info(
             "Mission context: %d indexed, %d memory topics, %d active agents",
-            ctx.index_total, len(ctx.memory_topics), len(ctx.active_agents),
+            ctx.index_total,
+            len(ctx.memory_topics),
+            len(ctx.active_agents),
         )
 
     missions = _discover_missions(context_root)
@@ -882,7 +933,9 @@ def run(args) -> int:
             duration_seconds=time.time() - start,
             notes=["no pending missions"],
         )
-        emit_result(result, output_path=None, force_stdout=bool(args.stdout), pretty=bool(args.pretty))
+        emit_result(
+            result, output_path=None, force_stdout=bool(args.stdout), pretty=bool(args.pretty)
+        )
         return 0
 
     all_results = []

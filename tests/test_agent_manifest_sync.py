@@ -42,7 +42,11 @@ def test_agent_manifest_sync_copies_skills_and_writes_exports(tmp_path: Path) ->
 
     applied = sync_manifest(data, apply=True)
     assert {action.status for action in applied} == {"synced"}
-    assert (skill_root / "focused-verification" / "SKILL.md").read_text(encoding="utf-8").startswith("---")
+    assert (
+        (skill_root / "focused-verification" / "SKILL.md")
+        .read_text(encoding="utf-8")
+        .startswith("---")
+    )
     export_payload = json.loads(export_path.read_text(encoding="utf-8"))
     assert export_payload["harness"]["name"] == "claude"
     assert export_payload["generated_by"] == "afs agent-manifest sync"
@@ -54,7 +58,9 @@ def test_agent_manifest_sync_copies_skills_and_writes_exports(tmp_path: Path) ->
 def test_agent_manifest_sync_replaces_skill_symlink_with_copy(tmp_path: Path) -> None:
     canonical = tmp_path / "canonical" / "handoff-writer"
     canonical.mkdir(parents=True)
-    (canonical / "SKILL.md").write_text("---\nname: handoff-writer\n---\n# Handoff\n", encoding="utf-8")
+    (canonical / "SKILL.md").write_text(
+        "---\nname: handoff-writer\n---\n# Handoff\n", encoding="utf-8"
+    )
     linked_target = tmp_path / "linked"
     linked_target.mkdir()
     skill_root = tmp_path / "gemini-skills"
@@ -147,3 +153,46 @@ def test_agent_manifest_sync_preserves_custom_slash_commands(tmp_path: Path) -> 
     applied = sync_manifest(data, apply=True)
     assert applied[0].status == "customized"
     assert existing.read_text(encoding="utf-8") == "custom\n"
+
+
+def test_agent_manifest_sync_accepts_portable_destination_overrides(tmp_path: Path) -> None:
+    skill = tmp_path / "source" / "agentic-context"
+    commands = tmp_path / "source" / "commands"
+    skill.mkdir(parents=True)
+    commands.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# AFS\n", encoding="utf-8")
+    (commands / "afs.md").write_text("Use AFS.\n", encoding="utf-8")
+    skill_root = tmp_path / "different-layout" / "skills"
+    command_root = tmp_path / "different-layout" / "commands"
+    export_path = tmp_path / "different-layout" / "manifest.json"
+    data = {
+        "version": 1,
+        "paths": {},
+        "harnesses": [
+            {
+                "name": "hcode",
+                "skill_roots": [],
+                "command_roots": [],
+                "manifest_exports": [],
+                "mcp_servers": [],
+            }
+        ],
+        "skills": [{"name": "agentic-context", "canonical_path": str(skill), "targets": ["hcode"]}],
+        "slash_command_packs": [
+            {"name": "afs-opencode", "canonical_path": str(commands), "targets": ["hcode"]}
+        ],
+        "mcp_servers": [],
+    }
+
+    actions = sync_manifest(
+        data,
+        apply=True,
+        skill_roots={"hcode": [str(skill_root)]},
+        command_roots={"hcode": [str(command_root)]},
+        export_paths={"hcode": [str(export_path)]},
+    )
+
+    assert {action.status for action in actions} == {"synced"}
+    assert (skill_root / "agentic-context" / "SKILL.md").exists()
+    assert (command_root / "afs.md").exists()
+    assert json.loads(export_path.read_text(encoding="utf-8"))["harness"]["name"] == "hcode"

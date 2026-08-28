@@ -17,15 +17,13 @@ from typing import Any
 from ..context_layout import LAYOUT_VERSION, detect_layout_version
 from ..models import ContextCategory
 from ..path_safety import assert_no_linklike_components, lexical_absolute
+from ..runtime_paths import default_context_root
 from ..scopes import resolve_scope, visible_scope_prefixes
 from ..scratchpad import ScratchpadStore
 
 logger = logging.getLogger(__name__)
 
-# Default paths
-DEFAULT_CONTEXT_ROOT = Path.home() / ".context"
-DEFAULT_WORKSPACE_ROOT = Path.home() / "src"
-DEFAULT_ASAR_PATH = Path.home() / "src/third_party/asar-repo/build/asar/bin/asar"
+DEFAULT_CONTEXT_ROOT = default_context_root()
 
 
 def _resolve_query_tool_path() -> Path:
@@ -141,9 +139,7 @@ async def read_context_handler(args: dict[str, Any]) -> ToolResult:
         if detect_layout_version(context_root) == LAYOUT_VERSION:
             requester_raw = str(args.get("_requester_path", "")).strip()
             if not requester_raw:
-                raise PermissionError(
-                    "context v2 reads require a registered current project"
-                )
+                raise PermissionError("context v2 reads require a registered current project")
             requester = Path(requester_raw).expanduser().resolve()
             scoped = resolve_scope(context_root, requester_path=requester)
             candidate = lexical_absolute(full_path)
@@ -449,7 +445,7 @@ async def fs_query_handler(args: dict[str, Any]) -> ToolResult:
             cmd,
             capture_output=True,
             text=True,
-            timeout=120, # Longer timeout for LLM call
+            timeout=120,  # Longer timeout for LLM call
         )
 
         if result.returncode == 0:

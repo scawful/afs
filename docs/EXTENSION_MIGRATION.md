@@ -37,7 +37,7 @@ it belongs in a companion extension repo, not in core AFS.
 A companion repo can be a sibling of `afs`:
 
 ```text
-~/src/lab/afs_example/
+/path/to/afs_example/
   extension.toml
   src/afs_example/
     __init__.py
@@ -51,7 +51,7 @@ Core AFS discovers it with:
 ```toml
 [extensions]
 enabled_extensions = ["afs_example"]
-extension_repo_roots = ["~/src/lab"]
+extension_repo_roots = ["/path/to/afs-extensions"]
 ```
 
 `src/` is added to the import path automatically when present, so src-layout

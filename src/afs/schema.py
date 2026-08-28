@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from .models import MountType
+from .runtime_paths import (
+    default_config_root,
+    default_context_root,
+    default_training_dataset,
+)
 from .skills import normalize_skill_root
 
 
@@ -113,7 +118,7 @@ class WorkspaceDirectory:
 
 @dataclass
 class GeneralConfig:
-    context_root: Path = field(default_factory=lambda: Path.home() / ".context")
+    context_root: Path = field(default_factory=default_context_root)
     python_executable: Path | None = None
     workspace_directories: list[WorkspaceDirectory] = field(default_factory=list)
     mcp_allowed_roots: list[Path] = field(default_factory=list)
@@ -140,12 +145,8 @@ class GeneralConfig:
         else:
             discovery_ignore = default_discovery_ignore()
         return cls(
-            context_root=_as_path(context_root)
-            if context_root
-            else cls().context_root,
-            python_executable=_as_path(python_executable)
-            if python_executable
-            else None,
+            context_root=_as_path(context_root) if context_root else cls().context_root,
+            python_executable=_as_path(python_executable) if python_executable else None,
             workspace_directories=workspace_directories,
             mcp_allowed_roots=mcp_allowed_roots,
             discovery_ignore=discovery_ignore,
@@ -157,9 +158,7 @@ class PluginsConfig:
     enabled_plugins: list[str] = field(default_factory=list)
     plugin_dirs: list[Path] = field(default_factory=list)
     auto_discover: bool = True
-    auto_discover_prefixes: list[str] = field(
-        default_factory=lambda: ["afs_plugin"]
-    )
+    auto_discover_prefixes: list[str] = field(default_factory=lambda: ["afs_plugin"])
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PluginsConfig:
@@ -167,9 +166,7 @@ class PluginsConfig:
             item for item in data.get("enabled_plugins", []) if isinstance(item, str)
         ]
         plugin_dirs = [
-            _as_path(item)
-            for item in data.get("plugin_dirs", [])
-            if isinstance(item, (str, Path))
+            _as_path(item) for item in data.get("plugin_dirs", []) if isinstance(item, (str, Path))
         ]
         auto_discover = data.get("auto_discover", True)
         prefixes = data.get("auto_discover_prefixes")
@@ -194,11 +191,7 @@ def _as_path_list(items: list[Any] | None) -> list[Path]:
 def _as_skill_root_list(items: list[Any] | None) -> list[Path]:
     if not isinstance(items, list):
         return []
-    return [
-        normalize_skill_root(item)
-        for item in items
-        if isinstance(item, (str, Path))
-    ]
+    return [normalize_skill_root(item) for item in items if isinstance(item, (str, Path))]
 
 
 def _as_str_list(items: list[Any] | None) -> list[str]:
@@ -224,9 +217,7 @@ class ProfileConfig:
     def from_dict(cls, data: dict[str, Any]) -> ProfileConfig:
         agents_raw = data.get("agent_configs", [])
         agent_configs = [
-            AgentConfig.from_dict(item)
-            for item in agents_raw
-            if isinstance(item, dict)
+            AgentConfig.from_dict(item) for item in agents_raw if isinstance(item, dict)
         ]
         return cls(
             inherits=_as_str_list(data.get("inherits")),
@@ -281,7 +272,9 @@ class ProfilesConfig:
                 parsed_profiles[str(name)] = ProfileConfig.from_dict(payload)
 
         return cls(
-            active_profile=str(active_profile) if isinstance(active_profile, str) else cls().active_profile,
+            active_profile=str(active_profile)
+            if isinstance(active_profile, str)
+            else cls().active_profile,
             auto_apply=auto_apply,
             profiles=parsed_profiles,
         )
@@ -293,9 +286,7 @@ class ExtensionsConfig:
     extension_dirs: list[Path] = field(default_factory=list)
     auto_discover: bool = True
     extension_repo_roots: list[Path] = field(default_factory=list)
-    extension_repo_prefixes: list[str] = field(
-        default_factory=lambda: ["afs_", "afs-"]
-    )
+    extension_repo_prefixes: list[str] = field(default_factory=lambda: ["afs_", "afs-"])
     manifest_filenames: list[str] = field(default_factory=lambda: ["extension.toml"])
 
     @classmethod
@@ -443,8 +434,7 @@ class AgentConfig:
             on_event=_as_str_list(data.get("on_event")),
             # Normalized but not coerced: an invalid value survives to the
             # reactor, which fails closed on it (no spawn, no job) and warns.
-            on_event_action=str(data.get("on_event_action", "spawn")).strip().lower()
-            or "spawn",
+            on_event_action=str(data.get("on_event_action", "spawn")).strip().lower() or "spawn",
             event_debounce=str(data.get("event_debounce", "")).strip(),
             allowed_mounts=_as_str_list(data.get("allowed_mounts")),
             allowed_tools=_as_str_list(data.get("allowed_tools")),
@@ -518,11 +508,7 @@ class OrchestratorConfig:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> OrchestratorConfig:
         agents_raw = data.get("default_agents", [])
-        agents = [
-            AgentConfig.from_dict(item)
-            for item in agents_raw
-            if isinstance(item, dict)
-        ]
+        agents = [AgentConfig.from_dict(item) for item in agents_raw if isinstance(item, dict)]
         max_agents = data.get("max_agents", cls().max_agents)
         return cls(
             enabled=bool(data.get("enabled", False)),
@@ -566,9 +552,7 @@ class ServiceConfig:
             auto_start=bool(data.get("auto_start", False)),
             command=command,
             context_filters=parsed_context_filters,
-            working_directory=_as_path(working_directory)
-            if working_directory
-            else None,
+            working_directory=_as_path(working_directory) if working_directory else None,
             environment=environment,
         )
 
@@ -616,7 +600,7 @@ class HistoryConfig:
 class MemoryExportConfig:
     interval_seconds: int = 0
     dataset_output: Path = field(
-        default_factory=lambda: Path.home() / "src" / "training" / "datasets" / "memory_export.jsonl"
+        default_factory=lambda: default_training_dataset("memory_export.jsonl")
     )
     report_output: Path | None = None
     allow_raw: bool = False
@@ -768,17 +752,13 @@ class MemoryConsolidationConfig:
             gate_min_sessions=int(data.get("gate_min_sessions", cls().gate_min_sessions))
             if isinstance(data.get("gate_min_sessions"), (int, float))
             else cls().gate_min_sessions,
-            summarize_with_llm=bool(
-                data.get("summarize_with_llm", cls().summarize_with_llm)
-            ),
+            summarize_with_llm=bool(data.get("summarize_with_llm", cls().summarize_with_llm)),
             summarizer_provider=str(
                 data.get("summarizer_provider", cls().summarizer_provider)
             ).strip()
             if isinstance(data.get("summarizer_provider"), str)
             else cls().summarizer_provider,
-            summarizer_model=str(
-                data.get("summarizer_model", cls().summarizer_model)
-            ).strip()
+            summarizer_model=str(data.get("summarizer_model", cls().summarizer_model)).strip()
             if isinstance(data.get("summarizer_model"), str)
             else cls().summarizer_model,
         )
@@ -800,7 +780,7 @@ class MemoryExportRoute:
         parsed_tags = [str(tag) for tag in tags if isinstance(tag, str)]
         output = data.get("output")
         if not output:
-            output = Path.home() / "src" / "training" / "datasets" / "memory_export.jsonl"
+            output = default_training_dataset("memory_export.jsonl")
         domain = data.get("domain")
         return cls(
             tags=parsed_tags,
@@ -813,7 +793,7 @@ def default_memory_export_routes() -> list[MemoryExportRoute]:
     return [
         MemoryExportRoute(
             tags=["scribe", "scribe_voice", "voice"],
-            output=Path.home() / "src" / "training" / "datasets" / "scribe_voice.jsonl",
+            output=default_training_dataset("scribe_voice.jsonl"),
             domain="scribe",
         )
     ]
@@ -912,7 +892,7 @@ class HivemindConfig:
 class SessionPackCacheConfig:
     enabled: bool = True
     ttl_seconds: int = 300
-    cache_dir: Path = field(default_factory=lambda: Path.home() / ".config" / "afs" / "cache")
+    cache_dir: Path = field(default_factory=lambda: default_config_root() / "cache")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SessionPackCacheConfig:
@@ -923,7 +903,9 @@ class SessionPackCacheConfig:
         return cls(
             enabled=bool(data.get("enabled", True)),
             ttl_seconds=int(ttl_seconds),
-            cache_dir=_as_path(cache_dir) if isinstance(cache_dir, (str, Path)) else cls().cache_dir,
+            cache_dir=_as_path(cache_dir)
+            if isinstance(cache_dir, (str, Path))
+            else cls().cache_dir,
         )
 
 
@@ -931,9 +913,7 @@ class VerificationConfigError(ValueError):
     """Raised when executable verification configuration is malformed."""
 
 
-def _verification_string_list(
-    data: dict[str, Any], key: str, *, label: str
-) -> list[str]:
+def _verification_string_list(data: dict[str, Any], key: str, *, label: str) -> list[str]:
     raw = data.get(key, [])
     if not isinstance(raw, list) or any(not isinstance(value, str) for value in raw):
         raise VerificationConfigError(f"{label} {key} must be an array of strings")
@@ -968,8 +948,7 @@ class VerificationExecutionConfig:
         unknown_fields = sorted(set(data) - allowed_fields)
         if unknown_fields:
             raise VerificationConfigError(
-                "verification execution contains unknown fields: "
-                + ", ".join(unknown_fields)
+                "verification execution contains unknown fields: " + ", ".join(unknown_fields)
             )
 
         argv = data.get("argv")
@@ -993,8 +972,7 @@ class VerificationExecutionConfig:
             or not 0 < float(timeout_seconds) <= 3600
         ):
             raise VerificationConfigError(
-                "verification execution timeout_seconds must be greater than 0 "
-                "and at most 3600"
+                "verification execution timeout_seconds must be greater than 0 and at most 3600"
             )
 
         max_output_bytes = data.get("max_output_bytes", cls().max_output_bytes)
@@ -1018,8 +996,7 @@ class VerificationExecutionConfig:
 
         raw_env = data.get("env", {})
         if not isinstance(raw_env, dict) or any(
-            not isinstance(key, str) or not isinstance(value, str)
-            for key, value in raw_env.items()
+            not isinstance(key, str) or not isinstance(value, str) for key, value in raw_env.items()
         ):
             raise VerificationConfigError(
                 "verification execution env must map string names to string values"
@@ -1029,10 +1006,7 @@ class VerificationExecutionConfig:
         if (
             not isinstance(raw_redactions, list)
             or any(
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or value < 1
-                or value > 255
+                not isinstance(value, int) or isinstance(value, bool) or value < 1 or value > 255
                 for value in raw_redactions
             )
             or len(set(raw_redactions)) != len(raw_redactions)
@@ -1062,6 +1036,7 @@ class VerificationExecutionConfig:
             "redact_argv_indices": list(self.redact_argv_indices),
         }
 
+
 @dataclass
 class VerificationCheckConfig:
     name: str
@@ -1090,20 +1065,15 @@ class VerificationCheckConfig:
         unknown_fields = sorted(set(data) - allowed_fields)
         if unknown_fields:
             raise VerificationConfigError(
-                "verification check contains unknown fields: "
-                + ", ".join(unknown_fields)
+                "verification check contains unknown fields: " + ", ".join(unknown_fields)
             )
         name = data.get("name", "")
         description = data.get("description", "")
         if not isinstance(name, str) or not isinstance(description, str):
-            raise VerificationConfigError(
-                "verification check name and description must be strings"
-            )
+            raise VerificationConfigError("verification check name and description must be strings")
         name = name.strip()
         if not name:
-            raise VerificationConfigError(
-                "verification check name must be a non-empty string"
-            )
+            raise VerificationConfigError("verification check name must be a non-empty string")
         executions_raw = data.get("executions", [])
         if not isinstance(executions_raw, list) or any(
             not isinstance(item, dict) for item in executions_raw
@@ -1111,30 +1081,19 @@ class VerificationCheckConfig:
             raise VerificationConfigError(
                 "verification check executions must be an array of tables"
             )
-        commands = _verification_string_list(
-            data, "commands", label="verification check"
-        )
+        commands = _verification_string_list(data, "commands", label="verification check")
         required = data.get("required", True)
         if not isinstance(required, bool):
             raise VerificationConfigError("verification check required must be a boolean")
-        executions = [
-            VerificationExecutionConfig.from_dict(item)
-            for item in executions_raw
-        ]
+        executions = [VerificationExecutionConfig.from_dict(item) for item in executions_raw]
         return cls(
             name=name,
             description=description.strip(),
-            paths=_verification_string_list(
-                data, "paths", label="verification check"
-            ),
+            paths=_verification_string_list(data, "paths", label="verification check"),
             executions=executions,
             commands=commands,
-            skills=_verification_string_list(
-                data, "skills", label="verification check"
-            ),
-            workflows=_verification_string_list(
-                data, "workflows", label="verification check"
-            ),
+            skills=_verification_string_list(data, "skills", label="verification check"),
+            workflows=_verification_string_list(data, "workflows", label="verification check"),
             tool_profiles=_verification_string_list(
                 data, "tool_profiles", label="verification check"
             ),
@@ -1172,25 +1131,17 @@ class VerificationProfileConfig:
         unknown_fields = sorted(set(data) - allowed_fields)
         if unknown_fields:
             raise VerificationConfigError(
-                "verification profile contains unknown fields: "
-                + ", ".join(unknown_fields)
+                "verification profile contains unknown fields: " + ", ".join(unknown_fields)
             )
         checks_raw = data.get("checks", [])
         if not isinstance(checks_raw, list) or any(
             not isinstance(item, dict) for item in checks_raw
         ):
-            raise VerificationConfigError(
-                "verification profile checks must be an array of tables"
-            )
+            raise VerificationConfigError("verification profile checks must be an array of tables")
         description = data.get("description", "")
         if not isinstance(description, str):
-            raise VerificationConfigError(
-                "verification profile description must be a string"
-            )
-        checks = [
-            VerificationCheckConfig.from_dict(item)
-            for item in checks_raw
-        ]
+            raise VerificationConfigError("verification profile description must be a string")
+        checks = [VerificationCheckConfig.from_dict(item) for item in checks_raw]
         return cls(
             name=str(name).strip(),
             description=description.strip(),
@@ -1230,14 +1181,11 @@ class VerificationConfig:
         unknown_fields = sorted(set(data) - allowed_fields)
         if unknown_fields:
             raise VerificationConfigError(
-                "verification configuration contains unknown fields: "
-                + ", ".join(unknown_fields)
+                "verification configuration contains unknown fields: " + ", ".join(unknown_fields)
             )
         allow_legacy_shell = data.get("allow_legacy_shell", False)
         if not isinstance(allow_legacy_shell, bool):
-            raise VerificationConfigError(
-                "verification allow_legacy_shell must be a boolean"
-            )
+            raise VerificationConfigError("verification allow_legacy_shell must be a boolean")
         raw_profiles = data.get("profiles", {})
         profiles: dict[str, VerificationProfileConfig] = {}
         if not isinstance(raw_profiles, dict) or any(
@@ -1254,9 +1202,7 @@ class VerificationConfig:
             )
         default_profile = data.get("default_profile", "")
         if not isinstance(default_profile, str):
-            raise VerificationConfigError(
-                "verification default_profile must be a string"
-            )
+            raise VerificationConfigError("verification default_profile must be a string")
         return cls(
             enabled=enabled,
             default_profile=default_profile.strip(),
@@ -1366,7 +1312,11 @@ class BundleManifest:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BundleManifest:
         profile_raw = data.get("profile", {})
-        profile = ProfileConfig.from_dict(profile_raw) if isinstance(profile_raw, dict) else ProfileConfig()
+        profile = (
+            ProfileConfig.from_dict(profile_raw)
+            if isinstance(profile_raw, dict)
+            else ProfileConfig()
+        )
         return cls(
             name=str(data.get("name", "")).strip(),
             version=str(data.get("version", "0.1.0")).strip(),

@@ -167,6 +167,9 @@ def sync_manifest(
     sync_skills: bool = True,
     sync_commands: bool = True,
     sync_exports: bool = True,
+    skill_roots: dict[str, list[str]] | None = None,
+    command_roots: dict[str, list[str]] | None = None,
+    export_paths: dict[str, list[str]] | None = None,
 ) -> list[ManifestSyncAction]:
     """Plan or apply manifest sync actions.
 
@@ -188,7 +191,12 @@ def sync_manifest(
                 harness = selected.get(target_name)
                 if harness is None:
                     continue
-                for raw_root in _as_list(harness.get("skill_roots")):
+                roots = (
+                    skill_roots[target_name]
+                    if skill_roots and target_name in skill_roots
+                    else _as_list(harness.get("skill_roots"))
+                )
+                for raw_root in roots:
                     root = Path(str(raw_root)).expanduser()
                     target = root / name
                     status, detail = _skill_state(canonical, target)
@@ -216,7 +224,12 @@ def sync_manifest(
                 harness = selected.get(target_name)
                 if harness is None:
                     continue
-                for raw_root in _as_list(harness.get("command_roots")):
+                roots = (
+                    command_roots[target_name]
+                    if command_roots and target_name in command_roots
+                    else _as_list(harness.get("command_roots"))
+                )
+                for raw_root in roots:
                     root = Path(str(raw_root)).expanduser()
                     status, detail = _command_pack_state(canonical, root, overwrite=overwrite)
                     if apply and status.startswith("would_"):
@@ -235,7 +248,12 @@ def sync_manifest(
 
     if sync_exports:
         for harness_name, harness in selected.items():
-            for raw_target in _as_list(harness.get("manifest_exports")):
+            targets = (
+                export_paths[harness_name]
+                if export_paths and harness_name in export_paths
+                else _as_list(harness.get("manifest_exports"))
+            )
+            for raw_target in targets:
                 target = Path(str(raw_target)).expanduser()
                 try:
                     payload = _export_payload(data, harness_name)

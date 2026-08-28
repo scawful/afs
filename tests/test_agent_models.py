@@ -11,14 +11,22 @@ from afs.agent.models import (
     ModelConfig,
     ModelProvider,
     resolve_gemini_cache_settings,
+    resolve_gemini_thinking_settings,
 )
 
 
 class FakePart:
-    def __init__(self, text=None, function_response=None, function_call=None):
+    def __init__(
+        self,
+        text=None,
+        function_response=None,
+        function_call=None,
+        thought_signature=None,
+    ):
         self.text = text
         self.function_response = function_response
         self.function_call = function_call
+        self.thought_signature = thought_signature
 
 
 class FakeContent:
@@ -31,6 +39,12 @@ class FakeFunctionResponse:
     def __init__(self, name, response):
         self.name = name
         self.response = response
+
+
+class FakeFunctionCall:
+    def __init__(self, name, args):
+        self.name = name
+        self.args = args
 
 
 class FakeTool:
@@ -46,6 +60,12 @@ class FakeGenerateContentConfig:
         self.system_instruction = kwargs.get("system_instruction")
         self.tools = kwargs.get("tools")
         self.cached_content = kwargs.get("cached_content")
+        self.thinking_config = kwargs.get("thinking_config")
+
+
+class FakeThinkingConfig:
+    def __init__(self, **kwargs):
+        self.thinking_level = kwargs.get("thinking_level")
 
 
 class FakeCreateCachedContentConfig:
@@ -60,9 +80,7 @@ class FakeResponse:
     def __init__(self, text: str, *, cached_content_tokens: int = 0):
         self.candidates = [
             SimpleNamespace(
-                content=SimpleNamespace(
-                    parts=[SimpleNamespace(text=text, function_call=None)]
-                )
+                content=SimpleNamespace(parts=[SimpleNamespace(text=text, function_call=None)])
             )
         ]
         self.usage_metadata = SimpleNamespace(
@@ -110,8 +128,10 @@ def _install_fake_gemini(monkeypatch, client: FakeClient) -> None:
         Content=FakeContent,
         Part=FakePart,
         FunctionResponse=FakeFunctionResponse,
+        FunctionCall=FakeFunctionCall,
         Tool=FakeTool,
         GenerateContentConfig=FakeGenerateContentConfig,
+        ThinkingConfig=FakeThinkingConfig,
         CreateCachedContentConfig=FakeCreateCachedContentConfig,
     )
     fake_genai = ModuleType("google.genai")
@@ -142,6 +162,74 @@ def test_resolve_gemini_cache_settings_reads_env(monkeypatch) -> None:
     assert settings.mode == "try"
     assert settings.ttl == "90s"
     assert settings.min_prefix_chars == 123
+
+
+def test_resolve_gemini_thinking_settings_is_optional_and_configurable(monkeypatch) -> None:
+    config = ModelConfig(provider=ModelProvider.GEMINI, model_id="gemini-3.7-flash")
+    assert resolve_gemini_thinking_settings(config).level is None
+
+    monkeypatch.setenv("AFS_GEMINI_THINKING_LEVEL", "medium")
+    assert resolve_gemini_thinking_settings(config).level == "medium"
+
+    config.extra["gemini_thinking"] = {"level": "high"}
+    assert resolve_gemini_thinking_settings(config).level == "high"
+
+
+def test_resolve_gemini_thinking_settings_rejects_unknown_level() -> None:
+    config = ModelConfig(
+        provider=ModelProvider.GEMINI,
+        model_id="gemini-3.7-flash",
+        extra={"gemini_thinking_level": "minimal"},
+    )
+    with pytest.raises(ValueError, match="invalid Gemini thinking level"):
+        resolve_gemini_thinking_settings(config)
+
+
+def test_gemini_backend_passes_thinking_level(monkeypatch) -> None:
+    client = FakeClient()
+    _install_fake_gemini(monkeypatch, client)
+    backend = GeminiBackend(
+        ModelConfig(
+            provider=ModelProvider.GEMINI,
+            model_id="gemini-3.7-flash",
+            extra={"gemini_thinking_level": "medium"},
+        )
+    )
+
+    asyncio.run(backend.generate([{"role": "user", "content": "review this"}]))
+
+    thinking = client.models.calls[0]["config"].thinking_config
+    assert thinking.thinking_level == "medium"
+
+
+def test_gemini_backend_preserves_tool_call_thought_signature(monkeypatch) -> None:
+    client = FakeClient()
+    _install_fake_gemini(monkeypatch, client)
+    backend = GeminiBackend(ModelConfig(provider=ModelProvider.GEMINI, model_id="gemini-3.7-flash"))
+    signature = backend._encode_thought_signature(b"provider-state")
+
+    contents = backend._messages_to_gemini_contents(
+        [
+            {"role": "user", "content": "inspect"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "name": "context_status",
+                        "arguments": {"path": "."},
+                        "thought_signature": signature,
+                    }
+                ],
+            },
+        ],
+        sys.modules["google.genai"].types,
+    )
+
+    tool_part = contents[1].parts[0]
+    assert tool_part.function_call.name == "context_status"
+    assert tool_part.function_call.args == {"path": "."}
+    assert tool_part.thought_signature == b"provider-state"
 
 
 def test_gemini_backend_uses_configurable_cached_content(monkeypatch) -> None:

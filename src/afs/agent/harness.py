@@ -152,9 +152,7 @@ class AgentHarness:
             AgentResult with response, history, and tool executions
         """
         if not self._backend:
-            raise RuntimeError(
-                "Harness not initialized. Use async context manager."
-            )
+            raise RuntimeError("Harness not initialized. Use async context manager.")
 
         # Build initial messages
         messages: list[dict[str, Any]] = []
@@ -196,10 +194,12 @@ class AgentHarness:
                 if retain_count < 1:
                     retain_count = 1
 
-                new_messages.append({
-                    "role": "system",
-                    "content": "Context truncated due to length limits. Please read 'scratchpad/state.md' or query files to restore your understanding of the task state.",
-                })
+                new_messages.append(
+                    {
+                        "role": "system",
+                        "content": "Context truncated due to length limits. Please read 'scratchpad/state.md' or query files to restore your understanding of the task state.",
+                    }
+                )
                 new_messages.extend(messages[-retain_count:])
 
                 messages = new_messages
@@ -224,30 +224,42 @@ class AgentHarness:
             # Check for tool calls
             if result.has_tool_calls:
                 # Add assistant message with tool calls
-                messages.append({
-                    "role": "assistant",
-                    "content": result.content,
-                    "tool_calls": [
-                        {"name": tc.name, "arguments": tc.arguments}
-                        for tc in result.tool_calls
-                    ],
-                })
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": result.content,
+                        "tool_calls": [
+                            {"name": tc.name, "arguments": tc.arguments}
+                            | ({"id": tc.id} if tc.id else {})
+                            | (
+                                {"thought_signature": tc.thought_signature}
+                                if tc.thought_signature
+                                else {}
+                            )
+                            for tc in result.tool_calls
+                        ],
+                    }
+                )
 
                 # Execute tools
                 tool_results = await self._execute_tools(result.tool_calls)
                 tool_executions.extend(tool_results)
 
                 # Add tool results to messages
-                messages.append({
-                    "role": "tool",
-                    "results": [
-                        {
-                            "name": te.name,
-                            "content": te.result.content if te.result.success else te.result.error,
-                        }
-                        for te in tool_results
-                    ],
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "results": [
+                            {
+                                "name": te.name,
+                                "content": te.result.content
+                                if te.result.success
+                                else te.result.error,
+                            }
+                            for te in tool_results
+                        ],
+                    }
+                )
 
                 # Continue loop
                 continue
@@ -332,7 +344,7 @@ async def run_agent(
     """Convenience function to run a single agent query.
 
     Args:
-        model: Model identifier (e.g., "ollama:llama3.2", "gemini-3-flash-preview")
+        model: Model identifier (e.g., "ollama:llama3.2", "gemini-3.7-flash")
         prompt: User's request
         tools: Tools available (default: AFS_TOOLS)
         context: Additional context
@@ -391,6 +403,7 @@ async def main():
         tools = []
     elif args.tools == "triforce":
         from .tools import TRIFORCE_TOOLS
+
         tools = TRIFORCE_TOOLS
     else:
         tools = None
@@ -431,4 +444,5 @@ async def main():
 
 if __name__ == "__main__":
     import asyncio
+
     asyncio.run(main())

@@ -14,13 +14,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .gemini_defaults import DEFAULT_GEMINI_EMBEDDING_MODEL
 from .index_storage import atomic_write_text, fsync_directory, index_file_lock
 
 EmbeddingFactory = Callable[..., Callable[[str], list[float]]]
 _EMBEDDING_BACKENDS: dict[str, EmbeddingFactory] = {}
 
-EMBEDDING_INDEX_VERSION = 2
-DEFAULT_GEMINI_MODEL = "gemini-embedding-2"
+EMBEDDING_INDEX_VERSION = 3
+DEFAULT_GEMINI_MODEL = DEFAULT_GEMINI_EMBEDDING_MODEL
 DEFAULT_GEMINI_DIMENSION = 768
 GEMINI_DOCUMENT_TASK = "RETRIEVAL_DOCUMENT"
 GEMINI_QUERY_TASK = "RETRIEVAL_QUERY"
@@ -291,8 +292,9 @@ def create_gemini_embed_fn(
     Uses the ``google-genai`` SDK when available, falling back to a
     plain HTTP request against the Gemini REST API otherwise.
 
-    The stable ``gemini-embedding-2`` collection defaults to 768 dimensions.
-    Document and query callers must use their respective retrieval task type.
+    The ``gemini-embedding-2`` collection defaults to 768 dimensions. Gemini
+    Embedding 2 expresses retrieval intent in the text prefix because its API
+    no longer accepts the legacy ``task_type`` field.
     """
     resolved_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not resolved_key:
@@ -302,6 +304,7 @@ def create_gemini_embed_fn(
 
     # Normalize model name — SDK expects "models/" prefix
     qualified_model = model if model.startswith("models/") else f"models/{model}"
+    uses_embedding_2 = model.removeprefix("models/").startswith("gemini-embedding-2")
 
     # Try the official SDK first; fall back to raw HTTP.
     try:
@@ -310,13 +313,18 @@ def create_gemini_embed_fn(
         client = genai.Client(api_key=resolved_key)
 
         def _embed_sdk(text: str) -> list[float]:
+            prepared_text = (
+                _prepare_gemini_embedding_text(text, task_type) if uses_embedding_2 else text
+            )
+            embed_config: dict[str, Any] = {
+                "output_dimensionality": output_dimensionality,
+            }
+            if not uses_embedding_2:
+                embed_config["task_type"] = task_type
             result = client.models.embed_content(
                 model=qualified_model,
-                contents=text,
-                config={
-                    "task_type": task_type,
-                    "output_dimensionality": output_dimensionality,
-                },
+                contents=prepared_text,
+                config=embed_config,
             )
             values = result.embeddings[0].values
             return [float(v) for v in values]
@@ -344,12 +352,16 @@ def create_gemini_embed_fn(
     )
 
     def _embed_http(text: str) -> list[float]:
+        prepared_text = (
+            _prepare_gemini_embedding_text(text, task_type) if uses_embedding_2 else text
+        )
         body = {
             "model": qualified_model,
-            "content": {"parts": [{"text": text}]},
-            "taskType": task_type,
+            "content": {"parts": [{"text": prepared_text}]},
             "outputDimensionality": output_dimensionality,
         }
+        if not uses_embedding_2:
+            body["taskType"] = task_type
         if hasattr(_http_mod, "post"):
             resp = _http_mod.post(url, json=body, timeout=30.0)  # type: ignore[union-attr]
         else:
@@ -360,6 +372,22 @@ def create_gemini_embed_fn(
         return [float(v) for v in values]
 
     return _embed_http
+
+
+def _prepare_gemini_embedding_text(text: str, task_type: str) -> str:
+    """Translate legacy task labels to Gemini Embedding 2 text instructions."""
+    normalized = str(task_type or "").strip().upper()
+    if normalized == GEMINI_QUERY_TASK:
+        return f"task: search result | query: {text}"
+    if normalized == GEMINI_DOCUMENT_TASK:
+        return f"title: none | text: {text}"
+    prefixes = {
+        "CLASSIFICATION": "task: classification | query: ",
+        "CLUSTERING": "task: clustering | query: ",
+        "SEMANTIC_SIMILARITY": "task: sentence similarity | query: ",
+    }
+    prefix = prefixes.get(normalized)
+    return f"{prefix}{text}" if prefix else text
 
 
 def create_hf_embed_fn(
@@ -792,12 +820,23 @@ def _build_embedding_index_locked(
             previous_collection = load_embedding_collection_metadata(output_dir)
         except (OSError, ValueError):
             previous_collection = None
-        if previous_collection and previous_collection.version >= EMBEDDING_INDEX_VERSION:
-            current_identity = (collection["provider"], collection["model"], expected_dimension)
+        if not previous_collection or previous_collection.version < EMBEDDING_INDEX_VERSION:
+            old_index = {}
+            old_meta = {}
+        else:
+            current_identity = (
+                collection["provider"],
+                collection["model"],
+                expected_dimension,
+                collection["document_instruction"],
+                collection["query_instruction"],
+            )
             previous_identity = (
                 previous_collection.provider,
                 previous_collection.model,
                 previous_collection.dimension,
+                previous_collection.document_instruction,
+                previous_collection.query_instruction,
             )
             if current_identity != previous_identity:
                 # Reusing vectors from a different collection would make
@@ -1631,44 +1670,36 @@ register_embedding_backend(
 )
 register_embedding_backend(
     "hf",
-    lambda model,
-    device=None,
-    max_tokens=512,
-    pooling="mean",
-    normalize=True,
-    token=None,
-    **_: create_hf_embed_fn(
-        model=model,
-        device=device,
-        max_tokens=max_tokens,
-        pooling=pooling,
-        normalize=normalize,
-        token=token,
+    lambda model, device=None, max_tokens=512, pooling="mean", normalize=True, token=None, **_: (
+        create_hf_embed_fn(
+            model=model,
+            device=device,
+            max_tokens=max_tokens,
+            pooling=pooling,
+            normalize=normalize,
+            token=token,
+        )
     ),
 )
 register_embedding_backend(
     "openai",
-    lambda model,
-    base_url="https://api.openai.com/v1",
-    api_key=None,
-    timeout=30.0,
-    **_: create_openai_embed_fn(
-        model=model,
-        base_url=base_url,
-        api_key=api_key,
-        timeout=timeout,
+    lambda model, base_url="https://api.openai.com/v1", api_key=None, timeout=30.0, **_: (
+        create_openai_embed_fn(
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+        )
     ),
 )
 register_embedding_backend(
     "gemini",
-    lambda model=DEFAULT_GEMINI_MODEL,
-    api_key=None,
-    task_type=GEMINI_DOCUMENT_TASK,
-    output_dimensionality=DEFAULT_GEMINI_DIMENSION,
-    **_: create_gemini_embed_fn(
-        model=model,
-        api_key=api_key,
-        task_type=task_type,
-        output_dimensionality=output_dimensionality,
+    lambda model=DEFAULT_GEMINI_MODEL, api_key=None, task_type=GEMINI_DOCUMENT_TASK, output_dimensionality=DEFAULT_GEMINI_DIMENSION, **_: (
+        create_gemini_embed_fn(
+            model=model,
+            api_key=api_key,
+            task_type=task_type,
+            output_dimensionality=output_dimensionality,
+        )
     ),
 )

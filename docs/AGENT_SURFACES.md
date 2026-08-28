@@ -77,7 +77,7 @@ export AFS_VENV=<afs-root>/.venv
 <afs-root>/scripts/afs work --path .
 <afs-root>/scripts/afs work approvals list --path .
 <afs-root>/scripts/afs work approvals execute <approval-id> --path . --dry-run --json
-<afs-root>/scripts/afs claude setup --path ~/src/project-a
+<afs-root>/scripts/afs claude setup --path /path/to/project-a
 <afs-root>/scripts/afs claude setup --scope user
 <afs-root>/scripts/afs claude doctor
 <afs-root>/scripts/afs claude reap --limit 20
@@ -92,10 +92,12 @@ Harness upgrade and setup:
 ```bash
 <afs-root>/scripts/afs setup
 <afs-root>/scripts/afs guide shell
-<afs-root>/scripts/afs-upgrade-agent-setup --workspace ~/src
-<afs-root>/scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
-<afs-root>/scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode
-<afs-root>/scripts/afs-upgrade-agent-setup --workspace ~/src --work --setup-hcode --apply
+<afs-root>/scripts/afs-upgrade-agent-setup --workspace /path/to/workspace
+<afs-root>/scripts/afs-upgrade-agent-setup --workspace /path/to/workspace --apply --all
+<afs-root>/scripts/afs-upgrade-agent-setup --workspace /path/to/workspace \
+  --setup-hcode --halext-code /path/to/halext-code
+<afs-root>/scripts/afs-upgrade-agent-setup --workspace /path/to/workspace \
+  --setup-hcode --halext-code /path/to/halext-code --apply
 ```
 
 Training commands are intentionally not part of the default agent startup path.
@@ -580,6 +582,13 @@ Antigravity raw config example:
 
 If the client requires a Python module entrypoint instead, use a Python
 environment where `afs` is installed and run `python3 -m afs.mcp_server`.
+
+Gemini CLI and Antigravity both recognize workspace skills under
+`.agents/skills`. The agent-manifest setup helper targets that shared alias only
+when the corresponding harness is selected, and accepts `--skill-root` when a
+managed workstation uses a different location. Current Antigravity skills are
+first-class slash commands; do not generate deprecated `.agents/workflows`
+files for new integrations.
 
 For the VS Code extension, `AFS: Register MCP Server` checks workspace
 `.cursor`, `.vscode`, and `.antigravity` MCP configs plus the configured

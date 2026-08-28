@@ -1,8 +1,8 @@
 # Antigravity CLI Integration
 
-AFS treats Antigravity CLI (`agy`) as the public successor path for Gemini CLI
-style terminal-agent workflows. Gemini API and Google Workspace public API
-helpers remain separate surfaces.
+AFS treats Antigravity CLI (`agy`) and Gemini CLI as separate supported agent
+clients. Gemini API and Google Workspace public API helpers remain separate
+surfaces as well.
 
 ## Commands
 
@@ -20,6 +20,24 @@ add dangerous permission flags automatically.
 Current `agy` builds use the shared migrated MCP config path
 `~/.gemini/config/mcp_config.json`. AFS still detects older Antigravity CLI and
 IDE config locations, but new setup writes the migrated MCP config by default.
+The client also exposes `agy mcp add|remove|list|enable|disable`; use
+`agy mcp list` to verify the effective registration after setup.
+
+## Workspace skill
+
+Gemini CLI and Antigravity both discover Agent Skills under
+`.agents/skills/<name>/SKILL.md`. The portable setup helper uses this shared
+workspace alias when either harness is selected:
+
+```bash
+scripts/afs-upgrade-agent-setup --workspace . --harness antigravity
+scripts/afs-upgrade-agent-setup --workspace . --harness gemini --apply
+```
+
+Pass `--skill-root antigravity=/different/location` or
+`--skill-root gemini=/different/location` when a managed machine uses another
+layout. AFS copies a small `/afs` skill and does not select a model or reasoning
+effort for the client.
 
 ## Install hint
 
@@ -36,12 +54,12 @@ agy --version
 agy models
 ```
 
-On `agy` 1.0.10, `agy models` prints labels such as:
+`agy models` prints the models and reasoning labels enabled for the current
+account and build. For example, a build may report:
 
 ```text
-Gemini 3.5 Flash (Medium)
-Gemini 3.1 Pro (High)
-Claude Opus 4.6 (Thinking)
+Gemini Flash (Medium)
+Gemini Pro (High)
 ```
 
 AFS parses these with `afs antigravity models --json` instead of hardcoding the
@@ -49,6 +67,6 @@ available model set.
 
 ## Gemini CLI compatibility
 
-`afs gemini setup` and `afs gemini status` remain for Gemini CLI compatibility
-and Gemini API-key workflows. Public individual/free/Pro/Ultra Gemini CLI
-request serving moved to Antigravity CLI on 2026-06-18.
+Use `afs gemini setup` and `afs gemini status` for Gemini CLI and Gemini API-key
+workflows. Use `afs antigravity setup` and `afs antigravity status` for
+Antigravity. Neither command silently configures the other client.

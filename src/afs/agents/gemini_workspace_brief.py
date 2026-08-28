@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ..agent.models import ModelConfig, ModelProvider, create_backend
+from ..gemini_defaults import DEFAULT_GEMINI_GENERATION_MODEL
 from ..models import ContextRoot, MountType
 from .base import (
     AgentResult,
@@ -23,7 +24,7 @@ from .base import (
 
 AGENT_NAME = "gemini-workspace-brief"
 AGENT_DESCRIPTION = "Use Gemini to summarize configured workspaces and discovered contexts."
-DEFAULT_MODEL = "gemini-3-flash-preview"
+DEFAULT_MODEL = DEFAULT_GEMINI_GENERATION_MODEL
 DEFAULT_SYSTEM_PROMPT = (
     "You are preparing a concise operational brief for Gemini/Antigravity users working in AFS-managed "
     "repositories. Return compact markdown with sections 'Snapshot', 'Risks', and 'Next Actions'. "
@@ -110,7 +111,9 @@ def _resolve_workspace_roots(args: argparse.Namespace, config) -> list[Path]:
     return unique
 
 
-def _context_payload(contexts: list[ContextRoot], *, limit: int) -> tuple[list[dict[str, object]], list[str]]:
+def _context_payload(
+    contexts: list[ContextRoot], *, limit: int
+) -> tuple[list[dict[str, object]], list[str]]:
     notes: list[str] = []
     ordered = sorted(contexts, key=lambda item: str(item.path))
     if limit > 0 and len(ordered) > limit:
@@ -158,9 +161,10 @@ def _build_prompt(
     if contexts:
         for context in contexts:
             mounts = context.get("mounts") or {}
-            mount_text = ", ".join(
-                f"{name}={count}" for name, count in sorted(mounts.items())
-            ) or "no mounts"
+            mount_text = (
+                ", ".join(f"{name}={count}" for name, count in sorted(mounts.items()))
+                or "no mounts"
+            )
             lines.append(
                 "- "
                 + f"{context['project']} | path={context['path']} | "
@@ -185,7 +189,9 @@ def _resolve_gemini_key_name() -> str | None:
     return None
 
 
-async def _generate_brief(prompt: str, model: str, system_prompt: str) -> tuple[str, dict[str, int]]:
+async def _generate_brief(
+    prompt: str, model: str, system_prompt: str
+) -> tuple[str, dict[str, int]]:
     backend = create_backend(
         ModelConfig(
             provider=ModelProvider.GEMINI,

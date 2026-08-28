@@ -28,8 +28,13 @@ afs embeddings search \
 
 `afs search` is the normal version 2 interface. Without `--semantic` it does
 not call a remote embedding provider. With `--semantic`, Gemini is the default
-provider and uses stable `gemini-embedding-2` with 768-dimensional output.
+provider and uses `gemini-embedding-2` with 768-dimensional output.
 Use `--all-projects` only when cross-project results are intended.
+
+Gemini Embedding 2 no longer accepts the legacy `task_type` request field.
+AFS converts its document/query contract to Google's recommended text prefixes
+instead. Collection contract version 3 forces older vectors to be rebuilt so
+prefixed and unprefixed vectors are never mixed.
 
 The `afs embeddings ...` commands remain the lower-level API for managing and
 evaluating a specific collection.
@@ -163,7 +168,7 @@ afs gemini context   # dump full knowledge INDEX.md
 
 | Model | Dimensions | Notes |
 |-------|-----------|-------|
-| `gemini-embedding-2` | 768 by default | Stable default; output dimensionality is stored in collection metadata |
+| `gemini-embedding-2` | 768 by default | Current default; output dimensionality is stored in collection metadata |
 
 ### Environment Variables
 

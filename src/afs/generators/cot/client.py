@@ -6,6 +6,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any
 
+from ...gemini_defaults import DEFAULT_GEMINI_GENERATION_MODEL
 from ...history import log_event
 from .prompts import ASM_COT_SYSTEM_PROMPT
 
@@ -46,10 +47,7 @@ class LLMClient(ABC):
         Default implementation calls generate() sequentially.
         Subclasses may override for batch API support.
         """
-        return [
-            self.generate(prompt, system_prompt, temperature, max_tokens)
-            for prompt in prompts
-        ]
+        return [self.generate(prompt, system_prompt, temperature, max_tokens) for prompt in prompts]
 
 
 class GeminiClient(LLMClient):
@@ -58,13 +56,11 @@ class GeminiClient(LLMClient):
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "gemini-3-flash-preview",
+        model: str = DEFAULT_GEMINI_GENERATION_MODEL,
     ):
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
         if not self.api_key:
-            raise ValueError(
-                "GEMINI_API_KEY not set. Set environment variable or pass api_key."
-            )
+            raise ValueError("GEMINI_API_KEY not set. Set environment variable or pass api_key.")
         self.model = model
         self._client = None
 
@@ -77,8 +73,7 @@ class GeminiClient(LLMClient):
                 self._client = genai.Client(api_key=self.api_key)
             except ImportError as exc:
                 raise ImportError(
-                    "google-genai not installed. "
-                    "Install with: pip install google-genai"
+                    "google-genai not installed. Install with: pip install google-genai"
                 ) from exc
         return self._client
 
@@ -135,9 +130,7 @@ class ClaudeClient(LLMClient):
     ):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not self.api_key:
-            raise ValueError(
-                "ANTHROPIC_API_KEY not set. Set environment variable or pass api_key."
-            )
+            raise ValueError("ANTHROPIC_API_KEY not set. Set environment variable or pass api_key.")
         self.model = model
         self._client = None
 
@@ -202,9 +195,7 @@ class OpenAIClient(LLMClient):
     ):
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
         if not self.api_key:
-            raise ValueError(
-                "OPENAI_API_KEY not set. Set environment variable or pass api_key."
-            )
+            raise ValueError("OPENAI_API_KEY not set. Set environment variable or pass api_key.")
         self.model = model
         self._client = None
 
@@ -216,9 +207,7 @@ class OpenAIClient(LLMClient):
 
                 self._client = OpenAI(api_key=self.api_key)
             except ImportError as exc:
-                raise ImportError(
-                    "openai not installed. Install with: pip install openai"
-                ) from exc
+                raise ImportError("openai not installed. Install with: pip install openai") from exc
         return self._client
 
     def generate(
@@ -279,9 +268,6 @@ def get_client(provider: str, **kwargs) -> LLMClient:
     }
 
     if provider not in clients:
-        raise ValueError(
-            f"Unknown provider: {provider}. "
-            f"Supported: {', '.join(clients.keys())}"
-        )
+        raise ValueError(f"Unknown provider: {provider}. Supported: {', '.join(clients.keys())}")
 
     return clients[provider](**kwargs)

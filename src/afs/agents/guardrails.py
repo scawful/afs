@@ -14,6 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..gemini_defaults import default_gemini_generation_model
+from ..runtime_paths import default_config_root, default_worktrees_root
+
 try:  # pragma: no cover - platform specific
     import fcntl
 except ImportError:  # pragma: no cover - platform specific
@@ -48,7 +51,7 @@ def _prefer_writable_state_path(filename: str, *, env_var: str) -> Path:
     if registry_value:
         return Path(registry_value).expanduser().resolve().with_name(filename)
 
-    home_candidate = Path("~/.config/afs/agents").expanduser().resolve() / filename
+    home_candidate = default_config_root() / "agents" / filename
     if os.access(_nearest_existing_parent(home_candidate), os.W_OK):
         return home_candidate
 
@@ -113,7 +116,7 @@ def _file_lock(path: Path, *, timeout: float = 5.0):
 # Quota tracking
 # ---------------------------------------------------------------------------
 
-DEFAULT_QUOTA_FILE = Path("~/.config/afs/agents/quota.json")
+DEFAULT_QUOTA_FILE = default_config_root() / "agents" / "quota.json"
 
 # Defaults: conservative to protect wallet
 DEFAULT_QUOTAS = {
@@ -227,16 +230,22 @@ class QuotaTracker:
         daily_limit = limits.get("daily", 0)
         cost_ceiling = limits.get("cost_ceiling_usd", 0.0)
         if hourly_limit > 0 and entry.calls_this_hour >= hourly_limit:
-            logger.info("Quota exceeded for %s: %d/%d hourly calls",
-                        provider, entry.calls_this_hour, hourly_limit)
+            logger.info(
+                "Quota exceeded for %s: %d/%d hourly calls",
+                provider,
+                entry.calls_this_hour,
+                hourly_limit,
+            )
             return False
         if daily_limit > 0 and entry.calls_today >= daily_limit:
-            logger.info("Quota exceeded for %s: %d/%d daily calls",
-                        provider, entry.calls_today, daily_limit)
+            logger.info(
+                "Quota exceeded for %s: %d/%d daily calls", provider, entry.calls_today, daily_limit
+            )
             return False
         if cost_ceiling > 0 and entry.cost_today_usd >= cost_ceiling:
-            logger.info("Cost ceiling hit for %s: $%.2f/$%.2f",
-                        provider, entry.cost_today_usd, cost_ceiling)
+            logger.info(
+                "Cost ceiling hit for %s: $%.2f/$%.2f", provider, entry.cost_today_usd, cost_ceiling
+            )
             return False
         return True
 
@@ -276,6 +285,7 @@ class QuotaTracker:
 # Model fallback chain
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ModelRoute:
     provider: str  # claude, gemini, codex, local
@@ -305,7 +315,7 @@ def resolve_model(
 
     model_map = {
         "claude": "claude-3-5-sonnet",
-        "gemini": "gemini-1.5-pro",
+        "gemini": default_gemini_generation_model(),
         "codex": "codex",
         "local": "qwen2.5-coder:14b",
     }
@@ -334,26 +344,28 @@ def resolve_model(
 # Worktree isolation
 # ---------------------------------------------------------------------------
 
+
 def ensure_worktree(repo_path: Path, branch_name: str) -> Path:
     """Create or reuse a git worktree for isolated agent work.
 
     Returns the worktree path. Does NOT modify the main repo.
     """
-    worktrees_root = Path.home() / "src" / "worktrees"
+    worktrees_root = default_worktrees_root(repo_path)
     worktree_path = worktrees_root / branch_name
 
     if worktree_path.exists():
         # Verify it's still a valid worktree
         result = subprocess.run(
             ["git", "-C", str(worktree_path), "status", "--porcelain"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode == 0:
             return worktree_path
-        # Stale worktree, remove and recreate
-        subprocess.run(
-            ["git", "-C", str(repo_path), "worktree", "remove", "--force", str(worktree_path)],
-            capture_output=True, timeout=10,
+        raise RuntimeError(
+            "Refusing to replace an existing path that is not a valid Git worktree: "
+            f"{worktree_path}. Move it aside or remove it explicitly."
         )
 
     worktrees_root.mkdir(parents=True, exist_ok=True)
@@ -361,12 +373,15 @@ def ensure_worktree(repo_path: Path, branch_name: str) -> Path:
     # Create branch if it doesn't exist
     subprocess.run(
         ["git", "-C", str(repo_path), "branch", branch_name],
-        capture_output=True, timeout=10,
+        capture_output=True,
+        timeout=10,
     )
 
     result = subprocess.run(
         ["git", "-C", str(repo_path), "worktree", "add", str(worktree_path), branch_name],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(f"Failed to create worktree: {result.stderr.strip()}")
@@ -377,14 +392,16 @@ def ensure_worktree(repo_path: Path, branch_name: str) -> Path:
 
 def cleanup_worktree(repo_path: Path, branch_name: str) -> bool:
     """Remove a worktree if it has no uncommitted changes."""
-    worktree_path = Path.home() / "src" / "worktrees" / branch_name
+    worktree_path = default_worktrees_root(repo_path) / branch_name
     if not worktree_path.exists():
         return True
 
     # Check for uncommitted changes
     result = subprocess.run(
         ["git", "-C", str(worktree_path), "status", "--porcelain"],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     if result.returncode != 0 or result.stdout.strip():
         logger.warning("Worktree %s has uncommitted changes, skipping cleanup", worktree_path)
@@ -392,7 +409,8 @@ def cleanup_worktree(repo_path: Path, branch_name: str) -> bool:
 
     subprocess.run(
         ["git", "-C", str(repo_path), "worktree", "remove", str(worktree_path)],
-        capture_output=True, timeout=10,
+        capture_output=True,
+        timeout=10,
     )
     return True
 
@@ -401,33 +419,37 @@ def cleanup_worktree(repo_path: Path, branch_name: str) -> bool:
 # Approval gates
 # ---------------------------------------------------------------------------
 
-APPROVAL_FILE = Path("~/.config/afs/agents/approvals.json")
+APPROVAL_FILE = default_config_root() / "agents" / "approvals.json"
 
 # Actions that always require approval
-ALWAYS_APPROVE = frozenset({
-    "git_push",
-    "git_force_push",
-    "file_delete",
-    "rom_edit",
-    "deploy",
-    "send_email",
-    "create_pr",
-    "merge_pr",
-})
+ALWAYS_APPROVE = frozenset(
+    {
+        "git_push",
+        "git_force_push",
+        "file_delete",
+        "rom_edit",
+        "deploy",
+        "send_email",
+        "create_pr",
+        "merge_pr",
+    }
+)
 
 # Actions that can be auto-approved for background agents
-AUTO_APPROVE = frozenset({
-    "file_read",
-    "file_write_scratchpad",
-    "git_status",
-    "git_diff",
-    "git_log",
-    "context_read",
-    "context_write",
-    "run_tests",
-    "run_build",
-    "embedding_update",
-})
+AUTO_APPROVE = frozenset(
+    {
+        "file_read",
+        "file_write_scratchpad",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "context_read",
+        "context_write",
+        "run_tests",
+        "run_build",
+        "embedding_update",
+    }
+)
 
 
 def _new_request_id() -> str:
@@ -485,14 +507,10 @@ class ApprovalGate:
             )
         )
         self._pending: list[ApprovalRequest] = []
-        self._archive_path = self._path.with_name(
-            f"{self._path.stem}.history.jsonl"
-        )
+        self._archive_path = self._path.with_name(f"{self._path.stem}.history.jsonl")
         self._load()
 
-    def human_authorization_scope(
-        self, decision: str, request_id: str, rationale: str
-    ) -> str:
+    def human_authorization_scope(self, decision: str, request_id: str, rationale: str) -> str:
         """Return the broker scope for one decision in this exact store."""
         from ..human_provenance import decision_scope_parts
 
@@ -522,8 +540,7 @@ class ApprovalGate:
             data = json.loads(self._path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
             raise ApprovalStateError(
-                f"active approval state is unreadable at {self._path}; "
-                "refusing to overwrite it"
+                f"active approval state is unreadable at {self._path}; refusing to overwrite it"
             ) from exc
         if not isinstance(data, list):
             raise ApprovalStateError(
@@ -566,9 +583,7 @@ class ApprovalGate:
         """Atomically replace requests on disk; caller must hold the file lock."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps([r.to_dict() for r in requests], indent=2)
-        temporary = self._path.with_name(
-            f".{self._path.name}.{uuid.uuid4().hex}.tmp"
-        )
+        temporary = self._path.with_name(f".{self._path.name}.{uuid.uuid4().hex}.tmp")
         try:
             with temporary.open("x", encoding="utf-8") as handle:
                 handle.write(payload)
@@ -650,12 +665,8 @@ class ApprovalGate:
         if not requests:
             return
         self._repair_archive_tail_unlocked()
-        existing_ids = {
-            request.request_id for request in self._read_archive_unlocked()
-        }
-        additions = [
-            request for request in requests if request.request_id not in existing_ids
-        ]
+        existing_ids = {request.request_id for request in self._read_archive_unlocked()}
+        additions = [request for request in requests if request.request_id not in existing_ids]
         if not additions:
             return
         self._archive_path.parent.mkdir(parents=True, exist_ok=True)
@@ -687,9 +698,7 @@ class ApprovalGate:
         after this gate loaded.
         """
         with _file_lock(self._path):
-            requests = (
-                self._read_unlocked() if self._path.exists() else list(self._pending)
-            )
+            requests = self._read_unlocked() if self._path.exists() else list(self._pending)
             completed = [r for r in requests if r.status != "pending"]
             kept = [r for r in requests if r.status == "pending"]
             removed = len(completed)
@@ -813,9 +822,7 @@ class ApprovalGate:
         request = self.find_pending(agent, action)
         if request is None:
             return False
-        scope = self.human_authorization_scope(
-            "approve", request.request_id, rationale
-        )
+        scope = self.human_authorization_scope("approve", request.request_id, rationale)
         if not consume_human_authorization(authorization, scope=scope):
             raise ValueError("a HumanDecisionBroker authorization is required")
         identity = authorization.identity
@@ -871,9 +878,7 @@ class ApprovalGate:
         request = self.find_pending(agent, action)
         if request is None:
             return False
-        scope = self.human_authorization_scope(
-            "reject", request.request_id, rationale
-        )
+        scope = self.human_authorization_scope("reject", request.request_id, rationale)
         if not consume_human_authorization(authorization, scope=scope):
             raise ValueError("a HumanDecisionBroker authorization is required")
         identity = authorization.identity
@@ -911,18 +916,13 @@ class ApprovalGate:
         save.
         """
         with _file_lock(self._path):
-            requests = (
-                self._read_unlocked() if self._path.exists() else list(self._pending)
-            )
+            requests = self._read_unlocked() if self._path.exists() else list(self._pending)
             for req in requests:
                 if (
                     req.agent == agent
                     and req.action == action
                     and req.status == "pending"
-                    and (
-                        expected_request_id is None
-                        or req.request_id == expected_request_id
-                    )
+                    and (expected_request_id is None or req.request_id == expected_request_id)
                 ):
                     req.status = status
                     req.reviewed_by = reviewer
@@ -943,9 +943,11 @@ class ApprovalGate:
 # Guardrailed agent context — combine all guardrails into one interface
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class GuardrailConfig:
     """Configuration for agent guardrails."""
+
     enable_quota: bool = True
     enable_worktrees: bool = True
     enable_approvals: bool = True
@@ -971,7 +973,9 @@ class GuardrailedAgent:
     def __init__(self, agent_name: str, config: GuardrailConfig | None = None):
         self.agent_name = agent_name
         self.config = config or GuardrailConfig()
-        self._tracker = QuotaTracker(quotas=self.config.quotas) if self.config.enable_quota else None
+        self._tracker = (
+            QuotaTracker(quotas=self.config.quotas) if self.config.enable_quota else None
+        )
         self._gate = ApprovalGate() if self.config.enable_approvals else None
         self._iteration = 0
 
@@ -1003,7 +1007,9 @@ class GuardrailedAgent:
         """Check if RALPH-style loop should continue (iteration cap)."""
         self._iteration += 1
         if self._iteration > self.config.max_iterations:
-            logger.info("Agent %s hit iteration cap (%d)", self.agent_name, self.config.max_iterations)
+            logger.info(
+                "Agent %s hit iteration cap (%d)", self.agent_name, self.config.max_iterations
+            )
             return False
         return True
 

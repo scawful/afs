@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 from ..claude.doctor import inspect_claude_sessions, reap_claude_sessions
@@ -29,9 +28,15 @@ def claude_session_report_command(args: argparse.Namespace) -> int:
     if args.json:
         payload = {
             "session_id": report.paths.session_id,
-            "transcript_path": str(report.paths.transcript_path) if report.paths.transcript_path else None,
-            "artifacts_dir": str(report.paths.artifacts_dir) if report.paths.artifacts_dir else None,
-            "debug_log_path": str(report.paths.debug_log_path) if report.paths.debug_log_path else None,
+            "transcript_path": str(report.paths.transcript_path)
+            if report.paths.transcript_path
+            else None,
+            "artifacts_dir": str(report.paths.artifacts_dir)
+            if report.paths.artifacts_dir
+            else None,
+            "debug_log_path": str(report.paths.debug_log_path)
+            if report.paths.debug_log_path
+            else None,
             "project_slug": report.paths.project_slug,
             "cwd": report.cwd,
             "git_branch": report.git_branch,
@@ -217,8 +222,7 @@ def claude_hook_command(args: argparse.Namespace) -> int:
     """
     import sys
 
-    from ..model_prompts import build_hook_injection
-    from ..session_bootstrap import build_session_bootstrap
+    from ..session_grounding import build_session_grounding
 
     stdin_payload: dict = {}
     try:
@@ -251,27 +255,11 @@ def claude_hook_command(args: argparse.Namespace) -> int:
         project_path, context_path, _context_root, _context_dir = resolve_context_paths(
             args, manager
         )
-        session_state = None
-        if event != "UserPromptSubmit":
-            skills_enabled = os.getenv("AFS_SESSION_SKILLS_MATCH_ENABLED", "1") != "0"
-            skills_prompt = (
-                os.getenv("AFS_SESSION_SKILLS_PROMPT", "").strip()[:8192]
-                if skills_enabled
-                else ""
-            )
-            session_state = build_session_bootstrap(
-                manager,
-                context_path,
-                project_path=project_path,
-                token_budget=0,
-                record_event=False,
-                skills_prompt=skills_prompt,
-                include_skills=skills_enabled,
-            )
-        injection = build_hook_injection(
+        injection = build_session_grounding(
+            manager,
+            context_path,
+            project_path=project_path,
             event=event,
-            context_path=context_path,
-            session_state=session_state,
             prompt=prompt,
         )
     except Exception:
@@ -471,15 +459,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--settings-path",
         help="Explicit Claude settings.json target override.",
     )
-    setup_parser.add_argument(
-        "--force", action="store_true", help="Overwrite existing CLAUDE.md."
-    )
+    setup_parser.add_argument("--force", action="store_true", help="Overwrite existing CLAUDE.md.")
     setup_parser.set_defaults(func=claude_setup_command)
 
     # context
-    context_parser = claude_sub.add_parser(
-        "context", help="Output Claude-optimized context block."
-    )
+    context_parser = claude_sub.add_parser("context", help="Output Claude-optimized context block.")
     context_parser.add_argument("--config", help="Config path.")
     context_parser.add_argument("--path", help="Project path.")
     context_parser.add_argument("--context-root", help="Context root override.")

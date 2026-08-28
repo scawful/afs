@@ -10,6 +10,7 @@ Supports:
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -18,6 +19,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+from ..gemini_defaults import validate_gemini_thinking_level
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +46,11 @@ class ModelConfig:
         ModelConfig(provider=ModelProvider.OLLAMA, model_id="llama3.2")
 
         # Gemini
-        ModelConfig(provider=ModelProvider.GEMINI, model_id="gemini-3-flash-preview")
+        ModelConfig(provider=ModelProvider.GEMINI, model_id="gemini-3.7-flash")
 
         # From string shorthand
         ModelConfig.from_string("ollama:llama3.2")
-        ModelConfig.from_string("gemini-3-flash-preview")  # Defaults to gemini provider
+        ModelConfig.from_string("gemini-3.7-flash")  # Defaults to gemini provider
     """
 
     provider: ModelProvider
@@ -60,7 +63,7 @@ class ModelConfig:
 
     @classmethod
     def from_string(cls, model_str: str) -> ModelConfig:
-        """Parse model string like 'ollama:llama3.2' or 'gemini-3-flash-preview'."""
+        """Parse model string like 'ollama:llama3.2' or 'gemini-3.7-flash'."""
         if ":" in model_str:
             parts = model_str.split(":", 1)
             provider_str = parts[0].lower()
@@ -157,6 +160,7 @@ class ToolCall:
     name: str
     arguments: dict[str, Any]
     id: str = ""  # Some providers return call IDs
+    thought_signature: str = ""  # Base64 Gemini tool-turn continuity token
 
 
 @dataclass
@@ -191,6 +195,18 @@ class GeminiCacheSettings:
         return self.mode == "required"
 
 
+@dataclass(frozen=True)
+class GeminiThinkingSettings:
+    """Optional Gemini 3 thinking-level override.
+
+    A missing level delegates the choice to the selected model. This keeps AFS
+    compatible with non-Gemini-3 models and lets host harnesses own cost/latency
+    policy.
+    """
+
+    level: str | None = None
+
+
 def _model_extra_value(config: ModelConfig, key: str) -> Any:
     nested = config.extra.get("gemini_cache")
     if isinstance(nested, dict) and nested.get(key) is not None:
@@ -211,24 +227,19 @@ def _coerce_int_setting(value: Any, default: int) -> int:
 
 def resolve_gemini_cache_settings(config: ModelConfig) -> GeminiCacheSettings:
     """Resolve Gemini cache settings from ModelConfig.extra and env vars."""
-    raw_mode = str(
-        _model_extra_value(config, "mode")
-        or os.getenv("AFS_GEMINI_CACHE_MODE", "off")
-    ).strip().lower()
+    raw_mode = (
+        str(_model_extra_value(config, "mode") or os.getenv("AFS_GEMINI_CACHE_MODE", "off"))
+        .strip()
+        .lower()
+    )
     if raw_mode not in {"off", "try", "required"}:
         raw_mode = "off"
 
-    raw_ttl = (
-        _model_extra_value(config, "ttl")
-        or os.getenv("AFS_GEMINI_CACHE_TTL")
-        or "3600s"
-    )
+    raw_ttl = _model_extra_value(config, "ttl") or os.getenv("AFS_GEMINI_CACHE_TTL") or "3600s"
     ttl = str(raw_ttl).strip() or "3600s"
 
     raw_min_prefix_chars = (
-        _model_extra_value(config, "min_chars")
-        or os.getenv("AFS_GEMINI_CACHE_MIN_CHARS")
-        or 4000
+        _model_extra_value(config, "min_chars") or os.getenv("AFS_GEMINI_CACHE_MIN_CHARS") or 4000
     )
     min_prefix_chars = _coerce_int_setting(raw_min_prefix_chars, 4000)
 
@@ -237,6 +248,26 @@ def resolve_gemini_cache_settings(config: ModelConfig) -> GeminiCacheSettings:
         ttl=ttl,
         min_prefix_chars=min_prefix_chars,
     )
+
+
+def resolve_gemini_thinking_settings(config: ModelConfig) -> GeminiThinkingSettings:
+    """Resolve an optional thinking level from model config or the environment."""
+    nested = config.extra.get("gemini_thinking")
+    nested_level = nested.get("level") if isinstance(nested, dict) else None
+    raw_level = (
+        nested_level
+        or config.extra.get("gemini_thinking_level")
+        or os.getenv("AFS_GEMINI_THINKING_LEVEL")
+        or ""
+    )
+    level = str(raw_level).strip().lower()
+    if level in {"", "auto", "default"}:
+        return GeminiThinkingSettings()
+    try:
+        level = validate_gemini_thinking_level(config.model_id, level)
+    except ValueError as exc:
+        raise ValueError(f"invalid Gemini thinking level: {exc}") from exc
+    return GeminiThinkingSettings(level=level)
 
 
 class ModelBackend(ABC):
@@ -306,9 +337,7 @@ class OllamaBackend(ModelBackend):
         if self.config.system_prompt and (
             not ollama_messages or ollama_messages[0]["role"] != "system"
         ):
-            ollama_messages.insert(
-                0, {"role": "system", "content": self.config.system_prompt}
-            )
+            ollama_messages.insert(0, {"role": "system", "content": self.config.system_prompt})
 
         # Build request
         payload = {
@@ -364,9 +393,7 @@ class OllamaBackend(ModelBackend):
             logger.error(f"Ollama generation failed: {e}")
             raise
 
-    def _convert_tools_to_ollama(
-        self, tools: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
+    def _convert_tools_to_ollama(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Convert OpenAI tool format to Ollama format."""
         ollama_tools = []
         for tool in tools:
@@ -425,9 +452,7 @@ class LMStudioBackend(ModelBackend):
         await self._ensure_client()
 
         # Add system prompt if configured
-        if self.config.system_prompt and (
-            not messages or messages[0]["role"] != "system"
-        ):
+        if self.config.system_prompt and (not messages or messages[0]["role"] != "system"):
             messages = [{"role": "system", "content": self.config.system_prompt}] + messages
 
         # Try chat completions first
@@ -437,7 +462,9 @@ class LMStudioBackend(ModelBackend):
             except Exception as e:
                 error_msg = str(e)
                 if "jinja" in error_msg.lower() or "template" in error_msg.lower():
-                    logger.warning(f"Chat endpoint failed with template error, falling back to completions: {e}")
+                    logger.warning(
+                        f"Chat endpoint failed with template error, falling back to completions: {e}"
+                    )
                     self._use_completions = True
                 else:
                     raise
@@ -599,9 +626,7 @@ class OpenAIBackend(ModelBackend):
         if self.require_key and not self.api_key:
             raise RuntimeError("Missing API key for OpenAI-compatible backend.")
 
-        if self.config.system_prompt and (
-            not messages or messages[0]["role"] != "system"
-        ):
+        if self.config.system_prompt and (not messages or messages[0]["role"] != "system"):
             messages = [{"role": "system", "content": self.config.system_prompt}] + messages
 
         payload = {
@@ -672,6 +697,7 @@ class GeminiBackend(ModelBackend):
         super().__init__(config)
         self._client = None
         self._cache_settings = resolve_gemini_cache_settings(config)
+        self._thinking_settings = resolve_gemini_thinking_settings(config)
         self._cached_content_names: dict[str, str] = {}
 
     def _ensure_client(self):
@@ -701,7 +727,9 @@ class GeminiBackend(ModelBackend):
         # Convert tools to Gemini format
         gemini_tools = None
         if tools:
-            gemini_tools = [self._convert_tool_to_gemini(t) for t in tools if t.get("type") == "function"]
+            gemini_tools = [
+                self._convert_tool_to_gemini(t) for t in tools if t.get("type") == "function"
+            ]
 
         cached_content_name, cache_key, request_contents = self._prepare_cached_request(
             messages=messages,
@@ -749,6 +777,9 @@ class GeminiBackend(ModelBackend):
                             ToolCall(
                                 name=fc.name,
                                 arguments=dict(fc.args) if fc.args else {},
+                                thought_signature=self._encode_thought_signature(
+                                    getattr(part, "thought_signature", None)
+                                ),
                             )
                         )
 
@@ -758,7 +789,9 @@ class GeminiBackend(ModelBackend):
                 finish_reason="tool_calls" if tool_calls else "stop",
                 usage={
                     "prompt_tokens": getattr(response.usage_metadata, "prompt_token_count", 0),
-                    "completion_tokens": getattr(response.usage_metadata, "candidates_token_count", 0),
+                    "completion_tokens": getattr(
+                        response.usage_metadata, "candidates_token_count", 0
+                    ),
                     "cached_content_tokens": getattr(
                         response.usage_metadata,
                         "cached_content_token_count",
@@ -773,7 +806,9 @@ class GeminiBackend(ModelBackend):
             logger.error(f"Gemini generation failed: {e}")
             raise
 
-    def _messages_to_gemini_contents(self, messages: list[dict[str, Any]], types_module) -> list[Any]:
+    def _messages_to_gemini_contents(
+        self, messages: list[dict[str, Any]], types_module
+    ) -> list[Any]:
         contents: list[Any] = []
         for msg in messages:
             role = msg["role"]
@@ -784,9 +819,27 @@ class GeminiBackend(ModelBackend):
                     types_module.Content(role="user", parts=[types_module.Part(text=content)])
                 )
             elif role == "assistant":
-                contents.append(
-                    types_module.Content(role="model", parts=[types_module.Part(text=content)])
-                )
+                parts = []
+                if content:
+                    parts.append(types_module.Part(text=content))
+                for tool_call in msg.get("tool_calls", []):
+                    if not isinstance(tool_call, dict):
+                        continue
+                    name = str(tool_call.get("name", "")).strip()
+                    if not name:
+                        continue
+                    part_kwargs: dict[str, Any] = {
+                        "function_call": types_module.FunctionCall(
+                            name=name,
+                            args=tool_call.get("arguments") or {},
+                        )
+                    }
+                    signature = self._decode_thought_signature(tool_call.get("thought_signature"))
+                    if signature:
+                        part_kwargs["thought_signature"] = signature
+                    parts.append(types_module.Part(**part_kwargs))
+                if parts:
+                    contents.append(types_module.Content(role="model", parts=parts))
             elif role == "tool":
                 results = msg.get("results", [])
                 parts = []
@@ -810,10 +863,17 @@ class GeminiBackend(ModelBackend):
         *,
         cached_content_name: str | None = None,
     ):
+        config_kwargs: dict[str, Any] = {
+            "temperature": self.config.temperature,
+            "top_p": self.config.top_p,
+            "max_output_tokens": self.config.max_tokens,
+        }
+        if self._thinking_settings.level:
+            config_kwargs["thinking_config"] = types_module.ThinkingConfig(
+                thinking_level=self._thinking_settings.level,
+            )
         gen_config = types_module.GenerateContentConfig(
-            temperature=self.config.temperature,
-            top_p=self.config.top_p,
-            max_output_tokens=self.config.max_tokens,
+            **config_kwargs,
         )
         if cached_content_name:
             gen_config.cached_content = cached_content_name
@@ -896,6 +956,21 @@ class GeminiBackend(ModelBackend):
     def _looks_like_cache_error(self, exc: Exception) -> bool:
         message = str(exc).lower()
         return "cached" in message or "cache" in message
+
+    @staticmethod
+    def _encode_thought_signature(value: Any) -> str:
+        if isinstance(value, bytes) and value:
+            return base64.b64encode(value).decode("ascii")
+        return ""
+
+    @staticmethod
+    def _decode_thought_signature(value: Any) -> bytes | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            return base64.b64decode(value, validate=True)
+        except (ValueError, TypeError):
+            return None
 
     def _convert_tool_to_gemini(self, tool: dict[str, Any]) -> dict[str, Any]:
         """Convert OpenAI tool format to Gemini FunctionDeclaration."""
