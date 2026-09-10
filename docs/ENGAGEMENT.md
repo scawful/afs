@@ -30,8 +30,14 @@ Both approval surfaces require a `--because` rationale, refused when empty
 
 ```bash
 afs approvals approve <agent> <action> --because "diff reviewed, release-gated"
+afs approvals approve --request-id gate_1a2b3c4d5e6f --because "pr drafts reviewed"
 afs work approvals approve <approval_id> --path <ws> --because "content verified"
 ```
+
+`agent action` decides the first pending request with that pair. When several
+share it (the mission runner queues one per mission), name the row with
+`--request-id`; `afs approvals list` prints the id in its last column, and the
+Barista approvals widget passes it for you.
 
 Both CLI surfaces require re-typing the displayed decision token on the
 terminal (`agent:action` for the agent gate, approval id for work approvals) —

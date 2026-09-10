@@ -394,3 +394,111 @@ def test_approvals_file_routes_before_or_after_subcommand(tmp_path: Path) -> Non
 
     assert before.approvals_file == custom
     assert after.approvals_file == custom
+
+
+# ---------------------------------------------------------------------------
+# --request-id: pick one row when several share an agent/action pair
+# ---------------------------------------------------------------------------
+
+
+def _two_same_pair(tmp_path: Path) -> tuple[Path, list[ApprovalRequest]]:
+    """Two pending requests with the same agent/action but different detail —
+    the mission-runner shape (one `mission_phase_decide` request per mission)."""
+    first = _sample_request(
+        agent="mission-runner", action="mission_phase_act", detail="Mission 'git-hygiene'"
+    )
+    first.request_id = "gate_first000000"
+    second = _sample_request(
+        agent="mission-runner", action="mission_phase_act", detail="Mission 'pr-review-prep'"
+    )
+    second.request_id = "gate_second00000"
+    return _make_gate(tmp_path, [first, second]), [first, second]
+
+
+def test_list_shows_request_id(tmp_path: Path, capsys) -> None:
+    approvals_file, _ = _two_same_pair(tmp_path)
+    assert approvals_list_command(_ns(approvals_file)) == 0
+    out = capsys.readouterr().out
+    assert "REQUEST" in out
+    assert "gate_first000000" in out
+    assert "gate_second00000" in out
+
+
+def test_approve_by_request_id_picks_that_row(tmp_path: Path, capsys, monkeypatch) -> None:
+    approvals_file, _ = _two_same_pair(tmp_path)
+    monkeypatch.setattr(
+        cli_approvals, "_TTY_READER", lambda prompt: "mission-runner:mission_phase_act"
+    )
+
+    exit_code = approvals_approve_command(
+        _ns(
+            approvals_file,
+            agent=None,
+            action=None,
+            request_id="gate_second00000",
+            because="pr drafts are fine to act on",
+        )
+    )
+    assert exit_code == 0
+    assert "gate_second00000" in capsys.readouterr().out
+
+    gate = ApprovalGate(path=approvals_file)
+    by_id = {r.request_id: r for r in gate._pending}
+    assert by_id["gate_second00000"].status == "approved"
+    assert by_id["gate_second00000"].human_confirmed is True
+    assert by_id["gate_first000000"].status == "pending"
+
+
+def test_reject_by_request_id_picks_that_row(tmp_path: Path, capsys, monkeypatch) -> None:
+    approvals_file, _ = _two_same_pair(tmp_path)
+    monkeypatch.setattr(
+        cli_approvals, "_TTY_READER", lambda prompt: "mission-runner:mission_phase_act"
+    )
+
+    exit_code = approvals_reject_command(
+        _ns(
+            approvals_file,
+            agent=None,
+            action=None,
+            request_id="gate_first000000",
+            because="stale since July",
+        )
+    )
+    assert exit_code == 0
+
+    gate = ApprovalGate(path=approvals_file)
+    by_id = {r.request_id: r for r in gate._pending}
+    assert by_id["gate_first000000"].status == "rejected"
+    assert by_id["gate_second00000"].status == "pending"
+
+
+def test_approve_unknown_request_id(tmp_path: Path, capsys) -> None:
+    approvals_file, _ = _two_same_pair(tmp_path)
+    exit_code = approvals_approve_command(
+        _ns(approvals_file, agent=None, action=None, request_id="gate_nope", because="x")
+    )
+    assert exit_code == 1
+    assert "request_id=gate_nope" in capsys.readouterr().out
+
+
+def test_approve_needs_id_or_pair(tmp_path: Path, capsys) -> None:
+    approvals_file, _ = _two_same_pair(tmp_path)
+    exit_code = approvals_approve_command(
+        _ns(approvals_file, agent="mission-runner", action=None, request_id=None, because="x")
+    )
+    assert exit_code == 2
+    assert "--request-id" in capsys.readouterr().err
+
+
+def test_parser_accepts_request_id_without_pair() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    register_parsers(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(
+        ["approvals", "approve", "--request-id", "gate_abc", "--because", "ok"]
+    )
+    assert args.agent is None and args.action is None
+    assert args.request_id == "gate_abc"
+    args = parser.parse_args(["approvals", "reject", "myagent", "deploy", "--because", "no"])
+    assert args.request_id is None

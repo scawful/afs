@@ -784,12 +784,30 @@ class ApprovalGate:
             self._pending = requests
         return [r for r in requests if r.status == "pending"]
 
-    def find_pending(self, agent: str, action: str) -> ApprovalRequest | None:
+    def find_pending(
+        self,
+        agent: str = "",
+        action: str = "",
+        request_id: str | None = None,
+    ) -> ApprovalRequest | None:
+        """Find one pending request.
+
+        With ``request_id`` the match is exact. Without it, the first pending
+        request for ``agent``/``action`` wins, which is ambiguous when several
+        requests share the pair (one per mission, say) — surfaces that let a
+        person pick a specific row should pass the id.
+        """
         with _file_lock(self._path):
             requests = self._current_unlocked()
             self._pending = requests
         for req in requests:
-            if req.agent == agent and req.action == action and req.status == "pending":
+            if req.status != "pending":
+                continue
+            if request_id:
+                if req.request_id == request_id:
+                    return req
+                continue
+            if req.agent == agent and req.action == action:
                 return req
         return None
 
@@ -824,18 +842,19 @@ class ApprovalGate:
 
     def approve_human(
         self,
-        agent: str,
-        action: str,
+        agent: str = "",
+        action: str = "",
         *,
         rationale: str,
         authorization: Any,
+        request_id: str | None = None,
     ) -> bool:
         """Authorize a pending request using a broker-minted capability."""
         from ..human_provenance import consume_human_authorization
 
         if not rationale.strip():
             raise ValueError("a rationale is required for a human approval")
-        request = self.find_pending(agent, action)
+        request = self.find_pending(agent, action, request_id=request_id)
         if request is None:
             return False
         scope = self.human_authorization_scope("approve", request.request_id, rationale)
@@ -843,8 +862,8 @@ class ApprovalGate:
             raise ValueError("a HumanDecisionBroker authorization is required")
         identity = authorization.identity
         return self._resolve(
-            agent,
-            action,
+            request.agent,
+            request.action,
             "approved",
             identity.reviewer,
             rationale,
@@ -880,18 +899,19 @@ class ApprovalGate:
 
     def reject_human(
         self,
-        agent: str,
-        action: str,
+        agent: str = "",
+        action: str = "",
         *,
         rationale: str,
         authorization: Any,
+        request_id: str | None = None,
     ) -> bool:
         """Record a human-confirmed rejection using a broker capability."""
         from ..human_provenance import consume_human_authorization
 
         if not rationale.strip():
             raise ValueError("a rationale is required for a human rejection")
-        request = self.find_pending(agent, action)
+        request = self.find_pending(agent, action, request_id=request_id)
         if request is None:
             return False
         scope = self.human_authorization_scope("reject", request.request_id, rationale)
@@ -899,8 +919,8 @@ class ApprovalGate:
             raise ValueError("a HumanDecisionBroker authorization is required")
         identity = authorization.identity
         return self._resolve(
-            agent,
-            action,
+            request.agent,
+            request.action,
             "rejected",
             identity.reviewer,
             rationale,

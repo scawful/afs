@@ -71,6 +71,35 @@ def _require_rationale(args: argparse.Namespace, decision: str) -> str | None:
     return None
 
 
+def _locate_request(
+    gate: ApprovalGate, args: argparse.Namespace
+) -> tuple[ApprovalRequest | None, int]:
+    """Resolve the request a decision names: ``--request-id`` or ``agent action``.
+
+    Returns ``(request, 0)`` on success, else ``(None, exit_code)`` after
+    printing why. The id form is exact; the pair form takes the first pending
+    match and is ambiguous when several requests share it.
+    """
+    request_id = (getattr(args, "request_id", None) or "").strip()
+    agent = getattr(args, "agent", None) or ""
+    action = getattr(args, "action", None) or ""
+    if not request_id and not (agent and action):
+        print(
+            "Name the request: pass --request-id <gate_...> "
+            "or both <agent> <action>.",
+            file=sys.stderr,
+        )
+        return None, 2
+    request = gate.find_pending(agent, action, request_id=request_id or None)
+    if request is None:
+        what = (
+            f"request_id={request_id}" if request_id else f"agent={agent} action={action}"
+        )
+        print(f"No pending request found for {what}")
+        return None, 1
+    return request, 0
+
+
 def approvals_list_command(args: argparse.Namespace) -> int:
     """List pending approval requests."""
     gate = _load_gate(args)
@@ -93,13 +122,19 @@ def approvals_list_command(args: argparse.Namespace) -> int:
     action_w = max(action_w, len("ACTION"))
     detail_w = max(detail_w, len("DETAIL"))
 
-    header = f"{'AGENT':<{agent_w}}  {'ACTION':<{action_w}}  {'DETAIL':<{detail_w}}  TIMESTAMP"
+    header = (
+        f"{'AGENT':<{agent_w}}  {'ACTION':<{action_w}}  {'DETAIL':<{detail_w}}  "
+        f"{'TIMESTAMP':<19}  REQUEST"
+    )
     print(header)
     print("-" * len(header))
 
     for req in pending:
         ts = req.timestamp[:19] if len(req.timestamp) >= 19 else req.timestamp
-        print(f"{req.agent:<{agent_w}}  {req.action:<{action_w}}  {req.detail:<{detail_w}}  {ts}")
+        print(
+            f"{req.agent:<{agent_w}}  {req.action:<{action_w}}  {req.detail:<{detail_w}}  "
+            f"{ts:<19}  {req.request_id}"
+        )
 
     print()
     print(f"{len(pending)} pending request(s)")
@@ -112,10 +147,9 @@ def approvals_approve_command(args: argparse.Namespace) -> int:
     if rationale is None:
         return 2
     gate = _load_gate(args)
-    request = gate.find_pending(args.agent, args.action)
+    request, code = _locate_request(gate, args)
     if request is None:
-        print(f"No pending request found for agent={args.agent} action={args.action}")
-        return 1
+        return code
     authorization = _confirm_gate_decision(
         gate, request, "approve", rationale
     )
@@ -128,18 +162,19 @@ def approvals_approve_command(args: argparse.Namespace) -> int:
         )
         return 2
     ok = gate.approve_human(
-        args.agent,
-        args.action,
+        request.agent,
+        request.action,
         rationale=rationale,
         authorization=authorization,
+        request_id=request.request_id,
     )
     if ok:
         print(
-            f"Approved: agent={args.agent} action={args.action} "
-            f"by {authorization.identity.reviewer}"
+            f"Approved: agent={request.agent} action={request.action} "
+            f"({request.request_id}) by {authorization.identity.reviewer}"
         )
         return 0
-    print(f"No pending request found for agent={args.agent} action={args.action}")
+    print(f"No pending request found for request_id={request.request_id}")
     return 1
 
 
@@ -154,10 +189,9 @@ def approvals_reject_command(args: argparse.Namespace) -> int:
     if rationale is None:
         return 2
     gate = _load_gate(args)
-    request = gate.find_pending(args.agent, args.action)
+    request, code = _locate_request(gate, args)
     if request is None:
-        print(f"No pending request found for agent={args.agent} action={args.action}")
-        return 1
+        return code
     authorization = _confirm_gate_decision(
         gate, request, "reject", rationale
     )
@@ -169,15 +203,16 @@ def approvals_reject_command(args: argparse.Namespace) -> int:
         )
         return 2
     ok = gate.reject_human(
-        args.agent,
-        args.action,
+        request.agent,
+        request.action,
         rationale=rationale,
         authorization=authorization,
+        request_id=request.request_id,
     )
     if ok:
-        print(f"Rejected: agent={args.agent} action={args.action}")
+        print(f"Rejected: agent={request.agent} action={request.action} ({request.request_id})")
         return 0
-    print(f"No pending request found for agent={args.agent} action={args.action}")
+    print(f"No pending request found for request_id={request.request_id}")
     return 1
 
 
@@ -270,8 +305,13 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         default=argparse.SUPPRESS,
         help="Path to approvals JSON file.",
     )
-    approve_parser.add_argument("agent", help="Agent name.")
-    approve_parser.add_argument("action", help="Action name.")
+    approve_parser.add_argument("agent", nargs="?", help="Agent name (with action).")
+    approve_parser.add_argument("action", nargs="?", help="Action name (with agent).")
+    approve_parser.add_argument(
+        "--request-id",
+        help="Exact request to decide (gate_...), from `afs approvals list`. "
+        "Use it when several pending requests share an agent/action pair.",
+    )
     approve_parser.add_argument(
         "--because",
         help="Required rationale for the decision; stored in immutable approvals history.",
@@ -285,8 +325,13 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         default=argparse.SUPPRESS,
         help="Path to approvals JSON file.",
     )
-    reject_parser.add_argument("agent", help="Agent name.")
-    reject_parser.add_argument("action", help="Action name.")
+    reject_parser.add_argument("agent", nargs="?", help="Agent name (with action).")
+    reject_parser.add_argument("action", nargs="?", help="Action name (with agent).")
+    reject_parser.add_argument(
+        "--request-id",
+        help="Exact request to decide (gate_...), from `afs approvals list`. "
+        "Use it when several pending requests share an agent/action pair.",
+    )
     reject_parser.add_argument(
         "--because",
         help="Required rationale for the decision; stored in immutable approvals history.",
