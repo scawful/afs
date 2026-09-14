@@ -994,6 +994,8 @@ config.
 
 ```bash
 ./scripts/afs claude setup --path /path/to/project-a
+./scripts/afs claude setup --path /path/to/project-a --hook-mode session-and-prompts
+./scripts/afs claude setup --path /path/to/project-a --hook-mode none
 ./scripts/afs claude context --path /path/to/project-a
 ./scripts/afs claude session-report --session <uuid> --write-scratchpad
 ```
@@ -1002,6 +1004,15 @@ config.
 for the resolved project path, not just the current shell directory. When an
 `afs.toml` is present, the generated Claude MCP entry pins `AFS_CONFIG_PATH`
 and `AFS_PREFER_REPO_CONFIG=1` so Claude uses the repo-local AFS config.
+The default `--hook-mode session` injects one bounded startup block and does
+not launch a process on every prompt. `session-and-prompts` opts into the
+just-in-time communication guard; `none` installs only MCP. Rerunning setup
+removes AFS-owned hooks from modes that are no longer selected while preserving
+unrelated hooks. Built-in section limits remain the default; use
+`--context-tokens <n>` only when a host needs a stricter overall startup budget.
+Matched skill bodies are omitted from the Claude hook by default because Claude
+Code and OpenCode load their own skills. Add `--include-skills` to a manually
+configured hook only when the host has no native skill loader.
 
 ## Workspace
 
@@ -1172,7 +1183,7 @@ Or override per agent via `ModelConfig.extra`, for example:
 ```python
 ModelConfig(
     provider=ModelProvider.GEMINI,
-    model_id="gemini-1.5-flash-001",
+    model_id="gemini-3.8-flash",
     extra={
         "gemini_cache": {
             "mode": "try",

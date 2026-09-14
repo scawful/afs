@@ -9,6 +9,22 @@ from typing import Any
 from .model_prompts import build_hook_injection
 from .session_bootstrap import build_session_bootstrap
 
+DEFAULT_SESSION_GROUNDING_TOKEN_BUDGET = 0
+
+
+def resolve_session_grounding_token_budget(value: int | None = None) -> int:
+    """Resolve an optional overall budget; zero keeps built-in section bounds."""
+    raw: int | str | None = value
+    if raw is None:
+        raw = os.getenv(
+            "AFS_SESSION_GROUNDING_TOKEN_BUDGET",
+            str(DEFAULT_SESSION_GROUNDING_TOKEN_BUDGET),
+        )
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):
+        return DEFAULT_SESSION_GROUNDING_TOKEN_BUDGET
+
 
 def build_session_grounding(
     manager: Any,
@@ -19,6 +35,7 @@ def build_session_grounding(
     prompt: str = "",
     skills_prompt: str | None = None,
     include_skills: bool | None = None,
+    token_budget: int | None = None,
 ) -> str:
     """Return bounded AFS context suitable for any host's system prompt.
 
@@ -45,7 +62,7 @@ def build_session_grounding(
             manager,
             context_path,
             project_path=project_path,
-            token_budget=0,
+            token_budget=resolve_session_grounding_token_budget(token_budget),
             record_event=False,
             skills_prompt=effective_skills_prompt,
             include_skills=skills_enabled,

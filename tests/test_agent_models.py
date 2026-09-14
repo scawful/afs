@@ -3,13 +3,18 @@ from __future__ import annotations
 import asyncio
 import sys
 from types import ModuleType, SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from afs.agent.models import (
+    AnthropicBackend,
     GeminiBackend,
     ModelConfig,
     ModelProvider,
+    OpenAIBackend,
+    ToolCall,
+    create_backend,
     resolve_gemini_cache_settings,
     resolve_gemini_thinking_settings,
 )
@@ -147,6 +152,141 @@ def _gemini_messages() -> list[dict[str, object]]:
     return [
         {"role": "user", "content": "Large repeated context " * 50},
         {"role": "user", "content": "What changed?"},
+    ]
+
+
+def test_anthropic_backend_is_native_and_caches_stable_system(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.delenv("AFS_ANTHROPIC_TRANSPORT", raising=False)
+    response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="reviewed")],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(
+            input_tokens=10,
+            output_tokens=3,
+            cache_creation_input_tokens=8,
+            cache_read_input_tokens=0,
+        ),
+    )
+    client = MagicMock()
+    client.messages.create = AsyncMock(return_value=response)
+    fake_anthropic = ModuleType("anthropic")
+    fake_anthropic.AsyncAnthropic = MagicMock(return_value=client)
+    monkeypatch.setitem(sys.modules, "anthropic", fake_anthropic)
+
+    backend = create_backend(
+        ModelConfig(
+            provider=ModelProvider.ANTHROPIC,
+            model_id="claude-sonnet-5",
+            system_prompt="stable policy",
+        )
+    )
+    result = asyncio.run(backend.generate([{"role": "user", "content": "inspect"}]))
+
+    assert isinstance(backend, AnthropicBackend)
+    assert result.content == "reviewed"
+    assert result.usage["cache_creation_input_tokens"] == 8
+    kwargs = client.messages.create.call_args.kwargs
+    assert kwargs["system"] == [
+        {
+            "type": "text",
+            "text": "stable policy",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+
+def test_anthropic_backend_does_not_duplicate_configured_system_prompt() -> None:
+    backend = AnthropicBackend(
+        ModelConfig(
+            provider=ModelProvider.ANTHROPIC,
+            model_id="claude-sonnet-5",
+            system_prompt="stable policy",
+        ),
+        api_key="test-key",
+    )
+
+    system = backend._system_content(
+        [
+            {"role": "system", "content": "stable policy"},
+            {"role": "system", "content": "context was truncated"},
+            {"role": "user", "content": "inspect"},
+        ]
+    )
+
+    assert system == [
+        {
+            "type": "text",
+            "text": "stable policy",
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "text", "text": "context was truncated"},
+    ]
+
+
+def test_anthropic_backend_keeps_explicit_openai_gateway(monkeypatch) -> None:
+    monkeypatch.setenv("AFS_ANTHROPIC_TRANSPORT", "openai")
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("LITELLM_API_KEY", "gateway-key")
+
+    backend = create_backend("anthropic:claude-sonnet-5")
+
+    assert isinstance(backend, OpenAIBackend)
+    assert backend.base_url == "https://gateway.example/v1"
+
+
+def test_anthropic_backend_converts_tools_and_parses_tool_calls() -> None:
+    response = SimpleNamespace(
+        content=[
+            SimpleNamespace(type="text", text="checking"),
+            SimpleNamespace(
+                type="tool_use",
+                id="call-1",
+                name="context_status",
+                input={"project_path": "."},
+            ),
+        ],
+        stop_reason="tool_use",
+        usage=SimpleNamespace(input_tokens=9, output_tokens=4),
+    )
+    client = MagicMock()
+    client.messages.create = AsyncMock(return_value=response)
+    backend = AnthropicBackend(
+        ModelConfig(provider=ModelProvider.ANTHROPIC, model_id="claude-sonnet-5"),
+        api_key="test-key",
+    )
+    backend._client = client
+
+    result = asyncio.run(
+        backend.generate(
+            [{"role": "user", "content": "inspect"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "context_status",
+                        "description": "Read context health",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        )
+    )
+
+    assert result.content == "checking"
+    assert result.tool_calls == [
+        ToolCall(
+            name="context_status",
+            arguments={"project_path": "."},
+            id="call-1",
+        )
+    ]
+    assert client.messages.create.call_args.kwargs["tools"] == [
+        {
+            "name": "context_status",
+            "description": "Read context health",
+            "input_schema": {"type": "object", "properties": {}},
+        }
     ]
 
 

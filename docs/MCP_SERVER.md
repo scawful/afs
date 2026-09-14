@@ -129,6 +129,13 @@ Project-local setup is also available:
 afs claude setup --path /path/to/project
 ```
 
+Claude setup uses a single `SessionStart` hook by default. This keeps the
+standing prefix stable and leaves changing state to focused MCP reads. Use
+`--hook-mode session-and-prompts` when the per-prompt communication guard is
+worth the extra hook process, or `--hook-mode none` for MCP-only setup. Matched
+skill bodies stay out of the default hook payload; Claude Code can load skills
+on demand without duplicating them in the session prefix.
+
 ## Troubleshooting
 
 ### Claude Desktop `initialize` timeout

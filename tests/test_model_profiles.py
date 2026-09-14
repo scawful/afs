@@ -10,8 +10,12 @@ def test_resolve_modern_model_profiles() -> None:
 
     opus = resolve_model_client_profile("claude-opus-4-6")
     assert opus.family == "claude"
-    assert "1024" in opus.cache_strategy
+    assert "byte-identical" in opus.cache_strategy
     assert resolve_model_client_profile("claude-opus-4-8").name == opus.name
+    assert resolve_model_client_profile("claude-sonnet-5").name == opus.name
+
+    flash = resolve_model_client_profile("gemini-3.8-flash")
+    assert flash.name == "gemini:flash"
 
     agy = resolve_model_client_profile("jetski")
     assert agy.name == "antigravity:agy"

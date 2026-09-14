@@ -210,7 +210,9 @@ class AgentHarness:
                     messages=messages,
                     tools=tool_defs if self.tools else None,
                 )
-            except Exception as e:
+            # A provider failure becomes a structured failed run; it must not
+            # escape and strand callers without an AgentResult.
+            except Exception as e:  # noqa: BLE001
                 logger.error(f"Generation failed: {e}")
                 return AgentResult(
                     response="",
@@ -255,8 +257,9 @@ class AgentHarness:
                                 "content": te.result.content
                                 if te.result.success
                                 else te.result.error,
+                                **({"tool_call_id": tc.id} if tc.id else {}),
                             }
-                            for te in tool_results
+                            for tc, te in zip(result.tool_calls, tool_results, strict=True)
                         ],
                     }
                 )
@@ -298,7 +301,9 @@ class AgentHarness:
             if hasattr(hook, "on_agent_complete"):
                 try:
                     await hook.on_agent_complete(agent_result)
-                except Exception as e:
+                # Hooks are third-party completion observers; one broken hook
+                # must not replace the already-computed agent result.
+                except Exception as e:  # noqa: BLE001
                     logger.error(f"Hook failed: {e}")
 
         return agent_result
@@ -344,7 +349,7 @@ async def run_agent(
     """Convenience function to run a single agent query.
 
     Args:
-        model: Model identifier (e.g., "ollama:llama3.2", "gemini-3.7-flash")
+        model: Model identifier (e.g., "ollama:llama3.2", "gemini-3.8-flash")
         prompt: User's request
         tools: Tools available (default: AFS_TOOLS)
         context: Additional context

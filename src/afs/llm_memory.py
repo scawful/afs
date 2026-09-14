@@ -28,6 +28,7 @@ from typing import Any
 
 from .agents.guardrails import ModelRoute, QuotaTracker, resolve_model
 from .agents.llm_bridge import query_llm
+from .claude_defaults import DEFAULT_CLAUDE_GENERATION_MODEL
 from .gemini_defaults import DEFAULT_GEMINI_GENERATION_MODEL
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,7 @@ _SUMMARIZER_FALLBACK_CHAIN = ["local", "gemini", "claude"]
 _SUMMARIZER_MODEL_MAP: dict[str, str] = {
     "local": "qwen2.5-coder:14b",
     "gemini": DEFAULT_GEMINI_GENERATION_MODEL,
-    "claude": "claude-3-5-sonnet",
+    "claude": DEFAULT_CLAUDE_GENERATION_MODEL,
 }
 
 # Maximum number of events to include in the prompt context.  Larger batches
@@ -274,7 +275,9 @@ class LLMSummarizer:
 
         try:
             return self._summarize_with_lock(events, context_root, lock_path)
-        except Exception as exc:
+        # LLM enrichment is an optional boundary; every provider/runtime
+        # failure must fall back to the deterministic counter summary.
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "LLM summarization failed (falling back to counter-based): %s",
                 exc,

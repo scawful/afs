@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..gemini_defaults import default_gemini_generation_model
+from ..claude_defaults import default_claude_generation_model
+from ..gemini_defaults import default_gemini_generation_model, default_gemini_subtask_model
 from ..runtime_paths import default_config_root, default_worktrees_root
 
 try:  # pragma: no cover - platform specific
@@ -297,25 +298,40 @@ def resolve_model(
     preferred: str = "claude",
     fallback_chain: list[str] | None = None,
     quota_tracker: QuotaTracker | None = None,
-    task_tier: str = "standard",  # critical, standard, background
+    task_tier: str = "standard",  # critical, standard, subtask, background
 ) -> ModelRoute:
     """Resolve which model to use based on quota, availability, and task tier.
 
     Task tiers:
         critical  — must use Claude/Gemini, fail if unavailable
         standard  — prefer Claude, fall back through chain
+        subtask — prefer the configured stable Gemini Flash route
         background — prefer cheapest available (local → codex → gemini → claude)
     """
     chain = fallback_chain or list(DEFAULT_FALLBACK_CHAIN)
     tracker = quota_tracker or QuotaTracker()
 
-    # For background tasks, reverse the chain to prefer cheap models
-    if task_tier == "background":
+    if task_tier == "critical":
+        chain = [provider for provider in chain if provider in {"claude", "gemini"}]
+        if preferred in chain:
+            chain = [preferred, *[provider for provider in chain if provider != preferred]]
+    # For background tasks, reverse the chain to prefer cheap models.
+    elif task_tier == "background":
         chain = list(reversed(chain))
+    elif task_tier == "subtask":
+        chain = ["gemini", *[provider for provider in chain if provider != "gemini"]]
+    elif preferred in chain:
+        chain = [preferred, *[provider for provider in chain if provider != preferred]]
+    elif preferred:
+        chain = [preferred, *chain]
 
     model_map = {
-        "claude": "claude-3-5-sonnet",
-        "gemini": default_gemini_generation_model(),
+        "claude": default_claude_generation_model(),
+        "gemini": (
+            default_gemini_subtask_model()
+            if task_tier in {"subtask", "background"}
+            else default_gemini_generation_model()
+        ),
         "codex": "codex",
         "local": "qwen2.5-coder:14b",
     }

@@ -6,6 +6,10 @@ from pathlib import Path
 from afs import session_grounding
 from afs.cli import core
 from afs.schema import AFSConfig
+from afs.session_grounding import (
+    DEFAULT_SESSION_GROUNDING_TOKEN_BUDGET,
+    resolve_session_grounding_token_budget,
+)
 
 
 def test_session_helper_discovers_config_from_explicit_project_path(tmp_path, monkeypatch) -> None:
@@ -94,3 +98,17 @@ def test_user_prompt_grounding_skips_bootstrap(monkeypatch) -> None:
     )
 
     assert result == "prompt=draft the release note;state=None"
+
+
+def test_session_grounding_budget_is_bounded_and_overridable(monkeypatch) -> None:
+    monkeypatch.delenv("AFS_SESSION_GROUNDING_TOKEN_BUDGET", raising=False)
+    assert resolve_session_grounding_token_budget() == DEFAULT_SESSION_GROUNDING_TOKEN_BUDGET
+
+    monkeypatch.setenv("AFS_SESSION_GROUNDING_TOKEN_BUDGET", "600")
+    assert resolve_session_grounding_token_budget() == 600
+    assert resolve_session_grounding_token_budget(0) == 0
+
+
+def test_invalid_session_grounding_budget_uses_default(monkeypatch) -> None:
+    monkeypatch.setenv("AFS_SESSION_GROUNDING_TOKEN_BUDGET", "not-a-number")
+    assert resolve_session_grounding_token_budget() == DEFAULT_SESSION_GROUNDING_TOKEN_BUDGET

@@ -426,7 +426,8 @@ afs gemini context "search query"     # Generate context for Gemini session
 afs gemini context --include-content  # With full file content
 ```
 
-Install: `pip install -e ".[gemini]"`
+Install direct provider support only when AFS itself makes model calls:
+`pip install -e ".[gemini]"` or `pip install -e ".[claude]"`.
 
 ## Client Wrappers
 

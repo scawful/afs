@@ -6,6 +6,11 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 
 ### Added
 
+- Native Anthropic Messages API support with stable-system prompt caching, a
+  configurable `claude-sonnet-5` default, and preserved tool-call IDs across
+  provider-neutral agent loops. A separate `AFS_GEMINI_SUBTASK_MODEL` route
+  defaults bounded delegated work to stable `gemini-3.8-flash` while leaving
+  provider endpoints and credentials under host control.
 - An opt-in version 2 central context layout with six human-facing categories,
   stable project/common scopes, a project registry, and hash-bound private
   migration plans. Mapping schema v2 adds reason-bearing `retained_sources`
@@ -141,6 +146,9 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 
 ### Changed
 
+- Claude setup now installs one `SessionStart` grounding hook by default,
+  omits duplicate skill bodies, and offers explicit per-prompt or MCP-only
+  modes. Generated setup no longer embeds a user-specific context path.
 - Refreshed GitHub Actions dependencies to current Node-runtime-compatible releases.
 - Narrowed CI type checking to the release-critical slice while broader type debt remains tracked in `ROADMAP.md`.
 - Fixed hcode/OpenCode wrappers to request the supported generic session-pack

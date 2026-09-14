@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from ..claude_defaults import claude_prompt_cache_enabled, claude_system_content
 from ..gemini_defaults import validate_gemini_thinking_level
 
 logger = logging.getLogger(__name__)
@@ -46,11 +47,11 @@ class ModelConfig:
         ModelConfig(provider=ModelProvider.OLLAMA, model_id="llama3.2")
 
         # Gemini
-        ModelConfig(provider=ModelProvider.GEMINI, model_id="gemini-3.7-flash")
+        ModelConfig(provider=ModelProvider.GEMINI, model_id="gemini-3.8-flash")
 
         # From string shorthand
         ModelConfig.from_string("ollama:llama3.2")
-        ModelConfig.from_string("gemini-3.7-flash")  # Defaults to gemini provider
+        ModelConfig.from_string("gemini-3.8-flash")  # Defaults to gemini provider
     """
 
     provider: ModelProvider
@@ -63,7 +64,7 @@ class ModelConfig:
 
     @classmethod
     def from_string(cls, model_str: str) -> ModelConfig:
-        """Parse model string like 'ollama:llama3.2' or 'gemini-3.7-flash'."""
+        """Parse model string like 'ollama:llama3.2' or 'gemini-3.8-flash'."""
         if ":" in model_str:
             parts = model_str.split(":", 1)
             provider_str = parts[0].lower()
@@ -150,7 +151,10 @@ def _load_scawful_preset(name: str) -> ModelConfig:
             "Domain-specific model presets moved to the afs_scawful extension repo."
         ) from exc
 
-    return build_preset(name)
+    preset = build_preset(name)
+    if not isinstance(preset, ModelConfig):
+        raise TypeError(f"afs_scawful preset {name!r} did not return ModelConfig")
+    return preset
 
 
 @dataclass
@@ -310,7 +314,9 @@ class OllamaBackend(ModelBackend):
     ):
         super().__init__(config)
         self.host = host
-        self._client = None
+        # Optional provider SDKs are imported lazily, so the concrete client
+        # type is deliberately not part of AFS core's type dependency graph.
+        self._client: Any = None
 
     async def _ensure_client(self):
         """Lazily initialize the HTTP client."""
@@ -433,7 +439,9 @@ class LMStudioBackend(ModelBackend):
     ):
         super().__init__(config)
         self.host = host
-        self._client = None
+        # Optional provider SDKs are imported lazily, so the concrete client
+        # type is deliberately not part of AFS core's type dependency graph.
+        self._client: Any = None
         self._use_completions = False  # Fallback for template issues
 
     async def _ensure_client(self):
@@ -603,7 +611,9 @@ class OpenAIBackend(ModelBackend):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or ""
         self.require_key = require_key
-        self._client = None
+        # Optional provider SDKs are imported lazily, so the concrete client
+        # type is deliberately not part of AFS core's type dependency graph.
+        self._client: Any = None
 
     async def _ensure_client(self):
         if self._client is None:
@@ -690,12 +700,212 @@ class OpenAIBackend(ModelBackend):
             self._client = None
 
 
+class AnthropicBackend(ModelBackend):
+    """Native Anthropic Messages API backend with stable-prefix caching."""
+
+    def __init__(
+        self,
+        config: ModelConfig,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+    ):
+        super().__init__(config)
+        self.api_key = api_key or ""
+        self.base_url = base_url.rstrip("/") if base_url else None
+        # Optional provider SDKs are imported lazily, so the concrete client
+        # type is deliberately not part of AFS core's type dependency graph.
+        self._client: Any = None
+
+    def _ensure_client(self) -> None:
+        if self._client is not None:
+            return
+        try:
+            import anthropic
+        except ImportError as exc:
+            raise RuntimeError(
+                "Anthropic backend requires the optional dependency: pip install 'afs[claude]'"
+            ) from exc
+
+        if not self.api_key:
+            raise RuntimeError(
+                "Missing Anthropic API key; set ANTHROPIC_API_KEY or AFS_ANTHROPIC_API_KEY."
+            )
+        kwargs: dict[str, Any] = {
+            "api_key": self.api_key,
+            "timeout": 120.0,
+        }
+        if self.base_url:
+            kwargs["base_url"] = self.base_url
+        self._client = anthropic.AsyncAnthropic(**kwargs)
+
+    def _system_content(self, messages: list[dict[str, Any]]) -> str | list[dict[str, Any]] | None:
+        # The harness already carries the effective system prompt as a system
+        # message. Only fall back to ModelConfig when a caller omits one, or the
+        # prompt would be duplicated and consume context twice.
+        parts = [
+            str(message.get("content", "")).strip()
+            for message in messages
+            if message.get("role") == "system" and str(message.get("content", "")).strip()
+        ]
+        if not parts and self.config.system_prompt.strip():
+            parts.append(self.config.system_prompt.strip())
+        if not parts:
+            return None
+        if not claude_prompt_cache_enabled(self.config.extra):
+            return "\n\n".join(parts)
+
+        # Cache only the stable leading system block. Later system blocks can
+        # contain changing truncation/recovery notices and must not destabilize
+        # the reusable prefix.
+        cached_prefix = claude_system_content(parts[0], cache=True)
+        assert isinstance(cached_prefix, list)
+        return [*cached_prefix, *({"type": "text", "text": part} for part in parts[1:])]
+
+    def _messages_to_anthropic(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        converted: list[dict[str, Any]] = []
+        for message in messages:
+            role = str(message.get("role", ""))
+            if role == "system":
+                continue
+            content = message.get("content", "")
+            if role == "assistant":
+                blocks: list[dict[str, Any]] = []
+                if content:
+                    blocks.append({"type": "text", "text": str(content)})
+                for index, call in enumerate(message.get("tool_calls", [])):
+                    if not isinstance(call, dict):
+                        continue
+                    name = str(call.get("name", "")).strip()
+                    if not name:
+                        continue
+                    blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": str(call.get("id") or f"tool_{index}"),
+                            "name": name,
+                            "input": call.get("arguments") or {},
+                        }
+                    )
+                if blocks:
+                    converted.append({"role": "assistant", "content": blocks})
+                continue
+            if role == "tool":
+                blocks = []
+                results = message.get("results")
+                if not isinstance(results, list):
+                    results = [message]
+                for index, result in enumerate(results):
+                    if not isinstance(result, dict):
+                        continue
+                    blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": str(
+                                result.get("tool_call_id") or result.get("id") or f"tool_{index}"
+                            ),
+                            "content": str(result.get("content", "")),
+                        }
+                    )
+                if blocks:
+                    converted.append({"role": "user", "content": blocks})
+                continue
+            if role == "user":
+                converted.append({"role": "user", "content": content})
+        return converted
+
+    @staticmethod
+    def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        converted = []
+        for tool in tools:
+            if tool.get("type") != "function":
+                continue
+            function = tool.get("function", {})
+            name = str(function.get("name", "")).strip()
+            if not name:
+                continue
+            converted.append(
+                {
+                    "name": name,
+                    "description": str(function.get("description", "")),
+                    "input_schema": function.get("parameters")
+                    or {"type": "object", "properties": {}},
+                }
+            )
+        return converted
+
+    async def generate(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> GenerateResult:
+        self._ensure_client()
+        kwargs: dict[str, Any] = {
+            "model": self.config.model_id,
+            "max_tokens": self.config.max_tokens,
+            "temperature": self.config.temperature,
+            "messages": self._messages_to_anthropic(messages),
+        }
+        system = self._system_content(messages)
+        if system is not None:
+            kwargs["system"] = system
+        if tools:
+            converted_tools = self._convert_tools(tools)
+            if converted_tools:
+                kwargs["tools"] = converted_tools
+
+        response = await self._client.messages.create(**kwargs)
+        content_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        for block in response.content:
+            block_type = getattr(block, "type", "")
+            if block_type == "text" or (not block_type and hasattr(block, "text")):
+                text = getattr(block, "text", "")
+                if text:
+                    content_parts.append(str(text))
+            elif block_type == "tool_use":
+                arguments = getattr(block, "input", {})
+                tool_calls.append(
+                    ToolCall(
+                        name=str(getattr(block, "name", "")),
+                        arguments=dict(arguments) if isinstance(arguments, dict) else {},
+                        id=str(getattr(block, "id", "")),
+                    )
+                )
+
+        usage = getattr(response, "usage", None)
+        return GenerateResult(
+            content="".join(content_parts),
+            tool_calls=tool_calls,
+            finish_reason=str(getattr(response, "stop_reason", "stop") or "stop"),
+            usage={
+                "prompt_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+                "completion_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+                "cache_creation_input_tokens": int(
+                    getattr(usage, "cache_creation_input_tokens", 0) or 0
+                ),
+                "cache_read_input_tokens": int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+            },
+            raw_response=response,
+        )
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.close()
+            self._client = None
+
+
 class GeminiBackend(ModelBackend):
     """Google Gemini model backend."""
 
     def __init__(self, config: ModelConfig):
         super().__init__(config)
-        self._client = None
+        # Optional provider SDKs are imported lazily, so the concrete client
+        # type is deliberately not part of AFS core's type dependency graph.
+        self._client: Any = None
         self._cache_settings = resolve_gemini_cache_settings(config)
         self._thinking_settings = resolve_gemini_thinking_settings(config)
         self._cached_content_names: dict[str, str] = {}
@@ -945,7 +1155,7 @@ class GeminiBackend(ModelBackend):
             logger.warning("Gemini cached content creation failed, continuing uncached: %s", exc)
             return None
 
-        cache_name = getattr(cache, "name", None)
+        cache_name = str(getattr(cache, "name", "") or "").strip()
         if not cache_name:
             if self._cache_settings.strict:
                 raise RuntimeError("Gemini cache required but create returned no cache name")
@@ -1006,9 +1216,42 @@ def create_backend(config: ModelConfig | str) -> ModelBackend:
     elif config.provider == ModelProvider.GEMINI:
         return GeminiBackend(config)
     elif config.provider == ModelProvider.ANTHROPIC:
+        transport = (
+            str(
+                config.extra.get("anthropic_transport")
+                or os.getenv("AFS_ANTHROPIC_TRANSPORT")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
+        has_native_config = bool(
+            config.extra.get("anthropic_base_url")
+            or os.getenv("AFS_ANTHROPIC_BASE_URL")
+            or os.getenv("ANTHROPIC_BASE_URL")
+            or os.getenv("AFS_ANTHROPIC_API_KEY")
+            or os.getenv("ANTHROPIC_API_KEY")
+        )
+        has_openai_gateway = bool(os.getenv("LITELLM_BASE_URL") or os.getenv("OPENROUTER_BASE_URL"))
+        use_openai_gateway = transport in {"openai", "litellm", "openrouter"} or (
+            not transport and not has_native_config and has_openai_gateway
+        )
+        if not use_openai_gateway:
+            return AnthropicBackend(
+                config,
+                api_key=(
+                    str(config.extra.get("anthropic_api_key") or "").strip()
+                    or os.getenv("AFS_ANTHROPIC_API_KEY")
+                    or os.getenv("ANTHROPIC_API_KEY")
+                ),
+                base_url=(
+                    str(config.extra.get("anthropic_base_url") or "").strip()
+                    or os.getenv("AFS_ANTHROPIC_BASE_URL")
+                    or os.getenv("ANTHROPIC_BASE_URL")
+                ),
+            )
         base_url = (
-            os.getenv("AFS_ANTHROPIC_BASE_URL")
-            or os.getenv("LITELLM_BASE_URL")
+            os.getenv("LITELLM_BASE_URL")
             or os.getenv("OPENROUTER_BASE_URL")
             or "http://localhost:4000/v1"
         )

@@ -50,17 +50,20 @@ def test_generate_claude_settings_with_context_root() -> None:
     class FakeConfig:
         class general:
             context_root = Path("/home/user/.context")
+
     settings = generate_claude_settings(Path("/tmp/test"), config=FakeConfig())
     entry = settings["mcpServers"]["afs"]
     assert "env" in entry
-    assert entry["env"]["AFS_CONTEXT_ROOT"] == str(Path("/home/user/.context").expanduser().resolve())
+    assert entry["env"]["AFS_CONTEXT_ROOT"] == str(
+        Path("/home/user/.context").expanduser().resolve()
+    )
 
 
 def test_generate_claude_settings_prefers_project_config(tmp_path: Path) -> None:
     project_path = tmp_path / "repo"
     project_path.mkdir()
     config_path = project_path / "afs.toml"
-    config_path.write_text("[general]\ncontext_root = \"/tmp/context\"\n", encoding="utf-8")
+    config_path.write_text('[general]\ncontext_root = "/tmp/context"\n', encoding="utf-8")
 
     settings = generate_claude_settings(project_path)
     entry = settings["mcpServers"]["afs"]
@@ -73,7 +76,7 @@ def test_generate_claude_settings_user_scope_omits_project_context(tmp_path: Pat
     project_path = tmp_path / "repo"
     project_path.mkdir()
     config_path = project_path / "afs.toml"
-    config_path.write_text("[general]\ncontext_root = \"/tmp/context\"\n", encoding="utf-8")
+    config_path.write_text('[general]\ncontext_root = "/tmp/context"\n', encoding="utf-8")
 
     class FakeConfig:
         class general:
@@ -91,6 +94,8 @@ def test_generate_claude_settings_user_scope_omits_project_context(tmp_path: Pat
     assert "AFS_CONFIG_PATH" not in env
     assert "AFS_PREFER_REPO_CONFIG" not in env
     assert "AFS_CONTEXT_ROOT" not in env
+    command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert " --path " not in command
 
 
 def test_merge_preserves_other_servers() -> None:
@@ -126,13 +131,13 @@ def test_merge_creates_mcp_servers_if_missing() -> None:
 
 
 def test_generate_claude_md() -> None:
-    md = generate_claude_md("my-project", "/home/user/.context")
+    md = generate_claude_md("my-project")
     assert "my-project" in md
-    assert "/home/user/.context" in md
+    assert "Do not assume a fixed home directory" in md
     assert "afs session bootstrap" in md
     assert "afs claude doctor --json" in md
-    assert "afs claude reap --limit 20 --apply" in md
-    assert "Never reap `protected` sessions" in md
+    assert "afs claude reap --limit 20" in md
+    assert "never reap protected sessions" in md
     assert "handoff.create" in md
 
 
@@ -144,20 +149,35 @@ def test_generate_hooks_config() -> None:
     assert "-m afs events tail" in hooks["hooks"]["PostToolUse"][0]["command"]
 
 
-def test_generate_claude_settings_includes_push_hooks() -> None:
+def test_generate_claude_settings_defaults_to_one_session_hook() -> None:
     settings = generate_claude_settings(Path("/tmp/test"))
     assert "SessionStart" in _hook_events(settings)
-    assert "UserPromptSubmit" in _hook_events(settings)
+    assert "UserPromptSubmit" not in _hook_events(settings)
     session_cmds = _afs_hook_commands(settings, "SessionStart")
     assert len(session_cmds) == 1
     assert "-m afs claude hook" in session_cmds[0]
+    assert "--token-budget 0" in session_cmds[0]
     assert "--event SessionStart" in session_cmds[0]
+
+
+def test_generate_claude_settings_prompt_hook_is_opt_in() -> None:
+    settings = generate_claude_settings(
+        Path("/tmp/test"),
+        hook_mode="session-and-prompts",
+    )
+    assert _hook_events(settings) == {"SessionStart", "UserPromptSubmit"}
+
+
+def test_generate_claude_settings_can_disable_hooks() -> None:
+    settings = generate_claude_settings(Path("/tmp/test"), hook_mode="none")
+    assert settings["hooks"] == {}
 
 
 def test_generate_afs_hook_settings_bakes_runtime_env(tmp_path: Path) -> None:
     hooks = generate_afs_hook_settings(
         tmp_path,
         context_root=tmp_path / ".context",
+        events=("SessionStart", "UserPromptSubmit"),
     )
     command = hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
     # Env is baked in as a prefix since Claude hooks take no per-hook env block.
@@ -168,11 +188,7 @@ def test_generate_afs_hook_settings_bakes_runtime_env(tmp_path: Path) -> None:
 
 def test_merge_hooks_is_idempotent_and_preserves_user_hooks() -> None:
     existing = {
-        "hooks": {
-            "SessionStart": [
-                {"hooks": [{"type": "command", "command": "echo user-owned"}]}
-            ]
-        }
+        "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "echo user-owned"}]}]}
     }
     afs_entry = generate_claude_settings(Path("/tmp/test"))
     merged_once = merge_claude_settings(existing, afs_entry)
@@ -180,20 +196,48 @@ def test_merge_hooks_is_idempotent_and_preserves_user_hooks() -> None:
 
     session = merged_twice["hooks"]["SessionStart"]
     afs_hooks = [
-        hook
-        for entry in session
-        for hook in entry["hooks"]
-        if "afs claude hook" in hook["command"]
+        hook for entry in session for hook in entry["hooks"] if "afs claude hook" in hook["command"]
     ]
     user_hooks = [
-        hook
-        for entry in session
-        for hook in entry["hooks"]
-        if hook["command"] == "echo user-owned"
+        hook for entry in session for hook in entry["hooks"] if hook["command"] == "echo user-owned"
     ]
     # AFS hook appears exactly once after two merges; the user's hook is preserved.
     assert len(afs_hooks) == 1
     assert len(user_hooks) == 1
+
+
+def test_merge_removes_stale_prompt_hook_when_switching_modes() -> None:
+    previous = generate_claude_settings(
+        Path("/tmp/test"),
+        hook_mode="session-and-prompts",
+    )
+    session_only = generate_claude_settings(Path("/tmp/test"))
+
+    merged = merge_claude_settings(previous, session_only)
+
+    assert "SessionStart" in _hook_events(merged)
+    assert "UserPromptSubmit" not in _hook_events(merged)
+
+
+def test_merge_no_hooks_removes_only_afs_owned_hooks() -> None:
+    existing = generate_claude_settings(
+        Path("/tmp/test"),
+        hook_mode="session-and-prompts",
+    )
+    existing["hooks"]["UserPromptSubmit"].append(
+        {"hooks": [{"type": "command", "command": "echo user-owned"}]}
+    )
+
+    merged = merge_claude_settings(
+        existing,
+        generate_claude_settings(Path("/tmp/test"), hook_mode="none"),
+    )
+
+    commands = [
+        hook["command"] for entry in merged["hooks"]["UserPromptSubmit"] for hook in entry["hooks"]
+    ]
+    assert commands == ["echo user-owned"]
+    assert "SessionStart" not in _hook_events(merged)
 
 
 def _hook_events(settings: dict) -> set:
@@ -201,7 +245,9 @@ def _hook_events(settings: dict) -> set:
 
 
 def test_default_claude_user_settings_path(tmp_path: Path) -> None:
-    assert default_claude_user_settings_path(home=tmp_path) == tmp_path / ".claude" / "settings.json"
+    assert (
+        default_claude_user_settings_path(home=tmp_path) == tmp_path / ".claude" / "settings.json"
+    )
 
 
 def test_mcp_registration_detects_project_claude_settings(tmp_path: Path) -> None:

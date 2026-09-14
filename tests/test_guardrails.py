@@ -23,7 +23,8 @@ from afs.agents.guardrails import (
     _file_lock,
     resolve_model,
 )
-from afs.gemini_defaults import DEFAULT_GEMINI_GENERATION_MODEL
+from afs.claude_defaults import DEFAULT_CLAUDE_GENERATION_MODEL
+from afs.gemini_defaults import DEFAULT_GEMINI_GENERATION_MODEL, DEFAULT_GEMINI_SUBTASK_MODEL
 
 
 def _require_xml_expat() -> None:
@@ -172,7 +173,38 @@ class TestResolveModel:
         tracker = QuotaTracker(path=tmp_path / "quota.json")
         route = resolve_model(quota_tracker=tracker, task_tier="standard")
         assert route.provider == "claude"
-        assert route.model_id == "claude-3-5-sonnet"
+        assert route.model_id == DEFAULT_CLAUDE_GENERATION_MODEL
+
+    def test_subtask_tier_prefers_stable_gemini_flash(self, tmp_path: Path) -> None:
+        tracker = QuotaTracker(path=tmp_path / "quota.json")
+        route = resolve_model(quota_tracker=tracker, task_tier="subtask")
+        assert route.provider == "gemini"
+        assert route.model_id == DEFAULT_GEMINI_SUBTASK_MODEL
+
+    def test_standard_tier_honors_explicit_preference(self, tmp_path: Path) -> None:
+        tracker = QuotaTracker(path=tmp_path / "quota.json")
+        route = resolve_model(
+            preferred="gemini",
+            quota_tracker=tracker,
+            task_tier="standard",
+        )
+        assert route.provider == "gemini"
+
+    def test_critical_tier_does_not_fall_back_to_local(self, tmp_path: Path) -> None:
+        tracker = QuotaTracker(
+            path=tmp_path / "quota.json",
+            quotas={
+                "claude": {"hourly": 1, "daily": 1, "cost_ceiling_usd": 0.01},
+                "gemini": {"hourly": 1, "daily": 1, "cost_ceiling_usd": 0.01},
+                "codex": {"hourly": 0, "daily": 0, "cost_ceiling_usd": 0.0},
+                "local": {"hourly": 0, "daily": 0, "cost_ceiling_usd": 0.0},
+            },
+        )
+        tracker.record_call("claude", cost_usd=0.02)
+        tracker.record_call("gemini", cost_usd=0.02)
+
+        with pytest.raises(RuntimeError, match="critical task"):
+            resolve_model(quota_tracker=tracker, task_tier="critical")
 
     def test_background_tier_prefers_local(self, tmp_path: Path) -> None:
         tracker = QuotaTracker(path=tmp_path / "quota.json")

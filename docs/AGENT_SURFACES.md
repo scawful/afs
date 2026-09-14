@@ -79,6 +79,7 @@ export AFS_VENV=<afs-root>/.venv
 <afs-root>/scripts/afs work approvals execute <approval-id> --path . --dry-run --json
 <afs-root>/scripts/afs claude setup --path /path/to/project-a
 <afs-root>/scripts/afs claude setup --scope user
+<afs-root>/scripts/afs claude setup --path /path/to/project-a --hook-mode none
 <afs-root>/scripts/afs claude doctor
 <afs-root>/scripts/afs claude reap --limit 20
 <afs-root>/scripts/afs doctor
@@ -103,6 +104,35 @@ Harness upgrade and setup:
 Training commands are intentionally not part of the default agent startup path.
 Use `afs training ...` only for reusable training/eval work that explicitly
 needs those surfaces.
+
+## Portable model roles
+
+AFS keeps model IDs separate from provider endpoints and credentials:
+
+- `AFS_CLAUDE_MODEL` overrides the stable Claude generation default
+  (`claude-sonnet-5`). Native Anthropic calls request caching only for stable
+  system content; set `AFS_CLAUDE_PROMPT_CACHE=off` to disable it.
+- `AFS_GEMINI_SUBTASK_MODEL` controls bounded delegated work independently of
+  `AFS_GEMINI_MODEL`. Its default is the stable `gemini-3.8-flash` endpoint.
+- `resolve_model(..., task_tier="subtask")` prefers that Gemini subtask route.
+  No agent starts automatically, and provider transport remains a host choice.
+- Native Anthropic transport uses `ANTHROPIC_API_KEY` or
+  `AFS_ANTHROPIC_API_KEY` and optional `AFS_ANTHROPIC_BASE_URL`. Existing
+  OpenAI-compatible gateways remain available with
+  `AFS_ANTHROPIC_TRANSPORT=openai`.
+- Claude lifecycle hooks omit matched skill bodies by default. Native host
+  skill loaders can retrieve them when needed instead of paying for the same
+  instructions in every session prefix.
+
+Install direct provider SDKs only when AFS itself makes model calls:
+
+```bash
+pip install -e ".[claude]"
+pip install -e ".[gemini]"
+```
+
+Claude Code, OpenCode, Antigravity, and other hosts can keep their own
+authentication and provider mappings while using AFS only for context.
 
 Work-assistant commands are for non-technical documents, sheets, tickets,
 planning, people, review routing, communication-style samples, and approval

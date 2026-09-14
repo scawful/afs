@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any
 
+from ...claude_defaults import DEFAULT_CLAUDE_GENERATION_MODEL, claude_system_content
 from ...gemini_defaults import DEFAULT_GEMINI_GENERATION_MODEL
 from ...history import log_event
 from .prompts import ASM_COT_SYSTEM_PROMPT
@@ -62,7 +64,8 @@ class GeminiClient(LLMClient):
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY not set. Set environment variable or pass api_key.")
         self.model = model
-        self._client = None
+        # Provider SDK is optional and imported lazily.
+        self._client: Any = None
 
     def _get_client(self) -> Any:
         """Lazy initialization of Gemini client."""
@@ -99,7 +102,7 @@ class GeminiClient(LLMClient):
             },
         )
 
-        content = response.text
+        content = str(response.text or "")
         log_event(
             "model",
             "afs.generators.cot",
@@ -126,13 +129,14 @@ class ClaudeClient(LLMClient):
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "claude-3-5-sonnet-20241022",
+        model: str = DEFAULT_CLAUDE_GENERATION_MODEL,
     ):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not self.api_key:
             raise ValueError("ANTHROPIC_API_KEY not set. Set environment variable or pass api_key.")
         self.model = model
-        self._client = None
+        # Provider SDK is optional and imported lazily.
+        self._client: Any = None
 
     def _get_client(self) -> Any:
         """Lazy initialization of Anthropic client."""
@@ -160,11 +164,20 @@ class ClaudeClient(LLMClient):
         message = client.messages.create(
             model=self.model,
             max_tokens=max_tokens,
-            system=system_prompt or ASM_COT_SYSTEM_PROMPT,
+            system=claude_system_content(
+                system_prompt or ASM_COT_SYSTEM_PROMPT,
+                cache=True,
+            ),
             messages=[{"role": "user", "content": prompt}],
         )
 
-        content = message.content[0].text
+        content = "\n".join(
+            str(block.text)
+            for block in message.content
+            if getattr(block, "type", "") == "text" and getattr(block, "text", "")
+        )
+        if not content:
+            raise RuntimeError("Claude returned no text content")
         log_event(
             "model",
             "afs.generators.cot",
@@ -197,7 +210,8 @@ class OpenAIClient(LLMClient):
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY not set. Set environment variable or pass api_key.")
         self.model = model
-        self._client = None
+        # Provider SDK is optional and imported lazily.
+        self._client: Any = None
 
     def _get_client(self) -> Any:
         """Lazy initialization of OpenAI client."""
@@ -230,7 +244,7 @@ class OpenAIClient(LLMClient):
             max_tokens=max_tokens,
         )
 
-        content = response.choices[0].message.content
+        content = str(response.choices[0].message.content or "")
         log_event(
             "model",
             "afs.generators.cot",
@@ -261,7 +275,7 @@ def get_client(provider: str, **kwargs) -> LLMClient:
     Returns:
         LLMClient instance
     """
-    clients = {
+    clients: dict[str, Callable[..., LLMClient]] = {
         "gemini": GeminiClient,
         "claude": ClaudeClient,
         "openai": OpenAIClient,

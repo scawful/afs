@@ -63,7 +63,7 @@ from afs.evaluation import SemanticEvaluator
 ```bash
 # Head-to-head comparison
 python3 -m afs comparison compare \
-  --models gemini-3.7-flash,claude-3.5-sonnet \
+  --models gemini-3.8-flash,claude-sonnet-5 \
   --questions eval/questions.json \
   --output results/comparison
 
