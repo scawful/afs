@@ -3,7 +3,7 @@
 Purpose: make AFS itself get used in an AFS-first way.
 
 Startup Contract
-1. Start with `./scripts/afs session bootstrap --json` or the MCP prompt `afs.session.bootstrap`.
+1. Start with `./scripts/afs session bootstrap --short --json` or the MCP prompt `afs.session.bootstrap` with `short=true`. Load the full bootstrap only when the task needs its diagnostics.
 2. If bootstrap is unavailable, call `context.status`, then `context.query`; use `context.read`/`context.list` for scratchpad follow-up.
 3. Read scratchpad state and deferred notes before major edits.
 4. Use `context.query` before asking for context that may already be in memory, knowledge, or scratchpad.
@@ -31,9 +31,11 @@ AFS Defaults
 - Treat `memory` and `knowledge` as deliberate, durable updates.
 - Use `items` for queued work and `hivemind` for cross-agent handoffs only when a task spans turns or tools.
 - Do not start training, embeddings, background agents, or domain MCP tooling unless the task explicitly needs that surface.
+- Use the host's native skill loader when available; AFS supplies skill roots and task context. Generic workflow coaching is optional; keep task constraints, permissions, and required checks.
 
 Reference Material
 - Agent harness upgrade guide: `docs/AGENT_INTEGRATION_UPGRADE.md`
+- Compact startup and extension contracts: `docs/AGENT_CONTRACTS.md`
 - Guided setup and approachable CLI guide: `docs/SETUP_GUIDE.md`
 - Detailed agent/runtime docs: `docs/AGENT_SURFACES.md`
 - MCP surface docs: `docs/MCP_SERVER.md`

@@ -523,6 +523,16 @@ def check_extensions(config_path: Path | None = None) -> DiagnosticResult:
     warnings = [
         f"{entry['name']}: {warning}" for entry in extensions for warning in entry["warnings"]
     ]
+    from .extension_diagnostics import extension_dispatch_warnings
+
+    for entry in extensions:
+        try:
+            warnings.extend(
+                f"{entry['name']}: {warning}"
+                for warning in extension_dispatch_warnings(Path(entry["path"]))
+            )
+        except (OSError, ValueError) as exc:
+            warnings.append(f"{entry['name']}: dispatch inspection failed: {type(exc).__name__}")
 
     if errors:
         details = summarize([entry["error"] for entry in errors])

@@ -177,3 +177,17 @@ def test_events_parser_accepts_context_flags_after_subcommand() -> None:
     assert args.events_command == "analytics"
     assert args.path == "/tmp/project"
     assert args.hours == 12
+
+
+def test_events_emit_returns_receipt_and_reports_disabled_logging(tmp_path, monkeypatch, capsys) -> None:
+    manager = AFSManager(config=AFSConfig(general=GeneralConfig(context_root=tmp_path)))
+    monkeypatch.setattr(events_cli, "_resolve_manager_context_history", lambda _args: (manager, tmp_path, tmp_path))
+    monkeypatch.setattr("afs.external_events.log_event", lambda *_args, **_kwargs: "event-id")
+    parser = argparse.ArgumentParser()
+    register_parsers(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["events", "emit", "task.done", "--source", "test", "--json"])
+    assert args.func(args) == 0
+    assert json.loads(capsys.readouterr().out)["event_id"] == "event-id"
+    monkeypatch.setattr("afs.external_events.log_event", lambda *_args, **_kwargs: None)
+    assert args.func(args) == 1
+    assert "not recorded" in capsys.readouterr().out

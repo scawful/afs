@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
+import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
@@ -103,7 +105,7 @@ def init_command(args: argparse.Namespace) -> int:
     from ..config import load_config_model
     from ..schema import GeneralConfig
 
-    config_path = Path(args.config) if args.config else Path.cwd() / "afs.toml"
+    config_path: Path | None = Path(args.config) if args.config else Path.cwd() / "afs.toml"
     if args.no_config:
         config_path = None
 
@@ -545,7 +547,8 @@ def _wait_target_names(
 def _format_agent_event(event: dict[str, Any], agent_name: str) -> str:
     timestamp = str(event.get("timestamp", ""))[:19] or "?"
     op = str(event.get("op", "") or "-")
-    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    value = event.get("metadata")
+    metadata = value if isinstance(value, dict) else {}
     detail = str(metadata.get("detail", "") or "")
     if detail:
         return f"{timestamp}  {agent_name}  {op}  {detail}"
@@ -553,7 +556,8 @@ def _format_agent_event(event: dict[str, Any], agent_name: str) -> str:
 
 
 def _event_agent_name(event: dict[str, Any]) -> str:
-    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    value = event.get("metadata")
+    metadata = value if isinstance(value, dict) else {}
     agent_name = str(metadata.get("agent_name", "") or metadata.get("agent", "")).strip()
     if agent_name:
         return agent_name
@@ -1057,8 +1061,11 @@ def session_bootstrap_command(args: argparse.Namespace) -> int:
         agent_name=getattr(args, "agent_name", "cli") or "cli",
         skills_prompt=str(getattr(args, "skills_prompt", "") or ""),
         skills_top_k=int(getattr(args, "skills_top_k", 5) or 0),
+        short=bool(getattr(args, "short", False)),
+        native_skills=bool(getattr(args, "native_skills", False)),
+        token_budget=int(getattr(args, "token_budget", 0) or 0),
     )
-    if not args.no_write_artifacts:
+    if not args.no_write_artifacts and not getattr(args, "short", False):
         summary["artifact_paths"] = write_session_bootstrap_artifacts(
             manager,
             context_path,
@@ -1484,7 +1491,7 @@ def session_hook_command(args: argparse.Namespace) -> int:
             exit_code=args.exit_code,
             seed_payload=payload,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary for extension hooks
         print(str(exc), file=sys.stderr)
         return 1
 
@@ -1593,13 +1600,14 @@ def session_event_command(args: argparse.Namespace) -> int:
             verification_command=verification_command,
             seed_payload=payload,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary for extension hooks
         print(str(exc), file=sys.stderr)
         return 1
 
     if args.json:
         updated_payload = result.get("updated_payload") or {}
-        activity = updated_payload.get("activity") if isinstance(updated_payload, dict) else {}
+        value = updated_payload.get("activity") if isinstance(updated_payload, dict) else {}
+        activity = value if isinstance(value, dict) else {}
         print(
             json.dumps(
                 {
@@ -1938,7 +1946,7 @@ def _count_mount_files(mount_dir: Path) -> int:
     return count_mount_files(mount_dir)
 
 
-def _human_size(size_bytes: int) -> str:
+def _human_size(size_bytes: float) -> str:
     """Format bytes as a human-readable string."""
     for unit in ("B", "KB", "MB", "GB"):
         if abs(size_bytes) < 1024:
@@ -2033,8 +2041,8 @@ def status_command(args: argparse.Namespace) -> int:
                 ),
             }
             index_stats["total_entries"] = total_entries
-        except Exception:
-            pass
+        except (OSError, ValueError, RuntimeError, sqlite3.Error):
+            logging.getLogger(__name__).debug("Context index status unavailable", exc_info=True)
 
     # Active profile
     active_profile = config.profiles.active_profile
@@ -2431,6 +2439,15 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Build a startup packet from context health, scratchpad, tasks, messages, and memory.",
     )
     add_context_args(session_bootstrap)
+    session_bootstrap.add_argument(
+        "--short", action="store_true", help="Read a compact brief without scans or artifact writes."
+    )
+    session_bootstrap.add_argument(
+        "--native-skills", action="store_true", help="List skill roots without matching skill bodies."
+    )
+    session_bootstrap.add_argument(
+        "--token-budget", type=int, default=0, help="Approximate full packet token budget (0: unlimited)."
+    )
     session_bootstrap.add_argument(
         "--task-limit",
         type=int,

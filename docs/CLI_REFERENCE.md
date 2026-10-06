@@ -1,5 +1,8 @@
 # AFS CLI Reference
 
+See [Compact startup and extension contracts](AGENT_CONTRACTS.md) for the short
+bootstrap, conditional writes, content-bound approvals, and extension migration.
+
 ## Invocation
 
 Preferred during local development:

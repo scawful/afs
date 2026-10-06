@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -9,6 +11,7 @@ from typing import Any
 from ..response_schemas import SCHEMA_URI_PREFIX
 
 ToolHandler = Callable[[dict[str, Any], Any], dict[str, Any]]
+logger = logging.getLogger(__name__)
 ResourceHandler = Callable[..., dict[str, Any]]
 PromptHandler = Callable[..., list[dict[str, Any]]]
 
@@ -41,8 +44,12 @@ class MCPToolDefinition:
     # Empty means "inherit" while an extension contribution is normalized;
     # outside an extension-level default it remains full-catalog-only.
     catalog: str = ""
+    # Extension-owned authorization for calls omitted from the active catalog.
+    allow_hidden_call: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.allow_hidden_call, bool):
+            raise ValueError("allow_hidden_call must be a boolean")
         if self.catalog not in MCP_TOOL_CATALOG_VALUES:
             raise ValueError(
                 "MCP tool catalog must be one of: '', 'full', 'slim'"
@@ -196,12 +203,23 @@ class MCPToolRegistry:
     ) -> dict[str, Any]:
         import time
 
-        from ..agent_scope import assert_tool_allowed
+        from ..agent_scope import allowed_tools, assert_tool_allowed
 
         tool = self.tools.get(name)
         if not tool:
             raise ValueError(f"Unknown tool: {name}")
         assert_tool_allowed(name)
+        catalog = os.environ.get("AFS_MCP_TOOL_CATALOG", "slim").strip().lower()
+        visible = (
+            tool.catalog == "slim"
+            or catalog in {"all", "full", "legacy"}
+            or allowed_tools() is not None
+        )
+        if tool.source != "core" and not visible and not tool.allow_hidden_call:
+            raise PermissionError(
+                f"hidden extension tool is not allowed: {name}; "
+                "the extension must set allow_hidden_call=true"
+            )
 
         # Run pre-hook if defined (can modify arguments or block)
         if tool.pre_hook is not None:
@@ -210,7 +228,7 @@ class MCPToolRegistry:
         start = time.monotonic()
         try:
             result = tool.handler(arguments, manager)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - arbitrary extension handler boundary
             elapsed_ms = int((time.monotonic() - start) * 1000)
             try:
                 from ..history import log_mcp_tool_call
@@ -222,8 +240,8 @@ class MCPToolRegistry:
                     duration_ms=elapsed_ms,
                     context_root=manager.config.general.context_root,
                 )
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - telemetry must preserve handler failure
+                logger.debug("MCP failure logging unavailable", exc_info=True)
             raise
         elapsed_ms = int((time.monotonic() - start) * 1000)
 
@@ -240,8 +258,8 @@ class MCPToolRegistry:
                 duration_ms=elapsed_ms,
                 context_root=manager.config.general.context_root,
             )
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - telemetry must preserve handler result
+            logger.debug("MCP result logging unavailable", exc_info=True)
         return result
 
     def read_resource(self, uri: str, manager: Any) -> dict[str, Any]:

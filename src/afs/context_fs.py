@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .agent_scope import allowed_mounts, assert_mount_allowed
 from .context_layout import LAYOUT_VERSION, detect_layout_version
+from .file_io import read_text_snapshot, write_text_checked
 from .grounding_hooks import run_grounding_hooks
 from .history import log_event
 from .manager import AFSManager
@@ -271,6 +272,20 @@ class ContextFileSystem:
         encoding: str = "utf-8",
         errors: str = "replace",
     ) -> str:
+        return self.read_text_with_hash(
+            mount_type, relative_path, encoding=encoding, errors=errors
+        )[0]
+
+    def read_text_with_hash(
+        self,
+        mount_type: FileMountType,
+        relative_path: str,
+        *,
+        encoding: str = "utf-8",
+        errors: str = "replace",
+        preserve_newlines: bool = False,
+    ) -> tuple[str, str]:
+        """Read text and its raw-byte version in one snapshot."""
         self._ensure_mount_access(mount_type, operation="read")
         run_grounding_hooks(
             event="before_context_read",
@@ -286,7 +301,9 @@ class ContextFileSystem:
             raise FileNotFoundError(f"Path not found: {target}")
         if target.is_dir():
             raise IsADirectoryError(f"Path is a directory: {target}")
-        content = target.read_text(encoding=encoding, errors=errors)
+        content, digest = read_text_snapshot(
+            target, encoding=encoding, errors=errors, preserve_newlines=preserve_newlines
+        )
         log_event(
             "fs",
             "afs.context_fs",
@@ -301,7 +318,7 @@ class ContextFileSystem:
             },
             include_payloads=False,
         )
-        return content
+        return content, digest
 
     def write_text(
         self,
@@ -312,6 +329,7 @@ class ContextFileSystem:
         encoding: str = "utf-8",
         append: bool = False,
         mkdirs: bool = False,
+        if_match: str | None = None,
     ) -> Path:
         self._ensure_mount_access(mount_type, operation="write")
         if (
@@ -332,9 +350,9 @@ class ContextFileSystem:
             if not mkdirs:
                 raise FileNotFoundError(f"Parent directory missing: {target.parent}")
             target.parent.mkdir(parents=True, exist_ok=True)
-        mode = "a" if append else "w"
-        with target.open(mode, encoding=encoding) as handle:
-            handle.write(content)
+        write_text_checked(
+            target, content, encoding=encoding, append=append, if_match=if_match
+        )
         run_grounding_hooks(
             event="after_context_write",
             payload={
@@ -389,7 +407,8 @@ class ContextFileSystem:
                 max_file_size_bytes=settings.max_file_size_bytes,
                 max_content_chars=settings.max_content_chars,
             )
-        except Exception as exc:  # pragma: no cover - non-critical path
+        # Index plugins are an optional post-write boundary; preserve the write.
+        except Exception as exc:  # noqa: BLE001
             logger.debug("Context index sync skipped for %s: %s", relative_path, exc)
 
     def stat_entry(

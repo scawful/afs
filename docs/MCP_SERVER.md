@@ -1,5 +1,8 @@
 # AFS MCP Server
 
+See [Compact startup and extension contracts](AGENT_CONTRACTS.md) for the short
+bootstrap, conditional writes, content-bound approvals, and extension migration.
+
 AFS provides a lightweight stdio MCP server for context operations.
 
 Work-assistant state for people, project relationships, review routes,

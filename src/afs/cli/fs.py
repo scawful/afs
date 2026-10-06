@@ -142,7 +142,7 @@ def fs_read_command(args: argparse.Namespace) -> int:
     try:
         access = _resolve_file_access(args, manager, (mount_type,))
         fs = access.fs
-        content = fs.read_text(
+        content, digest = fs.read_text_with_hash(
             mount_type,
             args.relative_path,
             encoding=args.encoding,
@@ -161,6 +161,7 @@ def fs_read_command(args: argparse.Namespace) -> int:
                 "context_path": str(access.context_path),
                 "layout_version": access.layout_version,
                 "content": content,
+                "sha256": digest,
             }
         )
         print(json.dumps(payload, indent=2))
@@ -191,7 +192,14 @@ def fs_write_command(args: argparse.Namespace) -> int:
     elif args.content is not None:
         content = args.content
     else:
-        content = sys.stdin.read()
+        try:
+            content = (
+                sys.stdin.buffer.read().decode(args.encoding, errors=args.errors)
+                if hasattr(sys.stdin, "buffer") else sys.stdin.read()
+            )
+        except (OSError, UnicodeError) as exc:
+            print(str(exc))
+            return 1
 
     try:
         access = _resolve_file_access(args, manager, (mount_type,))
@@ -203,6 +211,7 @@ def fs_write_command(args: argparse.Namespace) -> int:
             encoding=args.encoding,
             append=args.append,
             mkdirs=args.mkdirs,
+            if_match=args.if_match,
         )
     except (OSError, ValueError, PermissionError) as exc:
         print(str(exc))
@@ -228,6 +237,33 @@ def fs_write_command(args: argparse.Namespace) -> int:
         return 0
 
     print(f"wrote: {relative_path}")
+    return 0
+
+
+def fs_push_command(args: argparse.Namespace) -> int:
+    """Push one UTF-8 context file using a destination-side conditional write."""
+    import subprocess
+
+    from ..file_transfer import push_text
+
+    manager = load_manager(Path(args.config) if args.config else None)
+    mount = _parse_file_mount(args.mount_type)
+    try:
+        access = _resolve_file_access(args, manager, (mount,))
+        content, digest = access.fs.read_text_with_hash(
+            mount, args.relative_path, errors="strict", preserve_newlines=True
+        )
+        result = push_text(
+            content, host=args.host, mount=args.destination_mount or mount.value,
+            destination=args.destination or args.relative_path, if_match=args.if_match,
+            context_root=args.remote_context_root, project_path=args.remote_project,
+            remote_afs=args.remote_afs, mkdirs=args.mkdirs,
+        )
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        print(str(exc))
+        return 1
+    result["source_sha256"] = digest
+    print(json.dumps(result, indent=2) if args.json else f"wrote: {args.host}:{result['destination']}")
     return 0
 
 
@@ -510,7 +546,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     fs_sub = fs_parser.add_subparsers(dest="fs_command")
     mount_choices = sorted(
-        {mount.value for mount in MountType}
+        {mount.value for mount in MountType} | {"messages"}
         | {category.value for category in ContextCategory}
     )
 
@@ -544,10 +580,26 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     add_encoding_args(fs_write)
     fs_write.add_argument("--content", help="Inline content to write.")
     fs_write.add_argument("--input", help="Read content from file.")
+    fs_write.add_argument("--if-match", help="Require destination SHA-256, or missing to create.")
     fs_write.add_argument("--append", action="store_true", help="Append to file.")
     fs_write.add_argument("--mkdirs", action="store_true", help="Create parent dirs.")
     fs_write.add_argument("--json", action="store_true", help="Output JSON.")
     fs_write.set_defaults(func=fs_write_command)
+
+    fs_push = fs_sub.add_parser("push", help="Push one UTF-8 file over SSH, guarded by destination hash.")
+    add_context_args(fs_push)
+    fs_push.add_argument("mount_type", choices=mount_choices)
+    fs_push.add_argument("relative_path")
+    fs_push.add_argument("--host", required=True, help="SSH host alias or user@hostname.")
+    fs_push.add_argument("--destination", help="Destination relative path (default: source path).")
+    fs_push.add_argument("--destination-mount", choices=mount_choices)
+    fs_push.add_argument("--if-match", required=True, help="Destination SHA-256 or missing.")
+    fs_push.add_argument("--remote-context-root", required=True)
+    fs_push.add_argument("--remote-project", help="Registered project path for a v2 destination.")
+    fs_push.add_argument("--remote-afs", default="afs", help="Remote AFS executable path.")
+    fs_push.add_argument("--mkdirs", action="store_true")
+    fs_push.add_argument("--json", action="store_true")
+    fs_push.set_defaults(func=fs_push_command)
 
     fs_list = fs_sub.add_parser("list", help="List files in context.")
     add_context_args(fs_list)

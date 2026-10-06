@@ -439,6 +439,22 @@ def test_tools_list_can_expose_full_catalog(tmp_path: Path, monkeypatch) -> None
 
 # Preferred file tool surface: daily agent-facing behavior should exercise
 # context.* directly, with fs.* covered separately as compatibility aliases.
+def test_context_and_legacy_writes_share_preconditions(tmp_path: Path) -> None:
+    from afs.file_io import FileWriteConflict
+    from afs.mcp_server import _tool_fs_read, _tool_fs_write, build_mcp_registry
+
+    manager = _make_manager(tmp_path)
+    path = manager.config.general.context_root / "scratchpad" / "versioned"
+    args = {"path": str(path), "content": "one", "if_match": "missing"}
+    _tool_fs_write(args, manager)
+    digest = _tool_fs_read({"path": str(path)}, manager)["sha256"]
+    registry = build_mcp_registry(manager)
+    registry.call("context.write", {**args, "content": "two", "if_match": digest}, manager)
+    with pytest.raises(FileWriteConflict):
+        registry.call("fs.write", {**args, "content": "stale", "if_match": digest}, manager)
+    assert path.read_text() == "two"
+
+
 def test_context_write_and_read_tool_calls(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     target = manager.config.general.context_root / "scratchpad" / "notes.txt"
@@ -4107,6 +4123,7 @@ def test_extension_mcp_tools_are_registered_and_callable(tmp_path: Path) -> None
         "                'additionalProperties': False,\n"
         "            },\n"
         "            'handler': echo,\n"
+        "            'allow_hidden_call': True,\n"
         "        }\n"
         "    ]\n",
         encoding="utf-8",
@@ -4184,6 +4201,7 @@ def test_extension_mcp_server_registers_tools_resources_and_prompts(
         "                    'additionalProperties': False,\n"
         "                },\n"
         "                'handler': echo,\n"
+        "                'allow_hidden_call': True,\n"
         "            }\n"
         "        ],\n"
         "        'resources': [\n"
@@ -4419,6 +4437,7 @@ def test_profile_mcp_tools_modules_are_loaded_into_registry(
         "                    'additionalProperties': False,\n"
         "                },\n"
         "                'handler': echo,\n"
+        "                'allow_hidden_call': True,\n"
         "            }\n"
         "        ],\n"
         "        'resources': [\n"
@@ -5007,7 +5026,7 @@ def test_companion_repo_mcp_server_uses_src_layout(tmp_path: Path) -> None:
         "def register_mcp_server(_manager):\n"
         "    def echo(arguments):\n"
         "        return {'echo': arguments.get('value', '')}\n"
-        "    return {'tools': [{'name': 'google.echo', 'description': 'echo', 'handler': echo}]}\n",
+        "    return {'tools': [{'name': 'google.echo', 'description': 'echo', 'handler': echo, 'allow_hidden_call': True}]}\n",
         encoding="utf-8",
     )
     (repo / "extension.toml").write_text(

@@ -376,6 +376,8 @@ def build_session_bootstrap(
     skills_prompt: str = "",
     skills_top_k: int = 5,
     include_skills: bool = True,
+    short: bool = False,
+    native_skills: bool = False,
 ) -> dict[str, Any]:
     """Build a structured startup packet for a context-aware agent session.
 
@@ -385,6 +387,10 @@ def build_session_bootstrap(
     before whole sections, while the status header and startup sequence are
     always included.
     """
+    if short:
+        from .session_brief import build_session_brief
+
+        return build_session_brief(manager, context_path, project_path=project_path)
     context_path = context_path.expanduser().resolve()
     resolved_scope = resolve_scope(context_path, requester_path=project_path)
     visible_scopes = list(visible_scope_ids(resolved_scope))
@@ -424,8 +430,15 @@ def build_session_bootstrap(
         prompt=skill_focus,
         prompt_source=skill_prompt_source,
         top_k=skills_top_k,
-        enabled=include_skills,
+        enabled=include_skills and not native_skills,
     )
+    if native_skills:
+        profile = resolve_active_profile(manager.config)
+        skills.update({
+            "available": True,
+            "mode": "native",
+            "roots": [str(path) for path in resolve_skill_roots(list(profile.skill_roots))],
+        })
     messages = _collect_messages(
         context_path,
         scope_id=resolved_scope.scope_id,
@@ -656,6 +669,10 @@ def _apply_token_budget(summary: dict[str, Any], budget: int) -> dict[str, Any]:
 
 def render_session_bootstrap(summary: dict[str, Any]) -> str:
     """Render a bootstrap packet as markdown/text for CLI and MCP prompts."""
+    if summary.get("compact"):
+        from .session_brief import render_session_brief
+
+        return render_session_brief(summary)
     status = summary["status"]
     diff = summary["diff"]
     scratchpad = summary["scratchpad"]

@@ -9,13 +9,14 @@ from pathlib import Path
 from ..context_paths import resolve_mount_root
 from ..event_log import build_session_replay, summarize_event_analytics
 from ..history import query_events
+from ..manager import AFSManager
 from ..models import MountType
 from ._utils import load_manager, resolve_context_paths
 
 
 def _resolve_manager_context_history(
     args: argparse.Namespace,
-) -> tuple[object, Path, Path]:
+) -> tuple[AFSManager, Path, Path]:
     config_path = (
         Path(args.config).expanduser().resolve()
         if getattr(args, "config", None)
@@ -28,6 +29,24 @@ def _resolve_manager_context_history(
     )
     history_root = resolve_mount_root(context_path, MountType.HISTORY, config=manager.config)
     return manager, context_path, history_root
+
+
+def events_emit_command(args: argparse.Namespace) -> int:
+    """Append an external report using the core history writer."""
+    from ..external_events import emit_event
+
+    try:
+        _manager, context_path, _history_root = _resolve_manager_context_history(args)
+        if not _manager.config.history.enabled:
+            raise RuntimeError("event was not recorded: history logging is disabled")
+        event_id = emit_event(
+            args.name, source=args.source, data=json.loads(args.data), context_root=context_path
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(str(exc))
+        return 1
+    print(json.dumps({"event_id": event_id, "type": "external"}) if args.json else event_id)
+    return 0
 
 
 def events_list_command(args: argparse.Namespace) -> int:
@@ -175,6 +194,14 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     events_parser = subparsers.add_parser("events", help="Query the AFS event log.")
     _add_context_args(events_parser)
     events_sub = events_parser.add_subparsers(dest="events_command")
+
+    emit_parser = events_sub.add_parser("emit", help="Record an external agent event.")
+    _add_context_args(emit_parser)
+    emit_parser.add_argument("name", help="Event name, such as task.completed.")
+    emit_parser.add_argument("--source", required=True, help="Reporting agent or extension.")
+    emit_parser.add_argument("--data", default="{}", help="JSON object (maximum 32 KiB).")
+    emit_parser.add_argument("--json", action="store_true", help="Output JSON receipt.")
+    emit_parser.set_defaults(func=events_emit_command)
 
     list_parser = events_sub.add_parser("list", help="List events with filters.")
     _add_context_args(list_parser)
