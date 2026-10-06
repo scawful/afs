@@ -28,6 +28,8 @@ from typing import Any
 
 from .agents.guardrails import ModelRoute, QuotaTracker, resolve_model
 from .agents.llm_bridge import query_llm
+from .claude_defaults import DEFAULT_CLAUDE_GENERATION_MODEL
+from .gemini_defaults import DEFAULT_GEMINI_GENERATION_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +58,8 @@ _SUMMARIZER_FALLBACK_CHAIN = ["local", "gemini", "claude"]
 # may diverge — e.g. we can use a smaller Gemini model for summaries).
 _SUMMARIZER_MODEL_MAP: dict[str, str] = {
     "local": "qwen2.5-coder:14b",
-    "gemini": "gemini-2.0-flash",
-    "claude": "claude-3-5-sonnet",
+    "gemini": DEFAULT_GEMINI_GENERATION_MODEL,
+    "claude": DEFAULT_CLAUDE_GENERATION_MODEL,
 }
 
 # Maximum number of events to include in the prompt context.  Larger batches
@@ -149,17 +151,17 @@ def _acquire_lock(lock_path: Path) -> bool:
                 if age < _STALE_LOCK_SECONDS:
                     logger.debug("LLM summarizer lock held (age=%.1fs)", age)
                     return False
-                logger.info(
-                    "Removing stale LLM summarizer lock (age=%.0fs)", age
-                )
+                logger.info("Removing stale LLM summarizer lock (age=%.0fs)", age)
             except OSError:
                 pass
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(
-            json.dumps({
-                "pid": os.getpid(),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }),
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            ),
             encoding="utf-8",
         )
         return True
@@ -269,13 +271,13 @@ class LLMSummarizer:
         if not events:
             return None
 
-        lock_path = (
-            (self._lock_dir / _LOCK_FILENAME) if self._lock_dir else None
-        )
+        lock_path = (self._lock_dir / _LOCK_FILENAME) if self._lock_dir else None
 
         try:
             return self._summarize_with_lock(events, context_root, lock_path)
-        except Exception as exc:
+        # LLM enrichment is an optional boundary; every provider/runtime
+        # failure must fall back to the deterministic counter summary.
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "LLM summarization failed (falling back to counter-based): %s",
                 exc,

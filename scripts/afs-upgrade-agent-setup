@@ -15,11 +15,11 @@ Options:
   --workspace PATH        Project/workspace to repair and inspect (default: $PWD)
   --harness NAME          Limit manifest sync to a harness; repeatable
   --apply                 Apply write operations
-  --full                  Full local harness defaults: Codex/Claude/Gemini/Antigravity/hcode
-                          manifest sync, shell hooks, hcode smoke, and index rebuild
+  --full                  Full local harness defaults: Codex/Claude/Gemini/Antigravity
+                          manifest sync, shell hooks, and index rebuild
   --work                  Compatibility alias for --full
   --all                   Enable common write operations when paired with --apply
-                          (shell hooks, worker, Claude/Gemini/Antigravity MCP, hcode, index rebuild)
+                          (shell hooks, worker, Claude/Gemini/Antigravity MCP, index rebuild)
   --rebuild-index         Rebuild the workspace SQLite context index during repair
   --install-shell-hooks   Install idempotent shell wrappers for agent commands
   --install-worker        Install/load the background agent-jobs LaunchAgent
@@ -27,7 +27,11 @@ Options:
   --setup-gemini          Write Gemini MCP setup for the selected scope
   --setup-antigravity     Preview/write Antigravity CLI MCP setup for the selected scope
   --setup-hcode           Sync hcode slash commands/manifest and smoke bootstrap
-  --halext-code PATH      halext-code checkout for hcode smoke (default: ~/src/lab/halext-code)
+  --halext-code PATH      halext-code checkout for explicit hcode setup
+  --skill-root NAME=PATH  Override a harness skill destination; repeatable
+  --command-root NAME=PATH
+                          Override a harness command destination; repeatable
+  --export-path NAME=PATH Override a harness manifest export; repeatable
   --claude-scope SCOPE    project or user (default: project)
   --gemini-scope SCOPE    project or user (default: project)
   --antigravity-scope SCOPE
@@ -39,10 +43,10 @@ Options:
   -h, --help              Show this help
 
 Examples:
-  scripts/afs-upgrade-agent-setup --workspace ~/src/lab/afs
-  scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
-  scripts/afs-upgrade-agent-setup --workspace ~/src --full --setup-hcode
-  scripts/afs-upgrade-agent-setup --workspace ~/src --full --setup-hcode --apply
+  scripts/afs-upgrade-agent-setup --workspace .
+  scripts/afs-upgrade-agent-setup --workspace . --apply --all
+  scripts/afs-upgrade-agent-setup --workspace . --setup-hcode --halext-code /path/to/halext-code
+  scripts/afs-upgrade-agent-setup --workspace . --setup-hcode --halext-code /path/to/halext-code --apply
   scripts/afs-upgrade-agent-setup --apply --harness codex --harness claude
 EOF
 }
@@ -54,7 +58,6 @@ AFS_CLI="${SCRIPT_DIR}/afs"
 WORKSPACE="${AFS_UPGRADE_WORKSPACE:-$PWD}"
 APPLY=0
 FULL_MODE=0
-ALL_MODE=0
 RUN_VENV=1
 RUN_MANIFEST=1
 RUN_CONTEXT_REPAIR=1
@@ -69,8 +72,11 @@ CLAUDE_SCOPE="project"
 GEMINI_SCOPE="project"
 ANTIGRAVITY_SCOPE="project"
 FORCE_MCP=0
-HALEXT_CODE_PATH="${AFS_HALEXT_CODE_PATH:-$HOME/src/lab/halext-code}"
+HALEXT_CODE_PATH="${AFS_HALEXT_CODE_PATH:-}"
 HARNESSES=()
+SKILL_ROOT_OVERRIDES=()
+COMMAND_ROOT_OVERRIDES=()
+EXPORT_PATH_OVERRIDES=()
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -95,14 +101,12 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --all)
-      ALL_MODE=1
       REBUILD_INDEX=1
       INSTALL_SHELL_HOOKS=1
       INSTALL_WORKER=1
       SETUP_CLAUDE=1
       SETUP_GEMINI=1
       SETUP_ANTIGRAVITY=1
-      SETUP_HCODE=1
       shift
       ;;
     --rebuild-index)
@@ -135,6 +139,18 @@ while [ "$#" -gt 0 ]; do
       ;;
     --halext-code)
       HALEXT_CODE_PATH="${2:-}"
+      shift 2
+      ;;
+    --skill-root)
+      SKILL_ROOT_OVERRIDES+=("${2:-}")
+      shift 2
+      ;;
+    --command-root)
+      COMMAND_ROOT_OVERRIDES+=("${2:-}")
+      shift 2
+      ;;
+    --export-path)
+      EXPORT_PATH_OVERRIDES+=("${2:-}")
       shift 2
       ;;
     --claude-scope)
@@ -188,22 +204,40 @@ append_harness_once() {
   HARNESSES+=("$name")
 }
 
+has_harness_override() {
+  local name="$1"
+  shift
+  local item
+  for item in "$@"; do
+    if [ "${item%%=*}" = "$name" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [ "$FULL_MODE" -eq 1 ]; then
   REBUILD_INDEX=1
   INSTALL_SHELL_HOOKS=1
   SETUP_CLAUDE=1
   SETUP_GEMINI=1
   SETUP_ANTIGRAVITY=1
-  SETUP_HCODE=1
   if [ "${#HARNESSES[@]}" -eq 0 ]; then
-    HARNESSES=(codex claude gemini antigravity hcode)
+    HARNESSES=(codex claude gemini antigravity)
   fi
 fi
 
 if [ "$SETUP_HCODE" -eq 1 ]; then
-  if [ "${#HARNESSES[@]}" -gt 0 ] || { [ "$FULL_MODE" -eq 0 ] && [ "$ALL_MODE" -eq 0 ]; }; then
-    append_harness_once hcode
-  fi
+  append_harness_once hcode
+fi
+if [ "$SETUP_CLAUDE" -eq 1 ]; then
+  append_harness_once claude
+fi
+if [ "$SETUP_GEMINI" -eq 1 ]; then
+  append_harness_once gemini
+fi
+if [ "$SETUP_ANTIGRAVITY" -eq 1 ]; then
+  append_harness_once antigravity
 fi
 
 if [ -z "$WORKSPACE" ]; then
@@ -226,14 +260,21 @@ if [ "$ANTIGRAVITY_SCOPE" != "project" ] && [ "$ANTIGRAVITY_SCOPE" != "user" ]; 
   echo "--antigravity-scope must be project or user" >&2
   exit 2
 fi
-if [ -z "$HALEXT_CODE_PATH" ]; then
-  echo "--halext-code requires a path" >&2
-  exit 2
+if [ "$SETUP_HCODE" -eq 1 ]; then
+  if [ -z "$HALEXT_CODE_PATH" ]; then
+    echo "--setup-hcode requires --halext-code PATH or AFS_HALEXT_CODE_PATH" >&2
+    exit 2
+  fi
+  case "$HALEXT_CODE_PATH" in
+    "~") HALEXT_CODE_PATH="$HOME" ;;
+    "~/"*) HALEXT_CODE_PATH="$HOME/${HALEXT_CODE_PATH#~/}" ;;
+  esac
+  if [ ! -d "$HALEXT_CODE_PATH" ]; then
+    echo "halext-code is not a directory: $HALEXT_CODE_PATH" >&2
+    exit 2
+  fi
+  HALEXT_CODE_PATH="$(cd "$HALEXT_CODE_PATH" && pwd)"
 fi
-case "$HALEXT_CODE_PATH" in
-  "~") HALEXT_CODE_PATH="$HOME" ;;
-  "~/"*) HALEXT_CODE_PATH="$HOME/${HALEXT_CODE_PATH#~/}" ;;
-esac
 for harness in "${HARNESSES[@]}"; do
   if [ -z "$harness" ]; then
     echo "--harness requires a non-empty name" >&2
@@ -296,6 +337,26 @@ if [ "$RUN_MANIFEST" -eq 1 ]; then
   manifest_sync_args=(agent-manifest sync)
   for harness in "${HARNESSES[@]}"; do
     manifest_sync_args+=(--harness "$harness")
+    if { [ "$harness" = "gemini" ] || [ "$harness" = "antigravity" ]; } &&
+      ! has_harness_override "$harness" "${SKILL_ROOT_OVERRIDES[@]}"; then
+      # Gemini CLI and Antigravity both recognize this vendor-neutral alias.
+      manifest_sync_args+=(--skill-root "$harness=${WORKSPACE}/.agents/skills")
+    fi
+  done
+  if [ "$SETUP_HCODE" -eq 1 ] && ! has_harness_override hcode "${SKILL_ROOT_OVERRIDES[@]}"; then
+    manifest_sync_args+=(--skill-root "hcode=${HALEXT_CODE_PATH}/.opencode/skills")
+  fi
+  if [ "$SETUP_HCODE" -eq 1 ] && ! has_harness_override hcode "${COMMAND_ROOT_OVERRIDES[@]}"; then
+    manifest_sync_args+=(--command-root "hcode=${HALEXT_CODE_PATH}/.opencode/commands")
+  fi
+  for override in "${SKILL_ROOT_OVERRIDES[@]}"; do
+    manifest_sync_args+=(--skill-root "$override")
+  done
+  for override in "${COMMAND_ROOT_OVERRIDES[@]}"; do
+    manifest_sync_args+=(--command-root "$override")
+  done
+  for override in "${EXPORT_PATH_OVERRIDES[@]}"; do
+    manifest_sync_args+=(--export-path "$override")
   done
   if [ "$APPLY" -eq 1 ]; then
     manifest_sync_args+=(--apply)
@@ -398,12 +459,8 @@ echo
 if [ "$SETUP_HCODE" -eq 1 ]; then
   echo "hcode setup:"
   echo "halext_code: ${HALEXT_CODE_PATH}"
-  if [ -d "$HALEXT_CODE_PATH" ]; then
-    hcode_smoke="cd $(printf '%q' "$HALEXT_CODE_PATH") && $(printf '%q' "${SCRIPT_DIR}/afs-hcode") --bootstrap-only"
-    run_or_plan_write bash -lc "$hcode_smoke"
-  else
-    echo "hcode smoke skipped; halext-code path does not exist: ${HALEXT_CODE_PATH}"
-  fi
+  hcode_smoke="cd $(printf '%q' "$HALEXT_CODE_PATH") && $(printf '%q' "${SCRIPT_DIR}/afs-hcode") --bootstrap-only"
+  run_or_plan_write bash -lc "$hcode_smoke"
 else
   echo "hcode setup not requested; command:"
   plan_cmd "$0" --workspace "$WORKSPACE" --setup-hcode
@@ -423,7 +480,7 @@ if [ "$APPLY" -eq 0 ]; then
   echo
   if [ "$FULL_MODE" -eq 1 ]; then
     echo "Apply the full local harness upgrade with:"
-    plan_cmd "$0" --workspace "$WORKSPACE" --full --setup-hcode --apply
+    plan_cmd "$0" --workspace "$WORKSPACE" --full --apply
   else
     echo "Apply the common local upgrade with:"
     plan_cmd "$0" --workspace "$WORKSPACE" --apply --all

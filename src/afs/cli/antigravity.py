@@ -1,9 +1,9 @@
 """Antigravity CLI integration helpers.
 
-Antigravity CLI (``agy``) is the successor path for Gemini CLI style agentic
-terminal workflows. AFS keeps this surface provider-neutral: it checks local
-configuration, can write an AFS MCP entry, and leaves installation/auth to the
-user unless explicitly performed outside AFS.
+Antigravity CLI (``agy``) and Gemini CLI are separate supported clients. AFS
+keeps this surface provider-neutral: it checks local configuration, can write
+an AFS MCP entry, and leaves installation/auth to the user unless explicitly
+performed outside AFS.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from ..antigravity_status import DEFAULT_ANTIGRAVITY_DB, antigravity_status
 from ..health.mcp_registration import find_afs_mcp_registrations
 from ..mcp_runtime import build_afs_mcp_entry
 
-GEMINI_CLI_INDIVIDUAL_CUTOFF = "2026-06-18"
 ANTIGRAVITY_INSTALL_COMMAND = "curl -fsSL https://antigravity.google/cli/install.sh | bash"
 
 
@@ -167,14 +166,21 @@ def antigravity_setup_command(args: argparse.Namespace) -> int:
     settings_path, current, planned = _setup_payload(args)
     exists = _payload_has_afs_mcp(current)
     if args.json:
-        print(json.dumps({
-            "settings_path": str(settings_path),
-            "config_kind": "mcp_config" if settings_path.name == "mcp_config.json" else "settings",
-            "would_update": bool(args.force or not exists),
-            "apply": bool(args.apply),
-            "install_command": ANTIGRAVITY_INSTALL_COMMAND,
-            "mcp_entry": planned.get("mcpServers", {}).get("afs"),
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "settings_path": str(settings_path),
+                    "config_kind": "mcp_config"
+                    if settings_path.name == "mcp_config.json"
+                    else "settings",
+                    "would_update": bool(args.force or not exists),
+                    "apply": bool(args.apply),
+                    "install_command": ANTIGRAVITY_INSTALL_COMMAND,
+                    "mcp_entry": planned.get("mcpServers", {}).get("afs"),
+                },
+                indent=2,
+            )
+        )
         return 0
     print("Antigravity CLI setup")
     print(f"  settings: {settings_path}")
@@ -210,9 +216,7 @@ def antigravity_status_command(args: argparse.Namespace) -> int:
     registrations = find_afs_mcp_registrations(cwd=project_path)
     capture = antigravity_status(
         db_path=(
-            Path(args.db_path).expanduser().resolve()
-            if args.db_path
-            else DEFAULT_ANTIGRAVITY_DB
+            Path(args.db_path).expanduser().resolve() if args.db_path else DEFAULT_ANTIGRAVITY_DB
         ),
     )
     payload: dict[str, Any] = {
@@ -229,7 +233,7 @@ def antigravity_status_command(args: argparse.Namespace) -> int:
         },
         "mcp_registered": registrations.get("antigravity", []),
         "capture": capture,
-        "gemini_cli_cutoff": GEMINI_CLI_INDIVIDUAL_CUTOFF,
+        "gemini_cli": "separate supported client",
         "install_command": ANTIGRAVITY_INSTALL_COMMAND,
     }
     if args.json:
@@ -256,11 +260,16 @@ def antigravity_models_command(args: argparse.Namespace) -> int:
     binary = shutil.which(args.binary)
     if not binary:
         if args.json:
-            print(json.dumps({
-                "binary": {"name": args.binary, "path": "", "available": False},
-                "models": [],
-                "install_command": ANTIGRAVITY_INSTALL_COMMAND,
-            }, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "binary": {"name": args.binary, "path": "", "available": False},
+                        "models": [],
+                        "install_command": ANTIGRAVITY_INSTALL_COMMAND,
+                    },
+                    indent=2,
+                )
+            )
         else:
             print(f"{args.binary}: not found")
             print(f"install: {ANTIGRAVITY_INSTALL_COMMAND}")
@@ -275,21 +284,31 @@ def antigravity_models_command(args: argparse.Namespace) -> int:
         )
     except subprocess.TimeoutExpired:
         if args.json:
-            print(json.dumps({
-                "binary": {"name": args.binary, "path": binary, "available": True},
-                "models": [],
-                "error": f"agy models timed out after {args.timeout}s",
-            }, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "binary": {"name": args.binary, "path": binary, "available": True},
+                        "models": [],
+                        "error": f"agy models timed out after {args.timeout}s",
+                    },
+                    indent=2,
+                )
+            )
         else:
             print(f"agy models timed out after {args.timeout}s", file=sys.stderr)
         return 124
     if args.json:
-        print(json.dumps({
-            "binary": {"name": args.binary, "path": binary, "available": True},
-            "returncode": completed.returncode,
-            "models": _parse_models_output(completed.stdout),
-            "stderr": completed.stderr.strip(),
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "binary": {"name": args.binary, "path": binary, "available": True},
+                    "returncode": completed.returncode,
+                    "models": _parse_models_output(completed.stdout),
+                    "stderr": completed.stderr.strip(),
+                },
+                indent=2,
+            )
+        )
     else:
         if completed.stdout:
             print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n")
@@ -312,11 +331,13 @@ def _parse_models_output(output: str) -> list[dict[str, str]]:
         if not match:
             models.append({"raw": raw, "name": raw, "label": ""})
             continue
-        models.append({
-            "raw": raw,
-            "name": match.group("name").strip(),
-            "label": (match.group("label") or "").strip(),
-        })
+        models.append(
+            {
+                "raw": raw,
+                "name": match.group("name").strip(),
+                "label": (match.group("label") or "").strip(),
+            }
+        )
     return models
 
 

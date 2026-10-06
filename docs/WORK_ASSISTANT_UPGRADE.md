@@ -7,7 +7,7 @@ routes, and approval-gated external writes.
 ## Upgrade AFS
 
 ```bash
-cd ~/src/lab/afs
+cd /path/to/afs
 git pull --ff-only
 python3.11 -m pip install -e .
 ./scripts/afs help work
@@ -26,18 +26,18 @@ demand at:
 For repo-local context:
 
 ```bash
-cd ~/src/lab/afs
-./scripts/afs context ensure-all --path ~/src/project-a
-./scripts/afs context repair --path ~/src/project-a --rebuild-index --json
-./scripts/afs work --path ~/src/project-a
+cd /path/to/afs
+./scripts/afs context ensure-all --path /path/to/project-a
+./scripts/afs context repair --path /path/to/project-a --rebuild-index --json
+./scripts/afs work --path /path/to/project-a
 ```
 
 For a workspace that must use global context:
 
 ```bash
 export AFS_CONTEXT_ROOT="$HOME/.context"
-cd ~/src/lab/afs
-./scripts/afs context ensure-all --path ~/src/project-a
+cd /path/to/afs
+./scripts/afs context ensure-all --path /path/to/project-a
 ./scripts/afs work --context-root "$AFS_CONTEXT_ROOT"
 ```
 
@@ -82,7 +82,7 @@ Create a request:
 
 ```bash
 ./scripts/afs work approvals request \
-  --path ~/src/project-a \
+  --path /path/to/project-a \
   --target-system zendesk \
   --target-id ticket-123 \
   --action post_ticket_comment \
@@ -95,7 +95,7 @@ For connector-backed actions, pass structured preview data:
 
 ```bash
 ./scripts/afs work approvals request \
-  --path ~/src/project-a \
+  --path /path/to/project-a \
   --target-system gmail \
   --target-id "email:person@example.com" \
   --action send_email \
@@ -107,22 +107,22 @@ For connector-backed actions, pass structured preview data:
 Review and approve:
 
 ```bash
-./scripts/afs work approvals list --path ~/src/project-a
-./scripts/afs work approvals show <approval-id> --path ~/src/project-a
-./scripts/afs work approvals approve <approval-id> --path ~/src/project-a \
+./scripts/afs work approvals list --path /path/to/project-a
+./scripts/afs work approvals show <approval-id> --path /path/to/project-a
+./scripts/afs work approvals approve <approval-id> --path /path/to/project-a \
   --because "preview and target verified"
 ```
 
 Preview execution payload:
 
 ```bash
-./scripts/afs work approvals execute <approval-id> --path ~/src/project-a --dry-run --json
+./scripts/afs work approvals execute <approval-id> --path /path/to/project-a --dry-run --json
 ```
 
 Smoke-test with the included no-op executor:
 
 ```bash
-./scripts/afs work approvals execute <approval-id> --path ~/src/project-a \
+./scripts/afs work approvals execute <approval-id> --path /path/to/project-a \
   --executor "python3 scripts/afs-work-approval-echo.py"
 ```
 
@@ -130,7 +130,7 @@ Execute supported Google Workspace actions:
 
 ```bash
 ./scripts/setup_gws.sh --dry-run
-./scripts/afs work approvals execute <approval-id> --path ~/src/project-a \
+./scripts/afs work approvals execute <approval-id> --path /path/to/project-a \
   --executor "python3 scripts/afs-work-gws-executor.py"
 ```
 
@@ -173,8 +173,8 @@ AFS also sets these environment variables:
 After upgrading, run:
 
 ```bash
-./scripts/afs work --path ~/src/project-a --json
-./scripts/afs work approvals list --path ~/src/project-a --json
+./scripts/afs work --path /path/to/project-a --json
+./scripts/afs work approvals list --path /path/to/project-a --json
 ./scripts/afs help work
 ```
 
@@ -182,5 +182,5 @@ If the context database does not appear, check that the selected path resolves
 to the expected `.context` root:
 
 ```bash
-./scripts/afs context discover --path ~/src/project-a --json
+./scripts/afs context discover --path /path/to/project-a --json
 ```

@@ -42,6 +42,7 @@ from afs.health.mcp_registration import (
 )
 from afs.logging_config import get_logger
 from afs.path_safety import assert_no_linklike_components, iter_regular_files_no_links
+from afs.runtime_paths import default_config_root
 
 logger = get_logger(__name__)
 
@@ -183,10 +184,7 @@ class HealthCheckResult:
                 }
                 for s in self.scores
             ],
-            "checks": [
-                {**asdict(c), "timestamp": c.timestamp.isoformat()}
-                for c in self.checks
-            ],
+            "checks": [{**asdict(c), "timestamp": c.timestamp.isoformat()} for c in self.checks],
             "healing_actions": self.healing_actions,
             "trends": self.trends,
         }
@@ -207,9 +205,7 @@ class EnhancedHealthChecker:
             config: Configuration overrides for thresholds
         """
         self.context_root = (context_root or Path.home() / ".context").expanduser().resolve()
-        self._harden_paths = (
-            detect_layout_version(self.context_root) == LAYOUT_VERSION
-        )
+        self._harden_paths = detect_layout_version(self.context_root) == LAYOUT_VERSION
         self.health_dir = resolve_runtime_root(
             self.context_root,
             "health",
@@ -552,13 +548,18 @@ class EnhancedHealthChecker:
                     score=load_score,
                     status=self._score_to_status(load_score),
                     message=f"Model loads in {load_time_ms:.2f}ms",
-                    details={"load_time_ms": load_time_ms, "threshold_ms": self.config["model_load_timeout_s"] * 1000},
+                    details={
+                        "load_time_ms": load_time_ms,
+                        "threshold_ms": self.config["model_load_timeout_s"] * 1000,
+                    },
                 )
             )
 
             # Inference latency
             latency_ms = self._check_inference_latency()
-            latency_score = max(0, 1.0 - (latency_ms / self.config["inference_latency_threshold_ms"]))
+            latency_score = max(
+                0, 1.0 - (latency_ms / self.config["inference_latency_threshold_ms"])
+            )
             self.scores.append(
                 HealthScore(
                     category="model",
@@ -836,7 +837,9 @@ class EnhancedHealthChecker:
             for proc in psutil.process_iter(["pid", "name", "cpu_percent"]):
                 try:
                     if proc.info["cpu_percent"] < 1.0 and proc.info["name"] not in ["kernel_task"]:
-                        logger.info(f"Killing idle process: {proc.info['name']} (PID: {proc.info['pid']})")
+                        logger.info(
+                            f"Killing idle process: {proc.info['name']} (PID: {proc.info['pid']})"
+                        )
                         self.healing_actions.append(f"Killed idle process: {proc.info['name']}")
                         # proc.kill()  # Commented out for safety
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -976,7 +979,9 @@ class EnhancedHealthChecker:
             payload = {"model": "default", "prompt": "test", "max_tokens": 10}
 
             start = time.time()
-            requests.post(api_url, json=payload, timeout=self.config["inference_latency_threshold_ms"] / 1000)
+            requests.post(
+                api_url, json=payload, timeout=self.config["inference_latency_threshold_ms"] / 1000
+            )
             return (time.time() - start) * 1000
         except Exception:
             return self.config["inference_latency_threshold_ms"]
@@ -1051,7 +1056,9 @@ class EnhancedHealthChecker:
             for file in list(cache_dir.glob("**/*"))[:100]:  # Limit to 100 files
                 if file.is_file():
                     total += 1
-                    file_age = (now - datetime.fromtimestamp(file.stat().st_mtime)).total_seconds() / 3600
+                    file_age = (
+                        now - datetime.fromtimestamp(file.stat().st_mtime)
+                    ).total_seconds() / 3600
                     if file_age > max_age_hours:
                         old_cache += 1
 
@@ -1084,7 +1091,7 @@ class EnhancedHealthChecker:
     def _check_notification_channels(self) -> float:
         """Check notification channel configuration."""
         try:
-            notif_config_path = Path.home() / ".config" / "afs" / "notifications.toml"
+            notif_config_path = default_config_root() / "notifications.toml"
             if notif_config_path.exists():
                 # Count configured channels
                 return 0.8

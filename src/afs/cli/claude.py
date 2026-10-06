@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+import logging
 from pathlib import Path
 
 from ..claude.doctor import inspect_claude_sessions, reap_claude_sessions
@@ -15,6 +15,8 @@ from ..models import MountType
 from ..scopes import resolve_scope
 from ..scratchpad import ScratchpadStore
 from ._utils import load_manager, resolve_context_paths
+
+logger = logging.getLogger(__name__)
 
 
 def claude_session_report_command(args: argparse.Namespace) -> int:
@@ -29,9 +31,15 @@ def claude_session_report_command(args: argparse.Namespace) -> int:
     if args.json:
         payload = {
             "session_id": report.paths.session_id,
-            "transcript_path": str(report.paths.transcript_path) if report.paths.transcript_path else None,
-            "artifacts_dir": str(report.paths.artifacts_dir) if report.paths.artifacts_dir else None,
-            "debug_log_path": str(report.paths.debug_log_path) if report.paths.debug_log_path else None,
+            "transcript_path": str(report.paths.transcript_path)
+            if report.paths.transcript_path
+            else None,
+            "artifacts_dir": str(report.paths.artifacts_dir)
+            if report.paths.artifacts_dir
+            else None,
+            "debug_log_path": str(report.paths.debug_log_path)
+            if report.paths.debug_log_path
+            else None,
             "project_slug": report.paths.project_slug,
             "cwd": report.cwd,
             "git_branch": report.git_branch,
@@ -143,7 +151,7 @@ def claude_setup_command(args: argparse.Namespace) -> int:
 
     config_path = Path(args.config) if getattr(args, "config", None) else None
     manager = load_manager(config_path)
-    project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
+    project_path, _context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
     scope = getattr(args, "scope", "project")
 
     # Generate and merge settings
@@ -152,6 +160,8 @@ def claude_setup_command(args: argparse.Namespace) -> int:
         config=manager.config,
         config_path=config_path,
         include_project_context=scope == "project",
+        hook_mode=getattr(args, "hook_mode", "session"),
+        context_token_budget=getattr(args, "context_tokens", 0),
     )
     settings_path_arg = getattr(args, "settings_path", None)
     if settings_path_arg:
@@ -180,7 +190,7 @@ def claude_setup_command(args: argparse.Namespace) -> int:
     claude_md_path = project_path / "CLAUDE.md"
     if not claude_md_path.exists() or getattr(args, "force", False):
         project_name = project_path.name
-        content = generate_claude_md(project_name, str(context_path))
+        content = generate_claude_md(project_name)
         claude_md_path.write_text(content, encoding="utf-8")
         print(f"wrote: {claude_md_path}")
     else:
@@ -217,8 +227,7 @@ def claude_hook_command(args: argparse.Namespace) -> int:
     """
     import sys
 
-    from ..model_prompts import build_hook_injection
-    from ..session_bootstrap import build_session_bootstrap
+    from ..session_grounding import build_session_grounding
 
     stdin_payload: dict = {}
     try:
@@ -251,30 +260,19 @@ def claude_hook_command(args: argparse.Namespace) -> int:
         project_path, context_path, _context_root, _context_dir = resolve_context_paths(
             args, manager
         )
-        session_state = None
-        if event != "UserPromptSubmit":
-            skills_enabled = os.getenv("AFS_SESSION_SKILLS_MATCH_ENABLED", "1") != "0"
-            skills_prompt = (
-                os.getenv("AFS_SESSION_SKILLS_PROMPT", "").strip()[:8192]
-                if skills_enabled
-                else ""
-            )
-            session_state = build_session_bootstrap(
-                manager,
-                context_path,
-                project_path=project_path,
-                token_budget=0,
-                record_event=False,
-                skills_prompt=skills_prompt,
-                include_skills=skills_enabled,
-            )
-        injection = build_hook_injection(
+        injection = build_session_grounding(
+            manager,
+            context_path,
+            project_path=project_path,
             event=event,
-            context_path=context_path,
-            session_state=session_state,
             prompt=prompt,
+            include_skills=getattr(args, "include_skills", False),
+            token_budget=getattr(args, "token_budget", None),
         )
-    except Exception:
+    # Claude lifecycle hooks must fail open: configuration, storage, and plugin
+    # errors are diagnostic only and must never block the host session.
+    except Exception:  # noqa: BLE001
+        logger.debug("Claude hook grounding unavailable", exc_info=True)
         injection = ""
 
     if not injection.strip():
@@ -330,9 +328,9 @@ def claude_doctor_command(args: argparse.Namespace) -> int:
         print("bridge_pointers:")
         for pointer in report.bridge_pointers[: args.limit]:
             env = f" env={pointer.environment_id}" if pointer.environment_id else ""
-            session = f" session={pointer.session_id}" if pointer.session_id else ""
+            session_ref = f" session={pointer.session_id}" if pointer.session_id else ""
             source = f" source={pointer.source}" if pointer.source else ""
-            print(f"  - {pointer.project_slug}:{session}{env}{source}")
+            print(f"  - {pointer.project_slug}:{session_ref}{env}{source}")
 
     signals = report.debug_signals
     print(
@@ -472,14 +470,25 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Explicit Claude settings.json target override.",
     )
     setup_parser.add_argument(
-        "--force", action="store_true", help="Overwrite existing CLAUDE.md."
+        "--hook-mode",
+        choices=("session", "session-and-prompts", "none"),
+        default="session",
+        help=(
+            "AFS lifecycle hooks: one SessionStart hook (default), also run the "
+            "communication guard on prompt submission, or install MCP only."
+        ),
     )
+    setup_parser.add_argument(
+        "--context-tokens",
+        type=int,
+        default=0,
+        help="Optional overall SessionStart token budget (default: 0 uses built-in section bounds).",
+    )
+    setup_parser.add_argument("--force", action="store_true", help="Overwrite existing CLAUDE.md.")
     setup_parser.set_defaults(func=claude_setup_command)
 
     # context
-    context_parser = claude_sub.add_parser(
-        "context", help="Output Claude-optimized context block."
-    )
+    context_parser = claude_sub.add_parser("context", help="Output Claude-optimized context block.")
     context_parser.add_argument("--config", help="Config path.")
     context_parser.add_argument("--path", help="Project path.")
     context_parser.add_argument("--context-root", help="Context root override.")
@@ -499,6 +508,16 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--event",
         help="Hook event name (SessionStart or UserPromptSubmit). "
         "Falls back to the stdin hook payload, then SessionStart.",
+    )
+    hook_parser.add_argument(
+        "--token-budget",
+        type=int,
+        help="Optional overall SessionStart token budget; defaults to AFS_SESSION_GROUNDING_TOKEN_BUDGET or 0.",
+    )
+    hook_parser.add_argument(
+        "--include-skills",
+        action="store_true",
+        help="Include matched AFS skill bodies in SessionStart context (off by default).",
     )
     hook_parser.add_argument(
         "--raw",

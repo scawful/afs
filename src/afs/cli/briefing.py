@@ -22,7 +22,7 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 # Populate via AFS_BRIEFING_PROJECTS env var (JSON) or leave empty for auto-discovery.
-# Format: {"name": {"path": "~/src/...", "category": "lab"}, ...}
+# Format: {"name": {"path": "/path/to/project", "category": "lab"}, ...}
 PROJECTS: dict[str, dict[str, Any]] = {}
 _projects_env = os.environ.get("AFS_BRIEFING_PROJECTS")
 if _projects_env:
@@ -38,14 +38,24 @@ STALE_THRESHOLD_DAYS = 14
 # Git helpers
 # ---------------------------------------------------------------------------
 
+
 def _git_commits_since(repo_path: Path, days: int = 7) -> list[dict[str, str]]:
     """Return recent commits as [{hash, subject, date}]."""
     since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo_path), "log", f"--after={since}",
-             "--format=%H|%s|%aI", "--no-merges"],
-            capture_output=True, text=True, timeout=10,
+            [
+                "git",
+                "-C",
+                str(repo_path),
+                "log",
+                f"--after={since}",
+                "--format=%H|%s|%aI",
+                "--no-merges",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode != 0:
             return []
@@ -64,7 +74,9 @@ def _git_last_commit_date(repo_path: Path) -> datetime | None:
     try:
         result = subprocess.run(
             ["git", "-C", str(repo_path), "log", "-1", "--format=%aI"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode != 0 or not result.stdout.strip():
             return None
@@ -79,10 +91,12 @@ def _git_last_commit_date(repo_path: Path) -> datetime | None:
 # Halext-org task pull (optional, fails gracefully)
 # ---------------------------------------------------------------------------
 
+
 def _fetch_tasks() -> list[dict[str, Any]]:
     """Pull open tasks from task API. Returns [] on failure."""
     try:
         import urllib.request
+
         req = urllib.request.Request(
             "http://localhost:8000/tasks/?status=todo&limit=10",
             headers={"Accept": "application/json"},
@@ -96,6 +110,7 @@ def _fetch_tasks() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Weekly review carry-over
 # ---------------------------------------------------------------------------
+
 
 def _latest_weekly_carryover() -> list[str]:
     """Parse carry-over items from the most recent weekly review."""
@@ -125,15 +140,18 @@ def _latest_weekly_carryover() -> list[str]:
 # Uses afs.gws.GWSClient for all GWS operations.
 # ---------------------------------------------------------------------------
 
+
 def _get_gws_client():
     """Lazy import to avoid circular deps."""
     from ..gws import get_client
+
     return get_client()
 
 
 # ---------------------------------------------------------------------------
 # Agent registry (Phase 2 — reads if file exists)
 # ---------------------------------------------------------------------------
+
 
 def _read_agent_registry() -> list[dict[str, Any]]:
     """Read agent task registry if it exists."""
@@ -150,6 +168,7 @@ def _read_agent_registry() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Briefing assembly
 # ---------------------------------------------------------------------------
+
 
 def _build_briefing(
     days: int = 7,
@@ -188,6 +207,7 @@ def _build_briefing(
 # Renderers
 # ---------------------------------------------------------------------------
 
+
 def _render_text(briefing: dict[str, Any], short: bool = False) -> str:
     """Render briefing as readable text."""
     lines: list[str] = []
@@ -204,7 +224,11 @@ def _render_text(briefing: dict[str, Any], short: bool = False) -> str:
         for event in briefing["calendar_agenda"]:
             summary = event.get("summary", event.get("title", "untitled"))
             start = event.get("start", {})
-            time_str = start.get("dateTime", start.get("date", "")) if isinstance(start, dict) else str(start)
+            time_str = (
+                start.get("dateTime", start.get("date", ""))
+                if isinstance(start, dict)
+                else str(start)
+            )
             # Extract just the time portion if it's a datetime
             if "T" in str(time_str):
                 try:
@@ -261,7 +285,11 @@ def _render_org(briefing: dict[str, Any]) -> str:
         for event in briefing["calendar_agenda"]:
             summary = event.get("summary", event.get("title", "untitled"))
             start = event.get("start", {})
-            time_str = start.get("dateTime", start.get("date", "")) if isinstance(start, dict) else str(start)
+            time_str = (
+                start.get("dateTime", start.get("date", ""))
+                if isinstance(start, dict)
+                else str(start)
+            )
             if "T" in str(time_str):
                 try:
                     t = datetime.fromisoformat(str(time_str).replace("Z", "+00:00"))
@@ -291,6 +319,7 @@ def _render_org(briefing: dict[str, Any]) -> str:
 # CLI registration
 # ---------------------------------------------------------------------------
 
+
 def _briefing_command(args: argparse.Namespace) -> int:
     days = getattr(args, "days", 7)
     include_gws = not getattr(args, "no_gws", False)
@@ -313,8 +342,12 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Morning briefing — git velocity, tasks, project health.",
     )
     parser.add_argument("--short", "-s", action="store_true", help="Compact single-screen output.")
-    parser.add_argument("--json", "-j", action="store_true", help="JSON output for IDE integration.")
+    parser.add_argument(
+        "--json", "-j", action="store_true", help="JSON output for IDE integration."
+    )
     parser.add_argument("--org", action="store_true", help="Org-mode output for Emacs.")
-    parser.add_argument("--days", "-d", type=int, default=7, help="Lookback window in days (default: 7).")
+    parser.add_argument(
+        "--days", "-d", type=int, default=7, help="Lookback window in days (default: 7)."
+    )
     parser.add_argument("--no-gws", action="store_true", help="Skip Google Workspace integration.")
     parser.set_defaults(func=_briefing_command)

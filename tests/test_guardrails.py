@@ -23,6 +23,8 @@ from afs.agents.guardrails import (
     _file_lock,
     resolve_model,
 )
+from afs.claude_defaults import DEFAULT_CLAUDE_GENERATION_MODEL
+from afs.gemini_defaults import DEFAULT_GEMINI_GENERATION_MODEL, DEFAULT_GEMINI_SUBTASK_MODEL
 
 
 def _require_xml_expat() -> None:
@@ -171,7 +173,38 @@ class TestResolveModel:
         tracker = QuotaTracker(path=tmp_path / "quota.json")
         route = resolve_model(quota_tracker=tracker, task_tier="standard")
         assert route.provider == "claude"
-        assert route.model_id == "claude-3-5-sonnet"
+        assert route.model_id == DEFAULT_CLAUDE_GENERATION_MODEL
+
+    def test_subtask_tier_prefers_stable_gemini_flash(self, tmp_path: Path) -> None:
+        tracker = QuotaTracker(path=tmp_path / "quota.json")
+        route = resolve_model(quota_tracker=tracker, task_tier="subtask")
+        assert route.provider == "gemini"
+        assert route.model_id == DEFAULT_GEMINI_SUBTASK_MODEL
+
+    def test_standard_tier_honors_explicit_preference(self, tmp_path: Path) -> None:
+        tracker = QuotaTracker(path=tmp_path / "quota.json")
+        route = resolve_model(
+            preferred="gemini",
+            quota_tracker=tracker,
+            task_tier="standard",
+        )
+        assert route.provider == "gemini"
+
+    def test_critical_tier_does_not_fall_back_to_local(self, tmp_path: Path) -> None:
+        tracker = QuotaTracker(
+            path=tmp_path / "quota.json",
+            quotas={
+                "claude": {"hourly": 1, "daily": 1, "cost_ceiling_usd": 0.01},
+                "gemini": {"hourly": 1, "daily": 1, "cost_ceiling_usd": 0.01},
+                "codex": {"hourly": 0, "daily": 0, "cost_ceiling_usd": 0.0},
+                "local": {"hourly": 0, "daily": 0, "cost_ceiling_usd": 0.0},
+            },
+        )
+        tracker.record_call("claude", cost_usd=0.02)
+        tracker.record_call("gemini", cost_usd=0.02)
+
+        with pytest.raises(RuntimeError, match="critical task"):
+            resolve_model(quota_tracker=tracker, task_tier="critical")
 
     def test_background_tier_prefers_local(self, tmp_path: Path) -> None:
         tracker = QuotaTracker(path=tmp_path / "quota.json")
@@ -193,6 +226,28 @@ class TestResolveModel:
         tracker.record_call("claude", cost_usd=0.02)
         route = resolve_model(quota_tracker=tracker, task_tier="standard")
         assert route.provider == "gemini"
+        assert route.model_id == DEFAULT_GEMINI_GENERATION_MODEL
+
+
+def test_ensure_worktree_refuses_ambiguous_existing_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root = tmp_path / "worktrees"
+    ambiguous = root / repo.name / "feature"
+    ambiguous.mkdir(parents=True)
+    monkeypatch.setenv("AFS_WORKTREES_ROOT", str(root))
+
+    class Result:
+        returncode = 128
+        stdout = ""
+        stderr = "not a worktree"
+
+    monkeypatch.setattr(guardrails.subprocess, "run", lambda *args, **kwargs: Result())
+
+    with pytest.raises(RuntimeError, match="Refusing to replace"):
+        guardrails.ensure_worktree(repo, "feature")
 
     def test_critical_tier_raises_when_all_exhausted(self, tmp_path: Path) -> None:
         tracker = QuotaTracker(
@@ -268,9 +323,7 @@ class TestApprovalGate:
         gate.check("agent1", "git_push")
         assert len(gate.pending_requests()) == 1
 
-    def test_long_lived_gate_observes_another_process_approval(
-        self, tmp_path: Path
-    ) -> None:
+    def test_long_lived_gate_observes_another_process_approval(self, tmp_path: Path) -> None:
         from afs.human_provenance import _broker_for_reader
 
         path = tmp_path / "approvals.json"
@@ -280,14 +333,10 @@ class TestApprovalGate:
         reviewer = ApprovalGate(path=path)
         request = reviewer.find_pending("agent1", "git_push")
         assert request is not None
-        authorization = _broker_for_reader(
-            lambda _prompt: "confirm"
-        ).confirm_token(
+        authorization = _broker_for_reader(lambda _prompt: "confirm").confirm_token(
             "confirm",
             "prompt",
-            scope=reviewer.human_authorization_scope(
-                "approve", request.request_id, "reviewed"
-            ),
+            scope=reviewer.human_authorization_scope("approve", request.request_id, "reviewed"),
         )
         assert reviewer.approve_human(
             "agent1",
@@ -306,14 +355,10 @@ class TestApprovalGate:
         assert gate.check("agent1", "git_push", "origin/main") is False
         request = gate.find_pending("agent1", "git_push")
         assert request is not None
-        authorization = _broker_for_reader(
-            lambda _prompt: "confirm"
-        ).confirm_token(
+        authorization = _broker_for_reader(lambda _prompt: "confirm").confirm_token(
             "confirm",
             "prompt",
-            scope=gate.human_authorization_scope(
-                "approve", request.request_id, "reviewed"
-            ),
+            scope=gate.human_authorization_scope("approve", request.request_id, "reviewed"),
         )
         assert gate.approve_human(
             "agent1",
@@ -324,9 +369,7 @@ class TestApprovalGate:
 
         assert gate.check("agent1", "git_push", "origin/main") is True
         assert gate.check("agent1", "git_push", "origin/release") is False
-        assert [request.detail for request in gate.pending_requests()] == [
-            "origin/release"
-        ]
+        assert [request.detail for request in gate.pending_requests()] == ["origin/release"]
 
     def test_corrupt_active_state_is_never_overwritten(self, tmp_path: Path) -> None:
         path = tmp_path / "approvals.json"
@@ -344,9 +387,7 @@ class TestApprovalGate:
     def test_programmatic_approve_does_not_authorize_action(self, tmp_path: Path) -> None:
         gate = ApprovalGate(path=tmp_path / "approvals.json")
         gate.check("agent1", "git_push")
-        assert gate.approve(
-            "agent1", "git_push", reviewer="human", reviewed_via="tty"
-        ) is True
+        assert gate.approve("agent1", "git_push", reviewer="human", reviewed_via="tty") is True
         assert gate._pending[0].human_confirmed is False
         assert gate._pending[0].reviewed_via == "programmatic"
         assert gate.check("agent1", "git_push") is False
@@ -358,14 +399,10 @@ class TestApprovalGate:
         gate.check("agent1", "git_push")
         request = gate.find_pending("agent1", "git_push")
         assert request is not None
-        authorization = _broker_for_reader(
-            lambda _prompt: "confirm"
-        ).confirm_token(
+        authorization = _broker_for_reader(lambda _prompt: "confirm").confirm_token(
             "confirm",
             "prompt",
-            scope=gate.human_authorization_scope(
-                "approve", request.request_id, "reviewed"
-            ),
+            scope=gate.human_authorization_scope("approve", request.request_id, "reviewed"),
         )
         assert authorization is not None
         with pytest.raises(ValueError, match="authorization"):
@@ -468,9 +505,7 @@ class TestApprovalGate:
         assert len(archived) == 1
         assert archived[0].rationale == "reviewed"
 
-    def test_clear_repairs_torn_archive_tail_before_compacting(
-        self, tmp_path: Path
-    ) -> None:
+    def test_clear_repairs_torn_archive_tail_before_compacting(self, tmp_path: Path) -> None:
         path = tmp_path / "approvals.json"
         gate = ApprovalGate(path=path)
         gate.check("agent1", "git_push")
@@ -499,9 +534,7 @@ class TestApprovalGate:
             source_path = Path(source)
             assert source_path.parent == path.parent
             assert Path(destination) == path
-            assert json.loads(source_path.read_text(encoding="utf-8"))[0][
-                "rationale"
-            ] == "reviewed"
+            assert json.loads(source_path.read_text(encoding="utf-8"))[0]["rationale"] == "reviewed"
             raise OSError("simulated crash before replace")
 
         monkeypatch.setattr(guardrails.os, "replace", fail_replace)
@@ -510,9 +543,7 @@ class TestApprovalGate:
             gate.approve("agent1", "git_push", rationale="reviewed")
 
         assert path.read_bytes() == original
-        assert [(item.status, item.rationale) for item in gate._pending] == [
-            ("pending", "")
-        ]
+        assert [(item.status, item.rationale) for item in gate._pending] == [("pending", "")]
         assert not list(path.parent.glob(f".{path.name}.*.tmp"))
         reloaded = ApprovalGate(path=path).pending_requests()
         assert [(item.status, item.detail) for item in reloaded] == [
@@ -536,18 +567,14 @@ class TestApprovalGate:
             gate.reject("agent1", "deploy", rationale="unsafe")
 
         assert path.read_bytes() == original
-        assert [(item.status, item.rationale) for item in gate._pending] == [
-            ("pending", "")
-        ]
+        assert [(item.status, item.rationale) for item in gate._pending] == [("pending", "")]
         assert not list(path.parent.glob(f".{path.name}.*.tmp"))
         reloaded = ApprovalGate(path=path).pending_requests()
         assert [(item.status, item.detail) for item in reloaded] == [
             ("pending", "preserve this request")
         ]
 
-    def test_one_malformed_record_fails_closed_without_dropping_rest(
-        self, tmp_path: Path
-    ) -> None:
+    def test_one_malformed_record_fails_closed_without_dropping_rest(self, tmp_path: Path) -> None:
         import json as json_module
 
         path = tmp_path / "approvals.json"
@@ -844,6 +871,7 @@ class TestLaunchAgentPlist:
     def test_plist_is_valid_xml(self) -> None:
         _require_xml_expat()
         import xml.etree.ElementTree as ET
+
         plist_path = Path(__file__).parent.parent / "scripts" / "com.afs.supervisor.plist"
         if not plist_path.exists():
             pytest.skip("plist not found")
@@ -854,6 +882,7 @@ class TestLaunchAgentPlist:
     def test_plist_has_required_keys(self) -> None:
         _require_xml_expat()
         import plistlib
+
         plist_path = Path(__file__).parent.parent / "scripts" / "com.afs.supervisor.plist"
         if not plist_path.exists():
             pytest.skip("plist not found")

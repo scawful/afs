@@ -91,8 +91,10 @@ def test_discover_bundled_skills() -> None:
     names = {s.name for s in skills}
     assert names == {
         "adversarial-verification",
+        "afs",
         "afs-cli-map",
         "agent-ops",
+        "agentic-context",
         "approvals-and-gates",
         "code-review",
         "context-search",
@@ -203,10 +205,7 @@ def test_feature_skills_ignore_unrelated_engineering_terms() -> None:
         ("debug the service health check endpoint", {"health-repair"}),
         ("open the browser session timeline", {"event-log"}),
     ):
-        names = {
-            match["name"]
-            for match in build_skill_matches(prompt, [skills_dir], top_k=10)
-        }
+        names = {match["name"] for match in build_skill_matches(prompt, [skills_dir], top_k=10)}
         assert names.isdisjoint(forbidden), (prompt, names & forbidden)
 
 

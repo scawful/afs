@@ -15,10 +15,11 @@ from .agent_defaults import DEFAULT_AGENT_TAG
 from .config import load_config_model
 from .extensions import resolve_extensions_config
 from .profiles import resolve_active_profile
+from .runtime_paths import default_config_root
 from .schema import AFSConfig, AgentConfig, BundleManifest, ProfileConfig
 from .toml_compat import tomllib
 
-DEFAULT_EXTENSION_ROOT = Path.home() / ".config" / "afs" / "extensions"
+DEFAULT_EXTENSION_ROOT = default_config_root() / "extensions"
 CORE_SOURCE_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -62,7 +63,9 @@ def _count_files(directory: Path) -> int:
 def _dir_size(directory: Path) -> int:
     if not directory.exists():
         return 0
-    return sum(file_path.stat().st_size for file_path in directory.rglob("*") if file_path.is_file())
+    return sum(
+        file_path.stat().st_size for file_path in directory.rglob("*") if file_path.is_file()
+    )
 
 
 def _write_agent_block(lines: list[str], table_name: str, agent: AgentConfig) -> None:
@@ -133,9 +136,7 @@ def _bundle_profile_snapshot(profile_name: str, config: AFSConfig) -> ProfileCon
         # Shipped defaults are runtime-provided on every install; exporting
         # them would freeze one machine's context paths into the bundle.
         agent_configs=[
-            agent
-            for agent in resolved.agent_configs
-            if DEFAULT_AGENT_TAG not in agent.tags
+            agent for agent in resolved.agent_configs if DEFAULT_AGENT_TAG not in agent.tags
         ],
     )
 
@@ -232,33 +233,33 @@ def _write_mcp_surface_module(
     module_path = extension_path / f"{module_name}.py"
     module_list = ", ".join(repr(name) for name in modules)
     module_path.write_text(
-        "\"\"\"Generated bundle MCP surface.\"\"\"\n\n"
+        '"""Generated bundle MCP surface."""\n\n'
         "from __future__ import annotations\n\n"
         "import importlib\n\n"
         f"MODULES = [{module_list}]\n\n"
         "def _normalize(payload):\n"
         "    if isinstance(payload, list):\n"
-        "        return {\"tools\": list(payload), \"resources\": [], \"prompts\": []}\n"
+        '        return {"tools": list(payload), "resources": [], "prompts": []}\n'
         "    if not isinstance(payload, dict):\n"
-        "        return {\"tools\": [], \"resources\": [], \"prompts\": []}\n"
+        '        return {"tools": [], "resources": [], "prompts": []}\n'
         "    return {\n"
-        "        \"tools\": list(payload.get(\"tools\") or []),\n"
-        "        \"resources\": list(payload.get(\"resources\") or []),\n"
-        "        \"prompts\": list(payload.get(\"prompts\") or []),\n"
+        '        "tools": list(payload.get("tools") or []),\n'
+        '        "resources": list(payload.get("resources") or []),\n'
+        '        "prompts": list(payload.get("prompts") or []),\n'
         "    }\n\n"
         "def register_mcp_server(manager):\n"
-        "    merged = {\"tools\": [], \"resources\": [], \"prompts\": []}\n"
+        '    merged = {"tools": [], "resources": [], "prompts": []}\n'
         "    for module_name in MODULES:\n"
         "        module = importlib.import_module(module_name)\n"
-        "        factory = getattr(module, \"register_mcp_server\", None)\n"
+        '        factory = getattr(module, "register_mcp_server", None)\n'
         "        if not callable(factory):\n"
-        "            factory = getattr(module, \"register_mcp_tools\", None)\n"
+        '            factory = getattr(module, "register_mcp_tools", None)\n'
         "        if not callable(factory):\n"
         "            continue\n"
         "        payload = _normalize(factory(manager))\n"
-        "        merged[\"tools\"].extend(payload[\"tools\"])\n"
-        "        merged[\"resources\"].extend(payload[\"resources\"])\n"
-        "        merged[\"prompts\"].extend(payload[\"prompts\"])\n"
+        '        merged["tools"].extend(payload["tools"])\n'
+        '        merged["resources"].extend(payload["resources"])\n'
+        '        merged["prompts"].extend(payload["prompts"])\n'
         "    return merged\n",
         encoding="utf-8",
     )
@@ -290,7 +291,7 @@ def _write_agent_registry_module(
         for record in records
     )
     module_path.write_text(
-        "\"\"\"Generated bundle agent registry.\"\"\"\n\n"
+        '"""Generated bundle agent registry."""\n\n'
         "from __future__ import annotations\n\n"
         "import importlib\n\n"
         f"AGENTS = [\n{record_lines}\n]\n\n"
@@ -299,7 +300,7 @@ def _write_agent_registry_module(
         "        module = importlib.import_module(module_name)\n"
         "        main = getattr(module, 'main', None)\n"
         "        if not callable(main):\n"
-        "            raise RuntimeError(f\"agent module missing main(): {module_name}\")\n"
+        '            raise RuntimeError(f"agent module missing main(): {module_name}")\n'
         "        return main(argv)\n"
         "    return _run\n\n"
         "def register_agents():\n"
@@ -407,8 +408,10 @@ def pack_bundle(
         source = mount.resolve() if mount.is_symlink() else mount
         if source.exists() and source.is_dir():
             shutil.copytree(
-                source, knowledge_dir / mount.name,
-                symlinks=False, dirs_exist_ok=True,
+                source,
+                knowledge_dir / mount.name,
+                symlinks=False,
+                dirs_exist_ok=True,
             )
 
     skills_dir = bundle_dir / manifest.skills_dir
@@ -417,8 +420,10 @@ def pack_bundle(
         source = root.resolve() if root.is_symlink() else root
         if source.exists() and source.is_dir():
             shutil.copytree(
-                source, skills_dir / root.name,
-                symlinks=False, dirs_exist_ok=True,
+                source,
+                skills_dir / root.name,
+                symlinks=False,
+                dirs_exist_ok=True,
             )
 
     (bundle_dir / manifest.agents_dir).mkdir(exist_ok=True)

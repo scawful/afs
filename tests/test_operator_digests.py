@@ -89,7 +89,7 @@ Found 2 errors in the same file, starting at: src/app.ts:12
 def test_digest_operator_output_auto_detects_eslint_stylish_output() -> None:
     payload = digest_operator_output(
         """
-/Users/scawful/src/lab/afs/extensions/vscode-afs/src/extension.ts
+/path/to/afs/extensions/vscode-afs/src/extension.ts
   10:5  error    Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
   14:1  warning  Missing return type on function           @typescript-eslint/explicit-function-return-type
 

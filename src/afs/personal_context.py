@@ -25,13 +25,14 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .runtime_paths import default_config_root
+
 try:
     import tomllib  # Python 3.11+
 except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib  # type: ignore[no-redef]
 
 
-_DEFAULT_PERSONAL_CONTEXT = Path("~/.config/afs/personal").expanduser()
 _ENV_VAR = "AFS_PERSONAL_CONTEXT_ROOT"
 PROFILE_FILENAME = "profile.toml"
 MANIFEST_FILENAME = "manifest.toml"
@@ -46,7 +47,7 @@ def default_context_root() -> Path:
     env_value = os.environ.get(_ENV_VAR)
     if env_value:
         return Path(env_value).expanduser()
-    return _DEFAULT_PERSONAL_CONTEXT
+    return default_config_root() / "personal"
 
 
 # Generic fallback when manifest.toml is missing or doesn't declare modes.

@@ -11,19 +11,24 @@ These surfaces are visible in:
 
 ## Manifest
 
-`configs/agent_manifest.toml` is the single source of truth for harnesses, shared skills, MCP servers, startup hints, and shared instruction files.
+`configs/agent_manifest.toml` is the portable source of truth for harness
+capabilities, repo-owned skills, MCP servers, and startup hints. It
+intentionally does not prescribe workspace roots or user configuration
+directories.
 
 ```bash
 ./scripts/afs agent-manifest show
 ./scripts/afs agent-manifest validate
 ./scripts/afs agent-manifest export codex
-./scripts/afs agent-manifest sync --apply
-./scripts/afs agent-manifest sync --harness hcode --apply
+./scripts/afs agent-manifest sync --harness hcode \
+  --skill-root hcode=/path/to/halext-code/.opencode/skills \
+  --command-root hcode=/path/to/halext-code/.opencode/commands --apply
 ./scripts/afs agent-hooks install-shell --apply
 ./scripts/afs agent-hooks install-worker --apply --load
 ./scripts/afs agent-hooks status --path "$PWD"
-./scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
-./scripts/afs-upgrade-agent-setup --workspace ~/src --full --setup-hcode --apply
+./scripts/afs-upgrade-agent-setup --workspace /path/to/workspace --apply --all
+./scripts/afs-upgrade-agent-setup --workspace /path/to/workspace \
+  --setup-hcode --halext-code /path/to/halext-code --apply
 ```
 
 Use this before editing Codex, Claude, Gemini compatibility, Antigravity, hcode, or another
@@ -32,11 +37,10 @@ should point back to this manifest or derive their local view from it.
 
 `scripts/afs-upgrade-agent-setup` is the operator wrapper for a full local
 refresh. It defaults to dry-run, then with `--apply` can update the venv, copy
-skills and slash-command packs, write manifest exports, repair/rebuild context
-state, install hooks, run hcode bootstrap smoke, and write Claude/Gemini MCP
-setup. `--full --setup-hcode` is the convenient full local path; it keeps the
-MCP default catalog slim and routes richer flows through commands/framework
-hints.
+explicitly targeted skills and slash-command packs, write requested manifest
+exports, repair/rebuild context state, install hooks, and write Claude/Gemini
+MCP setup. Hcode setup is separate and requires `--halext-code` (or
+`AFS_HALEXT_CODE_PATH`) so another computer can use its own repository layout.
 
 `sync` copies manifest-declared shared skill directories into harness skill
 roots, copies slash-command packs into command roots, and writes per-harness

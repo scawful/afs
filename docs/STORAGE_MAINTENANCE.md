@@ -17,7 +17,7 @@ afs storage models
 afs storage models \
   --root ~/models/gguf \
   --root ~/models/mlx \
-  --registry ~/src/lab/afs-scawful/config/chat_registry.toml \
+  --registry /path/to/afs-extension/config/chat_registry.toml \
   --policy ~/models/model-retention.toml \
   --recent-days 14 \
   --json

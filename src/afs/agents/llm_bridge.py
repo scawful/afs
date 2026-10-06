@@ -18,8 +18,10 @@ import json
 import logging
 import os
 import time
+from collections.abc import Callable
 from typing import Any
 
+from ..claude_defaults import claude_prompt_cache_enabled, claude_system_content
 from .guardrails import ModelRoute
 
 logger = logging.getLogger(__name__)
@@ -53,11 +55,11 @@ def _is_transient_error(error_str: str) -> bool:
 
 
 def _with_retries(
-    fn,
-    *args,
+    fn: Callable[..., str],
+    *args: Any,
     max_retries: int = 3,
     retry_base_seconds: float = 1.0,
-    **kwargs,
+    **kwargs: Any,
 ) -> str:
     """Call *fn* up to *max_retries* times with exponential backoff.
 
@@ -84,7 +86,10 @@ def _with_retries(
         delay = retry_base_seconds * (2 ** (attempt - 1))
         logger.warning(
             "LLM retry %d/%d after %.1fs — %s",
-            attempt, max_retries, delay, result,
+            attempt,
+            max_retries,
+            delay,
+            result,
         )
         time.sleep(delay)
     return last_result
@@ -93,6 +98,7 @@ def _with_retries(
 # ---------------------------------------------------------------------------
 # Provider implementations
 # ---------------------------------------------------------------------------
+
 
 def _query_claude(
     prompt: str,
@@ -123,7 +129,10 @@ def _query_claude(
             ],
         }
         if system_prompt:
-            kwargs["system"] = system_prompt
+            kwargs["system"] = claude_system_content(
+                system_prompt,
+                cache=claude_prompt_cache_enabled(),
+            )
         message = client.messages.create(**kwargs)
         # Extract text from content blocks
         parts = []
@@ -131,7 +140,10 @@ def _query_claude(
             if hasattr(block, "text"):
                 parts.append(block.text)
         return "\n".join(parts) if parts else "ERROR: empty response from Claude"
-    except Exception as exc:
+    # The provider SDK is an optional boundary; normalize all of its failures
+    # into the bridge's documented ERROR result instead of crashing callers.
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Claude call failed: %s", exc)
         return f"ERROR: Claude call failed: {exc}"
 
 
@@ -156,9 +168,13 @@ def _query_gemini(
             client = genai.Client()
 
         full_prompt = f"{prompt}\n\nContext:\n{json.dumps(context, indent=2, default=str)}"
-        config = types.GenerateContentConfig(
-            system_instruction=system_prompt,
-        ) if system_prompt else None
+        config = (
+            types.GenerateContentConfig(
+                system_instruction=system_prompt,
+            )
+            if system_prompt
+            else None
+        )
         response = client.models.generate_content(
             model=model_id,
             contents=full_prompt,
@@ -166,7 +182,10 @@ def _query_gemini(
         )
         text = response.text if hasattr(response, "text") else ""
         return text or "ERROR: empty response from Gemini"
-    except Exception as exc:
+    # The provider SDK is an optional boundary; normalize all of its failures
+    # into the bridge's documented ERROR result instead of crashing callers.
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Gemini call failed: %s", exc)
         return f"ERROR: Gemini call failed: {exc}"
 
 
@@ -204,7 +223,10 @@ def _query_local(
             data = response.json()
             content = data.get("message", {}).get("content", "")
             return content or "ERROR: empty response from local model"
-    except Exception as exc:
+    # The local HTTP service is an optional boundary; normalize client,
+    # protocol, and response failures into the bridge's ERROR result.
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Local model call failed: %s", exc)
         return f"ERROR: local model call failed: {exc}"
 
 
@@ -215,19 +237,21 @@ def _query_codex(
     system_prompt: str = "",
 ) -> str:
     """Codex provider — placeholder, not yet available."""
-    return json.dumps({
-        "status": "not_available",
-        "provider": "codex",
-        "model_id": model_id,
-        "message": "Codex provider is not yet available for LLM inference.",
-    })
+    return json.dumps(
+        {
+            "status": "not_available",
+            "provider": "codex",
+            "model_id": model_id,
+            "message": "Codex provider is not yet available for LLM inference.",
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-_PROVIDER_MAP = {
+_PROVIDER_MAP: dict[str, Callable[..., str]] = {
     "claude": _query_claude,
     "gemini": _query_gemini,
     "local": _query_local,
@@ -274,13 +298,17 @@ def query_llm(
 
     logger.info(
         "LLM bridge: querying provider=%s model=%s prompt_len=%d system_len=%d",
-        provider, model_route.model_id, len(prompt), len(system_prompt),
+        provider,
+        model_route.model_id,
+        len(prompt),
+        len(system_prompt),
     )
 
     # Codex is a placeholder — no retries needed.
     use_retries = provider != "codex"
 
     try:
+        call_args: tuple[Any, ...]
         if system_prompt:
             call_args = (prompt, context, model_route.model_id, system_prompt)
         else:
@@ -296,5 +324,8 @@ def query_llm(
         else:
             result = handler(*call_args)
         return result
-    except Exception as exc:
+    # Provider handlers are pluggable call boundaries; this final guard keeps
+    # the public never-raises contract even when a handler violates it.
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Unexpected failure in LLM bridge")
         return f"ERROR: unexpected failure in LLM bridge: {exc}"

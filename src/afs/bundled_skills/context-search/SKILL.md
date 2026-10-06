@@ -39,7 +39,7 @@ Scoped local-first retrieval over project files and AFS context.
 ## Search Flags
 
 - `--rebuild` publishes a new immutable local index generation
-- `--semantic` explicitly allows embeddings; Gemini defaults to stable
+- `--semantic` explicitly allows embeddings; Gemini defaults to
   `gemini-embedding-2` at 768 dimensions
 - `--all-projects` is required for cross-project results
 - `--json` for machine-readable results

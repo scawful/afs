@@ -93,7 +93,7 @@ v2. The separate legacy mission-runner agent still reads TOML definitions from
 ./scripts/afs storage models
 ./scripts/afs storage models \
   --root ~/models/gguf \
-  --registry ~/src/lab/afs-scawful/config/chat_registry.toml \
+  --registry /path/to/afs-extension/config/chat_registry.toml \
   --policy ~/models/model-retention.toml \
   --recent-days 14 \
   --json
@@ -161,12 +161,13 @@ transaction cannot be replayed. See
 ./scripts/afs agent-manifest show
 ./scripts/afs agent-manifest validate
 ./scripts/afs agent-manifest export codex
-./scripts/afs agent-manifest sync --apply
-./scripts/afs agent-manifest sync --harness hcode --apply
-./scripts/afs-upgrade-agent-setup --workspace ~/src
-./scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
-./scripts/afs-upgrade-agent-setup --workspace ~/src --full --setup-hcode
-./scripts/afs-upgrade-agent-setup --workspace ~/src --full --setup-hcode --apply
+./scripts/afs agent-manifest sync --harness hcode \
+  --skill-root hcode=/path/to/halext-code/.opencode/skills \
+  --command-root hcode=/path/to/halext-code/.opencode/commands --apply
+./scripts/afs-upgrade-agent-setup --workspace /path/to/workspace
+./scripts/afs-upgrade-agent-setup --workspace /path/to/workspace --apply --all
+./scripts/afs-upgrade-agent-setup --workspace /path/to/workspace \
+  --setup-hcode --halext-code /path/to/halext-code --apply
 
 ./scripts/afs agent-hooks show
 ./scripts/afs agent-hooks install-shell --apply
@@ -189,14 +190,15 @@ job_id="$(./scripts/afs agent-jobs create "Review stale instructions" --prompt "
 ./scripts/afs agent-jobs work --agent local-worker --command 'codex exec < "$AFS_AGENT_JOB_PROMPT_FILE"'
 ```
 
-`agent-manifest` reads `configs/agent_manifest.toml`, the repo-owned source of
-truth for harnesses, shared skills, slash-command packs, MCP servers, and
-startup hints.
+`agent-manifest` reads `configs/agent_manifest.toml`, the repo-owned portable
+source of truth for harness capabilities, shared skills, slash-command packs,
+MCP servers, and startup hints. Destination roots are empty by default; provide
+them with `--skill-root`, `--command-root`, or `--export-path`, or select a
+machine-specific manifest with `AFS_AGENT_MANIFEST`.
 `afs-upgrade-agent-setup` wraps the common local upgrade path and stays dry-run
-unless `--apply` is provided. Use `--full --setup-hcode` to preview or apply
-the full local path that syncs Codex/Claude/Gemini/Antigravity/hcode manifest state,
-OpenCode slash commands, shell hooks, and index freshness without making the
-MCP catalog noisy.
+unless `--apply` is provided. `--full` covers generic local harnesses; hcode is
+an explicit `--setup-hcode --halext-code /path/to/halext-code` opt-in. This
+keeps one computer's checkout layout out of repository policy.
 `agent-manifest sync` copies manifest-declared shared skills into harness skill
 roots, copies slash-command packs into harness command roots, and writes
 per-harness export JSON. It uses real copied directories/files, not symlinks.
@@ -250,8 +252,8 @@ for review handling, and `agent.job.seed` for safe maintenance job seeding.
 
 ```bash
 ./scripts/afs manager
-./scripts/afs manager open --path ~/src/project-a
-./scripts/afs manager snapshot --path ~/src/project-a --json
+./scripts/afs manager open --path /path/to/project-a
+./scripts/afs manager snapshot --path /path/to/project-a --json
 ./scripts/afs-manager
 ```
 
@@ -322,7 +324,7 @@ aliases, colors, and zsh completion without routing AI harness commands;
 ./scripts/afs context repair --dry-run
 ./scripts/afs context query "startup guidance"
 ./scripts/afs query "startup guidance"
-./scripts/afs context mount knowledge ~/src/docs --alias docs
+./scripts/afs context mount knowledge /path/to/docs --alias docs
 ./scripts/afs context unmount knowledge docs
 ./scripts/afs index rebuild --mount scratchpad
 ./scripts/afs projects register "$PWD"
@@ -585,9 +587,9 @@ See [Insights](INSIGHTS.md) for storage, trust boundaries, and configuration.
 scratchpad at `review/<category>/`.
 
 ```bash
-./scripts/afs review list --path ~/src/project-a
-./scripts/afs review approve --path ~/src/project-a draft.md
-./scripts/afs review reject --path ~/src/project-a draft.md --reason "needs revision"
+./scripts/afs review list --path /path/to/project-a
+./scripts/afs review approve --path /path/to/project-a draft.md
+./scripts/afs review reject --path /path/to/project-a draft.md --reason "needs revision"
 ```
 
 Approved plans move into `memory/reviewed/plans/`. Other approved review
@@ -685,8 +687,8 @@ user's behalf.
 ## Memory
 
 ```bash
-./scripts/afs memory consolidate --path ~/src/project-a
-./scripts/afs memory consolidate --path ~/src/project-a --json
+./scripts/afs memory consolidate --path /path/to/project-a
+./scripts/afs memory consolidate --path /path/to/project-a --json
 ./scripts/afs agents run history-memory --stdout
 ./scripts/afs services start history-memory
 ```
@@ -809,7 +811,7 @@ or different model tiers without AFS owning the turn loop.
 ```bash
 ./scripts/afs events tail --json
 ./scripts/afs events list --type mcp_tool --limit 25
-./scripts/afs events list --path ~/src/project-a --source afs.mcp
+./scripts/afs events list --path /path/to/project-a --source afs.mcp
 ./scripts/afs events analytics --hours 24 --json
 ./scripts/afs events replay --session-id "$AFS_SESSION_ID"
 ./scripts/afs session event user_prompt_submit --client codex --session-id "$AFS_SESSION_ID" --prompt "current task"
@@ -943,13 +945,13 @@ verification commands are scheduled for removal in AFS `0.4.0`.
 ./scripts/afs training run start ./training/jobs/qwen35-tools-local.toml
 ./scripts/afs training run status <run-id>
 ./scripts/afs training run stop <run-id>
-./scripts/afs training memory-export --path ~/src/project-a --output ./memory.jsonl
+./scripts/afs training memory-export --path /path/to/project-a --output ./memory.jsonl
 
-./scripts/afs training freshness-gate --path ~/src/project-a
-./scripts/afs training freshness-gate --path ~/src/project-a --warn-only --json
+./scripts/afs training freshness-gate --path /path/to/project-a
+./scripts/afs training freshness-gate --path /path/to/project-a --warn-only --json
 ./scripts/afs training antigravity-status --json
-./scripts/afs training extract-sessions --path ~/src/project-a --output ./session_replay_training.jsonl
-./scripts/afs training generate-router-data --config ~/src/project-a/afs.toml --output ./router_from_capabilities.jsonl
+./scripts/afs training extract-sessions --path /path/to/project-a --output ./session_replay_training.jsonl
+./scripts/afs training generate-router-data --config /path/to/project-a/afs.toml --output ./router_from_capabilities.jsonl
 ./scripts/training_watch.sh --debounce 45
 ```
 
@@ -994,8 +996,10 @@ config.
 ## Claude
 
 ```bash
-./scripts/afs claude setup --path ~/src/project-a
-./scripts/afs claude context --path ~/src/project-a
+./scripts/afs claude setup --path /path/to/project-a
+./scripts/afs claude setup --path /path/to/project-a --hook-mode session-and-prompts
+./scripts/afs claude setup --path /path/to/project-a --hook-mode none
+./scripts/afs claude context --path /path/to/project-a
 ./scripts/afs claude session-report --session <uuid> --write-scratchpad
 ```
 
@@ -1003,13 +1007,22 @@ config.
 for the resolved project path, not just the current shell directory. When an
 `afs.toml` is present, the generated Claude MCP entry pins `AFS_CONFIG_PATH`
 and `AFS_PREFER_REPO_CONFIG=1` so Claude uses the repo-local AFS config.
+The default `--hook-mode session` injects one bounded startup block and does
+not launch a process on every prompt. `session-and-prompts` opts into the
+just-in-time communication guard; `none` installs only MCP. Rerunning setup
+removes AFS-owned hooks from modes that are no longer selected while preserving
+unrelated hooks. Built-in section limits remain the default; use
+`--context-tokens <n>` only when a host needs a stricter overall startup budget.
+Matched skill bodies are omitted from the Claude hook by default because Claude
+Code and OpenCode load their own skills. Add `--include-skills` to a manually
+configured hook only when the host has no native skill loader.
 
 ## Workspace
 
 ```bash
 ./scripts/afs workspace list
-./scripts/afs workspace add ~/src/project-a --description "project-a"
-./scripts/afs workspace remove ~/src/project-a
+./scripts/afs workspace add /path/to/project-a --description "project-a"
+./scripts/afs workspace remove /path/to/project-a
 ./scripts/afs workspace sync --root ~/src
 ```
 
@@ -1026,11 +1039,11 @@ and `AFS_PREFER_REPO_CONFIG=1` so Claude uses the repo-local AFS config.
 ./scripts/afs skills list --profile work
 ./scripts/afs skills list --profile work --json
 ./scripts/afs skills match "mcp context mount" --profile work
-./scripts/afs skills mine --path ~/src/project-a
-./scripts/afs skills review --path ~/src/project-a --status pending
-./scripts/afs skills promote --path ~/src/project-a --candidate workflow-example
-./scripts/afs skills reject --path ~/src/project-a --candidate workflow-example
-./scripts/afs skills archive --path ~/src/project-a --candidate workflow-example
+./scripts/afs skills mine --path /path/to/project-a
+./scripts/afs skills review --path /path/to/project-a --status pending
+./scripts/afs skills promote --path /path/to/project-a --candidate workflow-example
+./scripts/afs skills reject --path /path/to/project-a --candidate workflow-example
+./scripts/afs skills archive --path /path/to/project-a --candidate workflow-example
 ```
 
 Skill discovery is fail-soft per entry and directory: malformed or unreadable
@@ -1083,7 +1096,7 @@ Embedding providers: `none` (keyword-only), `ollama`, `hf` (HuggingFace), `opena
 
 `afs search` is the version 2 user-facing API. It filters scope before ranking,
 uses local retrieval unless `--semantic` is present, and defaults semantic
-Gemini collections to stable `gemini-embedding-2` at 768 dimensions. The
+Gemini collections to `gemini-embedding-2` at 768 dimensions. The
 `afs embeddings ...` commands remain the lower-level collection and evaluation
 API.
 
@@ -1147,8 +1160,7 @@ scoped ingestion can route project records to
 ./scripts/afs gemini context --knowledge-path ~/.context/knowledge/afs "hooks"
 ```
 
-`afs antigravity setup` previews or writes the AFS MCP entry for Antigravity CLI. New `agy` builds use `~/.gemini/config/mcp_config.json` for MCP config by default. `afs gemini setup` remains as Gemini CLI compatibility/API-key setup and writes settings so
-Gemini can discover AFS tools automatically. The default launch target is the
+`afs antigravity setup` previews or writes the AFS MCP entry for Antigravity CLI. New `agy` builds use `~/.gemini/config/mcp_config.json` for MCP config by default and expose `agy mcp list` for effective-state verification. `afs gemini setup` configures the separate Gemini CLI/API surface so Gemini can discover AFS tools automatically. The default launch target is the
 repo-local `scripts/afs mcp serve` wrapper, which preserves AFS runtime env and
 repo-config preference automatically. Use `--scope project` for repo-local
 `./.gemini/config/mcp_config.json` and `--python-module` only when you explicitly want
@@ -1174,7 +1186,7 @@ Or override per agent via `ModelConfig.extra`, for example:
 ```python
 ModelConfig(
     provider=ModelProvider.GEMINI,
-    model_id="gemini-1.5-flash-001",
+    model_id="gemini-3.8-flash",
     extra={
         "gemini_cache": {
             "mode": "try",

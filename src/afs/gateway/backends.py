@@ -8,15 +8,17 @@ import subprocess
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 
 import httpx
+
+from ..runtime_paths import default_config_root
 
 logger = logging.getLogger(__name__)
 
 
 class BackendType(str, Enum):
     """Available backend types."""
+
     LOCAL = "local"
     WINDOWS = "windows"
     VASTAI = "vastai"
@@ -25,6 +27,7 @@ class BackendType(str, Enum):
 @dataclass
 class BackendConfig:
     """Configuration for a single backend."""
+
     name: str
     type: BackendType
     host: str
@@ -47,6 +50,7 @@ class BackendConfig:
 @dataclass
 class BackendStatus:
     """Current status of a backend."""
+
     healthy: bool = False
     last_check: float = 0
     error: str | None = None
@@ -56,7 +60,7 @@ class BackendStatus:
 class BackendManager:
     """Manages multiple inference backends with failover."""
 
-    DEFAULT_CONFIG_PATH = Path.home() / ".config" / "afs" / "backends.json"
+    DEFAULT_CONFIG_PATH = default_config_root() / "backends.json"
 
     def __init__(self, backends: list[BackendConfig] | None = None):
         self.backends = backends or self._default_backends()
@@ -107,6 +111,7 @@ class BackendManager:
     async def check_health(self, backend: BackendConfig) -> BackendStatus:
         """Check health of a single backend."""
         import time
+
         status = BackendStatus(last_check=time.time())
 
         try:
@@ -158,10 +163,7 @@ class BackendManager:
         """Get currently active backend."""
         if not self._active_backend:
             return None
-        return next(
-            (b for b in self.backends if b.name == self._active_backend),
-            None
-        )
+        return next((b for b in self.backends if b.name == self._active_backend), None)
 
     def get_backend(self, name: str) -> BackendConfig | None:
         """Get backend by name."""
@@ -220,6 +222,7 @@ class BackendManager:
     ) -> AsyncIterator[str]:
         """Streaming generation."""
         import json
+
         async with self._client.stream(
             "POST",
             f"{backend.base_url}/api/generate",
@@ -278,6 +281,7 @@ class BackendManager:
     ) -> AsyncIterator[str]:
         """Streaming chat."""
         import json
+
         async with self._client.stream(
             "POST",
             f"{backend.base_url}/api/chat",
@@ -306,11 +310,17 @@ class BackendManager:
         try:
             result = subprocess.run(
                 [
-                    "vastai", "create", "instance",
-                    "--image", backend.vastai_image,
-                    "--gpu-type", gpu_type,
-                    "--disk", "50",
-                    "--onstart", "ollama serve",
+                    "vastai",
+                    "create",
+                    "instance",
+                    "--image",
+                    backend.vastai_image,
+                    "--gpu-type",
+                    gpu_type,
+                    "--disk",
+                    "50",
+                    "--onstart",
+                    "ollama serve",
                 ],
                 capture_output=True,
                 text=True,

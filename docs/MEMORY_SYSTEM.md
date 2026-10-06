@@ -81,7 +81,7 @@ Version 1 keeps the corresponding paths directly under `.context/history/`,
 Run it manually or through the maintenance agent:
 
 ```bash
-afs memory consolidate --path ~/src/project-a
+afs memory consolidate --path /path/to/project-a
 afs agents run history-memory --stdout
 afs services start history-memory
 ```
@@ -108,12 +108,12 @@ write_markdown = true
 Plain-language commands cover normal work:
 
 ```bash
-afs start --path ~/src/project-a
-afs search "release checklist" --path ~/src/project-a
-afs files list knowledge --path ~/src/project-a
-afs notes list --path ~/src/project-a
-afs handoff threads --path ~/src/project-a
-afs messages list --path ~/src/project-a
+afs start --path /path/to/project-a
+afs search "release checklist" --path /path/to/project-a
+afs files list knowledge --path /path/to/project-a
+afs notes list --path /path/to/project-a
+afs handoff threads --path /path/to/project-a
+afs messages list --path /path/to/project-a
 ```
 
 `files` is an alias for `fs`; existing `afs fs ...` calls remain valid. In a
@@ -123,7 +123,7 @@ all-project capability.
 
 `afs search` is local-first and filters scope before ranking. Pass
 `--semantic` to explicitly enable embeddings for that rebuild/query. Gemini
-defaults to stable `gemini-embedding-2` with 768-dimensional vectors. Without
+defaults to `gemini-embedding-2` with 768-dimensional vectors. Without
 `--semantic`, no remote embedding call is made.
 
 The older `afs embeddings ...` collection commands remain available for
@@ -150,4 +150,6 @@ afs layout audit --context-root ~/.context --json
 afs layout plan --context-root ~/.context --json
 ```
 
-Both are non-migrating operations. There is no v2 layout apply command.
+Both are non-migrating operations. To apply a reviewed v2 layout plan, use
+`afs layout migrate --apply`; use `afs layout activate` and
+`afs layout rollback` for the activation lifecycle.

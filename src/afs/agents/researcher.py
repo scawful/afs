@@ -17,10 +17,14 @@ import logging
 from pathlib import Path
 
 from afs.agent.harness import run_agent
+from afs.gemini_defaults import DEFAULT_GEMINI_GENERATION_MODEL
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger("researcher")
+
 
 async def analyze_document(file_path: Path, query: str, model: str) -> str:
     """Analyze a single document using an ephemeral agent (External Attention)."""
@@ -49,8 +53,8 @@ Answer:
     result = await run_agent(
         model=model,
         prompt=prompt,
-        tools=[], # No tools needed for pure analysis
-        verbose=False
+        tools=[],  # No tools needed for pure analysis
+        verbose=False,
     )
 
     if result.success:
@@ -58,12 +62,13 @@ Answer:
     else:
         return f"Analysis failed: {result.error}"
 
+
 async def run_research_task(
     input_dir: Path,
     output_file: Path,
     query: str,
     glob_pattern: str = "*.pdf",
-    model: str = "gemini-3-flash-preview"
+    model: str = DEFAULT_GEMINI_GENERATION_MODEL,
 ):
     """Run the research loop."""
     if not input_dir.exists():
@@ -92,7 +97,7 @@ async def run_research_task(
             logger.info(f"Skipping already processed: {file_path.name}")
             continue
 
-        logger.info(f"Processing [{i+1}/{len(files)}]: {file_path.name}")
+        logger.info(f"Processing [{i + 1}/{len(files)}]: {file_path.name}")
 
         # 3. External Attention Step
         # This spawns a separate context. The main loop's context is effectively just 'i' and 'file_path'.
@@ -111,23 +116,21 @@ async def run_research_task(
 
     logger.info("Research task complete.")
 
+
 async def main():
     parser = argparse.ArgumentParser(description="InfiAgent Researcher (Level 2)")
     parser.add_argument("input_dir", help="Directory containing documents to research")
     parser.add_argument("output_file", help="Path to the markdown report file")
     parser.add_argument("--query", default="Summarize the key findings.", help="Research query")
     parser.add_argument("--glob", default="*.txt", help="File pattern (e.g. *.md, *.txt)")
-    parser.add_argument("--model", default="gemini-3-flash-preview", help="Model to use")
+    parser.add_argument("--model", default=DEFAULT_GEMINI_GENERATION_MODEL, help="Model to use")
 
     args = parser.parse_args()
 
     await run_research_task(
-        Path(args.input_dir),
-        Path(args.output_file),
-        args.query,
-        args.glob,
-        args.model
+        Path(args.input_dir), Path(args.output_file), args.query, args.glob, args.model
     )
+
 
 if __name__ == "__main__":
     asyncio.run(main())

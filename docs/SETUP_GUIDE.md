@@ -108,3 +108,15 @@ afs guide agents
 These guides are intentionally generic. Organization-specific MCP servers,
 search tools, credentials, and policy should stay in local client config or
 approved extension packages.
+
+For model-backed helpers, use role-specific environment overrides rather than
+editing repository paths or provider credentials into AFS config:
+
+```bash
+export AFS_GEMINI_SUBTASK_MODEL=gemini-3.8-flash
+export AFS_CLAUDE_MODEL=claude-sonnet-5
+```
+
+Both are stable defaults already; the exports are examples for machines that
+need an explicit local policy. Host applications remain free to map those
+model IDs through Anthropic, Google AI, Vertex, or an approved internal gateway.
