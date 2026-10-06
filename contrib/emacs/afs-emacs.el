@@ -14,9 +14,9 @@
   :group 'tools)
 
 (defcustom afs-emacs-cli-script
-  (expand-file-name "~/src/lab/afs/scripts/afs")
-  "Path to the AFS CLI wrapper."
-  :type 'file)
+  (or (executable-find "afs") "afs")
+  "AFS executable name or path.  Defaults to `afs' on PATH."
+  :type 'string)
 
 (defcustom afs-emacs-briefing-buffer-name
   "*AFS Morning Briefing*"

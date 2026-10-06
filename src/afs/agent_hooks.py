@@ -7,6 +7,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .runtime_paths import default_config_root
+
 SHELL_BLOCK_BEGIN = "# >>> afs agent hooks >>>"
 SHELL_BLOCK_END = "# <<< afs agent hooks <<<"
 DEFAULT_WORKER_LABEL = "com.afs.agent-jobs"
@@ -127,7 +129,9 @@ def render_worker_command(
 
 def default_worker_command(afs_root: Path) -> str:
     wrapper = shlex.quote(str(afs_root.expanduser().resolve() / "scripts" / "afs-codex"))
-    return f'{wrapper} --prompt-file "$AFS_AGENT_JOB_PROMPT_FILE" exec < "$AFS_AGENT_JOB_PROMPT_FILE"'
+    return (
+        f'{wrapper} --prompt-file "$AFS_AGENT_JOB_PROMPT_FILE" exec < "$AFS_AGENT_JOB_PROMPT_FILE"'
+    )
 
 
 def render_launchd_plist(
@@ -141,7 +145,7 @@ def render_launchd_plist(
     log_dir: Path | None = None,
 ) -> bytes:
     root = afs_root.expanduser().resolve()
-    logs = (log_dir or (Path.home() / ".config" / "afs" / "agent-jobs")).expanduser()
+    logs = (log_dir or (default_config_root() / "agent-jobs")).expanduser()
     worker_command = command or default_worker_command(root)
     args = render_worker_command(
         afs_root=root,
@@ -215,7 +219,7 @@ def install_worker_launchd(
     load: bool = False,
 ) -> HookInstallResult:
     target = (plist_path or default_launchd_plist_path(label)).expanduser()
-    log_dir = Path.home() / ".config" / "afs" / "agent-jobs"
+    log_dir = default_config_root() / "agent-jobs"
     payload = render_launchd_plist(
         afs_root=afs_root,
         context_path=context_path,
@@ -239,7 +243,9 @@ def install_worker_launchd(
             message = "worker LaunchAgent installed"
         if load:
             domain = f"gui/{_uid()}"
-            subprocess.run(["launchctl", "bootout", f"{domain}/{label}"], check=False, capture_output=True)
+            subprocess.run(
+                ["launchctl", "bootout", f"{domain}/{label}"], check=False, capture_output=True
+            )
             result = subprocess.run(
                 ["launchctl", "bootstrap", domain, str(target)],
                 check=False,

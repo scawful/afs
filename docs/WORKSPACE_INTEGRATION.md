@@ -9,19 +9,20 @@ infrastructure details in workspace-specific docs or extensions.
 - Source universe sync: your workspace inventory or project registry
 - Windows/remote workflow: companion extension docs or local runbooks
 
-## Codenames (no IPs)
+## Machine Names
 
-- **ORACLE**: macOS primary workstation (`mac`)
-- **MECHANICA**: Windows GPU node (`remote-gpu`)
-- **NEXUS**: Linux server (`remote-server`)
-
-Use SSH host aliases rather than hardcoded IPs.
+Machine names, SSH aliases, and infrastructure roles belong in user or
+organization configuration, not core AFS. Use whatever naming convention the
+current environment supplies and avoid committing hostnames or addresses to a
+portable profile.
 
 ## Mounts + Contexts
 
-- Use mount points (`~/Mounts/...`) to browse remote filesystems.
-- For Windows, prefer `/mnt/d/src` when working in WSL.
-- Keep `.context/` local to each machine.
+- Configure remote mount points where the operating environment expects them.
+- Do not assume a drive letter, WSL path, home-directory layout, or shared
+  network namespace.
+- Use repo-local `.context/` or a configured central context root. Do not infer
+  one computer's placement from another computer's checkout path.
 - For Antigravity or Gemini compatibility workspaces under a managed root, add that root to
   `general.workspace_directories` and `general.mcp_allowed_roots` so MCP path
   validation matches your real workspace root.
@@ -59,9 +60,11 @@ works best when the real workspace roots are listed in
 
 ## Tooling
 
-- Use `ws` for workspace navigation (`ws list`, `ws go`, `ws status`).
-- Use `afs` CLI for context operations and mounts.
-- Use `afs workspace sync --root ~/src` to mirror `WORKSPACE.toml` paths into AFS discovery.
+- Use `afs` for context operations and mounts.
+- Workspace navigation tools are optional; AFS does not require `ws` or a
+  particular source root.
+- Use `afs workspace sync --root /path/to/workspace` only when that root has a
+  `WORKSPACE.toml` inventory you want AFS to mirror.
 
 ## Monorepo Bridge
 

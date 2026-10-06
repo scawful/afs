@@ -46,15 +46,15 @@ def _resolve_default_scan_roots() -> list[Path]:
     """Resolve scan roots from AFS config or env, with no hardcoded fallback.
 
     Order of precedence:
-        1. ``AFS_WORKSPACE_ROOTS`` env var (colon-separated paths)
+        1. ``AFS_WORKSPACE_ROOTS`` env var (platform path-list separated)
         2. ``general.workspace_directories`` from the loaded AFS config
         3. Empty list — caller must pass ``--scan-roots``
     """
-    import os as _os
+    import os
 
-    env_roots = _os.environ.get("AFS_WORKSPACE_ROOTS")
+    env_roots = os.environ.get("AFS_WORKSPACE_ROOTS")
     if env_roots:
-        return [Path(p).expanduser() for p in env_roots.split(":") if p.strip()]
+        return [Path(p).expanduser() for p in env_roots.split(os.pathsep) if p.strip()]
 
     try:
         from ..config import load_config_model
@@ -107,7 +107,9 @@ def _run_git(repo: Path, *args: str, timeout: int = 10) -> str | None:
     try:
         result = subprocess.run(
             ["git", "-C", str(repo)] + list(args),
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
         return result.stdout.strip() if result.returncode == 0 else None
     except (subprocess.TimeoutExpired, OSError):
@@ -137,7 +139,9 @@ def _analyze_repo(repo_path: Path) -> RepoHealth | None:
             health.notes.append(f"{health.uncommitted_files} uncommitted files")
 
     # Ahead/behind (if tracking remote)
-    ab_output = _run_git(repo_path, "rev-list", "--left-right", "--count", f"{health.branch}...@{{u}}")
+    ab_output = _run_git(
+        repo_path, "rev-list", "--left-right", "--count", f"{health.branch}...@{{u}}"
+    )
     if ab_output:
         parts = ab_output.split()
         if len(parts) == 2:
@@ -234,8 +238,7 @@ def _write_report(
         },
         "repos": [r.to_dict() for r in results],
         "attention_needed": [
-            r.to_dict() for r in results
-            if r.status != "ok" or r.behind > 0 or r.stale_branches
+            r.to_dict() for r in results if r.status != "ok" or r.behind > 0 or r.stale_branches
         ],
     }
 
@@ -252,9 +255,7 @@ def _write_report(
 
 
 def build_parser():
-    parser = build_base_parser(
-        "Analyze workspace health across configured workspace roots."
-    )
+    parser = build_base_parser("Analyze workspace health across configured workspace roots.")
     parser.add_argument(
         "--scan-roots",
         nargs="*",
@@ -299,6 +300,7 @@ class _AnalystAgent(ContextAwareAgent):
             return None
         try:
             import json as _json
+
             return _json.loads(content)
         except (ValueError, TypeError):
             return None
@@ -335,7 +337,9 @@ def run(args) -> int:
     if ctx:
         logger.info(
             "Context loaded: %d indexed, %d memory topics, %d active agents",
-            ctx.index_total, len(ctx.memory_topics), len(ctx.active_agents),
+            ctx.index_total,
+            len(ctx.memory_topics),
+            len(ctx.active_agents),
         )
 
     guard = GuardrailedAgent(AGENT_NAME, config=GuardrailConfig(task_tier="background"))
@@ -423,9 +427,7 @@ def run(args) -> int:
         results,
         report_root,
         v2_boundary=(
-            context_root
-            if detect_layout_version(context_root) == LAYOUT_VERSION
-            else None
+            context_root if detect_layout_version(context_root) == LAYOUT_VERSION else None
         ),
     )
 
@@ -456,10 +458,7 @@ def run(args) -> int:
         notes=notes,
         payload={
             "report_path": str(report_path),
-            "attention_needed": [
-                r.to_dict() for r in results
-                if r.status != "ok" or r.behind > 0
-            ],
+            "attention_needed": [r.to_dict() for r in results if r.status != "ok" or r.behind > 0],
             "quota_usage": guard.usage_summary(),
             "context_state": {
                 "index_total": ctx.index_total if ctx else 0,

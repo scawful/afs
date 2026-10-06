@@ -28,21 +28,15 @@ from ..embeddings import (
     create_embed_fn,
     search_embedding_index,
 )
+from ..gemini_defaults import (
+    DEFAULT_GEMINI_GENERATION_MODEL,
+    GEMINI_THINKING_LEVELS,
+    default_gemini_generation_model,
+    validate_gemini_thinking_level,
+)
 from ..health.mcp_registration import find_afs_mcp_registrations
 from ..mcp_runtime import build_afs_mcp_entry
 from ..models import MountType
-
-GEMINI_CLI_INDIVIDUAL_CUTOFF = "2026-06-18"
-GEMINI_CLI_DEPRECATION_NOTE = (
-    "Gemini CLI compatibility is deprecated for individual/free/Pro/Ultra users "
-    "after 2026-06-18; use `afs antigravity setup` for the public Antigravity CLI path. "
-    "API-key and enterprise Gemini workflows may continue to use this command."
-)
-
-
-def _print_gemini_cli_deprecation_note() -> None:
-    print(f"note: {GEMINI_CLI_DEPRECATION_NOTE}")
-
 
 # --------------------------------------------------------------------------- #
 # settings.json management
@@ -112,8 +106,6 @@ def _write_settings(path: Path, data: dict[str, Any]) -> None:
 
 def gemini_setup_command(args: argparse.Namespace) -> int:
     """Set up Gemini integration: settings.json + MCP registration."""
-    if not getattr(args, "json", False):
-        _print_gemini_cli_deprecation_note()
     project_path = None
     if args.scope == "project":
         project_path = (
@@ -154,14 +146,10 @@ def gemini_setup_command(args: argparse.Namespace) -> int:
 
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if api_key:
-        key_name = (
-            "GEMINI_API_KEY" if os.getenv("GEMINI_API_KEY") else "GOOGLE_API_KEY"
-        )
+        key_name = "GEMINI_API_KEY" if os.getenv("GEMINI_API_KEY") else "GOOGLE_API_KEY"
         print(f"API key: set (via {key_name})")
     else:
-        print(
-            "API key: NOT SET — export GEMINI_API_KEY to enable embeddings and generation"
-        )
+        print("API key: NOT SET — export GEMINI_API_KEY to enable embeddings and generation")
 
     return 0
 
@@ -179,11 +167,15 @@ def gemini_status_command(args: argparse.Namespace) -> int:
     # --- API key check ---
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     key_name = "GEMINI_API_KEY" if os.getenv("GEMINI_API_KEY") else "GOOGLE_API_KEY"
-    checks.append((
-        "API key",
-        bool(api_key),
-        f"set (via {key_name})" if api_key else "NOT SET — export GEMINI_API_KEY or GOOGLE_API_KEY",
-    ))
+    checks.append(
+        (
+            "API key",
+            bool(api_key),
+            f"set (via {key_name})"
+            if api_key
+            else "NOT SET — export GEMINI_API_KEY or GOOGLE_API_KEY",
+        )
+    )
 
     # --- SDK availability ---
     try:
@@ -196,9 +188,7 @@ def gemini_status_command(args: argparse.Namespace) -> int:
 
     # --- settings.json ---
     settings_path = _find_gemini_settings()
-    checks.append(
-        ("settings.json", settings_path is not None, str(settings_path or "not found"))
-    )
+    checks.append(("settings.json", settings_path is not None, str(settings_path or "not found")))
 
     # --- MCP registration ---
     registrations = find_afs_mcp_registrations()
@@ -265,8 +255,9 @@ def gemini_status_command(args: argparse.Namespace) -> int:
 
             client = genai_mod.Client(api_key=api_key)
             t0 = time.monotonic()
+            ping_model = default_gemini_generation_model()
             response = client.models.generate_content(
-                model="gemini-2.0-flash",
+                model=ping_model,
                 contents="Say 'ok'.",
             )
             latency_ms = (time.monotonic() - t0) * 1000
@@ -276,7 +267,7 @@ def gemini_status_command(args: argparse.Namespace) -> int:
                 "tested": True,
                 "ok": api_ok,
                 "latency_ms": round(latency_ms, 1),
-                "model": "gemini-2.0-flash",
+                "model": ping_model,
             }
         except Exception as exc:
             api_ok = False
@@ -313,12 +304,14 @@ def gemini_status_command(args: argparse.Namespace) -> int:
         registry = load_chat_registry(config=config)
         for model in registry.models.values():
             if model.provider == "gemini" or "gemini" in model.model_id.lower():
-                gemini_models.append({
-                    "name": model.name,
-                    "provider": model.provider,
-                    "model_id": model.model_id,
-                    "role": model.role,
-                })
+                gemini_models.append(
+                    {
+                        "name": model.name,
+                        "provider": model.provider,
+                        "model_id": model.model_id,
+                        "role": model.role,
+                    }
+                )
     except Exception:
         pass
 
@@ -331,23 +324,13 @@ def gemini_status_command(args: argparse.Namespace) -> int:
     # --- Output ---
     if args.json:
         payload: dict[str, Any] = {
-            "cli_deprecation": {
-                "cutoff": GEMINI_CLI_INDIVIDUAL_CUTOFF,
-                "note": GEMINI_CLI_DEPRECATION_NOTE,
-                "replacement_command": "afs antigravity setup",
-            },
-            "checks": [
-                {"name": name, "ok": ok, "detail": detail}
-                for name, ok, detail in checks
-            ],
+            "checks": [{"name": name, "ok": ok, "detail": detail} for name, ok, detail in checks],
             "embedding_index": index_detail,
             "api_latency": api_latency,
             "configured_models": gemini_models,
         }
         print(json.dumps(payload, indent=2))
         return 0
-
-    _print_gemini_cli_deprecation_note()
 
     all_ok = True
     for name, ok, detail in checks:
@@ -422,15 +405,21 @@ def _context_generate(args: argparse.Namespace) -> int:
 
     try:
         from google import genai  # type: ignore[import-untyped]
+        from google.genai import types  # type: ignore[import-untyped]
     except ImportError:
         print(
-            "Error: google-genai SDK not installed.\n"
-            "  pip install google-genai",
+            "Error: google-genai SDK not installed.\n  pip install google-genai",
             file=sys.stderr,
         )
         return 1
 
-    model_name = getattr(args, "model", "gemini-2.0-flash") or "gemini-2.0-flash"
+    model_name = getattr(args, "model", None) or default_gemini_generation_model()
+    thinking_level = str(getattr(args, "thinking_level", "") or "").strip().lower()
+    try:
+        thinking_level = validate_gemini_thinking_level(model_name, thinking_level)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     token_budget = getattr(args, "token_budget", 4000) or 4000
 
     # Build AFS context using session bootstrap or context pack
@@ -446,12 +435,18 @@ def _context_generate(args: argparse.Namespace) -> int:
             f"{context_text}"
         )
 
+        config_kwargs: dict[str, Any] = {
+            "system_instruction": system_instruction,
+        }
+        if thinking_level:
+            config_kwargs["thinking_config"] = types.ThinkingConfig(
+                thinking_level=thinking_level,
+            )
+
         response = client.models.generate_content_stream(
             model=model_name,
             contents=query,
-            config={
-                "system_instruction": system_instruction,
-            },
+            config=types.GenerateContentConfig(**config_kwargs),
         )
 
         full_response = []
@@ -478,6 +473,7 @@ def _context_generate(args: argparse.Namespace) -> int:
                 "model": model_name,
                 "query": query[:200],
                 "token_budget": token_budget,
+                "thinking_level": thinking_level or "model-default",
                 "response_length": sum(len(c) for c in full_response),
             },
         )
@@ -490,9 +486,7 @@ def _context_generate(args: argparse.Namespace) -> int:
 def _build_afs_context_text(args: argparse.Namespace, *, token_budget: int) -> str:
     """Build AFS context text from session bootstrap or context pack."""
     config_path = getattr(args, "config", None)
-    resolved_config_path = (
-        Path(config_path).expanduser().resolve() if config_path else None
-    )
+    resolved_config_path = Path(config_path).expanduser().resolve() if config_path else None
 
     # Try context pack first (richer, model-aware), fall back to session bootstrap
     try:
@@ -559,9 +553,7 @@ def _build_afs_context_text(args: argparse.Namespace, *, token_budget: int) -> s
 def _index_doc_count_and_metadata(index_root: Path) -> tuple[int, dict[str, Any]]:
     """Return (doc_count, metadata_dict) from an embedding index."""
     try:
-        payload = json.loads(
-            (index_root / "embedding_index.json").read_text(encoding="utf-8")
-        )
+        payload = json.loads((index_root / "embedding_index.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return 0, {}
     if isinstance(payload, dict):
@@ -621,9 +613,7 @@ def _context_search(knowledge_roots: Iterable[Path], args: argparse.Namespace) -
 
     print(f"# Context for: {args.query}\n")
     for result in results:
-        rel_path = (
-            result.doc_id.split("::")[-1] if "::" in result.doc_id else result.doc_id
-        )
+        rel_path = result.doc_id.split("::")[-1] if "::" in result.doc_id else result.doc_id
         print(f"## {rel_path} (score: {result.score:.3f})\n")
         if args.include_content:
             try:
@@ -661,9 +651,7 @@ def _context_full(knowledge_root: Path) -> int:
 
 def _load_cli_config(args: argparse.Namespace):
     config_path = getattr(args, "config", None)
-    resolved_config_path = (
-        Path(config_path).expanduser().resolve() if config_path else None
-    )
+    resolved_config_path = Path(config_path).expanduser().resolve() if config_path else None
     return load_config_model(config_path=resolved_config_path, merge_user=True)
 
 
@@ -720,9 +708,7 @@ def _indexed_knowledge_roots(roots: Iterable[Path]) -> list[Path]:
 
 def _index_doc_count(index_root: Path) -> int:
     try:
-        payload = json.loads(
-            (index_root / "embedding_index.json").read_text(encoding="utf-8")
-        )
+        payload = json.loads((index_root / "embedding_index.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return 0
     return len(payload) if isinstance(payload, list) else 0
@@ -770,14 +756,10 @@ def _add_knowledge_root_args(parser: argparse.ArgumentParser) -> None:
 
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register gemini command parsers."""
-    gemini_parser = subparsers.add_parser(
-        "gemini", help="Gemini integration management."
-    )
+    gemini_parser = subparsers.add_parser("gemini", help="Gemini integration management.")
     gemini_sub = gemini_parser.add_subparsers(dest="gemini_command")
 
-    setup = gemini_sub.add_parser(
-        "setup", help="Set up Gemini settings.json and MCP registration."
-    )
+    setup = gemini_sub.add_parser("setup", help="Set up Gemini settings.json and MCP registration.")
     setup.add_argument(
         "--settings-path",
         help="Override settings.json path (default: ~/.gemini/settings.json).",
@@ -804,9 +786,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     setup.set_defaults(func=gemini_setup_command)
 
-    status = gemini_sub.add_parser(
-        "status", help="Check Gemini integration health."
-    )
+    status = gemini_sub.add_parser("status", help="Check Gemini integration health.")
     _add_knowledge_root_args(status)
     status.add_argument("--json", action="store_true", help="JSON output.")
     status.add_argument(
@@ -853,8 +833,17 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     ctx.add_argument(
         "--model",
-        default="gemini-2.0-flash",
-        help="Gemini model to use for generation (default: gemini-2.0-flash).",
+        default=default_gemini_generation_model(),
+        help=(
+            "Gemini model for generation "
+            f"(default: AFS_GEMINI_MODEL or {DEFAULT_GEMINI_GENERATION_MODEL})."
+        ),
+    )
+    ctx.add_argument(
+        "--thinking-level",
+        choices=GEMINI_THINKING_LEVELS,
+        default=os.getenv("AFS_GEMINI_THINKING_LEVEL") or None,
+        help="Optional Gemini 3 thinking level; default delegates to the model.",
     )
     ctx.add_argument(
         "--gen-query",

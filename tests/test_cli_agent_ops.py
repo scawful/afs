@@ -24,12 +24,16 @@ def test_agent_ops_parsers_register() -> None:
     assert finish.ran_command == ["pytest"]
     assert hasattr(finish, "func")
 
-    job = parser.parse_args(["agent-jobs", "create", "Review docs", "--prompt", "scan", "--allow-destructive"])
+    job = parser.parse_args(
+        ["agent-jobs", "create", "Review docs", "--prompt", "scan", "--allow-destructive"]
+    )
     assert job.command == "agent-jobs"
     assert job.allow_destructive is True
     assert hasattr(job, "func")
 
-    work = parser.parse_args(["agent-jobs", "work", "--agent", "worker", "--dry-run", "--allow-destructive"])
+    work = parser.parse_args(
+        ["agent-jobs", "work", "--agent", "worker", "--dry-run", "--allow-destructive"]
+    )
     assert work.command == "agent-jobs"
     assert work.agent == "worker"
     assert work.job_command is None
@@ -83,11 +87,28 @@ def test_build_parser_includes_agent_ops_commands() -> None:
     assert args.command == "agent-manifest"
     assert hasattr(args, "func")
 
-    sync = parser.parse_args(["agent-manifest", "sync", "--apply", "--harness", "claude", "--no-slash-commands"])
+    sync = parser.parse_args(
+        ["agent-manifest", "sync", "--apply", "--harness", "claude", "--no-slash-commands"]
+    )
     assert sync.command == "agent-manifest"
     assert sync.apply is True
     assert sync.harness == ["claude"]
     assert sync.no_slash_commands is True
+
+    portable = parser.parse_args(
+        [
+            "agent-manifest",
+            "sync",
+            "--harness",
+            "hcode",
+            "--skill-root",
+            "hcode=/opt/tools/skills",
+            "--command-root",
+            "hcode=/opt/tools/commands",
+        ]
+    )
+    assert portable.skill_root == ["hcode=/opt/tools/skills"]
+    assert portable.command_root == ["hcode=/opt/tools/commands"]
 
     hooks = parser.parse_args(["agent-hooks", "install-shell", "--apply", "--helpers-only"])
     assert hooks.command == "agent-hooks"

@@ -31,7 +31,13 @@ def _wire(monkeypatch, manager: AFSManager, context_root: Path, project_path: Pa
 
 
 def _args(**kwargs) -> Namespace:
-    values = {"config": None, "path": None, "context_root": None, "context_dir": None, "event": None}
+    values = {
+        "config": None,
+        "path": None,
+        "context_root": None,
+        "context_dir": None,
+        "event": None,
+    }
     values.update(kwargs)
     return Namespace(**values)
 
@@ -97,10 +103,30 @@ def test_hook_uses_wrapper_skill_prompt_with_resolved_manager_profile(
     monkeypatch.setenv("AFS_SESSION_SKILLS_PROMPT", "hookprofiletoken")
     monkeypatch.setenv("AFS_SESSION_SKILLS_MATCH_ENABLED", "1")
 
-    assert claude_hook_command(_args(raw=True, config=str(tmp_path / "custom.toml"))) == 0
+    assert (
+        claude_hook_command(
+            _args(
+                raw=True,
+                config=str(tmp_path / "custom.toml"),
+                include_skills=True,
+            )
+        )
+        == 0
+    )
     output = capsys.readouterr().out
     assert "## Matched Skill Instructions" in output
     assert "Instructions from the explicitly resolved hook profile." in output
+
+
+def test_hook_omits_skill_bodies_by_default(tmp_path, monkeypatch, capsys) -> None:
+    manager, context_root, project_path = _workspace(tmp_path)
+    _wire(monkeypatch, manager, context_root, project_path)
+    _feed_stdin(monkeypatch, {"hook_event_name": "SessionStart", "cwd": str(project_path)})
+    monkeypatch.setenv("AFS_SESSION_SKILLS_PROMPT", "verification")
+
+    assert claude_hook_command(_args(raw=True)) == 0
+
+    assert "## Matched Skill Instructions" not in capsys.readouterr().out
 
 
 def test_hook_user_prompt_submit_injects_contract_on_comms(tmp_path, monkeypatch, capsys) -> None:

@@ -23,6 +23,7 @@ from afs.agents.llm_bridge import (
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def claude_route() -> ModelRoute:
     return ModelRoute(provider="claude", model_id="claude-3-5-sonnet")
@@ -52,6 +53,7 @@ def sample_context() -> dict[str, Any]:
 # Claude provider
 # ---------------------------------------------------------------------------
 
+
 class TestClaudeProvider:
     def test_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
@@ -73,6 +75,33 @@ class TestClaudeProvider:
         assert result == "Claude analysis result"
         mock_anthropic.Anthropic.assert_called_once_with(api_key="sk-test-key", timeout=LLM_TIMEOUT)
         mock_client.messages.create.assert_called_once()
+
+    def test_stable_system_prompt_requests_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
+        mock_message = MagicMock(content=[MagicMock(text="ok")])
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_message
+        mock_anthropic = MagicMock()
+        mock_anthropic.Anthropic.return_value = mock_client
+
+        with patch.dict(sys.modules, {"anthropic": mock_anthropic}):
+            result = _query_claude(
+                "dynamic task",
+                {"changing": "context"},
+                "claude-sonnet-5",
+                system_prompt="stable instructions",
+            )
+
+        assert result == "ok"
+        kwargs = mock_client.messages.create.call_args.kwargs
+        assert kwargs["system"] == [
+            {
+                "type": "text",
+                "text": "stable instructions",
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+        assert "changing" in kwargs["messages"][0]["content"]
 
     def test_missing_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -125,6 +154,7 @@ class TestClaudeProvider:
 # Gemini provider
 # ---------------------------------------------------------------------------
 
+
 class TestGeminiProvider:
     def test_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("GEMINI_API_KEY", "test-key")
@@ -173,6 +203,7 @@ class TestGeminiProvider:
 # ---------------------------------------------------------------------------
 # Local (Ollama) provider
 # ---------------------------------------------------------------------------
+
 
 class TestLocalProvider:
     @staticmethod
@@ -230,6 +261,7 @@ class TestLocalProvider:
 # Codex provider (placeholder)
 # ---------------------------------------------------------------------------
 
+
 class TestCodexProvider:
     def test_returns_not_available(self) -> None:
         result = _query_codex("test", {}, "codex")
@@ -243,9 +275,12 @@ class TestCodexProvider:
 # query_llm() — main public function
 # ---------------------------------------------------------------------------
 
+
 class TestQueryLLM:
     def test_routes_to_claude(
-        self, claude_route: ModelRoute, sample_context: dict[str, Any],
+        self,
+        claude_route: ModelRoute,
+        sample_context: dict[str, Any],
     ) -> None:
         mock_fn = MagicMock(return_value="Claude result")
         with patch.dict("afs.agents.llm_bridge._PROVIDER_MAP", {"claude": mock_fn}):
@@ -254,7 +289,9 @@ class TestQueryLLM:
         mock_fn.assert_called_once_with("test prompt", sample_context, "claude-3-5-sonnet")
 
     def test_routes_to_gemini(
-        self, gemini_route: ModelRoute, sample_context: dict[str, Any],
+        self,
+        gemini_route: ModelRoute,
+        sample_context: dict[str, Any],
     ) -> None:
         mock_fn = MagicMock(return_value="Gemini result")
         with patch.dict("afs.agents.llm_bridge._PROVIDER_MAP", {"gemini": mock_fn}):
@@ -263,7 +300,9 @@ class TestQueryLLM:
         mock_fn.assert_called_once_with("test prompt", sample_context, "gemini-1.5-pro")
 
     def test_routes_to_local(
-        self, local_route: ModelRoute, sample_context: dict[str, Any],
+        self,
+        local_route: ModelRoute,
+        sample_context: dict[str, Any],
     ) -> None:
         mock_fn = MagicMock(return_value="Local result")
         with patch.dict("afs.agents.llm_bridge._PROVIDER_MAP", {"local": mock_fn}):
@@ -272,14 +311,18 @@ class TestQueryLLM:
         mock_fn.assert_called_once_with("test prompt", sample_context, "qwen2.5-coder:14b")
 
     def test_routes_to_codex(
-        self, codex_route: ModelRoute, sample_context: dict[str, Any],
+        self,
+        codex_route: ModelRoute,
+        sample_context: dict[str, Any],
     ) -> None:
         result = query_llm("test prompt", sample_context, codex_route)
         parsed = json.loads(result)
         assert parsed["status"] == "not_available"
 
     def test_passes_system_prompt_when_provided(
-        self, claude_route: ModelRoute, sample_context: dict[str, Any],
+        self,
+        claude_route: ModelRoute,
+        sample_context: dict[str, Any],
     ) -> None:
         mock_fn = MagicMock(return_value="Claude result")
         with patch.dict("afs.agents.llm_bridge._PROVIDER_MAP", {"claude": mock_fn}):
@@ -304,7 +347,9 @@ class TestQueryLLM:
         assert "unknown provider" in result
 
     def test_handler_exception_caught(
-        self, claude_route: ModelRoute, sample_context: dict[str, Any],
+        self,
+        claude_route: ModelRoute,
+        sample_context: dict[str, Any],
     ) -> None:
         mock_fn = MagicMock(side_effect=RuntimeError("unexpected crash"))
         with patch.dict("afs.agents.llm_bridge._PROVIDER_MAP", {"claude": mock_fn}):
@@ -313,7 +358,9 @@ class TestQueryLLM:
         assert "unexpected failure" in result
 
     def test_error_prefix_on_provider_failure(
-        self, gemini_route: ModelRoute, sample_context: dict[str, Any],
+        self,
+        gemini_route: ModelRoute,
+        sample_context: dict[str, Any],
     ) -> None:
         mock_fn = MagicMock(return_value="ERROR: Gemini quota exceeded")
         with patch.dict("afs.agents.llm_bridge._PROVIDER_MAP", {"gemini": mock_fn}):
@@ -324,6 +371,7 @@ class TestQueryLLM:
 # ---------------------------------------------------------------------------
 # Timeout handling
 # ---------------------------------------------------------------------------
+
 
 class TestTimeoutHandling:
     def test_claude_timeout_returns_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -354,9 +402,11 @@ class TestTimeoutHandling:
 # Graceful fallback when SDK not installed
 # ---------------------------------------------------------------------------
 
+
 class TestGracefulFallback:
     def test_anthropic_sdk_missing_via_query_llm(
-        self, sample_context: dict[str, Any],
+        self,
+        sample_context: dict[str, Any],
     ) -> None:
         """query_llm should return error string when anthropic is missing."""
         route = ModelRoute(provider="claude", model_id="claude-3-5-sonnet")
@@ -366,7 +416,8 @@ class TestGracefulFallback:
         assert "anthropic SDK not installed" in result
 
     def test_genai_sdk_missing_via_query_llm(
-        self, sample_context: dict[str, Any],
+        self,
+        sample_context: dict[str, Any],
     ) -> None:
         """query_llm should return error string when google.genai is missing."""
         route = ModelRoute(provider="gemini", model_id="gemini-1.5-pro")

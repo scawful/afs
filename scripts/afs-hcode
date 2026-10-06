@@ -2,5 +2,5 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export HCODE_CMD="${HCODE_CMD:-${HOME}/bin/hcode}"
+export HCODE_CMD="${HCODE_CMD:-hcode}"
 exec "${SCRIPT_DIR}/afs-client-session" hcode "${HCODE_CMD}" HCODE_CMD "$@"

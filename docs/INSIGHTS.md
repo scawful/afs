@@ -88,7 +88,7 @@ afs insights research "similar shutdown failures" --path "$PWD" \
 The provider is used only with `--semantic`. **Ollama keeps embedding input
 local. Gemini transmits indexed content and the query to Gemini** to create
 embeddings. Use `--model` to select a supported provider model; Gemini
-otherwise uses the stable `gemini-embedding-2` default at 768 dimensions.
+otherwise uses the `gemini-embedding-2` default at 768 dimensions.
 
 Semantic retrieval and internet research are separate permissions. Enabling
 one does not enable the other.

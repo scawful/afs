@@ -47,7 +47,7 @@ Enable it from an AFS workspace:
 ```toml
 [extensions]
 enabled_extensions = ["afs_example"]
-extension_repo_roots = ["~/src/lab"]
+extension_repo_roots = ["/path/to/extensions"]
 ```
 
 Or with environment variables:

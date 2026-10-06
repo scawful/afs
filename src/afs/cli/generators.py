@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from ..gemini_defaults import DEFAULT_GEMINI_GENERATION_MODEL
+
 
 def generators_asm_augment_command(args: argparse.Namespace) -> int:
     """Augment ASM training samples via paraphrasing."""
@@ -258,9 +260,7 @@ def generators_validate_command(args: argparse.Namespace) -> int:
 
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register generators command parsers."""
-    generators_parser = subparsers.add_parser(
-        "generators", help="Training data generators."
-    )
+    generators_parser = subparsers.add_parser("generators", help="Training data generators.")
     generators_sub = generators_parser.add_subparsers(dest="generators_command")
 
     # asm-augment
@@ -308,12 +308,8 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     gen_cot = generators_sub.add_parser(
         "cot", help="Generate Chain of Thought reasoning for samples."
     )
-    gen_cot.add_argument(
-        "--input", required=True, help="Source JSONL file with training samples."
-    )
-    gen_cot.add_argument(
-        "--output", help="Output JSONL path (default: input_cot.jsonl)."
-    )
+    gen_cot.add_argument("--input", required=True, help="Source JSONL file with training samples.")
+    gen_cot.add_argument("--output", help="Output JSONL path (default: input_cot.jsonl).")
     gen_cot.add_argument(
         "--provider",
         default="gemini",
@@ -322,8 +318,8 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     gen_cot.add_argument(
         "--model",
-        default="gemini-2.0-flash-exp",
-        help="Model name (default: gemini-2.0-flash-exp).",
+        default=DEFAULT_GEMINI_GENERATION_MODEL,
+        help=f"Model name (default: {DEFAULT_GEMINI_GENERATION_MODEL}).",
     )
     gen_cot.add_argument(
         "--format",
@@ -364,9 +360,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     gen_clean.add_argument(
         "--input", required=True, help="Source JSONL file with training samples."
     )
-    gen_clean.add_argument(
-        "--output", help="Output JSONL path (default: input_cleaned.jsonl)."
-    )
+    gen_clean.add_argument("--output", help="Output JSONL path (default: input_cleaned.jsonl).")
     gen_clean.add_argument(
         "--regen-output",
         help="Output file for samples needing regeneration (optional).",
@@ -386,15 +380,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     gen_validate.add_argument(
         "--input", required=True, help="Source JSONL file with training samples."
     )
-    gen_validate.add_argument(
-        "--output", help="Output JSONL path for valid samples."
-    )
-    gen_validate.add_argument(
-        "--invalid-output", help="Output JSONL path for invalid samples."
-    )
-    gen_validate.add_argument(
-        "--asar-path", help="Path to asar executable."
-    )
+    gen_validate.add_argument("--output", help="Output JSONL path for valid samples.")
+    gen_validate.add_argument("--invalid-output", help="Output JSONL path for invalid samples.")
+    gen_validate.add_argument("--asar-path", help="Path to asar executable.")
     gen_validate.add_argument(
         "--include-path",
         action="append",
@@ -428,12 +416,8 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Keep temp files for debugging.",
     )
-    gen_validate.add_argument(
-        "--stats-output", help="Output JSON path for validation statistics."
-    )
-    gen_validate.add_argument(
-        "--base-rom", help="Base ROM path for asar validation."
-    )
+    gen_validate.add_argument("--stats-output", help="Output JSON path for validation statistics.")
+    gen_validate.add_argument("--base-rom", help="Base ROM path for asar validation.")
     gen_validate.add_argument(
         "--timeout",
         type=float,

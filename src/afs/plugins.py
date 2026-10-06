@@ -23,6 +23,7 @@ from .extensions import (
 from .extensions import (
     resolve_extensions_config,
 )
+from .runtime_paths import default_config_root
 from .schema import AFSConfig, PluginsConfig
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ def _env_enabled_plugins() -> list[str]:
 
 def _default_plugin_dirs() -> list[Path]:
     return [
-        Path("~/.config/afs/plugins").expanduser().resolve(),
+        default_config_root() / "plugins",
         Path("~/.afs/plugins").expanduser().resolve(),
     ]
 
@@ -95,13 +96,7 @@ def _iter_module_names(paths: list[Path] | None) -> set[str]:
 
 
 def _filter_prefixes(names: Iterable[str], prefixes: list[str]) -> list[str]:
-    return sorted(
-        {
-            name
-            for name in names
-            if any(name.startswith(prefix) for prefix in prefixes)
-        }
-    )
+    return sorted({name for name in names if any(name.startswith(prefix) for prefix in prefixes)})
 
 
 @contextmanager
@@ -147,18 +142,12 @@ def _normalize_plugins_config(config: AFSConfig | PluginsConfig | dict | None) -
     env_dirs = _env_plugin_dirs()
     env_enabled = _env_enabled_plugins()
     if env_dirs:
-        plugins_config.plugin_dirs = _merge_unique_paths(
-            env_dirs, plugins_config.plugin_dirs
-        )
+        plugins_config.plugin_dirs = _merge_unique_paths(env_dirs, plugins_config.plugin_dirs)
     if env_enabled:
-        plugins_config.enabled_plugins = _merge_unique(
-            env_enabled, plugins_config.enabled_plugins
-        )
+        plugins_config.enabled_plugins = _merge_unique(env_enabled, plugins_config.enabled_plugins)
     default_dirs = _default_plugin_dirs()
     if default_dirs:
-        plugins_config.plugin_dirs = _merge_unique_paths(
-            plugins_config.plugin_dirs, default_dirs
-        )
+        plugins_config.plugin_dirs = _merge_unique_paths(plugins_config.plugin_dirs, default_dirs)
     return plugins_config
 
 

@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 from afs.agent.harness import AgentHarness, HarnessConfig
+from afs.agent.models import GenerateResult, ToolCall
 from afs.agent.tools import Tool, ToolResult
 from afs.context_layout import scaffold_v2
 from afs.project_registry import ProjectRegistry
@@ -26,11 +27,7 @@ def test_default_harness_tools_bind_configured_v2_root_and_project(
     beta_record = configured_registry.register(beta)
     ProjectRegistry(other_context).register(beta)
     beta_secret = (
-        configured_context
-        / "knowledge"
-        / "projects"
-        / beta_record.project_id
-        / "secret.md"
+        configured_context / "knowledge" / "projects" / beta_record.project_id / "secret.md"
     )
     beta_secret.parent.mkdir(parents=True)
     beta_secret.write_text("beta-only", encoding="utf-8")
@@ -56,11 +53,7 @@ def test_default_harness_tools_bind_configured_v2_root_and_project(
 
     assert written.success is True
     assert Path(written.metadata["path"]).parent == (
-        configured_context
-        / "scratchpad"
-        / "projects"
-        / alpha_record.project_id
-        / "notes"
+        configured_context / "scratchpad" / "projects" / alpha_record.project_id / "notes"
     )
     assert denied.success is False
     assert "authorized project scope" in str(denied.error)
@@ -113,3 +106,46 @@ def test_harness_preserves_empty_and_explicit_tool_lists() -> None:
 
     assert empty_harness.tools == {}
     assert explicit_harness.tools == {"explicit": explicit}
+
+
+def test_harness_preserves_provider_tool_call_id_in_result_message() -> None:
+    async def handler(_arguments) -> ToolResult:  # noqa: ANN001
+        return ToolResult(success=True, content="found")
+
+    tool = Tool(
+        name="inspect",
+        description="Inspect a target",
+        parameters={"type": "object"},
+        handler=handler,
+    )
+
+    class Backend:
+        def __init__(self) -> None:
+            self.messages: list[list[dict[str, object]]] = []
+
+        async def generate(self, messages, tools=None):  # noqa: ANN001, ANN201
+            self.messages.append([dict(message) for message in messages])
+            if len(self.messages) == 1:
+                return GenerateResult(
+                    content="",
+                    tool_calls=[ToolCall(name="inspect", arguments={}, id="provider-call-1")],
+                )
+            return GenerateResult(content="done")
+
+    backend = Backend()
+    harness = AgentHarness("ollama:test", tools=[tool])
+    harness._backend = backend  # type: ignore[assignment]
+
+    result = asyncio.run(harness.run("inspect it"))
+
+    assert result.success is True
+    assert backend.messages[1][-1] == {
+        "role": "tool",
+        "results": [
+            {
+                "name": "inspect",
+                "content": "found",
+                "tool_call_id": "provider-call-1",
+            }
+        ],
+    }

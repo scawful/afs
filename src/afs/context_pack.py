@@ -466,7 +466,9 @@ def _context_pack_cache_key(
         "config_fingerprint": config_fingerprint,
         "bootstrap": bootstrap,
     }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode(
+        "utf-8"
+    )
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -509,7 +511,9 @@ def _cache_bootstrap(
             current = counts.get("scratchpad", 0)
             if isinstance(current, int):
                 counts["scratchpad"] = max(0, current - ignored)
-            status["total_files"] = sum(value for value in counts.values() if isinstance(value, int))
+            status["total_files"] = sum(
+                value for value in counts.values() if isinstance(value, int)
+            )
         index = status.get("index")
         if isinstance(index, dict):
             status["index"] = {"enabled": bool(index.get("enabled", False))}
@@ -538,8 +542,7 @@ def _cache_bootstrap(
     stale = result.get("stale_mounts")
     if isinstance(stale, list):
         result["stale_mounts"] = [
-            item for item in stale
-            if item not in {MountType.HISTORY.value, MountType.GLOBAL.value}
+            item for item in stale if item not in {MountType.HISTORY.value, MountType.GLOBAL.value}
         ]
 
     # Strip volatile fields that change between calls but don't affect
@@ -760,9 +763,7 @@ def _context_pack_config_fingerprint(manager: AFSManager) -> str:
         )
         if stat.S_ISREG(manifest_stat.st_mode) and manifest_stat.st_size <= 1024 * 1024:
             try:
-                manifest_state["sha256"] = hashlib.sha256(
-                    manifest_path.read_bytes()
-                ).hexdigest()
+                manifest_state["sha256"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
             except OSError:
                 manifest_state["unreadable"] = True
     afs_root = os.getenv("AFS_ROOT", "").strip()
@@ -1302,11 +1303,7 @@ def _prune_session_pack_cache_unlocked(
     survivors: list[_OwnedSessionPackCacheEntry] = []
     for entry in entries:
         expired = now - entry.modified_at > ttl_seconds
-        if (
-            expired
-            and entry.path != protected
-            and _remove_session_pack_cache_file_unlocked(entry)
-        ):
+        if expired and entry.path != protected and _remove_session_pack_cache_file_unlocked(entry):
             removed += 1
             continue
         survivors.append(entry)
@@ -1340,6 +1337,7 @@ def clear_pack_cache(context_path: Path | None = None, *, config: Any = None) ->
     """
     if config is None:
         from .config import load_config_model
+
         config = load_config_model()
 
     cache_dir = _resolve_session_pack_cache_dir(config)
@@ -1521,9 +1519,7 @@ def _model_guidance(model: str) -> str:
         "`afs index rebuild --path <workspace>` if search is stale."
     )
     guidance = {
-        "generic": (
-            "Prefer high-signal sections first and cite file paths. " + follow_up
-        ),
+        "generic": ("Prefer high-signal sections first and cite file paths. " + follow_up),
         "gemini": (
             "Start with source-backed sections; ask for more retrieval only if gaps remain. "
             + follow_up
@@ -1564,9 +1560,7 @@ def _reserved_context_tokens(
         blocks.append((focus_block["title"], focus_block["body"]))
 
     return sum(
-        estimate_tokens(title) + estimate_tokens(body)
-        for title, body in blocks
-        if body.strip()
+        estimate_tokens(title) + estimate_tokens(body) for title, body in blocks if body.strip()
     )
 
 
@@ -1594,7 +1588,9 @@ def _build_sections(
     sections.append(
         ContextPackSection(
             title="Recommended Actions",
-            body=_render_list(bootstrap.get("recommended_actions", []), fallback="No urgent actions."),
+            body=_render_list(
+                bootstrap.get("recommended_actions", []), fallback="No urgent actions."
+            ),
             priority=0,
         )
     )
@@ -1928,9 +1924,7 @@ def _embedding_section(
     semantic_ready = False
     rules = _pack_embedding_rules(manager)
     search_limit = (
-        500
-        if rules.enabled or scoped.layout_version == LAYOUT_VERSION
-        else max(1, max_results)
+        500 if rules.enabled or scoped.layout_version == LAYOUT_VERSION else max(1, max_results)
     )
     for index_root in candidates:
         try:
@@ -1983,11 +1977,7 @@ def _embedding_section(
         if len(sources) >= max_results:
             break
     return ContextPackSection(
-        title=(
-            "Semantic Hits"
-            if semantic_ready
-            else "Indexed Text Hits"
-        ),
+        title=("Semantic Hits" if semantic_ready else "Indexed Text Hits"),
         body="\n".join(lines),
         priority=_embedding_section_priority(pack_mode),
         sources=sources,
@@ -2394,17 +2384,20 @@ def _context_pack_prefix_hash(pack: dict[str, Any]) -> str:
 
 
 # Sections that change between sessions or on every scratchpad write.
-# Excluded from stable_prefix_hash so Gemini context caching can hit on
-# the knowledge-heavy prefix even when volatile state drifts.
-_VOLATILE_SECTION_TITLES = frozenset({
-    "Context Health",
-    "Recommended Actions",
-    "Scratchpad State",
-    "Latest Handoff",
-    "Open Tasks",
-    "Recent Messages",
-    "Recent Hivemind",  # compatibility with packs created before v7
-})
+# Excluded from stable_prefix_hash so provider prompt caches can hit on the
+# knowledge-heavy prefix even when volatile state drifts. Gemini explicit
+# caching and Claude prefix caching can both consume this boundary.
+_VOLATILE_SECTION_TITLES = frozenset(
+    {
+        "Context Health",
+        "Recommended Actions",
+        "Scratchpad State",
+        "Latest Handoff",
+        "Open Tasks",
+        "Recent Messages",
+        "Recent Hivemind",  # compatibility with packs created before v7
+    }
+)
 
 
 def _context_pack_stable_prefix_hash(pack: dict[str, Any]) -> str:
@@ -2509,9 +2502,7 @@ def _entry_blocked(entry: dict[str, Any], rules: SensitivityRuleSet) -> bool:
 
 def _pack_export_rules(manager: AFSManager) -> SensitivityRuleSet:
     sensitivity = manager.config.sensitivity
-    return SensitivityRuleSet.from_patterns(
-        [*sensitivity.never_index, *sensitivity.never_export]
-    )
+    return SensitivityRuleSet.from_patterns([*sensitivity.never_index, *sensitivity.never_export])
 
 
 def _pack_embedding_rules(manager: AFSManager) -> SensitivityRuleSet:

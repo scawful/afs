@@ -15,6 +15,7 @@ from ..project_registry import (
     ProjectRecord,
     ProjectRegistry,
 )
+from ..runtime_paths import default_workspace_root
 from ._utils import load_manager, resolve_context_paths
 
 
@@ -123,11 +124,7 @@ def projects_current_command(args: argparse.Namespace) -> int:
         # This orientation command must still explain how to register a
         # checkout that has not yet been granted a project scope. Other
         # commands intentionally keep the stricter resolver boundary.
-        config = (
-            Path(args.config).expanduser().resolve()
-            if getattr(args, "config", None)
-            else None
-        )
+        config = Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
         manager = load_manager(config)
         project = (
             Path(args.path).expanduser().resolve()
@@ -138,11 +135,7 @@ def projects_current_command(args: argparse.Namespace) -> int:
         if detect_layout_version(context) != LAYOUT_VERSION:
             raise
     layout_version = detect_layout_version(context)
-    record = (
-        ProjectRegistry(context).resolve(project)
-        if layout_version == LAYOUT_VERSION
-        else None
-    )
+    record = ProjectRegistry(context).resolve(project) if layout_version == LAYOUT_VERSION else None
     scope_id = record.scope_id if record is not None else COMMON_SCOPE_ID
     payload: dict[str, Any] = {
         "context_root": str(context),
@@ -259,9 +252,7 @@ def _artifact_context(
         if not common:
             raise
         config_path = (
-            Path(args.config).expanduser().resolve()
-            if getattr(args, "config", None)
-            else None
+            Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
         )
         manager = load_manager(config_path)
         project = (
@@ -715,7 +706,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     search.add_argument(
         "--model",
-        help="Embedding model override; Gemini defaults to stable gemini-embedding-2.",
+        help="Embedding model override; Gemini defaults to gemini-embedding-2.",
     )
     search.add_argument(
         "--all-projects",
@@ -752,8 +743,8 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     project_import.add_argument(
         "--workspace-root",
-        default=str(Path.home() / "src"),
-        help="Directory containing WORKSPACE.toml (default: ~/src).",
+        default=str(default_workspace_root()),
+        help="Directory containing WORKSPACE.toml (default: discovered from the current directory).",
     )
     project_import.add_argument("--config")
     project_import.add_argument("--context-root")
