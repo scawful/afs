@@ -19,6 +19,12 @@ class MountType(str, Enum):
     resources attached to a category rather than as the category itself.
     """
 
+    @classmethod
+    def _missing_(cls, value: object) -> MountType | None:
+        if value == "messages":
+            return cls.HIVEMIND
+        return None
+
     MEMORY = "memory"
     KNOWLEDGE = "knowledge"
     TOOLS = "tools"
@@ -142,7 +148,8 @@ class ProjectMetadata:
             created_at = created_at.isoformat()
         if not isinstance(created_at, str):
             created_at = datetime.now().isoformat()
-        description = data.get("description") if isinstance(data.get("description"), str) else ""
+        description_value = data.get("description")
+        description = description_value if isinstance(description_value, str) else ""
         agents = [agent for agent in data.get("agents", []) if isinstance(agent, str)]
         manual_only = [p for p in data.get("manual_only", []) if isinstance(p, str)]
         directories: dict[str, str] = {}
