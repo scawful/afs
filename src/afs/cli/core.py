@@ -1103,7 +1103,7 @@ def session_context_command(args: argparse.Namespace) -> int:
             skills_prompt=args.skills_prompt,
             include_skills=not args.no_skills,
         )
-    except Exception as exc:
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
