@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-Z3CLI_SCRIPT="${Z3CLI_SCRIPT:-${HOME}/src/hobby/z3cli/z3cli.py}"
-Z3CLI_PYTHON="${Z3CLI_PYTHON:-python3}"
-exec "${Z3CLI_PYTHON}" "${Z3CLI_SCRIPT}" "$@"
+if [ -n "${Z3CLI_SCRIPT:-}" ]; then
+  exec "${Z3CLI_PYTHON:-python3}" "${Z3CLI_SCRIPT}" "$@"
+fi
+
+Z3CLI_BIN="${Z3CLI_BIN:-z3cli}"
+if ! command -v "$Z3CLI_BIN" >/dev/null 2>&1; then
+  echo "z3cli executable not found; put it on PATH or set Z3CLI_BIN/Z3CLI_SCRIPT." >&2
+  exit 127
+fi
+exec "$Z3CLI_BIN" "$@"

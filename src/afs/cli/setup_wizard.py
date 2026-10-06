@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..runtime_paths import default_config_root, default_context_root
+
 
 @dataclass(frozen=True)
 class SetupStep:
@@ -71,14 +73,14 @@ def _afs_command() -> list[str]:
 
 def _default_config_path(workspace: Path, scope: str) -> Path:
     if scope == "user":
-        return Path.home() / ".config" / "afs" / "config.toml"
+        return default_config_root() / "config.toml"
     return workspace / "afs.toml"
 
 
 def _default_context_root(workspace: Path, mode: str) -> Path:
     if mode == "project":
         return workspace / ".context"
-    return Path.home() / ".context"
+    return default_context_root()
 
 
 def _bool_choice(value: bool) -> str:
@@ -122,11 +124,15 @@ def _interactive(args: argparse.Namespace) -> bool:
 def _collect_answers(args: argparse.Namespace) -> dict[str, Any]:
     interactive = _interactive(args)
     workspace_default = str(Path(args.workspace or Path.cwd()).expanduser().resolve())
-    workspace = Path(
-        _ask_text("Workspace or project path", workspace_default)
-        if interactive and not args.workspace
-        else workspace_default
-    ).expanduser().resolve()
+    workspace = (
+        Path(
+            _ask_text("Workspace or project path", workspace_default)
+            if interactive and not args.workspace
+            else workspace_default
+        )
+        .expanduser()
+        .resolve()
+    )
 
     config_scope = args.config_scope or "project"
     if interactive and not args.config_scope:
@@ -145,18 +151,26 @@ def _collect_answers(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     context_default = str(_default_context_root(workspace, context_mode))
-    context_root = Path(
-        _ask_text("Context root", context_default)
-        if interactive and not args.context_root
-        else (args.context_root or context_default)
-    ).expanduser().resolve()
+    context_root = (
+        Path(
+            _ask_text("Context root", context_default)
+            if interactive and not args.context_root
+            else (args.context_root or context_default)
+        )
+        .expanduser()
+        .resolve()
+    )
 
     config_default = str(_default_config_path(workspace, config_scope))
-    config_path = Path(
-        _ask_text("Config path", config_default)
-        if interactive and not args.config
-        else (args.config or config_default)
-    ).expanduser().resolve()
+    config_path = (
+        Path(
+            _ask_text("Config path", config_default)
+            if interactive and not args.config
+            else (args.config or config_default)
+        )
+        .expanduser()
+        .resolve()
+    )
 
     link_default = bool(context_mode == "shared" and config_scope == "project")
     if args.link_context is not None:
@@ -340,7 +354,9 @@ def build_setup_plan(
         )
 
     if gws_mode == "check":
-        steps.append(SetupStep("Check Google Workspace auth", [*afs, "gws", "status"], optional=True))
+        steps.append(
+            SetupStep("Check Google Workspace auth", [*afs, "gws", "status"], optional=True)
+        )
     elif gws_mode == "setup":
         gws_script = root / "scripts" / "setup_gws.sh"
         steps.append(
@@ -450,9 +466,21 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--context-root", help="Context root path.")
     parser.add_argument("--config", help="Config path to write.")
     parser.add_argument("--config-scope", choices=["project", "user"], help="Config scope.")
-    parser.add_argument("--context-mode", choices=["project", "shared"], help="Where context files live.")
-    parser.add_argument("--link-context", dest="link_context", action="store_true", help="Create a .context link in the workspace.")
-    parser.add_argument("--no-link-context", dest="link_context", action="store_false", help="Do not create a .context link.")
+    parser.add_argument(
+        "--context-mode", choices=["project", "shared"], help="Where context files live."
+    )
+    parser.add_argument(
+        "--link-context",
+        dest="link_context",
+        action="store_true",
+        help="Create a .context link in the workspace.",
+    )
+    parser.add_argument(
+        "--no-link-context",
+        dest="link_context",
+        action="store_false",
+        help="Do not create a .context link.",
+    )
     parser.set_defaults(link_context=None)
     parser.add_argument(
         "--shell",
@@ -472,12 +500,20 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         default="ask",
         help="Optional Google Workspace helper handling.",
     )
-    parser.add_argument("--worker", dest="worker", action="store_true", help="Install background job worker.")
-    parser.add_argument("--no-worker", dest="worker", action="store_false", help="Skip background job worker.")
+    parser.add_argument(
+        "--worker", dest="worker", action="store_true", help="Install background job worker."
+    )
+    parser.add_argument(
+        "--no-worker", dest="worker", action="store_false", help="Skip background job worker."
+    )
     parser.set_defaults(worker=None)
     parser.add_argument("--apply", action="store_true", help="Execute the generated setup plan.")
-    parser.add_argument("--dry-run", action="store_true", help="Print the setup plan without executing it.")
-    parser.add_argument("--yes", "-y", action="store_true", help="Accept defaults and do not prompt.")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print the setup plan without executing it."
+    )
+    parser.add_argument(
+        "--yes", "-y", action="store_true", help="Accept defaults and do not prompt."
+    )
     parser.add_argument("--force", action="store_true", help="Overwrite config when running init.")
     parser.add_argument("--json", action="store_true", help="Print the setup plan as JSON.")
     parser.set_defaults(func=setup_command)

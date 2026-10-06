@@ -4,7 +4,7 @@
 #   source /path/to/afs/scripts/afs-shell-init.sh
 #
 # Or add to .zshrc / .bashrc:
-#   [ -f ~/src/lab/afs/scripts/afs-shell-init.sh ] && source ~/src/lab/afs/scripts/afs-shell-init.sh
+#   [ -f /path/to/afs/scripts/afs-shell-init.sh ] && source /path/to/afs/scripts/afs-shell-init.sh
 
 # --- Resolve AFS_ROOT ---
 if [ -n "${BASH_SOURCE[0]-}" ]; then
@@ -258,6 +258,8 @@ afs-verify() {
 
 # --- Completions (zsh) ---
 if [ -n "${ZSH_VERSION-}" ]; then
+  typeset -gi AFS_COMPLETION_STATUS=${AFS_COMPLETION_STATUS:-0}
+
   _afs_commands() {
     local commands=(
       'status:Show AFS status'
@@ -282,4 +284,33 @@ if [ -n "${ZSH_VERSION-}" ]; then
     _describe 'command' commands
   }
   compdef _afs_commands afs
+
+  # Full completion asks the CLI to render its live command tree. Keep that
+  # work out of shell startup and let the user opt in after the prompt appears.
+  afs-load-completion() {
+    local generated
+    if (( $+functions[_afs] )); then
+      AFS_COMPLETION_STATUS=1
+      echo "AFS full completion already loaded."
+      return 0
+    fi
+    if ! command -v afs >/dev/null 2>&1; then
+      AFS_COMPLETION_STATUS=-1
+      echo "afs command not found; keeping static completion." >&2
+      return 1
+    fi
+    generated="$(_AFS_COMPLETE=zsh_source command afs 2>/dev/null)"
+    if [ -n "$generated" ] && [[ "$generated" == *"#compdef"* ]]; then
+      eval "$generated"
+      if (( $+functions[_afs] )); then
+        compdef _afs afs
+        AFS_COMPLETION_STATUS=1
+        echo "Loaded full AFS completion."
+        return 0
+      fi
+    fi
+    AFS_COMPLETION_STATUS=-1
+    echo "Failed to load full AFS completion; keeping static completion." >&2
+    return 1
+  }
 fi

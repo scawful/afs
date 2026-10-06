@@ -29,7 +29,46 @@ class ManifestIssue:
 
 def load_manifest(path: Path | None = None) -> dict[str, Any]:
     manifest_path = (path or default_manifest_path()).expanduser()
-    return tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+    data = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+    _resolve_relative_paths(data, manifest_path.resolve().parent)
+    return data
+
+
+def _resolved_path(value: str, base_dir: Path) -> str:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    return str(path.resolve())
+
+
+def _resolve_path_list(item: dict[str, Any], key: str, base_dir: Path) -> None:
+    value = item.get(key)
+    if not isinstance(value, list):
+        return
+    item[key] = [_resolved_path(str(path), base_dir) for path in value if str(path).strip()]
+
+
+def _resolve_relative_paths(data: dict[str, Any], base_dir: Path) -> None:
+    """Resolve manifest path fields relative to the manifest file itself."""
+    paths = data.get("paths")
+    if isinstance(paths, dict):
+        for key, value in list(paths.items()):
+            if isinstance(value, str) and value.strip():
+                paths[key] = _resolved_path(value, base_dir)
+
+    for harness in _as_list(data.get("harnesses")):
+        if not isinstance(harness, dict):
+            continue
+        for key in ("instructions", "skill_roots", "command_roots", "manifest_exports"):
+            _resolve_path_list(harness, key, base_dir)
+
+    for collection_name in ("skills", "slash_command_packs"):
+        for item in _as_list(data.get(collection_name)):
+            if not isinstance(item, dict):
+                continue
+            canonical = item.get("canonical_path")
+            if isinstance(canonical, str) and canonical.strip():
+                item["canonical_path"] = _resolved_path(canonical, base_dir)
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -80,7 +119,9 @@ def validate_manifest(data: dict[str, Any], *, check_paths: bool = False) -> lis
         for server in _as_list(harness.get("mcp_servers")):
             if str(server) not in mcp_names:
                 issues.append(
-                    ManifestIssue("warning", f"harness {name or index} references unknown MCP server {server}")
+                    ManifestIssue(
+                        "warning", f"harness {name or index} references unknown MCP server {server}"
+                    )
                 )
 
     for index, skill in enumerate(skills, start=1):
@@ -93,22 +134,35 @@ def validate_manifest(data: dict[str, Any], *, check_paths: bool = False) -> lis
         for target in _as_list(skill.get("targets")):
             if str(target) not in harness_names:
                 issues.append(
-                    ManifestIssue("warning", f"skill {name or index} targets unknown harness {target}")
+                    ManifestIssue(
+                        "warning", f"skill {name or index} targets unknown harness {target}"
+                    )
                 )
 
     for index, pack in enumerate(command_packs, start=1):
         if not isinstance(pack, dict):
-            issues.append(ManifestIssue("error", f"slash command pack entry {index} must be a table"))
+            issues.append(
+                ManifestIssue("error", f"slash command pack entry {index} must be a table")
+            )
             continue
         name = str(pack.get("name", "")).strip()
         if not name:
-            issues.append(ManifestIssue("error", f"slash command pack entry {index} is missing name"))
+            issues.append(
+                ManifestIssue("error", f"slash command pack entry {index} is missing name")
+            )
         if not str(pack.get("canonical_path", "")).strip():
-            issues.append(ManifestIssue("error", f"slash command pack {name or index} is missing canonical_path"))
+            issues.append(
+                ManifestIssue(
+                    "error", f"slash command pack {name or index} is missing canonical_path"
+                )
+            )
         for target in _as_list(pack.get("targets")):
             if str(target) not in harness_names:
                 issues.append(
-                    ManifestIssue("warning", f"slash command pack {name or index} targets unknown harness {target}")
+                    ManifestIssue(
+                        "warning",
+                        f"slash command pack {name or index} targets unknown harness {target}",
+                    )
                 )
 
     if check_paths:
@@ -150,7 +204,9 @@ def summarize_manifest(data: dict[str, Any]) -> dict[str, Any]:
         "paths": data.get("paths") if isinstance(data.get("paths"), dict) else {},
         "harnesses": [item.get("name") for item in harnesses if isinstance(item, dict)],
         "skills": [item.get("name") for item in skills if isinstance(item, dict)],
-        "slash_command_packs": [item.get("name") for item in command_packs if isinstance(item, dict)],
+        "slash_command_packs": [
+            item.get("name") for item in command_packs if isinstance(item, dict)
+        ],
         "mcp_servers": [item.get("name") for item in mcp_servers if isinstance(item, dict)],
     }
 

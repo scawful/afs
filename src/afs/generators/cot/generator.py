@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ...gemini_defaults import DEFAULT_GEMINI_GENERATION_MODEL
 from ..base import (
     BaseGenerator,
     GenerationResult,
@@ -30,7 +31,7 @@ class CotConfig:
 
     # LLM settings
     api_provider: str = "gemini"  # gemini, claude, openai
-    model_name: str = "gemini-2.0-flash-exp"
+    model_name: str = DEFAULT_GEMINI_GENERATION_MODEL
     temperature: float = 0.7
     max_tokens: int = 4096
     system_prompt: str | None = None

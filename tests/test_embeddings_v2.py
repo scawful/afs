@@ -12,6 +12,7 @@ from afs.embeddings import (
     DEFAULT_GEMINI_MODEL,
     EMBEDDING_INDEX_VERSION,
     GEMINI_DOCUMENT_TASK,
+    _prepare_gemini_embedding_text,
     build_embedding_index,
     create_embed_fn,
     create_query_embed_fn_from_index,
@@ -148,6 +149,25 @@ def test_incremental_reuse_preserves_healthy_collection_state(tmp_path: Path) ->
     assert result.semantic_status == "healthy"
 
 
+def test_incremental_build_reembeds_an_older_collection_contract(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "guide.md").write_text("alpha keyword", encoding="utf-8")
+    output = tmp_path / "index"
+    provider = _register_fake_provider()
+    embed = create_embed_fn(provider, model="fake-2026", dimension=3)
+    build_embedding_index([source], output, embed_fn=embed)
+    manifest_path = output / "embedding_index.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["_metadata"]["collection"]["version"] = EMBEDDING_INDEX_VERSION - 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = build_embedding_index([source], output, embed_fn=embed, incremental=True)
+
+    assert result.reused == 0
+    assert result.indexed == 1
+
+
 def test_full_rebuild_garbage_collects_orphan_payloads(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -182,6 +202,15 @@ def test_embedding_index_discovery_is_bounded_and_documented(tmp_path: Path) -> 
 def test_stable_gemini_defaults_are_current() -> None:
     assert DEFAULT_GEMINI_MODEL == "gemini-embedding-2"
     assert DEFAULT_GEMINI_DIMENSION == 768
+
+
+def test_gemini_embedding_2_uses_prompt_instructions_instead_of_task_field() -> None:
+    assert _prepare_gemini_embedding_text("find this", "RETRIEVAL_QUERY") == (
+        "task: search result | query: find this"
+    )
+    assert _prepare_gemini_embedding_text("document body", "RETRIEVAL_DOCUMENT") == (
+        "title: none | text: document body"
+    )
 
 
 def test_blank_query_is_rejected_before_embedder_invocation(tmp_path: Path) -> None:

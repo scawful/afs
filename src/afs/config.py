@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .runtime_paths import default_config_root, default_context_root
 from .schema import AFSConfig
 from .skills import normalize_skill_root
 from .toml_compat import tomllib
@@ -109,15 +110,9 @@ def _expand_config_paths(config_data: dict[str, Any]) -> None:
                 continue
             for key in ("memory_mounts", "knowledge_mounts", "skill_roots", "model_registries"):
                 if key in profile_data and isinstance(profile_data[key], list):
-                    path_parser = (
-                        normalize_skill_root
-                        if key == "skill_roots"
-                        else _expand_path
-                    )
+                    path_parser = normalize_skill_root if key == "skill_roots" else _expand_path
                     profile_data[key] = [
-                        path_parser(p)
-                        for p in profile_data[key]
-                        if isinstance(p, (str, Path))
+                        path_parser(p) for p in profile_data[key] if isinstance(p, (str, Path))
                     ]
 
         nested_profiles = profile_root.get("profiles")
@@ -127,15 +122,9 @@ def _expand_config_paths(config_data: dict[str, Any]) -> None:
                     continue
                 for key in ("memory_mounts", "knowledge_mounts", "skill_roots", "model_registries"):
                     if key in profile_data and isinstance(profile_data[key], list):
-                        path_parser = (
-                            normalize_skill_root
-                            if key == "skill_roots"
-                            else _expand_path
-                        )
+                        path_parser = normalize_skill_root if key == "skill_roots" else _expand_path
                         profile_data[key] = [
-                            path_parser(p)
-                            for p in profile_data[key]
-                            if isinstance(p, (str, Path))
+                            path_parser(p) for p in profile_data[key] if isinstance(p, (str, Path))
                         ]
 
     if "projects" in config_data:
@@ -143,9 +132,7 @@ def _expand_config_paths(config_data: dict[str, Any]) -> None:
             if "path" in project:
                 project["path"] = _expand_path(project["path"])
             if "knowledge_roots" in project:
-                project["knowledge_roots"] = [
-                    _expand_path(p) for p in project["knowledge_roots"]
-                ]
+                project["knowledge_roots"] = [_expand_path(p) for p in project["knowledge_roots"]]
 
     if "memory_export" in config_data:
         memory_export = config_data["memory_export"]
@@ -161,10 +148,7 @@ def _expand_config_paths(config_data: dict[str, Any]) -> None:
 
     if "memory_consolidation" in config_data:
         memory_consolidation = config_data["memory_consolidation"]
-        if (
-            "report_output" in memory_consolidation
-            and memory_consolidation["report_output"]
-        ):
+        if "report_output" in memory_consolidation and memory_consolidation["report_output"]:
             memory_consolidation["report_output"] = _expand_path(
                 memory_consolidation["report_output"]
             )
@@ -181,9 +165,7 @@ def load_config(
     explicit_path = Path(config_path).expanduser().resolve() if config_path else None
     env_config = os.environ.get("AFS_CONFIG_PATH")
     env_path = (
-        Path(env_config).expanduser().resolve()
-        if explicit_path is None and env_config
-        else None
+        Path(env_config).expanduser().resolve() if explicit_path is None and env_config else None
     )
     local_path = find_repo_config(start_dir)
     effective_explicit_path = explicit_path or env_path
@@ -206,7 +188,7 @@ def load_config(
     explicit_raw: dict[str, Any] = {}
 
     if merge_user:
-        user_path = Path.home() / ".config" / "afs" / "config.toml"
+        user_path = default_config_root() / "config.toml"
         if user_path.exists():
             with open(user_path, "rb") as f:
                 user_raw = tomllib.load(f)
@@ -270,7 +252,7 @@ def load_runtime_config_model(
 
 def _merge_workspace_registry(config_data: dict[str, Any]) -> None:
     general = config_data.setdefault("general", {})
-    raw_context_root = general.get("context_root", Path.home() / ".context")
+    raw_context_root = general.get("context_root", default_context_root())
     context_root = _expand_path(raw_context_root)
     registry_path = context_root / "workspaces.toml"
     if not registry_path.exists():
@@ -291,11 +273,7 @@ def _merge_workspace_registry(config_data: dict[str, Any]) -> None:
         existing = []
 
     merged = list(existing)
-    seen = {
-        item.get("path")
-        for item in merged
-        if isinstance(item, dict) and item.get("path")
-    }
+    seen = {item.get("path") for item in merged if isinstance(item, dict) and item.get("path")}
 
     for entry in entries:
         if not isinstance(entry, dict):
@@ -321,9 +299,7 @@ def _merge_env_allowed_roots(config_data: dict[str, Any]) -> None:
 
     merged = list(existing)
     seen = {
-        str(item).strip()
-        for item in merged
-        if isinstance(item, (str, Path)) and str(item).strip()
+        str(item).strip() for item in merged if isinstance(item, (str, Path)) and str(item).strip()
     }
     for item in raw.split(os.pathsep):
         value = item.strip()

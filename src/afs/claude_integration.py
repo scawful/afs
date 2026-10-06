@@ -5,15 +5,27 @@ from __future__ import annotations
 import shlex
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .mcp_runtime import build_afs_mcp_entry, build_afs_runtime_env
+from .session_grounding import DEFAULT_SESSION_GROUNDING_TOKEN_BUDGET
 
 # Marker used to find/replace AFS-owned lifecycle hooks idempotently on re-setup.
 _AFS_HOOK_MARKER = "afs claude hook"
 # Lifecycle events AFS pushes grounding into. SessionStart grounds the session once;
 # UserPromptSubmit injects the work-communication contract just-in-time on comms turns.
 _AFS_HOOK_EVENTS = ("SessionStart", "UserPromptSubmit")
+ClaudeHookMode = Literal["session", "session-and-prompts", "none"]
+
+
+def _hook_events_for_mode(mode: ClaudeHookMode) -> tuple[str, ...]:
+    if mode == "session":
+        return ("SessionStart",)
+    if mode == "session-and-prompts":
+        return _AFS_HOOK_EVENTS
+    if mode == "none":
+        return ()
+    raise ValueError(f"unsupported Claude hook mode: {mode}")
 
 
 def generate_claude_settings(
@@ -22,8 +34,10 @@ def generate_claude_settings(
     *,
     config_path: Path | None = None,
     include_project_context: bool = True,
+    hook_mode: ClaudeHookMode = "session",
+    context_token_budget: int = DEFAULT_SESSION_GROUNDING_TOKEN_BUDGET,
 ) -> dict[str, Any]:
-    """Build the mcpServers.afs entry plus AFS push hooks for Claude Code settings."""
+    """Build the AFS MCP entry plus bounded Claude Code lifecycle hooks."""
     resolved_project = project_path.expanduser().resolve()
     config_path_for_env: Path | None = None
     context_root_for_env: Path | None = None
@@ -47,6 +61,9 @@ def generate_claude_settings(
         prefer_repo_config=include_project_context,
         config_path=config_path_for_env,
         context_root=context_root_for_env,
+        pin_project_path=include_project_context,
+        token_budget=context_token_budget,
+        events=_hook_events_for_mode(hook_mode),
     )
     return {"mcpServers": {"afs": entry}, **hooks}
 
@@ -57,6 +74,9 @@ def generate_afs_hook_settings(
     prefer_repo_config: bool = True,
     config_path: Path | None = None,
     context_root: Path | None = None,
+    pin_project_path: bool = True,
+    token_budget: int = DEFAULT_SESSION_GROUNDING_TOKEN_BUDGET,
+    events: tuple[str, ...] = ("SessionStart",),
 ) -> dict[str, Any]:
     """Build Claude Code ``hooks`` entries that push AFS grounding into a session.
 
@@ -73,7 +93,10 @@ def generate_afs_hook_settings(
     )
     prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in sorted(env.items()))
     python = shlex.quote(sys.executable)
-    base = f"{python} -m afs claude hook --path {shlex.quote(str(resolved_project))}"
+    base = f"{python} -m afs claude hook"
+    if pin_project_path:
+        base += f" --path {shlex.quote(str(resolved_project))}"
+    base += f" --token-budget {max(0, token_budget)}"
     if context_root is not None:
         base += f" --context-root {shlex.quote(str(context_root.expanduser().resolve()))}"
 
@@ -81,10 +104,15 @@ def generate_afs_hook_settings(
         command = f"{base} --event {event}"
         return f"{prefix} {command}" if prefix else command
 
+    unsupported = set(events).difference(_AFS_HOOK_EVENTS)
+    if unsupported:
+        names = ", ".join(sorted(unsupported))
+        raise ValueError(f"unsupported Claude hook events: {names}")
+
     return {
         "hooks": {
             event: [{"hooks": [{"type": "command", "command": _command(event)}]}]
-            for event in _AFS_HOOK_EVENTS
+            for event in events
         }
     }
 
@@ -114,15 +142,27 @@ def merge_claude_settings(existing: dict[str, Any], afs_entry: dict[str, Any]) -
     if isinstance(new_hooks, dict):
         existing_hooks = merged.get("hooks")
         merged_hooks = dict(existing_hooks) if isinstance(existing_hooks, dict) else {}
-        for event, entries in new_hooks.items():
+        # Clean every event AFS owns, including hooks installed by an older setup
+        # mode. Switching to session-only or no-hooks must remove the stale
+        # per-prompt process rather than silently leaving it configured.
+        for event in _AFS_HOOK_EVENTS:
             prior = merged_hooks.get(event)
             kept = [
                 entry
                 for entry in (prior if isinstance(prior, list) else [])
                 if not _is_afs_hook_entry(entry)
             ]
-            merged_hooks[event] = kept + list(entries)
-        merged["hooks"] = merged_hooks
+            additions = new_hooks.get(event)
+            if isinstance(additions, list):
+                kept.extend(additions)
+            if kept:
+                merged_hooks[event] = kept
+            else:
+                merged_hooks.pop(event, None)
+        if merged_hooks:
+            merged["hooks"] = merged_hooks
+        else:
+            merged.pop("hooks", None)
     return merged
 
 
@@ -136,7 +176,7 @@ def _is_afs_hook_entry(entry: Any) -> bool:
     return False
 
 
-def generate_claude_md(project_name: str, context_path: str) -> str:
+def generate_claude_md(project_name: str) -> str:
     """Generate project CLAUDE.md content with AFS bootstrap instructions."""
     return f"""# Claude Workspace Bootstrap
 
@@ -144,32 +184,26 @@ Use AFS (Agent File System) for context management in this project.
 
 ## Session Startup
 
-Before major work:
-1. Run `afs session bootstrap --json` or use the MCP prompt `afs.session.bootstrap`.
-2. Read scratchpad state/deferred notes.
-3. Check queued tasks and recent hivemind messages.
-4. Use `context.query` before asking for already-known context.
+At session start:
+1. Use the context already supplied by the AFS `SessionStart` hook when present.
+2. Otherwise run `afs session bootstrap --json` or the MCP prompt `afs.session.bootstrap` once.
+3. Use `context.query` for a focused question, then `context.read` or `context.list` only for relevant follow-up.
+4. Do not repeat bootstrap or paste a full context pack on every prompt.
 
 ## Context
 
 - Project: {project_name}
-- Context path: {context_path}
+- AFS discovers context from the active project. Do not assume a fixed home directory, source root, host, or context path.
+- Scratchpad is the default writable working area. Update durable memory or knowledge only when the user requests it.
 
 ## Session Recovery
 
-If Claude notices MCP sluggishness, session tool timeouts, repeated missing-tool errors, or obvious stale-session buildup:
-1. Run `afs claude doctor --json` first to inspect session counts, bridge protection, and recent debug signals.
-2. If cleanup is needed, run `afs claude reap --limit 20` as a dry-run before making changes.
-3. Claude may run `afs claude reap --limit 20 --apply` to archive stale or zombie sessions in bounded batches.
-4. Never reap `protected` sessions or any project with an active `bridge-pointer.json`.
-5. Re-run `afs claude doctor --json` after each batch and stop once the blocking condition clears.
+If the integration becomes sluggish or tools repeatedly disappear, run `afs claude doctor --json`.
+Cleanup remains explicit: preview with `afs claude reap --limit 20`, never reap protected sessions, and apply only in bounded batches.
 
 ## Handoff Protocol
 
-Before ending a session:
-1. Use `handoff.create` to record accomplished work, blockers, and next steps.
-2. Update scratchpad state if needed.
-3. The next session's bootstrap will include the handoff automatically.
+When work must continue in another session, use `handoff.create` for accomplished work, blockers, and the next action. Do not create routine end-of-chat handoffs when no continuation state is needed.
 """
 
 

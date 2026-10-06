@@ -50,7 +50,9 @@ def test_antigravity_setup_apply_writes_mcp_entry(tmp_path: Path, monkeypatch, c
     assert entry["env"]["AFS_PREFER_REPO_CONFIG"] == "1"
 
 
-def test_antigravity_status_handles_missing_binary_and_db(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_antigravity_status_handles_missing_binary_and_db(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(antigravity.shutil, "which", lambda _name: None)
     monkeypatch.setattr(
@@ -67,20 +69,26 @@ def test_antigravity_status_handles_missing_binary_and_db(tmp_path: Path, monkey
     payload = json.loads(capsys.readouterr().out)
     assert payload["binary"]["available"] is False
     assert payload["capture"]["db_exists"] is False
-    assert payload["gemini_cli_cutoff"] == "2026-06-18"
+    assert payload["gemini_cli"] == "separate supported client"
 
 
-def test_antigravity_status_detects_migrated_mcp_config(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_antigravity_status_detects_migrated_mcp_config(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(antigravity.shutil, "which", lambda _name: None)
     monkeypatch.setattr(
         antigravity,
         "find_afs_mcp_registrations",
-        lambda **_kwargs: {"antigravity": [str(tmp_path / ".gemini" / "config" / "mcp_config.json")]},
+        lambda **_kwargs: {
+            "antigravity": [str(tmp_path / ".gemini" / "config" / "mcp_config.json")]
+        },
     )
     settings = tmp_path / ".gemini" / "config" / "mcp_config.json"
     settings.parent.mkdir(parents=True)
-    settings.write_text(json.dumps({"mcpServers": {"afs": {"command": "afs", "args": ["mcp", "serve"]}}}))
+    settings.write_text(
+        json.dumps({"mcpServers": {"afs": {"command": "afs", "args": ["mcp", "serve"]}}})
+    )
 
     exit_code = antigravity.antigravity_status_command(
         _args(json=True, db_path=str(tmp_path / "missing.vscdb"))

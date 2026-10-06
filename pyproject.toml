@@ -36,6 +36,9 @@ embeddings = [
 gemini = [
     "google-genai>=1.0.0",
 ]
+claude = [
+    "anthropic>=0.40.0",
+]
 training = [
     "datasets>=2.14.0",
     "transformers>=4.35.0",
@@ -105,7 +108,6 @@ ignore = ["E501", "B008", "C901"]
 # Contract: never add an entry. When touching a listed file, fix its
 # violations and delete its line. See docs/ENGINEERING_PRACTICES.md.
 # Verify a shrink with: ruff check src/ tests/ --select BLE001,S110,S112
-"src/afs/agent/harness.py" = ["BLE001"]
 "src/afs/agent/hooks.py" = ["BLE001"]
 "src/afs/agent/tools.py" = ["BLE001"]
 "src/afs/agent_context.py" = ["BLE001", "S110"]
@@ -117,7 +119,6 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/agents/context_warm.py" = ["BLE001", "S110"]
 "src/afs/agents/dashboard_export.py" = ["BLE001", "S112"]
 "src/afs/agents/gemini_workspace_brief.py" = ["BLE001"]
-"src/afs/agents/llm_bridge.py" = ["BLE001"]
 "src/afs/agents/mission_runner.py" = ["BLE001"]
 "src/afs/agents/researcher.py" = ["BLE001"]
 "src/afs/agents/supervisor.py" = ["BLE001", "S110"]
@@ -133,9 +134,7 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/cli/_utils.py" = ["BLE001"]
 "src/afs/cli/briefing.py" = ["BLE001"]
 "src/afs/cli/bundle.py" = ["BLE001"]
-"src/afs/cli/claude.py" = ["BLE001"]
 "src/afs/cli/comparison.py" = ["BLE001"]
-"src/afs/cli/core.py" = ["BLE001", "S110"]
 "src/afs/cli/gemini.py" = ["BLE001", "S110"]
 "src/afs/cli/optimize.py" = ["BLE001"]
 "src/afs/cli/personal.py" = ["BLE001"]
@@ -145,7 +144,6 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/comparison/framework.py" = ["BLE001"]
 "src/afs/config.py" = ["BLE001"]
 "src/afs/context_freshness.py" = ["BLE001", "S112"]
-"src/afs/context_fs.py" = ["BLE001"]
 "src/afs/context_index.py" = ["BLE001", "S112"]
 "src/afs/deployment/cli.py" = ["BLE001", "S110"]
 "src/afs/deployment/validator.py" = ["BLE001"]
@@ -169,10 +167,8 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/hivemind.py" = ["BLE001", "S110"]
 "src/afs/knowledge/__init__.py" = ["BLE001", "S110"]
 "src/afs/knowledge/graph_core.py" = ["BLE001"]
-"src/afs/llm_memory.py" = ["BLE001"]
 "src/afs/manager.py" = ["BLE001"]
 "src/afs/manager_gui.py" = ["BLE001"]
-"src/afs/mcp/registry.py" = ["BLE001", "S110"]
 "src/afs/memory_consolidation.py" = ["BLE001", "S110"]
 "src/afs/missions.py" = ["BLE001", "S110"]
 "src/afs/next_action.py" = ["BLE001"]
@@ -239,7 +235,6 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = [
     "afs.agent.hooks",
-    "afs.agent.models",
     "afs.agent.tools",
     "afs.agent_context",
     "afs.agent_job_inbox",
@@ -255,7 +250,6 @@ module = [
     "afs.agents.event_reactor",
     "afs.agents.gemini_workspace_brief",
     "afs.agents.history_memory",
-    "afs.agents.llm_bridge",
     "afs.agents.memory_export",
     "afs.agents.mission_runner",
     "afs.agents.researcher",
@@ -275,13 +269,10 @@ module = [
     "afs.cli._help",
     "afs.cli.antigravity",
     "afs.cli.briefing",
-    "afs.cli.claude",
     "afs.cli.comparison",
     "afs.cli.context",
-    "afs.cli.core",
     "afs.cli.embeddings",
     "afs.cli.encoder",
-    "afs.cli.events",
     "afs.cli.gemini",
     "afs.cli.generator",
     "afs.cli.generators",
@@ -304,7 +295,6 @@ module = [
     "afs.extensions",
     "afs.gateway.backends",
     "afs.generators",
-    "afs.generators.cot.client",
     "afs.generators.cot.rate_limiter",
     "afs.generators.model_generator",
     "afs.grounding_hooks",
@@ -318,7 +308,6 @@ module = [
     "afs.logging_config",
     "afs.manager",
     "afs.missions",
-    "afs.models",
     "afs.next_action",
     "afs.notifications.base",
     "afs.notifications.discord",
@@ -339,7 +328,6 @@ module = [
     "afs.sources.models",
     "afs.sources.registry",
     "afs.training.lifecycle",
-    "afs.work_assistant",
     "afs.workspace_sync",
 ]
 ignore_errors = true

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
+import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
@@ -43,9 +45,7 @@ def _load_service_manager(args: argparse.Namespace):
     from ..services import ServiceManager
 
     explicit_config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     config, config_path = load_runtime_config_model(
         config_path=explicit_config_path,
@@ -57,9 +57,7 @@ def _load_service_manager(args: argparse.Namespace):
 
 def _resolve_command_context(args: argparse.Namespace) -> Path:
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     if not hasattr(args, "path"):
         args.path = None
@@ -68,9 +66,7 @@ def _resolve_command_context(args: argparse.Namespace) -> Path:
     if not hasattr(args, "context_dir"):
         args.context_dir = None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
     return context_path
 
 
@@ -79,15 +75,19 @@ def _load_manager_context_and_config_path(
 ):
     from ..manager import AFSManager
 
+    requested_path = getattr(args, "path", None)
+    start_dir = (
+        Path(requested_path).expanduser().resolve()
+        if isinstance(requested_path, str) and requested_path.strip()
+        else Path.cwd()
+    )
     explicit_config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     config, resolved_config_path = load_runtime_config_model(
         config_path=explicit_config_path,
         merge_user=True,
-        start_dir=Path.cwd(),
+        start_dir=start_dir,
     )
     if not hasattr(args, "path"):
         args.path = None
@@ -96,9 +96,7 @@ def _load_manager_context_and_config_path(
     if not hasattr(args, "context_dir"):
         args.context_dir = None
     manager = AFSManager(config=config)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
     return manager, context_path, resolved_config_path
 
 
@@ -107,7 +105,7 @@ def init_command(args: argparse.Namespace) -> int:
     from ..config import load_config_model
     from ..schema import GeneralConfig
 
-    config_path = Path(args.config) if args.config else Path.cwd() / "afs.toml"
+    config_path: Path | None = Path(args.config) if args.config else Path.cwd() / "afs.toml"
     if args.no_config:
         config_path = None
 
@@ -361,7 +359,9 @@ def services_status_command(args: argparse.Namespace) -> int:
             if args.json:
                 print(json.dumps(payload, indent=2))
                 return 0
-            print(f"{payload['name']}: installed={str(payload['installed']).lower()} enabled={str(payload['enabled']).lower()} active={str(payload['active']).lower()}")
+            print(
+                f"{payload['name']}: installed={str(payload['installed']).lower()} enabled={str(payload['enabled']).lower()} active={str(payload['active']).lower()}"
+            )
             print(f"  unit: {payload['unit_path']}")
             print(f"  stdout_log: {payload['stdout_log']}")
             print(f"  stderr_log: {payload['stderr_log']}")
@@ -403,7 +403,10 @@ def services_status_command(args: argparse.Namespace) -> int:
             return 0
         # Show all services
         if args.json:
-            payload = [manager.status(definition.name).to_dict() for definition in manager.list_definitions()]
+            payload = [
+                manager.status(definition.name).to_dict()
+                for definition in manager.list_definitions()
+            ]
             print(json.dumps(payload, indent=2))
             return 0
         for definition in manager.list_definitions():
@@ -474,9 +477,7 @@ def agents_ps_command(args: argparse.Namespace) -> int:
     from ..agents.supervisor import AgentSupervisor
 
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     manager = load_manager(config_path)
     supervisor = AgentSupervisor(config=manager.config)
@@ -546,7 +547,8 @@ def _wait_target_names(
 def _format_agent_event(event: dict[str, Any], agent_name: str) -> str:
     timestamp = str(event.get("timestamp", ""))[:19] or "?"
     op = str(event.get("op", "") or "-")
-    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    value = event.get("metadata")
+    metadata = value if isinstance(value, dict) else {}
     detail = str(metadata.get("detail", "") or "")
     if detail:
         return f"{timestamp}  {agent_name}  {op}  {detail}"
@@ -554,7 +556,8 @@ def _format_agent_event(event: dict[str, Any], agent_name: str) -> str:
 
 
 def _event_agent_name(event: dict[str, Any]) -> str:
-    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    value = event.get("metadata")
+    metadata = value if isinstance(value, dict) else {}
     agent_name = str(metadata.get("agent_name", "") or metadata.get("agent", "")).strip()
     if agent_name:
         return agent_name
@@ -609,9 +612,7 @@ def agents_wait_command(args: argparse.Namespace) -> int:
         return 2
 
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
@@ -719,9 +720,7 @@ def agents_monitor_command(args: argparse.Namespace) -> int:
         return 2
 
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
@@ -779,14 +778,10 @@ def agents_watch_command(args: argparse.Namespace) -> int:
     agent_name = args.name
     limit = args.limit
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
     history_dir = resolve_mount_root(context_path, MountType.HISTORY)
     if not history_dir.exists():
         print("no history directory")
@@ -835,9 +830,7 @@ def _compat_message_bus(args: argparse.Namespace, manager, *, all_projects: bool
     from ..messages import MessageBus
     from ..scopes import resolve_scope
 
-    project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
+    project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
     scoped = resolve_scope(context_path, requester_path=project_path)
     bus = MessageBus(
         context_path,
@@ -853,9 +846,7 @@ def hivemind_list_command(args: argparse.Namespace) -> int:
     """List scoped messages through the deprecated command spelling."""
 
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     manager = load_manager(config_path)
     bus, _context_path = _compat_message_bus(args, manager)
@@ -880,9 +871,7 @@ def hivemind_subscribe_command(args: argparse.Namespace) -> int:
     """Subscribe an agent to topics."""
 
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     manager = load_manager(config_path)
     bus, _context_path = _compat_message_bus(args, manager)
@@ -899,9 +888,7 @@ def hivemind_unsubscribe_command(args: argparse.Namespace) -> int:
     """Unsubscribe an agent from topics."""
 
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     manager = load_manager(config_path)
     bus, _context_path = _compat_message_bus(args, manager)
@@ -919,9 +906,7 @@ def hivemind_reap_command(args: argparse.Namespace) -> int:
     """Reap expired messages through the deprecated command spelling."""
 
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     manager = load_manager(config_path)
     bus, context_path = _compat_message_bus(args, manager, all_projects=True)
@@ -953,9 +938,7 @@ def hivemind_reap_command(args: argparse.Namespace) -> int:
 def memory_consolidate_command(args: argparse.Namespace) -> int:
     """Consolidate recent history into durable memory entries."""
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
@@ -1009,9 +992,7 @@ def memory_status_command(args: argparse.Namespace) -> int:
     from ..memory_consolidation import memory_status
 
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
@@ -1034,9 +1015,7 @@ def memory_search_command(args: argparse.Namespace) -> int:
     from ..memory_consolidation import search_memory
 
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
@@ -1064,9 +1043,7 @@ def session_bootstrap_command(args: argparse.Namespace) -> int:
     )
 
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
@@ -1084,8 +1061,11 @@ def session_bootstrap_command(args: argparse.Namespace) -> int:
         agent_name=getattr(args, "agent_name", "cli") or "cli",
         skills_prompt=str(getattr(args, "skills_prompt", "") or ""),
         skills_top_k=int(getattr(args, "skills_top_k", 5) or 0),
+        short=bool(getattr(args, "short", False)),
+        native_skills=bool(getattr(args, "native_skills", False)),
+        token_budget=int(getattr(args, "token_budget", 0) or 0),
     )
-    if not args.no_write_artifacts:
+    if not args.no_write_artifacts and not getattr(args, "short", False):
         summary["artifact_paths"] = write_session_bootstrap_artifacts(
             manager,
             context_path,
@@ -1103,6 +1083,46 @@ def session_bootstrap_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def session_context_command(args: argparse.Namespace) -> int:
+    """Render provider-neutral AFS grounding for an interactive harness."""
+    from ..session_grounding import build_session_grounding
+
+    manager, context_path, _config_path = _load_manager_context_and_config_path(args)
+    project_path = (
+        Path(args.path).expanduser().resolve()
+        if isinstance(getattr(args, "path", None), str) and args.path.strip()
+        else None
+    )
+    try:
+        context = build_session_grounding(
+            manager,
+            context_path,
+            project_path=project_path,
+            event=args.event,
+            prompt=args.prompt or "",
+            skills_prompt=args.skills_prompt,
+            include_skills=not args.no_skills,
+        )
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "event": args.event,
+                    "context_path": str(context_path),
+                    "context": context,
+                },
+                indent=2,
+            )
+        )
+    elif context:
+        print(context)
+    return 0
+
+
 def session_pack_command(args: argparse.Namespace) -> int:
     """Build a token-budgeted context pack for a target model."""
     from ..context_pack import (
@@ -1112,9 +1132,7 @@ def session_pack_command(args: argparse.Namespace) -> int:
     )
 
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
@@ -1350,9 +1368,8 @@ def _emit_session_event(
         from ..project_registry import ProjectRegistry
         from ..scopes import resolve_scope
 
-        if (
-            detect_layout_version(context_path) == LAYOUT_VERSION
-            and (cwd == context_path or cwd.is_relative_to(context_path))
+        if detect_layout_version(context_path) == LAYOUT_VERSION and (
+            cwd == context_path or cwd.is_relative_to(context_path)
         ):
             relative = cwd.relative_to(context_path)
             category_names = {category.value for category in ContextCategory}
@@ -1377,9 +1394,7 @@ def _emit_session_event(
                     None,
                 )
                 if record is None:
-                    raise PermissionError(
-                        f"context project scope is not registered: {project_id}"
-                    )
+                    raise PermissionError(f"context project scope is not registered: {project_id}")
                 metadata["scope_id"] = record.scope_id
                 metadata["project_id"] = record.project_id
                 metadata["scope_attribution"] = "registry"
@@ -1395,9 +1410,7 @@ def _emit_session_event(
     else:
         if scoped is not None:
             metadata["scope_id"] = scoped.scope_id
-            metadata["scope_attribution"] = (
-                "registry" if scoped.project_id else "common"
-            )
+            metadata["scope_attribution"] = "registry" if scoped.project_id else "common"
             if scoped.project_id:
                 metadata["project_id"] = scoped.project_id
     if activity_snapshot:
@@ -1457,12 +1470,10 @@ def session_hook_command(args: argparse.Namespace) -> int:
     manager, context_path, config_path = _load_manager_context_and_config_path(args)
     payload, payload_path = _load_optional_json_payload(args.payload_file)
     client = (
-        args.client
-        or str(payload.get("client") or os.getenv("AFS_SESSION_CLIENT", "")).strip()
+        args.client or str(payload.get("client") or os.getenv("AFS_SESSION_CLIENT", "")).strip()
     )
     session_id = (
-        args.session_id
-        or str(payload.get("session_id") or os.getenv("AFS_SESSION_ID", "")).strip()
+        args.session_id or str(payload.get("session_id") or os.getenv("AFS_SESSION_ID", "")).strip()
     )
     cwd = Path(args.cwd).expanduser().resolve() if args.cwd else Path.cwd()
 
@@ -1480,7 +1491,7 @@ def session_hook_command(args: argparse.Namespace) -> int:
             exit_code=args.exit_code,
             seed_payload=payload,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary for extension hooks
         print(str(exc), file=sys.stderr)
         return 1
 
@@ -1488,10 +1499,14 @@ def session_hook_command(args: argparse.Namespace) -> int:
     activity = updated_payload.get("activity") if isinstance(updated_payload, dict) else {}
     verification = activity.get("verification") if isinstance(activity, dict) else {}
     verification = verification if isinstance(verification, dict) else {}
-    verification_mode = str(
-        getattr(args, "verification_mode", None)
-        or os.getenv("AFS_SESSION_VERIFICATION_MODE", "warn")
-    ).strip().lower()
+    verification_mode = (
+        str(
+            getattr(args, "verification_mode", None)
+            or os.getenv("AFS_SESSION_VERIFICATION_MODE", "warn")
+        )
+        .strip()
+        .lower()
+    )
     if verification_mode not in {"off", "warn", "error"}:
         verification_mode = "warn"
     verification = dict(verification)
@@ -1509,8 +1524,7 @@ def session_hook_command(args: argparse.Namespace) -> int:
         args.event == "session_end"
         and verification_mode == "error"
         and bool(verification.get("required"))
-        and str(verification.get("status", "")).strip()
-        in {"missing", "failed", "blocked"}
+        and str(verification.get("status", "")).strip() in {"missing", "failed", "blocked"}
     )
 
     if gate_warning:
@@ -1539,9 +1553,7 @@ def session_hook_command(args: argparse.Namespace) -> int:
         )
         return 2 if gate_error else 0
 
-    print(
-        f"{result['event']}: client={result['client']} session={result['session_id']}"
-    )
+    print(f"{result['event']}: client={result['client']} session={result['session_id']}")
     return 2 if gate_error else 0
 
 
@@ -1550,12 +1562,10 @@ def session_event_command(args: argparse.Namespace) -> int:
     manager, context_path, config_path = _load_manager_context_and_config_path(args)
     payload, payload_path = _load_optional_json_payload(args.payload_file)
     client = (
-        args.client
-        or str(payload.get("client") or os.getenv("AFS_SESSION_CLIENT", "")).strip()
+        args.client or str(payload.get("client") or os.getenv("AFS_SESSION_CLIENT", "")).strip()
     )
     session_id = (
-        args.session_id
-        or str(payload.get("session_id") or os.getenv("AFS_SESSION_ID", "")).strip()
+        args.session_id or str(payload.get("session_id") or os.getenv("AFS_SESSION_ID", "")).strip()
     )
     cwd = Path(args.cwd).expanduser().resolve() if args.cwd else Path.cwd()
     prompt = _session_prompt_text(args)
@@ -1590,13 +1600,14 @@ def session_event_command(args: argparse.Namespace) -> int:
             verification_command=verification_command,
             seed_payload=payload,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary for extension hooks
         print(str(exc), file=sys.stderr)
         return 1
 
     if args.json:
         updated_payload = result.get("updated_payload") or {}
-        activity = updated_payload.get("activity") if isinstance(updated_payload, dict) else {}
+        value = updated_payload.get("activity") if isinstance(updated_payload, dict) else {}
+        activity = value if isinstance(value, dict) else {}
         print(
             json.dumps(
                 {
@@ -1614,9 +1625,7 @@ def session_event_command(args: argparse.Namespace) -> int:
         )
         return 0
 
-    print(
-        f"{result['event']}: client={result['client']} session={result['session_id']}"
-    )
+    print(f"{result['event']}: client={result['client']} session={result['session_id']}")
     return 0
 
 
@@ -1693,9 +1702,7 @@ def _session_handoff_store(args: argparse.Namespace):
     from ..project_registry import ProjectRegistry
 
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     manager = load_manager(config_path)
     project_path, context_path, _context_root, _context_dir = resolve_context_paths(
@@ -1706,9 +1713,7 @@ def _session_handoff_store(args: argparse.Namespace):
     if detect_layout_version(context_path) == LAYOUT_VERSION:
         record = ProjectRegistry(context_path).resolve(project_path)
         if record is None:
-            raise PermissionError(
-                f"project is not registered in central context: {project_path}"
-            )
+            raise PermissionError(f"project is not registered in central context: {project_path}")
         scope_id = record.scope_id
     return HandoffStore(
         context_path,
@@ -1722,9 +1727,7 @@ def session_replay_command(args: argparse.Namespace) -> int:
     from ..event_log import build_session_timeline
 
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
@@ -1752,9 +1755,7 @@ def session_replay_list_command(args: argparse.Namespace) -> int:
     from ..event_log import list_sessions
 
     config_path = (
-        Path(args.config).expanduser().resolve()
-        if getattr(args, "config", None)
-        else None
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
     )
     manager = load_manager(config_path)
     context_path = _resolve_command_context(args)
@@ -1766,7 +1767,9 @@ def session_replay_list_command(args: argparse.Namespace) -> int:
         print("(no sessions)")
         return 0
     for session in sessions:
-        print(f"  {session['session_id']}: {session['event_count']} events ({', '.join(session['event_types'][:3])})")
+        print(
+            f"  {session['session_id']}: {session['event_count']} events ({', '.join(session['event_types'][:3])})"
+        )
     return 0
 
 
@@ -1895,11 +1898,7 @@ def studio_install_command(args: argparse.Namespace) -> int:
     if not build_dir.exists():
         print(f"build dir missing: {build_dir}")
         return 1
-    prefix = (
-        Path(args.prefix).expanduser().resolve()
-        if args.prefix
-        else Path.home() / ".local"
-    )
+    prefix = Path(args.prefix).expanduser().resolve() if args.prefix else Path.home() / ".local"
     cmd = ["cmake", "--install", str(build_dir), "--prefix", str(prefix)]
     if args.config:
         cmd.extend(["--config", args.config])
@@ -1929,12 +1928,14 @@ def studio_alias_command(args: argparse.Namespace) -> int:
     except FileNotFoundError as exc:
         print(str(exc))
         return 1
-    afs_root = Path(os.getenv("AFS_ROOT") or Path(__file__).resolve().parents[3]).expanduser().resolve()
-    print(f"export AFS_ROOT=\"{afs_root}\"")
+    afs_root = (
+        Path(os.getenv("AFS_ROOT") or Path(__file__).resolve().parents[3]).expanduser().resolve()
+    )
+    print(f'export AFS_ROOT="{afs_root}"')
     if studio_root.resolve() != (afs_root / "apps" / "studio").resolve():
-        print(f"export AFS_STUDIO_ROOT=\"{studio_root}\"")
-    print("alias afs-studio=\"$AFS_ROOT/scripts/afs-studio\"")
-    print("alias afs-studio-build=\"$AFS_ROOT/scripts/afs-studio-build\"")
+        print(f'export AFS_STUDIO_ROOT="{studio_root}"')
+    print('alias afs-studio="$AFS_ROOT/scripts/afs-studio"')
+    print('alias afs-studio-build="$AFS_ROOT/scripts/afs-studio-build"')
     return 0
 
 
@@ -1945,7 +1946,7 @@ def _count_mount_files(mount_dir: Path) -> int:
     return count_mount_files(mount_dir)
 
 
-def _human_size(size_bytes: int) -> str:
+def _human_size(size_bytes: float) -> str:
     """Format bytes as a human-readable string."""
     for unit in ("B", "KB", "MB", "GB"):
         if abs(size_bytes) < 1024:
@@ -2006,16 +2007,16 @@ def status_command(args: argparse.Namespace) -> int:
 
     # Gather index stats
     index_stats: dict[str, Any] = {"available": False}
-    db_path = manager.resolve_mount_root(context_root, MountType.GLOBAL) / config.context_index.db_filename
+    db_path = (
+        manager.resolve_mount_root(context_root, MountType.GLOBAL)
+        / config.context_index.db_filename
+    )
     if config.context_index.enabled and db_path.exists():
         try:
             from ..context_index import ContextSQLiteIndex
+
             index = ContextSQLiteIndex(manager, context_root)
-            prefixes = (
-                visible_scope_prefixes(scoped)
-                if scoped.layout_version == 2
-                else None
-            )
+            prefixes = visible_scope_prefixes(scoped) if scoped.layout_version == 2 else None
             total_entries = (
                 index.count_entries_scoped(scoped)
                 if scoped.layout_version == 2
@@ -2032,9 +2033,7 @@ def status_command(args: argparse.Namespace) -> int:
                         index.diff(
                             mount_types=index.health_mount_types(),
                             relative_prefixes=prefixes,
-                            scoped=(
-                                scoped if scoped.layout_version == 2 else None
-                            ),
+                            scoped=(scoped if scoped.layout_version == 2 else None),
                         )["total_changes"]
                     )
                     if has_entries
@@ -2042,8 +2041,8 @@ def status_command(args: argparse.Namespace) -> int:
                 ),
             }
             index_stats["total_entries"] = total_entries
-        except Exception:
-            pass
+        except (OSError, ValueError, RuntimeError, sqlite3.Error):
+            logging.getLogger(__name__).debug("Context index status unavailable", exc_info=True)
 
     # Active profile
     active_profile = config.profiles.active_profile
@@ -2177,7 +2176,9 @@ def status_command(args: argparse.Namespace) -> int:
             print(_hint(hint))
 
     print()
-    print(_hint("discovery: context.status -> context.query -> context.read/list -> routed CLI flows"))
+    print(
+        _hint("discovery: context.status -> context.query -> context.read/list -> routed CLI flows")
+    )
     print(_hint("router: afs next --intent continue --path .  # exact next AFS action"))
 
     return 0
@@ -2185,6 +2186,7 @@ def status_command(args: argparse.Namespace) -> int:
 
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register core command parsers."""
+
     def add_context_args(parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--config", help="Config path.")
         parser.add_argument("--path", help="Project path.")
@@ -2202,7 +2204,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     init_parser.add_argument("--force", action="store_true", help="Overwrite config if it exists.")
     init_parser.add_argument("--workspace-path", help="Workspace path to register.")
     init_parser.add_argument("--workspace-name", help="Workspace label/description.")
-    init_parser.add_argument("--link-context", action="store_true", help="Symlink .context to context root.")
+    init_parser.add_argument(
+        "--link-context", action="store_true", help="Symlink .context to context root."
+    )
     init_parser.set_defaults(func=init_command)
 
     # plugins
@@ -2236,13 +2240,19 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 
     services_install = services_sub.add_parser("install", help="Install a managed service unit.")
     services_install.add_argument("--config", help="Config path.")
-    services_install.add_argument("--enable", action="store_true", help="Enable/load the service after installing.")
+    services_install.add_argument(
+        "--enable", action="store_true", help="Enable/load the service after installing."
+    )
     services_install.add_argument("name", help="Service name.")
     services_install.set_defaults(func=services_install_command)
 
     services_uninstall = services_sub.add_parser("uninstall", help="Remove a managed service unit.")
     services_uninstall.add_argument("--config", help="Config path.")
-    services_uninstall.add_argument("--keep-enabled", action="store_true", help="Skip disable/unload before removing the unit file.")
+    services_uninstall.add_argument(
+        "--keep-enabled",
+        action="store_true",
+        help="Skip disable/unload before removing the unit file.",
+    )
     services_uninstall.add_argument("name", help="Service name.")
     services_uninstall.set_defaults(func=services_uninstall_command)
 
@@ -2251,7 +2261,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     services_enable.add_argument("name", help="Service name.")
     services_enable.set_defaults(func=services_enable_command)
 
-    services_disable = services_sub.add_parser("disable", help="Disable/unload a managed service unit.")
+    services_disable = services_sub.add_parser(
+        "disable", help="Disable/unload a managed service unit."
+    )
     services_disable.add_argument("--config", help="Config path.")
     services_disable.add_argument("name", help="Service name.")
     services_disable.set_defaults(func=services_disable_command)
@@ -2259,7 +2271,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     services_start = services_sub.add_parser("start", help="Start a service.")
     services_start.add_argument("--config", help="Config path.")
     services_start.add_argument("name", help="Service name.")
-    services_start.add_argument("--foreground", "-f", action="store_true", help="Run in foreground.")
+    services_start.add_argument(
+        "--foreground", "-f", action="store_true", help="Run in foreground."
+    )
     services_start.set_defaults(func=services_start_command)
 
     services_stop = services_sub.add_parser("stop", help="Stop a service.")
@@ -2270,8 +2284,12 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     services_status = services_sub.add_parser("status", help="Get service status.")
     services_status.add_argument("--config", help="Config path.")
     services_status.add_argument("--json", action="store_true", help="Output JSON.")
-    services_status.add_argument("--system", action="store_true", help="Inspect installed OS-level service state.")
-    services_status.add_argument("name", nargs="?", help="Service name (optional, shows all if omitted).")
+    services_status.add_argument(
+        "--system", action="store_true", help="Inspect installed OS-level service state."
+    )
+    services_status.add_argument(
+        "name", nargs="?", help="Service name (optional, shows all if omitted)."
+    )
     services_status.set_defaults(func=services_status_command)
 
     services_restart = services_sub.add_parser("restart", help="Restart a service.")
@@ -2282,7 +2300,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     services_logs = services_sub.add_parser("logs", help="Show captured service logs.")
     services_logs.add_argument("--config", help="Config path.")
     services_logs.add_argument("--json", action="store_true", help="Output JSON.")
-    services_logs.add_argument("--lines", type=int, default=50, help="Number of lines per log stream.")
+    services_logs.add_argument(
+        "--lines", type=int, default=50, help="Number of lines per log stream."
+    )
     services_logs.add_argument("name", help="Service name.")
     services_logs.set_defaults(func=services_logs_command)
 
@@ -2308,20 +2328,35 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     agents_monitor = agents_sub.add_parser("monitor", help="Stream background agent events.")
     add_context_args(agents_monitor)
     agents_monitor.add_argument("name", nargs="?", help="Optional agent name.")
-    agents_monitor.add_argument("--all", action="store_true", help="Monitor all matching agent events.")
+    agents_monitor.add_argument(
+        "--all", action="store_true", help="Monitor all matching agent events."
+    )
     agents_monitor.add_argument("--session-id", help="Restrict to a specific AFS session id.")
-    agents_monitor.add_argument("--timeout", type=float, default=0.0, help="Stop after N seconds (0 = run until interrupted).")
-    agents_monitor.add_argument("--poll-interval", type=float, default=0.25, help="Polling interval in seconds.")
+    agents_monitor.add_argument(
+        "--timeout",
+        type=float,
+        default=0.0,
+        help="Stop after N seconds (0 = run until interrupted).",
+    )
+    agents_monitor.add_argument(
+        "--poll-interval", type=float, default=0.25, help="Polling interval in seconds."
+    )
     agents_monitor.add_argument("--json", action="store_true", help="Emit NDJSON event objects.")
     agents_monitor.set_defaults(func=agents_monitor_command)
 
     agents_wait = agents_sub.add_parser("wait", help="Wait for background agents to settle.")
     add_context_args(agents_wait)
     agents_wait.add_argument("name", nargs="?", help="Agent name.")
-    agents_wait.add_argument("--all", action="store_true", help="Wait for all currently running agents.")
+    agents_wait.add_argument(
+        "--all", action="store_true", help="Wait for all currently running agents."
+    )
     agents_wait.add_argument("--session-id", help="Restrict matches to a specific AFS session id.")
-    agents_wait.add_argument("--timeout", type=float, default=30.0, help="Maximum seconds to wait (default: 30).")
-    agents_wait.add_argument("--poll-interval", type=float, default=0.25, help="Polling interval in seconds.")
+    agents_wait.add_argument(
+        "--timeout", type=float, default=30.0, help="Maximum seconds to wait (default: 30)."
+    )
+    agents_wait.add_argument(
+        "--poll-interval", type=float, default=0.25, help="Polling interval in seconds."
+    )
     agents_wait.add_argument("--limit", type=int, default=50, help="Max events to scan per poll.")
     agents_wait.add_argument("--json", action="store_true", help="Output JSON.")
     agents_wait.set_defaults(func=agents_wait_command)
@@ -2405,6 +2440,15 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     add_context_args(session_bootstrap)
     session_bootstrap.add_argument(
+        "--short", action="store_true", help="Read a compact brief without scans or artifact writes."
+    )
+    session_bootstrap.add_argument(
+        "--native-skills", action="store_true", help="List skill roots without matching skill bodies."
+    )
+    session_bootstrap.add_argument(
+        "--token-budget", type=int, default=0, help="Approximate full packet token budget (0: unlimited)."
+    )
+    session_bootstrap.add_argument(
         "--task-limit",
         type=int,
         default=10,
@@ -2444,6 +2488,35 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     session_bootstrap.add_argument("--json", action="store_true", help="Output JSON.")
     session_bootstrap.set_defaults(func=session_bootstrap_command)
+
+    session_context = session_sub.add_parser(
+        "context",
+        help="Render provider-neutral session grounding for OpenCode and other harnesses.",
+    )
+    add_context_args(session_context)
+    session_context.add_argument(
+        "--event",
+        choices=["SessionStart", "UserPromptSubmit"],
+        default="SessionStart",
+        help="Grounding event to render (default: SessionStart).",
+    )
+    session_context.add_argument(
+        "--prompt",
+        default="",
+        help="Prompt text used by UserPromptSubmit communication checks.",
+    )
+    session_context.add_argument(
+        "--skills-prompt",
+        default=None,
+        help="Optional task prompt used to select a bounded skill excerpt.",
+    )
+    session_context.add_argument(
+        "--no-skills",
+        action="store_true",
+        help="Skip skill discovery for faster startup.",
+    )
+    session_context.add_argument("--json", action="store_true", help="Output JSON.")
+    session_context.set_defaults(func=session_context_command)
 
     session_pack = session_sub.add_parser(
         "pack",
@@ -2531,10 +2604,16 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Build session bootstrap/pack/skill artifacts for a client harness.",
     )
     add_context_args(session_prepare)
-    session_prepare.add_argument("--client", required=True, help="Client label (for example: codex, claude, gemini).")
-    session_prepare.add_argument("--session-id", help="Session ID override (defaults to AFS_SESSION_ID).")
+    session_prepare.add_argument(
+        "--client", required=True, help="Client label (for example: codex, claude, gemini)."
+    )
+    session_prepare.add_argument(
+        "--session-id", help="Session ID override (defaults to AFS_SESSION_ID)."
+    )
     session_prepare.add_argument("--cwd", help="Working directory to encode into the payload.")
-    session_prepare.add_argument("--query", default="", help="Optional retrieval query for the session pack.")
+    session_prepare.add_argument(
+        "--query", default="", help="Optional retrieval query for the session pack."
+    )
     session_prepare.add_argument("--task", help="Optional task statement for the session pack.")
     session_prepare.add_argument(
         "--model",
@@ -2713,9 +2792,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     session_event.add_argument("--json", action="store_true", help="Output JSON.")
     session_event.set_defaults(func=session_event_command)
 
-    session_handoff = session_sub.add_parser(
-        "handoff", help="Create or read handoff packets."
-    )
+    session_handoff = session_sub.add_parser("handoff", help="Create or read handoff packets.")
     session_handoff_sub = session_handoff.add_subparsers(dest="handoff_command")
 
     handoff_create = session_handoff_sub.add_parser("create", help="Create a handoff packet.")
@@ -2772,7 +2849,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     hivemind_sub_cmd.add_argument("--ttl-hours", type=int, help="Optional subscription TTL window.")
     hivemind_sub_cmd.set_defaults(func=hivemind_subscribe_command)
 
-    hivemind_unsub_cmd = hivemind_sub.add_parser("unsubscribe", help="Unsubscribe agent from topics.")
+    hivemind_unsub_cmd = hivemind_sub.add_parser(
+        "unsubscribe", help="Unsubscribe agent from topics."
+    )
     add_context_args(hivemind_unsub_cmd)
     hivemind_unsub_cmd.add_argument("--agent", required=True, help="Agent name.")
     hivemind_unsub_cmd.add_argument("--topics", required=True, help="Comma-separated topics.")
@@ -2784,7 +2863,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     add_context_args(hivemind_reap_cmd)
     hivemind_reap_cmd.add_argument("--max-age-hours", type=int, help="Override retention window.")
-    hivemind_reap_cmd.add_argument("--dry-run", action="store_true", help="Report removals without deleting.")
+    hivemind_reap_cmd.add_argument(
+        "--dry-run", action="store_true", help="Report removals without deleting."
+    )
     hivemind_reap_cmd.add_argument(
         "--all-projects",
         action="store_true",

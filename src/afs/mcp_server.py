@@ -42,6 +42,7 @@ from .context_paths import load_context_metadata
 from .core import find_existing_root
 from .discovery import discover_contexts
 from .event_log import read_agent_events
+from .file_io import read_text_snapshot, write_text_checked
 from .manager import AFSManager
 from .mcp.registry import (
     CORE_PROMPT_NAMES as _CORE_PROMPT_NAMES_NEW,
@@ -1096,10 +1097,8 @@ def _tool_fs_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str, A
         raise FileNotFoundError(f"Path not found: {path}")
     if path.is_dir():
         raise IsADirectoryError(f"Path is a directory: {path}")
-    return {
-        "path": str(path),
-        "content": path.read_text(encoding="utf-8", errors="replace"),
-    }
+    content, digest = read_text_snapshot(path)
+    return {"path": str(path), "content": content, "sha256": digest}
 
 
 def _tool_fs_write(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
@@ -1123,13 +1122,14 @@ def _tool_fs_write(arguments: dict[str, Any], manager: AFSManager) -> dict[str, 
             raise FileNotFoundError(f"Parent directory missing: {path.parent}")
         path.parent.mkdir(parents=True, exist_ok=True)
 
-    mode = "a" if append else "w"
-    with path.open(mode, encoding="utf-8") as handle:
-        handle.write(content)
+    digest = write_text_checked(
+        path, content, append=append, if_match=arguments.get("if_match")
+    )
     index_updated = _sync_context_index_for_path(path, manager, scoped=scoped)
     payload: dict[str, Any] = {
         "path": str(path),
         "bytes": len(content.encode("utf-8")),
+        "sha256": digest,
         "append": append,
         "index_updated": index_updated,
     }
@@ -3349,6 +3349,10 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 **_mcp_scope_properties(),
                 "path": {"type": "string"},
                 "content": {"type": "string"},
+                "if_match": {
+                    "type": "string",
+                    "description": "Expected raw-byte SHA-256, or missing to create.",
+                },
                 "append": {"type": "boolean", "default": False},
                 "mkdirs": {"type": "boolean", "default": False},
             },
@@ -5333,6 +5337,7 @@ def _normalize_extension_tools(
                 handler=_wrapped,
                 source=source,
                 catalog=catalog,
+                allow_hidden_call=payload.get("allow_hidden_call", False),
             )
         )
     return tools
@@ -6167,6 +6172,8 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
             "name": "afs.session.bootstrap",
             "description": "Build a scoped session-start packet with health, notes, tasks, messages, handoffs, and durable memory. Call this first in a new session.",
             "arguments": [
+                {"name": "short", "description": "Compact startup without scans (true/false).", "required": False},
+                {"name": "native_skills", "description": "List roots; let the host load skills (true/false).", "required": False},
                 {
                     "name": "context_path",
                     "description": "Path to .context root (uses configured default if omitted)",
@@ -6455,6 +6462,8 @@ def _get_prompt(
             message_limit=_coerce_int(
                 arguments.get("message_limit"), default=10, minimum=1, maximum=100
             ),
+            short=_coerce_bool(arguments.get("short", False)),
+            native_skills=_coerce_bool(arguments.get("native_skills", False)),
             skills_prompt=str(arguments.get("skills_prompt", "") or ""),
             skills_top_k=_coerce_int(
                 arguments.get("skills_top_k"),

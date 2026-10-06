@@ -44,7 +44,7 @@ GUIDES: dict[str, GuideTopic] = {
             ("afs status --start-dir .", "show the resolved context and health"),
             ("afs context repair --path . --dry-run", "preview mount/provenance repairs"),
             ("afs context repair --path . --rebuild-index", "repair and refresh the index"),
-            ("afs query \"handoff\" --path . --mount scratchpad", "search context"),
+            ('afs query "handoff" --path . --mount scratchpad', "search context"),
             ("afs fs list scratchpad --path .", "browse writable notes"),
         ],
         notes=[
@@ -60,7 +60,7 @@ GUIDES: dict[str, GuideTopic] = {
         commands=[
             ("afs manager", "open the GUI for the current workspace"),
             ("afs manager snapshot --json", "print the same read model without a GUI"),
-            ("afs manager open --path ~/src/project", "open the manager for a project"),
+            ("afs manager open --path /path/to/project", "open the manager for a project"),
             ("afs-manager", "launcher shortcut installed from the repo scripts directory"),
         ],
         notes=[
@@ -114,7 +114,10 @@ GUIDES: dict[str, GuideTopic] = {
             ("afs manager", "inspect .gemini/.claude/.codex project setup"),
             ("afs mcp serve", "run the AFS stdio MCP server"),
             ("afs antigravity setup --scope project", "preview Antigravity CLI MCP setup"),
-            ("afs gemini setup --scope project", "compatibility setup for Gemini CLI/API-key workflows"),
+            (
+                "afs gemini setup --scope project",
+                "compatibility setup for Gemini CLI/API-key workflows",
+            ),
             ("afs claude setup --path .", "register AFS for Claude-compatible settings"),
             ("afs guide google-workspace", "optional Google Workspace public API helper setup"),
         ],
@@ -148,7 +151,7 @@ GUIDES: dict[str, GuideTopic] = {
             ("afs agent-hooks status --path .", "show hooks, worker status, and next commands"),
             ("afs agent-jobs status --path .", "queue and watchdog summary"),
             ("afs agent-jobs inbox --path .", "review completed, failed, and blocked jobs"),
-            ("afs agent-jobs create \"task\" --prompt \"...\"", "queue a background job"),
+            ('afs agent-jobs create "task" --prompt "..."', "queue a background job"),
         ],
         notes=[
             "Background agents are optional and should stay report-oriented by default.",

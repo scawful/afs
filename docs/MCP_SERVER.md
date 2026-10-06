@@ -1,5 +1,8 @@
 # AFS MCP Server
 
+See [Compact startup and extension contracts](AGENT_CONTRACTS.md) for the short
+bootstrap, conditional writes, content-bound approvals, and extension migration.
+
 AFS provides a lightweight stdio MCP server for context operations.
 
 Work-assistant state for people, project relationships, review routes,
@@ -37,12 +40,19 @@ entry and preserves the repo runtime env (`AFS_ROOT`, `AFS_VENV`, `PYTHONPATH`,
 and `AFS_PREFER_REPO_CONFIG=1`) so Gemini uses the same import/config path as
 the rest of the AFS toolchain.
 
-Use `afs antigravity setup --scope project` for the public `agy` CLI path. New
-`agy` builds use `~/.gemini/config/mcp_config.json` for migrated MCP config, and
-AFS detects the older Antigravity CLI/IDE paths as compatibility fallbacks. Use
+Use `afs antigravity setup --scope project` for the separate `agy` CLI path. New
+`agy` builds use `~/.gemini/config/mcp_config.json` for global MCP config, expose
+native `agy mcp` management commands, and AFS detects the older Antigravity
+CLI/IDE paths as compatibility fallbacks. Use
 `--scope project` when you want the compatibility Gemini CLI setup to keep MCP
 registration inside the current repo at `./.gemini/settings.json`.
 `afs gemini status` detects both user-level and project-level Gemini configs.
+
+Gemini CLI and Antigravity both discover workspace Agent Skills from
+`.agents/skills`. `scripts/afs-upgrade-agent-setup --harness gemini` and
+`--harness antigravity` use that shared relative location by default; pass a
+`--skill-root NAME=PATH` override for managed installations with another
+convention.
 
 Manual alternative:
 
@@ -121,6 +131,13 @@ Project-local setup is also available:
 ```bash
 afs claude setup --path /path/to/project
 ```
+
+Claude setup uses a single `SessionStart` hook by default. This keeps the
+standing prefix stable and leaves changing state to focused MCP reads. Use
+`--hook-mode session-and-prompts` when the per-prompt communication guard is
+worth the extra hook process, or `--hook-mode none` for MCP-only setup. Matched
+skill bodies stay out of the default hook payload; Claude Code can load skills
+on demand without duplicating them in the session prefix.
 
 ## Troubleshooting
 
@@ -209,7 +226,7 @@ requires `all_projects=true`.
 ranking. It is local text/symbol retrieval by default. `semantic=true`
 explicitly permits the configured embedding provider for the query; build the
 index with `afs search --semantic --rebuild` first. The default Gemini
-collection uses stable `gemini-embedding-2` at 768 dimensions.
+collection uses `gemini-embedding-2` at 768 dimensions.
 
 `skill.match` ranks configured, profile-eligible skills against a task prompt.
 Prompts are capped at 8,000 characters and `top_k` must be from 1 through 10.
@@ -629,7 +646,7 @@ includes maintenance report/service state for `context-warm`, `context-watch`,
   "name": "context.read",
   "arguments": {
     "context_path": "~/.context",
-    "project_path": "~/src/project-a",
+    "project_path": "/path/to/project-a",
     "path": "notes/investigation.md"
   }
 }
@@ -642,7 +659,7 @@ Rebuild and query the SQLite context index:
   "name": "context.query",
   "arguments": {
     "context_path": "~/.context",
-    "project_path": "~/src/project-a",
+    "project_path": "/path/to/project-a",
     "mount_types": ["scratchpad", "knowledge"],
     "query": "Gemini",
     "limit": 20,
@@ -658,7 +675,7 @@ Search the scoped v2 hybrid index without remote embeddings:
   "name": "context.search",
   "arguments": {
     "context_path": "~/.context",
-    "project_path": "~/src/project-a",
+    "project_path": "/path/to/project-a",
     "query": "cache invalidation",
     "mode": "symbol",
     "semantic": false,
@@ -674,7 +691,7 @@ Create scoped human-readable records:
   "name": "note.create",
   "arguments": {
     "context_path": "~/.context",
-    "project_path": "~/src/project-a",
+    "project_path": "/path/to/project-a",
     "title": "Cache decision",
     "body": "Keep invalidation local to the repository boundary."
   }
@@ -686,7 +703,7 @@ Create scoped human-readable records:
   "name": "handoff.create",
   "arguments": {
     "context_path": "~/.context",
-    "project_path": "~/src/project-a",
+    "project_path": "/path/to/project-a",
     "title": "Cache cleanup",
     "agent_name": "codex",
     "accomplished": ["Added scoped invalidation"],
@@ -702,7 +719,7 @@ Send a current-project message:
   "name": "messages.send",
   "arguments": {
     "context_path": "~/.context",
-    "project_path": "~/src/project-a",
+    "project_path": "/path/to/project-a",
     "from": "codex",
     "topic": "status",
     "payload": {"summary": "integration suite passed"}
@@ -716,7 +733,7 @@ The older prompt-oriented search remains for version 1 clients:
 {
   "name": "afs.query.search",
   "arguments": {
-    "context_path": "~/src/project-a/.context",
+    "context_path": "/path/to/project-a/.context",
     "query": "Gemini",
     "mount_types": "scratchpad,knowledge",
     "relative_prefix": "work",

@@ -14,6 +14,7 @@ from typing import Any
 
 from ..config import load_config_model
 from ..context_paths import resolve_agent_output_root
+from ..runtime_paths import default_config_root
 from ..schema import AFSConfig, ServiceConfig
 from .adapters.base import ServiceAdapter
 from .adapters.launchd import LaunchdAdapter
@@ -21,7 +22,7 @@ from .adapters.systemd import SystemdAdapter
 from .models import ServiceDefinition, ServiceState, ServiceStatus, ServiceType
 
 # State directory for tracking running services
-STATE_DIR = Path.home() / ".config" / "afs" / "services" / "state"
+STATE_DIR = default_config_root() / "services" / "state"
 LOG_DIRNAME = "logs"
 
 
@@ -54,7 +55,8 @@ class ServiceManager:
     ) -> None:
         self.config_path = config_path.expanduser().resolve() if config_path else None
         self.config = config or load_config_model(config_path=self.config_path)
-        self.service_root = service_root or Path.home() / ".config" / "afs" / "services"
+        self.service_root = service_root or default_config_root() / "services"
+        self.state_dir = self.service_root / "state" if service_root else STATE_DIR
         self.platform_name = platform_name or platform.system().lower()
         self._adapter = self._build_adapter(self.platform_name)
 
@@ -97,7 +99,7 @@ class ServiceManager:
         if not definition:
             return ServiceStatus(name=name, state=ServiceState.UNKNOWN, enabled=False)
 
-        state_file = STATE_DIR / f"{name}.json"
+        state_file = self.state_dir / f"{name}.json"
         unit_path = self._adapter.unit_path(self.service_root, definition)
         stdout_log, stderr_log = self.log_paths(name)
         pid = None
@@ -124,7 +126,9 @@ class ServiceManager:
 
         # Special handling for docker-based services
         if name == "openwebui":
-            state = self._check_docker_service("afs-chat-simple") or self._check_docker_service("afs-chat")
+            state = self._check_docker_service("afs-chat-simple") or self._check_docker_service(
+                "afs-chat"
+            )
 
         return ServiceStatus(
             name=definition.name,
@@ -154,6 +158,7 @@ class ServiceManager:
             }
         )
         return payload
+
     def _check_docker_service(self, container_name: str) -> ServiceState:
         """Check if a docker container is running."""
         try:
@@ -179,7 +184,7 @@ class ServiceManager:
         if current.state == ServiceState.RUNNING:
             return True
 
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
 
         # Build environment
         env = os.environ.copy()
@@ -212,12 +217,16 @@ class ServiceManager:
             )
 
         # Save state
-        state_file = STATE_DIR / f"{name}.json"
-        state_file.write_text(json.dumps({
-            "pid": process.pid,
-            "started_at": datetime.now().isoformat(),
-            "command": definition.command,
-        }))
+        state_file = self.state_dir / f"{name}.json"
+        state_file.write_text(
+            json.dumps(
+                {
+                    "pid": process.pid,
+                    "started_at": datetime.now().isoformat(),
+                    "command": definition.command,
+                }
+            )
+        )
 
         return True
 
@@ -249,7 +258,9 @@ class ServiceManager:
                 break
 
         if not docker_bin:
-            raise FileNotFoundError("Docker not found. Install docker-compose: brew install docker-compose")
+            raise FileNotFoundError(
+                "Docker not found. Install docker-compose: brew install docker-compose"
+            )
 
         # Try new syntax: docker compose
         result = subprocess.run(
@@ -298,14 +309,20 @@ class ServiceManager:
             return False
 
     def _openwebui_script_path(self, definition: ServiceDefinition) -> Path:
+        explicit = os.getenv("AFS_OPENWEBUI_SCRIPT", "").strip()
+        if explicit:
+            return Path(explicit).expanduser().resolve()
         if definition.command:
             return Path(definition.command[0])
-        repo_root = self._find_repo_root() or Path.home() / "src" / "lab" / "afs"
-        return repo_root / "scripts" / "chat-service.sh"
+        return self._afs_root() / "scripts" / "chat-service.sh"
 
     def _openwebui_compose_path(self) -> Path:
-        repo_root = self._find_repo_root() or Path.home() / "src" / "lab" / "afs"
-        return repo_root / "docker" / "docker-compose.simple.yml"
+        explicit = os.getenv("AFS_OPENWEBUI_COMPOSE_FILE", "").strip()
+        return (
+            Path(explicit).expanduser().resolve()
+            if explicit
+            else self._afs_root() / "docker" / "docker-compose.simple.yml"
+        )
 
     def _start_openwebui_service(self, definition: ServiceDefinition, env: dict[str, str]) -> bool:
         """Start Open WebUI using the chat-service helper script."""
@@ -343,7 +360,7 @@ class ServiceManager:
         if name == "openwebui":
             return self._stop_openwebui_service(definition)
 
-        state_file = STATE_DIR / f"{name}.json"
+        state_file = self.state_dir / f"{name}.json"
         if not state_file.exists():
             return True
 
@@ -427,7 +444,9 @@ class ServiceManager:
         if enable:
             result = self._adapter.enable(unit_path)
             if result is not None and result.returncode != 0:
-                raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"Failed to enable {name}")
+                raise RuntimeError(
+                    result.stderr.strip() or result.stdout.strip() or f"Failed to enable {name}"
+                )
         return unit_path
 
     def uninstall(self, name: str, *, disable: bool = True) -> bool:
@@ -438,7 +457,9 @@ class ServiceManager:
         if disable and unit_path.exists():
             result = self._adapter.disable(unit_path)
             if result is not None and result.returncode not in {0, 3, 5}:
-                raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"Failed to disable {name}")
+                raise RuntimeError(
+                    result.stderr.strip() or result.stdout.strip() or f"Failed to disable {name}"
+                )
         return self._adapter.uninstall(self.service_root, definition)
 
     def enable(self, name: str) -> bool:
@@ -450,7 +471,9 @@ class ServiceManager:
             self.install(name, enable=False)
         result = self._adapter.enable(unit_path)
         if result is not None and result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"Failed to enable {name}")
+            raise RuntimeError(
+                result.stderr.strip() or result.stdout.strip() or f"Failed to enable {name}"
+            )
         return True
 
     def disable(self, name: str) -> bool:
@@ -462,7 +485,9 @@ class ServiceManager:
             return True
         result = self._adapter.disable(unit_path)
         if result is not None and result.returncode not in {0, 3, 5}:
-            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"Failed to disable {name}")
+            raise RuntimeError(
+                result.stderr.strip() or result.stdout.strip() or f"Failed to disable {name}"
+            )
         return True
 
     def logs(self, name: str, *, lines: int = 50) -> dict[str, Any]:
@@ -505,7 +530,7 @@ class ServiceManager:
     def _builtin_definitions(self) -> dict[str, ServiceDefinition]:
         python = self._resolve_python_executable()
         repo_root = self._find_repo_root()
-        afs_root = repo_root or Path.home() / "src" / "lab" / "afs"
+        afs_root = self._afs_root()
         working_root = repo_root or afs_root
         environment = self._service_environment()
         context_root = self.config.general.context_root
@@ -540,7 +565,9 @@ class ServiceManager:
         gemini_brief_interval = _resolve_interval_env(
             "AFS_GEMINI_WORKSPACE_BRIEF_INTERVAL", default=1800
         )
-        chat_service = afs_root / "scripts" / "chat-service.sh"
+        chat_service = self._openwebui_script_path(
+            ServiceDefinition(name="openwebui", label="Open WebUI")
+        )
 
         memory_command = [
             python,
@@ -645,7 +672,16 @@ class ServiceManager:
                 name="gateway",
                 label="AFS Gateway",
                 description="OpenAI-compatible API gateway",
-                command=[python, "-m", "uvicorn", "afs.gateway.server:app", "--host", "0.0.0.0", "--port", "8000"],
+                command=[
+                    python,
+                    "-m",
+                    "uvicorn",
+                    "afs.gateway.server:app",
+                    "--host",
+                    "0.0.0.0",
+                    "--port",
+                    "8000",
+                ],
                 working_directory=working_root,
                 environment=environment,
                 service_type=ServiceType.DAEMON,
@@ -740,8 +776,7 @@ class ServiceManager:
                 service_type=ServiceType.DAEMON,
                 keep_alive=True,
                 run_at_load=bool(
-                    memory_consolidation_cfg.enabled
-                    and memory_consolidation_cfg.auto_start
+                    memory_consolidation_cfg.enabled and memory_consolidation_cfg.auto_start
                 ),
             ),
             "context-warm": ServiceDefinition(
@@ -809,6 +844,12 @@ class ServiceManager:
                 return parent
         return None
 
+    def _afs_root(self) -> Path:
+        explicit = os.getenv("AFS_ROOT", "").strip()
+        if explicit:
+            return Path(explicit).expanduser().resolve()
+        return self._find_repo_root() or Path.cwd().resolve()
+
     def _service_environment(self) -> dict[str, str]:
         env: dict[str, str] = {}
         repo_root = self._find_repo_root()
@@ -821,13 +862,9 @@ class ServiceManager:
         if repo_root and (repo_root / "src").exists():
             repo_src = str(repo_root / "src")
             existing = os.environ.get("PYTHONPATH")
-            env["PYTHONPATH"] = (
-                f"{repo_src}{os.pathsep}{existing}" if existing else repo_src
-            )
+            env["PYTHONPATH"] = f"{repo_src}{os.pathsep}{existing}" if existing else repo_src
         config_path = self.config_path or (
-            Path(raw).expanduser().resolve()
-            if (raw := os.environ.get("AFS_CONFIG_PATH"))
-            else None
+            Path(raw).expanduser().resolve() if (raw := os.environ.get("AFS_CONFIG_PATH")) else None
         )
         if config_path is not None:
             env["AFS_CONFIG_PATH"] = str(config_path)
@@ -838,14 +875,17 @@ class ServiceManager:
         return env
 
 
-def _merge_definition(
-    base: ServiceDefinition, override: ServiceConfig
-) -> ServiceDefinition:
+def _merge_definition(base: ServiceDefinition, override: ServiceConfig) -> ServiceDefinition:
     command = list(override.command) if override.command else list(base.command)
-    if override.context_filters and not override.command and base.name in {
-        "context-warm",
-        "context-watch",
-    }:
+    if (
+        override.context_filters
+        and not override.command
+        and base.name
+        in {
+            "context-warm",
+            "context-watch",
+        }
+    ):
         command = _replace_repeated_flag(
             command,
             "--context-filter",
@@ -892,7 +932,7 @@ def _tail_file(path: Path, lines: int) -> list[str]:
         content = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return []
-    return content[-max(1, lines):]
+    return content[-max(1, lines) :]
 
 
 class LMStudioManager:

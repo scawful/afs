@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_runtime_config_model, resolve_runtime_config_path
+from ..runtime_paths import default_config_root, default_workspace_root
 from ..schema import AFSConfig, GeneralConfig
 
 _TOP_LEVEL_ORDER = [
@@ -92,7 +93,7 @@ def render_default_help(parser: argparse.ArgumentParser, config: AFSConfig | Non
     workspace_label = workspace_root.name or "workspace"
 
     env_config = os.getenv("AFS_CONFIG_PATH")
-    user_config_path = Path.home() / ".config" / "afs" / "config.toml"
+    user_config_path = default_config_root() / "config.toml"
     local_config_path = resolve_runtime_config_path(start_dir=Path.cwd())
 
     lines: list[str] = []
@@ -161,12 +162,8 @@ def render_default_help(parser: argparse.ArgumentParser, config: AFSConfig | Non
     lines.append(_section("Config Sources"))
     if env_config:
         lines.append(f"  env:   AFS_CONFIG_PATH={env_config}")
-    lines.append(
-        f"  user:  {_format_path(user_config_path)} {_path_status(user_config_path)}"
-    )
-    lines.append(
-        f"  local: {_format_path(local_config_path)} {_path_status(local_config_path)}"
-    )
+    lines.append(f"  user:  {_format_path(user_config_path)} {_path_status(user_config_path)}")
+    lines.append(f"  local: {_format_path(local_config_path)} {_path_status(local_config_path)}")
     if config_error:
         lines.append(f"  note:  config load failed ({config_error})")
     lines.append("")
@@ -297,17 +294,14 @@ def _safe_load_config(config: AFSConfig | None) -> tuple[AFSConfig | None, str |
 def _guess_workspace_root(workspaces: list[Any]) -> Path:
     if workspaces:
         return Path(workspaces[0].path)
-    candidate = Path.home() / "src"
-    if candidate.exists():
-        return candidate
-    return Path.cwd()
+    return default_workspace_root()
 
 
 def _format_path(path: Path | str) -> str:
     raw = str(path)
     home = str(Path.home())
     if raw.startswith(home):
-        return "~" + raw[len(home):]
+        return "~" + raw[len(home) :]
     return raw
 
 
@@ -401,12 +395,9 @@ def _suggest_command_paths(
         full_prefix = path_key.startswith(query)
         leaf_prefix = leaf_key.startswith(query_tokens[-1])
         token_prefix = all(
-            any(part.startswith(token) for part in path_parts)
-            for token in query_tokens
+            any(part.startswith(token) for part in path_parts) for token in query_tokens
         )
-        token_contains = all(
-            token in path_key or token in help_key for token in query_tokens
-        )
+        token_contains = all(token in path_key or token in help_key for token in query_tokens)
         similarity = max(
             SequenceMatcher(None, query, path_key).ratio(),
             SequenceMatcher(None, query_tokens[-1], leaf_key).ratio(),

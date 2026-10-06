@@ -1,5 +1,8 @@
 # Agent Integration Upgrade Guide
 
+See [Compact startup and extension contracts](AGENT_CONTRACTS.md) for the short
+bootstrap, conditional writes, content-bound approvals, and extension migration.
+
 Use this when refreshing Codex, Claude, Gemini compatibility, Antigravity, hcode, or another local
 agent harness to follow AFS without adding unnecessary tool noise.
 
@@ -8,25 +11,29 @@ agent harness to follow AFS without adding unnecessary tool noise.
 Preview first:
 
 ```bash
-cd ~/src/lab/afs
-scripts/afs-upgrade-agent-setup --workspace ~/src
+cd /path/to/afs
+scripts/afs-upgrade-agent-setup --workspace /path/to/workspace
 ```
 
 Apply the common local setup:
 
 ```bash
-cd ~/src/lab/afs
-scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
+cd /path/to/afs
+scripts/afs-upgrade-agent-setup --workspace /path/to/workspace --apply --all
 ```
 
-For a full local harness refresh, keep the default catalog slim and let the setup
-script sync hcode/OpenCode commands plus the usual Codex/Claude/Gemini/Antigravity harness
-state:
+For a full local harness refresh, keep the default catalog slim. Hcode/OpenCode
+is an explicit opt-in because its checkout may live anywhere or may not be
+installed on a given computer:
 
 ```bash
-cd ~/src/lab/afs
-scripts/afs-upgrade-agent-setup --workspace ~/src --full --setup-hcode
-scripts/afs-upgrade-agent-setup --workspace ~/src --full --setup-hcode --apply
+cd /path/to/afs
+scripts/afs-upgrade-agent-setup --workspace /path/to/workspace --full
+scripts/afs-upgrade-agent-setup --workspace /path/to/workspace --full --apply
+
+# Optional OpenCode integration
+scripts/afs-upgrade-agent-setup --workspace /path/to/workspace \
+  --setup-hcode --halext-code /path/to/halext-code --apply
 ```
 
 The script keeps dry-run mode as the default. `--apply --all` performs the
@@ -34,10 +41,10 @@ normal local upgrade:
 
 - refreshes the repo venv
 - validates `configs/agent_manifest.toml`
-- copies shared skills and writes harness manifest exports
+- copies explicitly targeted shared skills/commands and writes explicitly
+  targeted manifest exports
 - repairs the selected workspace context and rebuilds its SQLite index
-- installs idempotent shell hooks for generic harnesses such as `codex`,
-  `claude`, `gemini`, `antigravity`, and `hcode`
+- installs idempotent shell hooks for the selected local harnesses
 - installs the background agent-job LaunchAgent
 - writes project-scoped Claude and Gemini MCP setup
 - syncs the default hcode/OpenCode AFS slash-command pack when hcode setup is
@@ -47,18 +54,20 @@ normal local upgrade:
 Narrow examples:
 
 ```bash
-# Copy skills/exports for only Codex and Claude.
-scripts/afs-upgrade-agent-setup --apply --harness codex --harness claude
+# Copy the AFS skill to one explicitly chosen harness directory.
+scripts/afs agent-manifest sync --harness codex \
+  --skill-root codex=/path/to/codex/skills --apply
 
 # Refresh MCP setup only, without worker installation.
-scripts/afs-upgrade-agent-setup --workspace ~/src/project-a --apply \
+scripts/afs-upgrade-agent-setup --workspace /path/to/project --apply \
   --setup-claude --setup-gemini --rebuild-index
 
 # Inspect hooks and context health without writing anything.
-scripts/afs-upgrade-agent-setup --workspace ~/src/project-a --skip-venv
+scripts/afs-upgrade-agent-setup --workspace /path/to/project --skip-venv
 
 # Preview hcode/OpenCode command sync and bootstrap smoke.
-scripts/afs-upgrade-agent-setup --workspace ~/src/project-a --setup-hcode
+scripts/afs-upgrade-agent-setup --workspace /path/to/project \
+  --setup-hcode --halext-code /path/to/halext-code
 ```
 
 ## Minimal Agent Contract
@@ -119,20 +128,23 @@ Optional surfaces should be profile-gated or harness-specific:
 roots. It intentionally does not rely on symlinks, because not every harness
 loads symlinked skill folders consistently.
 
-The same manifest sync can copy default OpenCode slash-command packs into
-harness command roots such as `~/src/company-agent/.opencode/command`. These
+The same manifest sync can copy default OpenCode slash-command packs into an
+explicit harness command root. These
 commands keep models on the slim MCP surface by default and route heavier
 actions through CLI/framework commands. Command packs are additive by default:
 existing customized command files are reported as `customized` and left
 untouched unless a pack explicitly sets `overwrite = true`.
 
-Current shared skills are declared in `configs/agent_manifest.toml`. Refresh
-them with:
+The default manifest contains repo-owned sources but deliberately leaves
+machine-specific destination roots empty. Supply destinations at sync time, or
+point `AFS_AGENT_MANIFEST` at a user/organization manifest:
 
 ```bash
-cd ~/src/lab/afs
-scripts/afs agent-manifest sync --apply
-scripts/afs agent-manifest sync --harness hcode --apply
+cd /path/to/afs
+scripts/afs agent-manifest sync --harness hcode \
+  --skill-root hcode=/path/to/halext-code/.opencode/skills \
+  --command-root hcode=/path/to/halext-code/.opencode/commands \
+  --apply
 ```
 
 Validate after editing skills or manifest entries:
@@ -144,22 +156,21 @@ scripts/afs skills list
 
 ## Context Placement
 
-Use repo-local `.context/` when the repo can own its context. This is preferred
-for normal `~/src` development because project scratchpad, memory, and handoffs
-stay near the code.
+Use repo-local `.context/` when the repo can own its context and local placement
+fits the environment.
 
-Use global `~/.context` when the workspace cannot contain `.context/`, such as
-large managed work codebases. In that case, keep `AFS_CONTEXT_ROOT` or
-`general.context_root` explicit so agents do not silently drift between context
-trees.
+Use a configured central context root when the workspace cannot contain
+`.context/`, such as a managed work codebase. AFS does not require that root to
+be `~/.context`; keep `AFS_CONTEXT_ROOT` or `general.context_root` explicit so
+agents do not silently drift between context trees.
 
 Useful repair commands:
 
 ```bash
-scripts/afs status --start-dir ~/src/project-a
-scripts/afs context repair --path ~/src/project-a --rebuild-index --json
-scripts/afs index rebuild --path ~/src/project-a --json
-scripts/afs query "handoff" --path ~/src/project-a --mount scratchpad
+scripts/afs status --start-dir /path/to/project
+scripts/afs context repair --path /path/to/project --rebuild-index --json
+scripts/afs index rebuild --path /path/to/project --json
+scripts/afs query "handoff" --path /path/to/project --mount scratchpad
 ```
 
 ## Harness Notes
@@ -188,7 +199,7 @@ Bypass functions remain available in that shell:
 The hook status command always prints what to run next:
 
 ```bash
-scripts/afs agent-hooks status --path ~/src/project-a
+scripts/afs agent-hooks status --path /path/to/project
 ```
 
 ## Work Assistant Upgrade

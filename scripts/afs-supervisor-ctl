@@ -9,7 +9,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_PLIST="${SCRIPT_DIR}/${PLIST_NAME}.plist"
 TARGET_DIR="${HOME}/Library/LaunchAgents"
 TARGET_PLIST="${TARGET_DIR}/${PLIST_NAME}.plist"
-LOG_DIR="${HOME}/.config/afs/agents"
+AFS_CONFIG_HOME="${AFS_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/afs}"
+LOG_DIR="${AFS_AGENT_LOG_DIR:-${AFS_CONFIG_HOME}/agents}"
+AFS_ROOT="${AFS_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 
 usage() {
     echo "Usage: $(basename "$0") {install|uninstall|start|stop|status|logs|tail}"
@@ -36,7 +38,22 @@ cmd_install() {
     # Unload if already installed (ignore errors)
     launchctl bootout "gui/$(id -u)/${PLIST_NAME}" 2>/dev/null || true
 
+    local python_bin="${AFS_SUPERVISOR_PYTHON:-${AFS_VENV:-${AFS_ROOT}/.venv}/bin/python}"
+    if [ ! -x "$python_bin" ]; then
+        python_bin="$(command -v python3 || true)"
+    fi
+    if [ -z "$python_bin" ] || [ ! -x "$python_bin" ]; then
+        echo "Error: no Python executable found; set AFS_SUPERVISOR_PYTHON." >&2
+        exit 1
+    fi
+
     cp "$SOURCE_PLIST" "$TARGET_PLIST"
+    plutil -replace ProgramArguments.0 -string "$python_bin" "$TARGET_PLIST"
+    plutil -replace EnvironmentVariables.PATH -string "${PATH:-/usr/local/bin:/usr/bin:/bin}" "$TARGET_PLIST"
+    plutil -replace EnvironmentVariables.AFS_ROOT -string "$AFS_ROOT" "$TARGET_PLIST"
+    plutil -replace EnvironmentVariables.PYTHONPATH -string "${AFS_ROOT}/src" "$TARGET_PLIST"
+    plutil -replace StandardOutPath -string "${LOG_DIR}/supervisor.stdout.log" "$TARGET_PLIST"
+    plutil -replace StandardErrorPath -string "${LOG_DIR}/supervisor.stderr.log" "$TARGET_PLIST"
     echo "Installed plist to $TARGET_PLIST"
 
     launchctl bootstrap "gui/$(id -u)" "$TARGET_PLIST"
@@ -89,7 +106,7 @@ cmd_status() {
 
     echo ""
     echo "=== Last Run ==="
-    LAST_RUN="${HOME}/.config/afs/agents/supervisor_last_run.json"
+    LAST_RUN="${LOG_DIR}/supervisor_last_run.json"
     if [ -f "$LAST_RUN" ]; then
         python3 -c "
 import json, sys
@@ -105,7 +122,7 @@ print(f\"Status: {d.get('status', '?')}\")
 
     echo ""
     echo "=== Quota Usage ==="
-    QUOTA_FILE="${HOME}/.config/afs/agents/quota.json"
+    QUOTA_FILE="${AFS_QUOTA_FILE:-${LOG_DIR}/quota.json}"
     if [ -f "$QUOTA_FILE" ]; then
         python3 -c "
 import json
@@ -122,7 +139,7 @@ for provider, info in d.items():
 
     echo ""
     echo "=== Pending Approvals ==="
-    APPROVAL_FILE="${HOME}/.config/afs/agents/approvals.json"
+    APPROVAL_FILE="${AFS_APPROVAL_FILE:-${LOG_DIR}/approvals.json}"
     if [ -f "$APPROVAL_FILE" ]; then
         python3 -c "
 import json

@@ -17,7 +17,7 @@ def test_agent_manifest_exports_harness_slice() -> None:
     payload = export_for_harness(data, "codex")
     assert payload["harness"]["name"] == "codex"
     assert "paths" in payload
-    assert any(skill["name"] == "focused-verification" for skill in payload["skills"])
+    assert any(skill["name"] == "agentic-context" for skill in payload["skills"])
     assert payload["slash_command_packs"] == []
     assert any(server["name"] == "afs" for server in payload["mcp_servers"])
 
@@ -27,7 +27,41 @@ def test_agent_manifest_exports_hcode_slash_commands() -> None:
     payload = export_for_harness(data, "hcode")
     assert payload["harness"]["name"] == "hcode"
     assert any(pack["name"] == "afs-opencode" for pack in payload["slash_command_packs"])
-    assert payload["harness"]["command_roots"]
+    assert payload["harness"]["command_roots"] == []
+
+
+def test_agent_manifest_resolves_repo_paths_from_manifest_location(tmp_path: Path) -> None:
+    config_dir = tmp_path / "portable" / "configs"
+    command_dir = tmp_path / "portable" / "commands"
+    config_dir.mkdir(parents=True)
+    command_dir.mkdir(parents=True)
+    manifest = config_dir / "agent_manifest.toml"
+    manifest.write_text(
+        """
+version = 1
+[paths]
+afs_root = ".."
+[[harnesses]]
+name = "hcode"
+kind = "cli"
+instructions = []
+skill_roots = []
+command_roots = []
+mcp_servers = []
+startup = ["hcode"]
+manifest_exports = []
+[[slash_command_packs]]
+name = "portable"
+canonical_path = "../commands"
+targets = ["hcode"]
+""",
+        encoding="utf-8",
+    )
+
+    data = load_manifest(manifest)
+
+    assert data["paths"]["afs_root"] == str((tmp_path / "portable").resolve())
+    assert data["slash_command_packs"][0]["canonical_path"] == str(command_dir.resolve())
 
 
 def test_doctor_agent_manifest_check_accepts_synced_skill(tmp_path: Path, monkeypatch) -> None:
@@ -75,9 +109,7 @@ def test_default_agent_manifest_stays_domain_neutral() -> None:
     harness_names = {harness.get("name") for harness in data.get("harnesses", [])}
     server_names = {server.get("name") for server in data.get("mcp_servers", [])}
     harness_server_names = {
-        name
-        for harness in data.get("harnesses", [])
-        for name in harness.get("mcp_servers", [])
+        name for harness in data.get("harnesses", []) for name in harness.get("mcp_servers", [])
     }
 
     assert "z3cli" not in harness_names

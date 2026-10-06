@@ -46,7 +46,9 @@ from ._utils import load_manager, resolve_context_paths
 
 
 def _resolve_context(args: argparse.Namespace) -> Path:
-    config_path = Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
+    config_path = (
+        Path(args.config).expanduser().resolve() if getattr(args, "config", None) else None
+    )
     manager = load_manager(config_path)
     _project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
     return context_path
@@ -118,18 +120,52 @@ def manifest_export_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_harness_path_overrides(
+    values: list[str] | None,
+    *,
+    option: str,
+) -> dict[str, list[str]] | None:
+    if not values:
+        return None
+    parsed: dict[str, list[str]] = {}
+    for value in values:
+        harness, separator, raw_path = value.partition("=")
+        harness = harness.strip()
+        raw_path = raw_path.strip()
+        if not separator or not harness or not raw_path:
+            raise ValueError(f"{option} requires HARNESS=PATH: {value}")
+        parsed.setdefault(harness, []).append(str(Path(raw_path).expanduser().resolve()))
+    return parsed
+
+
 def manifest_sync_command(args: argparse.Namespace) -> int:
     path = Path(args.file).expanduser() if args.file else default_manifest_path()
     data = load_manifest(path)
     selected = set(args.harness or []) or None
-    actions = sync_manifest(
-        data,
-        apply=args.apply,
-        harnesses=selected,
-        sync_skills=not args.no_skills,
-        sync_commands=not getattr(args, "no_slash_commands", False),
-        sync_exports=not args.no_exports,
-    )
+    try:
+        actions = sync_manifest(
+            data,
+            apply=args.apply,
+            harnesses=selected,
+            sync_skills=not args.no_skills,
+            sync_commands=not getattr(args, "no_slash_commands", False),
+            sync_exports=not args.no_exports,
+            skill_roots=_parse_harness_path_overrides(
+                getattr(args, "skill_root", None),
+                option="--skill-root",
+            ),
+            command_roots=_parse_harness_path_overrides(
+                getattr(args, "command_root", None),
+                option="--command-root",
+            ),
+            export_paths=_parse_harness_path_overrides(
+                getattr(args, "export_path", None),
+                option="--export-path",
+            ),
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     payload = {
         "path": str(path),
         "applied": bool(args.apply),
@@ -141,9 +177,7 @@ def manifest_sync_command(args: argparse.Namespace) -> int:
         mode = "apply" if args.apply else "dry-run"
         print(f"mode: {mode}")
         for action in actions:
-            print(
-                f"{action.status}\t{action.action}\t{action.harness}\t{action.target}"
-            )
+            print(f"{action.status}\t{action.action}\t{action.harness}\t{action.target}")
     return 1 if any(action.status == "error" for action in actions) else 0
 
 
@@ -452,9 +486,7 @@ def jobs_seed_command(args: argparse.Namespace) -> int:
         )
         for result in payload["results"]:
             suffix = f"\t{result['reason']}" if result.get("reason") else ""
-            print(
-                f"{result['status']}\t{result['key']}\t{result.get('job_id') or '-'}{suffix}"
-            )
+            print(f"{result['status']}\t{result['key']}\t{result.get('job_id') or '-'}{suffix}")
     return 0
 
 
@@ -504,9 +536,7 @@ def jobs_work_command(args: argparse.Namespace) -> int:
         print(json.dumps(all_results, indent=2))
     else:
         for result in all_results:
-            print(
-                f"{result['status']}\t{result['job_id']}\t{result['title']}"
-            )
+            print(f"{result['status']}\t{result['job_id']}\t{result['title']}")
         if not all_results:
             print("no queued jobs")
     return 1 if any(result["status"] == "failed" for result in all_results) else 0
@@ -533,17 +563,43 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     export.add_argument("--file", help="Manifest TOML path.")
     export.set_defaults(func=manifest_export_command)
 
-    sync = manifest_sub.add_parser("sync", help="Copy shared skills/commands and write harness manifest exports.")
+    sync = manifest_sub.add_parser(
+        "sync", help="Copy shared skills/commands and write harness manifest exports."
+    )
     sync.add_argument("--file", help="Manifest TOML path.")
     sync.add_argument("--harness", action="append", help="Limit sync to one harness; repeatable.")
     sync.add_argument("--apply", action="store_true", help="Apply changes. Default is dry-run.")
     sync.add_argument("--no-skills", action="store_true", help="Skip skill directory copies.")
-    sync.add_argument("--no-slash-commands", action="store_true", help="Skip slash-command pack copies.")
-    sync.add_argument("--no-exports", action="store_true", help="Skip per-harness manifest exports.")
+    sync.add_argument(
+        "--no-slash-commands", action="store_true", help="Skip slash-command pack copies."
+    )
+    sync.add_argument(
+        "--no-exports", action="store_true", help="Skip per-harness manifest exports."
+    )
+    sync.add_argument(
+        "--skill-root",
+        action="append",
+        metavar="HARNESS=PATH",
+        help="Override a harness skill destination; repeatable.",
+    )
+    sync.add_argument(
+        "--command-root",
+        action="append",
+        metavar="HARNESS=PATH",
+        help="Override a harness slash-command destination; repeatable.",
+    )
+    sync.add_argument(
+        "--export-path",
+        action="append",
+        metavar="HARNESS=PATH",
+        help="Override a harness manifest export destination; repeatable.",
+    )
     sync.add_argument("--json", action="store_true", help="Output JSON.")
     sync.set_defaults(func=manifest_sync_command)
 
-    hooks = subparsers.add_parser("agent-hooks", help="Install shell and background hooks for agent harnesses.")
+    hooks = subparsers.add_parser(
+        "agent-hooks", help="Install shell and background hooks for agent harnesses."
+    )
     hooks_sub = hooks.add_subparsers(dest="agent_hooks_command")
 
     hooks_show = hooks_sub.add_parser("show", help="Render hook content without installing.")
@@ -568,7 +624,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     install_shell.add_argument("--json", action="store_true")
     install_shell.set_defaults(func=hooks_install_shell_command)
 
-    install_worker = hooks_sub.add_parser("install-worker", help="Install a launchd agent-jobs worker.")
+    install_worker = hooks_sub.add_parser(
+        "install-worker", help="Install a launchd agent-jobs worker."
+    )
     install_worker.add_argument("--afs-root", help="AFS repo root.")
     install_worker.add_argument("--path", help="Context/project path for queued jobs.")
     install_worker.add_argument("--agent", default="local-worker", help="Worker agent name.")
@@ -576,7 +634,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     install_worker.add_argument("--poll-seconds", type=float, default=30.0)
     install_worker.add_argument("--label", default=DEFAULT_WORKER_LABEL)
     install_worker.add_argument("--apply", action="store_true", help="Write the LaunchAgent plist.")
-    install_worker.add_argument("--load", action="store_true", help="Load the LaunchAgent with launchctl.")
+    install_worker.add_argument(
+        "--load", action="store_true", help="Load the LaunchAgent with launchctl."
+    )
     install_worker.add_argument("--json", action="store_true")
     install_worker.set_defaults(func=hooks_install_worker_command)
 
@@ -670,7 +730,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 
     status = jobs_sub.add_parser("status", help="Show queue, worker, run, and watchdog status.")
     _add_context_args(status)
-    status.add_argument("--label", default=DEFAULT_WORKER_LABEL, help="LaunchAgent label to inspect.")
+    status.add_argument(
+        "--label", default=DEFAULT_WORKER_LABEL, help="LaunchAgent label to inspect."
+    )
     status.add_argument(
         "--stale-after",
         type=float,
@@ -686,7 +748,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=jobs_status_command)
 
-    inbox = jobs_sub.add_parser("inbox", help="Show completed, failed, stale, or blocked jobs needing review.")
+    inbox = jobs_sub.add_parser(
+        "inbox", help="Show completed, failed, stale, or blocked jobs needing review."
+    )
     _add_context_args(inbox)
     inbox.add_argument(
         "--stale-after",
@@ -703,13 +767,17 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     inbox.add_argument("--json", action="store_true")
     inbox.set_defaults(func=jobs_inbox_command)
 
-    review = jobs_sub.add_parser("review", help="Review a completed, failed, stale, or blocked job.")
+    review = jobs_sub.add_parser(
+        "review", help="Review a completed, failed, stale, or blocked job."
+    )
     _add_context_args(review)
     review.add_argument("job_id")
     review.add_argument("--json", action="store_true")
     review.set_defaults(func=jobs_review_command)
 
-    archive = jobs_sub.add_parser("archive", help="Archive a job without deleting its markdown record.")
+    archive = jobs_sub.add_parser(
+        "archive", help="Archive a job without deleting its markdown record."
+    )
     _add_context_args(archive)
     archive.add_argument("job_id")
     archive.add_argument("--json", action="store_true")
@@ -720,7 +788,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     promote.add_argument("job_id")
     promote.add_argument("--to-handoff", action="store_true", help="Create a durable handoff.")
     promote.add_argument("--handoff-name", help="Optional handoff filename.")
-    promote.add_argument("--archive", action="store_true", help="Archive the job after writing the handoff.")
+    promote.add_argument(
+        "--archive", action="store_true", help="Archive the job after writing the handoff."
+    )
     promote.add_argument("--json", action="store_true")
     promote.set_defaults(func=jobs_promote_command)
 
@@ -730,7 +800,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     seed.add_argument("--cadence", choices=SEED_CADENCES, default="daily")
     seed.add_argument("--created-by", default="agent-job-seed")
     seed.add_argument("--dry-run", action="store_true", help="Show jobs that would be queued.")
-    seed.add_argument("--force", action="store_true", help="Create jobs even when a dedupe match exists.")
+    seed.add_argument(
+        "--force", action="store_true", help="Create jobs even when a dedupe match exists."
+    )
     seed.add_argument("--quiet", action="store_true", help="Suppress normal output.")
     seed.add_argument("--json", action="store_true")
     seed.set_defaults(func=jobs_seed_command)
@@ -742,7 +814,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     claim.add_argument("--json", action="store_true")
     claim.set_defaults(func=jobs_claim_command)
 
-    move = jobs_sub.add_parser("move", help="Move a job to queue, running, done, failed, or archived.")
+    move = jobs_sub.add_parser(
+        "move", help="Move a job to queue, running, done, failed, or archived."
+    )
     _add_context_args(move)
     move.add_argument("job_id")
     move.add_argument("status", choices=JOB_STATES)
@@ -768,7 +842,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Let this worker run jobs that look explicitly destructive.",
     )
-    work.add_argument("--dry-run", action="store_true", help="Show queued work without claiming jobs.")
+    work.add_argument(
+        "--dry-run", action="store_true", help="Show queued work without claiming jobs."
+    )
     work.add_argument("--once", action="store_true", help="Run one pass and exit.")
     work.add_argument("--loop", action="store_true", help="Poll for jobs until interrupted.")
     work.add_argument("--poll-seconds", type=float, default=5.0)

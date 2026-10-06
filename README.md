@@ -35,6 +35,26 @@ Use the wrapper script for reliable local development and agent invocation; it s
 ./scripts/afs --help
 ```
 
+### Portable paths
+
+AFS does not require a `~/src` checkout or a specific internal-tools layout.
+Command arguments and `afs.toml` remain the primary configuration surface;
+these environment variables provide machine-level defaults when needed:
+
+- `AFS_CONFIG_HOME` — user configuration, plugin, extension, cache, and service state root
+- `AFS_CONTEXT_ROOT` — default context root
+- `AFS_WORKSPACE_ROOT` — workspace catalog root; otherwise AFS discovers the nearest `WORKSPACE.toml`
+- `AFS_TRAINING_ROOT` — generic training artifact root
+- `AFS_WORKTREES_ROOT` — parent for repository-namespaced agent worktrees
+
+`XDG_CONFIG_HOME` and Windows `APPDATA` are honored when
+`AFS_CONFIG_HOME` is unset. The established `~/.context` default remains for
+compatibility, but it is not embedded into generated harness files.
+
+For zsh, sourcing `scripts/afs-shell-init.sh` installs lightweight static
+completion without running Python during shell startup. Run
+`afs-load-completion` after startup to load the live CLI command tree.
+
 ## Quick Start
 
 ```bash
@@ -58,8 +78,8 @@ Refresh local agent harnesses, MCP setup, copied skills, hooks, and context
 indexes with a dry-run first:
 
 ```bash
-./scripts/afs-upgrade-agent-setup --workspace ~/src
-./scripts/afs-upgrade-agent-setup --workspace ~/src --apply --all
+./scripts/afs-upgrade-agent-setup --workspace /path/to/workspace
+./scripts/afs-upgrade-agent-setup --workspace /path/to/workspace --apply --all
 ```
 
 ## Branching and releases
@@ -326,7 +346,7 @@ afs embeddings search "how to debug a sprite"              # direct legacy colle
 
 `afs search` filters to the current project plus `common` before ranking.
 Cross-project search requires `--all-projects`. Semantic retrieval is opt-in;
-Gemini defaults to stable `gemini-embedding-2` with 768-dimensional vectors.
+Gemini defaults to `gemini-embedding-2` with 768-dimensional vectors.
 
 ### Health & Diagnostics
 
@@ -390,15 +410,15 @@ index-health reads may initialize SQLite metadata inside the configured context.
 
 ```bash
 afs antigravity setup --scope project    # Preview Antigravity CLI MCP setup
-afs gemini setup                         # Gemini CLI compatibility/API helper
+afs gemini setup                         # Configure Gemini CLI and API helpers
 afs antigravity models --json            # Parse the installed agy model list
 ```
 
-Gemini CLI compatibility is retained for API-key/enterprise workflows, but the
-individual/free/Pro/Ultra public path moved to Antigravity CLI (`agy`) on
-2026-06-18. AFS does not auto-install `agy`; run `afs antigravity status` or
-`afs antigravity setup --json` to inspect the local state. Current `agy` builds
-use `~/.gemini/config/mcp_config.json` as the migrated MCP config path.
+Gemini CLI and Antigravity CLI (`agy`) are separate supported clients. AFS does
+not auto-install either client; run `afs antigravity status` or
+`afs antigravity setup --json` to inspect Antigravity state. Current `agy`
+builds expose native `agy mcp` commands and use
+`~/.gemini/config/mcp_config.json` for global MCP configuration.
 
 ```
 afs gemini status                     # Check API key, SDK, embeddings
@@ -406,7 +426,8 @@ afs gemini context "search query"     # Generate context for Gemini session
 afs gemini context --include-content  # With full file content
 ```
 
-Install: `pip install -e ".[gemini]"`
+Install direct provider support only when AFS itself makes model calls:
+`pip install -e ".[gemini]"` or `pip install -e ".[claude]"`.
 
 ## Client Wrappers
 

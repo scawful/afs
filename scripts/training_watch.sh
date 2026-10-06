@@ -10,7 +10,8 @@
 #   ./scripts/training_watch.sh [--debounce SECONDS]
 #
 # Environment:
-#   TRAINING_ROOT   Override training data root (default: ~/src/training)
+#   AFS_TRAINING_ROOT  Preferred training data root override
+#   TRAINING_ROOT      Backwards-compatible training data root override
 #   AFS_ROOT        Override AFS project root (default: script's parent dir)
 #   QA_SCRIPT       Override QA summary script path
 
@@ -18,9 +19,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AFS_ROOT="${AFS_ROOT:-$(dirname "$SCRIPT_DIR")}"
-TRAINING_ROOT="${TRAINING_ROOT:-$HOME/src/training}"
+TRAINING_ROOT="${AFS_TRAINING_ROOT:-${TRAINING_ROOT:-${AFS_CONTEXT_ROOT:-$HOME/.context}/scratchpad/common/training}}"
 QA_SCRIPT="${QA_SCRIPT:-$AFS_ROOT/scripts/dataset_qa_summary.py}"
 DEBOUNCE="30"
+export AFS_ROOT TRAINING_ROOT QA_SCRIPT
 
 if [[ "${1:-}" == "--debounce" ]] && [[ -n "${2:-}" ]]; then
     DEBOUNCE="$2"

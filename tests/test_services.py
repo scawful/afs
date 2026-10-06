@@ -43,6 +43,24 @@ def test_service_manager_lists_builtins() -> None:
     assert "history-memory" in names
 
 
+def test_service_manager_uses_configurable_state_root(tmp_path: Path) -> None:
+    service_root = tmp_path / "company" / "afs-services"
+    manager = ServiceManager(config=AFSConfig(), platform_name="linux", service_root=service_root)
+
+    assert manager.state_dir == service_root / "state"
+
+
+def test_openwebui_paths_honor_explicit_environment(monkeypatch, tmp_path: Path) -> None:
+    script = tmp_path / "internal" / "chat-service"
+    compose = tmp_path / "internal" / "compose.yml"
+    monkeypatch.setenv("AFS_OPENWEBUI_SCRIPT", str(script))
+    monkeypatch.setenv("AFS_OPENWEBUI_COMPOSE_FILE", str(compose))
+    manager = ServiceManager(config=AFSConfig(), platform_name="linux")
+
+    assert manager._openwebui_script_path(manager.get_definition("openwebui")) == script.resolve()
+    assert manager._openwebui_compose_path() == compose.resolve()
+
+
 def test_gemini_workspace_brief_service_uses_agent_entrypoint() -> None:
     manager = ServiceManager(config=AFSConfig(), platform_name="linux")
     definition = manager.get_definition("gemini-workspace-brief")
@@ -122,12 +140,12 @@ def test_service_render_contains_execstart() -> None:
 def test_service_render_launchd_contains_label() -> None:
     manager = ServiceManager(config=AFSConfig(), platform_name="darwin")
     payload = manager.render_unit("orchestrator")
-    assert "\"Label\"" in payload
+    assert '"Label"' in payload
 
 
 def test_service_manager_propagates_explicit_config_path(tmp_path) -> None:
     config_path = tmp_path / "afs.toml"
-    config_path.write_text("[general]\ncontext_root = \"/tmp/context\"\n", encoding="utf-8")
+    config_path.write_text('[general]\ncontext_root = "/tmp/context"\n', encoding="utf-8")
 
     manager = ServiceManager(
         config=AFSConfig(),

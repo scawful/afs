@@ -33,6 +33,7 @@ from ..context_layout import LAYOUT_VERSION, _atomic_write_text, detect_layout_v
 from ..context_paths import resolve_agent_output_root
 from ..path_safety import assert_no_linklike_components
 from ..profiles import resolve_active_profile
+from ..runtime_paths import default_config_root
 from ..schema import MAX_AGENT_RESTARTS, AFSConfig, AgentConfig
 from .base import AgentResult, build_base_parser, configure_logging, emit_result, now_iso
 from .event_reactor import (
@@ -256,7 +257,7 @@ class RunningAgent:
 
 
 class AgentSupervisor:
-    STATE_DIR = Path.home() / ".config" / "afs" / "agents" / "state"
+    STATE_DIR = default_config_root() / "agents" / "state"
 
     # Restart backoff parameters
     RESTART_BASE_DELAY: float = 30.0  # seconds
@@ -272,9 +273,7 @@ class AgentSupervisor:
     ) -> None:
         self._config = config
         self._managed_state_boundary: Path | None = None
-        self._config_path = (
-            config_path.expanduser().resolve() if config_path is not None else None
-        )
+        self._config_path = config_path.expanduser().resolve() if config_path is not None else None
         self._state_dir = self._resolve_state_dir(state_dir, config)
         durable_base = self._state_dir
         while not durable_base.is_dir():
@@ -386,9 +385,7 @@ class AgentSupervisor:
             return {"scope_attribution": "unregistered"}
         common = agent_config.extra.get("common") is True
         raw_project = agent_config.extra.get("project_path")
-        if not common and (
-            not isinstance(raw_project, str) or not raw_project.strip()
-        ):
+        if not common and (not isinstance(raw_project, str) or not raw_project.strip()):
             return {"scope_attribution": "unregistered"}
         try:
             from ..scopes import resolve_scope
@@ -813,7 +810,8 @@ class AgentSupervisor:
         # --- mutex_group ---
         if config.mutex_group:
             group_members = [
-                c for c in all_configs
+                c
+                for c in all_configs
                 if c.mutex_group == config.mutex_group and c.name != agent_name
             ]
             for member in group_members:
@@ -858,8 +856,7 @@ class AgentSupervisor:
 
             existing = self.status(config.name)
             if existing and (
-                existing.state in ("running", "awaiting_review")
-                or existing.manually_stopped
+                existing.state in ("running", "awaiting_review") or existing.manually_stopped
             ):
                 continue
 
@@ -867,11 +864,15 @@ class AgentSupervisor:
                 continue
 
             ready, reason = self._check_dependencies(
-                config.name, config, agent_configs,
+                config.name,
+                config,
+                agent_configs,
             )
             if not ready:
                 _log.info(
-                    "Handoff target '%s' not ready: %s", config.name, reason,
+                    "Handoff target '%s' not ready: %s",
+                    config.name,
+                    reason,
                 )
                 continue
 
@@ -927,14 +928,14 @@ class AgentSupervisor:
 
             context_root = self._context_root_path()
             snapshot = build_agent_context_snapshot(
-                name, context_root, config=self._config,
+                name,
+                context_root,
+                config=self._config,
             )
             snapshot_path = write_agent_context_snapshot(
                 snapshot,
                 self._state_dir / "context_snapshots",
-                trusted_root=self._state_dir
-                if self._managed_state_boundary is not None
-                else None,
+                trusted_root=self._state_dir if self._managed_state_boundary is not None else None,
             )
             env[AGENT_CONTEXT_ENV] = str(snapshot_path)
         except Exception:
@@ -946,6 +947,7 @@ class AgentSupervisor:
         agent_spec = None
         try:
             from . import get_agent
+
             agent_spec = get_agent(name)
             if agent_spec and agent_spec.capabilities:
                 pass
@@ -1262,11 +1264,15 @@ class AgentSupervisor:
             ):
                 continue
             ready, reason = self._check_dependencies(
-                config.name, config, agent_configs,
+                config.name,
+                config,
+                agent_configs,
             )
             if not ready:
                 _log.info(
-                    "Skipping auto_start for '%s': %s", config.name, reason,
+                    "Skipping auto_start for '%s': %s",
+                    config.name,
+                    reason,
                 )
                 continue
             try:
@@ -1528,11 +1534,7 @@ class AgentSupervisor:
             # A wall-clock rollback must not backdate the circuit before the
             # failure that opened it; correction would otherwise consume the
             # cooldown instantly. Persist the later trusted route instant.
-            opened_at = (
-                failed_at
-                if failed_at is not None and failed_at > current
-                else current
-            )
+            opened_at = failed_at if failed_at is not None and failed_at > current else current
             batch.open_launch_circuit(config.name, at=opened_at)
             if existing is not None and existing.state != "circuit_open":
                 existing.state = "circuit_open"
@@ -1644,9 +1646,7 @@ class AgentSupervisor:
                 agent_configs,
             )
             if not ready:
-                _log.info(
-                    "Deferring event job for '%s': %s", config.name, dep_reason
-                )
+                _log.info("Deferring event job for '%s': %s", config.name, dep_reason)
                 batch.mark_dispatch_deferred(config.name, reason="dependency")
                 continue
             if self._event_is_debounced(
@@ -1802,9 +1802,7 @@ class AgentSupervisor:
 
         started: list[RunningAgent] = []
         for config, reason in candidates.values():
-            is_event_candidate = bool(
-                event_batch and config.name in event_candidates
-            )
+            is_event_candidate = bool(event_batch and config.name in event_candidates)
             if not config.module:
                 if is_event_candidate and event_batch:
                     event_batch.mark_dispatch_deferred(
@@ -1846,7 +1844,9 @@ class AgentSupervisor:
             ):
                 continue
             ready, dep_reason = self._check_dependencies(
-                config.name, config, agent_configs,
+                config.name,
+                config,
+                agent_configs,
             )
             if not ready:
                 _log.info(
@@ -1907,7 +1907,8 @@ class AgentSupervisor:
         for agent in self.list_agents():
             if agent.state == "stopped" and not agent.manually_stopped:
                 handoff_started = self._process_handoff_targets(
-                    agent.name, agent_configs,
+                    agent.name,
+                    agent_configs,
                 )
                 started.extend(handoff_started)
 
@@ -1954,8 +1955,7 @@ class AgentSupervisor:
                     or _parse_timestamp(agent.started_at)
                 )
                 is_historical = bool(
-                    failed_at
-                    and (now - failed_at).total_seconds() > failure_history_seconds
+                    failed_at and (now - failed_at).total_seconds() > failure_history_seconds
                 )
                 if is_historical:
                     counts["historical_failed"] += 1
@@ -2057,9 +2057,7 @@ def _run_once(
     )
     current_watch_state = _snapshot_watch_paths(profile.agent_configs)
     changed_paths = (
-        _diff_watch_paths(previous_watch_state, current_watch_state)
-        if previous_watch_state
-        else []
+        _diff_watch_paths(previous_watch_state, current_watch_state) if previous_watch_state else []
     )
     # Event handling is transactional: source checkpoints and the coalesced
     # pending-route outbox commit together after routing. A crash before that
@@ -2147,8 +2145,7 @@ def _run_once(
         )
     if reactor_jobs_coalesced:
         notes.append(
-            f"{reactor_jobs_coalesced} event reaction(s) coalesced into "
-            "already-active jobs"
+            f"{reactor_jobs_coalesced} event reaction(s) coalesced into already-active jobs"
         )
     if reactor_state_error:
         notes.append("reactor state not persisted; cursors unchanged")

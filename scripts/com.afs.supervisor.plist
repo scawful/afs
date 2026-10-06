@@ -7,8 +7,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <!-- Replace with your AFS venv python path -->
-        <string>$HOME/src/lab/afs/.venv/bin/python</string>
+        <string>__AFS_PYTHON__</string>
         <string>-m</string>
         <string>afs.agents.supervisor</string>
         <string>--max-runs</string>
@@ -19,7 +18,11 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>__AFS_PATH__</string>
+        <key>AFS_ROOT</key>
+        <string>__AFS_ROOT__</string>
+        <key>PYTHONPATH</key>
+        <string>__AFS_ROOT__/src</string>
     </dict>
 
     <!-- Run every 15 minutes -->
@@ -32,9 +35,9 @@
 
     <!-- Logging -->
     <key>StandardOutPath</key>
-    <string>/tmp/afs-supervisor.stdout.log</string>
+    <string>__AFS_LOG_DIR__/supervisor.stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/afs-supervisor.stderr.log</string>
+    <string>__AFS_LOG_DIR__/supervisor.stderr.log</string>
 
     <!-- Resource limits — keep it lightweight -->
     <key>Nice</key>

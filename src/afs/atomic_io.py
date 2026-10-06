@@ -24,6 +24,7 @@ from .path_safety import is_linklike
 
 __all__ = [
     "atomic_create_text",
+    "atomic_write_bytes",
     "atomic_write_text",
     "exclusive_create_text",
     "fsync_directory",
@@ -34,6 +35,29 @@ __all__ = [
 _AT_FDCWD = -100
 _RENAME_NOREPLACE = 0x00000001
 _RENAME_EXCL = 0x00000004
+
+
+def atomic_write_bytes(
+    path: Path, data: bytes, *, mode: int = 0o600, directory_fd: int | None = None
+) -> None:
+    """Publish exact bytes without exposing partially written content."""
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temporary_name = str(temporary) if directory_fd is None else temporary.name
+    target_name = str(path) if directory_fd is None else path.name
+    descriptor = os.open(
+        temporary_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode, dir_fd=directory_fd
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            if hasattr(os, "fchmod"):
+                os.fchmod(handle.fileno(), mode)
+        os.replace(
+            temporary_name, target_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd
+        )
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary_name, dir_fd=directory_fd)
 
 
 def _rename_noreplace(source: Path, destination: Path) -> None:

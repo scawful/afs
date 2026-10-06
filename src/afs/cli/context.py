@@ -15,6 +15,7 @@ from ..context_index import ContextSQLiteIndex
 from ..context_layout import LAYOUT_VERSION
 from ..core import find_existing_root
 from ..models import ContextCategory, MountType
+from ..runtime_paths import default_workspace_root
 from ..scopes import ResolvedScope, resolve_scope, visible_scope_prefixes
 from ._utils import load_manager, parse_mount_type, resolve_context_paths
 
@@ -94,9 +95,7 @@ def context_list_command(args: argparse.Namespace) -> int:
 
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
     context = manager.list_context(context_path=context_path)
     if args.json:
         print(json.dumps(_context_to_dict(context), indent=2))
@@ -179,7 +178,10 @@ def context_overview_command(args: argparse.Namespace) -> int:
     print(f"context_path: {payload['context_path'] or '(none)'}")
     print(f"context_available: {str(bool(payload['context_available'])).lower()}")
     print(f"project: {payload['project_name']}")
-    if payload.get("context_project_name") and payload["context_project_name"] != payload["project_name"]:
+    if (
+        payload.get("context_project_name")
+        and payload["context_project_name"] != payload["project_name"]
+    ):
         print(f"context_project: {payload['context_project_name']}")
     print(f"valid: {str(payload['is_valid']).lower()}")
     print(f"total_mounts: {payload['total_mounts']}")
@@ -191,9 +193,7 @@ def context_mount_command(args: argparse.Namespace) -> int:
     """Mount a resource to context."""
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
     mount_type = parse_mount_type(args.mount_type)
     source = Path(args.source).expanduser().resolve()
     mount = manager.mount(
@@ -210,9 +210,7 @@ def context_unmount_command(args: argparse.Namespace) -> int:
     """Unmount a resource from context."""
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
     mount_type = parse_mount_type(args.mount_type)
     removed = manager.unmount(
         alias=args.alias,
@@ -230,9 +228,7 @@ def context_repair_command(args: argparse.Namespace) -> int:
     """Repair context mounts, provenance, and optionally the index."""
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
     payload = manager.repair_context(
         context_path=context_path,
         profile_name=args.profile,
@@ -275,9 +271,7 @@ def context_validate_command(args: argparse.Namespace) -> int:
 
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
     validator = AFSValidator(context_path, afs_directories=manager.config.directories)
     status = validator.check_integrity()
     missing = ", ".join(status.get("missing", [])) or "(none)"
@@ -358,16 +352,18 @@ def context_report_command(args: argparse.Namespace) -> int:
         config=config,
     )
 
-    stats = get_project_stats(projects) if projects else {
-        "total_projects": 0,
-        "total_mounts": 0,
-    }
+    stats = (
+        get_project_stats(projects)
+        if projects
+        else {
+            "total_projects": 0,
+            "total_mounts": 0,
+        }
+    )
     stats["invalid_projects"] = sum(1 for project in projects if not project.is_valid)
 
     payload = {
-        "context_root": str(config.general.context_root)
-        if config.general.context_root
-        else None,
+        "context_root": str(config.general.context_root) if config.general.context_root else None,
         "stats": stats,
         "contexts": [_context_to_dict(project) for project in projects],
     }
@@ -387,9 +383,7 @@ def context_protect_command(args: argparse.Namespace) -> int:
     """Protect a path (manual only)."""
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
     metadata = manager.protect(args.path_to_protect, context_path=context_path)
     print(f"protected: {args.path_to_protect}")
     print(f"manual_only: {', '.join(metadata.manual_only)}")
@@ -400,9 +394,7 @@ def context_unprotect_command(args: argparse.Namespace) -> int:
     """Unprotect a path."""
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
     metadata = manager.unprotect(args.path_to_unprotect, context_path=context_path)
     print(f"unprotected: {args.path_to_unprotect}")
     print(f"manual_only: {', '.join(metadata.manual_only)}")
@@ -507,9 +499,7 @@ def context_profile_apply_command(args: argparse.Namespace) -> int:
 
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
+    _project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
 
     profile = resolve_active_profile(manager.config, profile_name=args.profile)
     result = apply_profile_mounts(manager, context_path, profile)
@@ -569,9 +559,7 @@ def graph_export_command(args: argparse.Namespace) -> int:
     )
 
     output_path = (
-        Path(args.output).expanduser().resolve()
-        if args.output
-        else default_graph_path(config)
+        Path(args.output).expanduser().resolve() if args.output else default_graph_path(config)
     )
     write_graph(
         graph,
@@ -596,7 +584,8 @@ def workspace_add_command(args: argparse.Namespace) -> int:
         return 1
 
     existing = [
-        ws for ws in config.general.workspace_directories or []
+        ws
+        for ws in config.general.workspace_directories or []
         if Path(ws.path).resolve() == workspace_path
     ]
     if existing:
@@ -644,10 +633,7 @@ def workspace_remove_command(args: argparse.Namespace) -> int:
     workspace_path = Path(args.path).expanduser().resolve()
 
     workspaces = config.general.workspace_directories or []
-    new_workspaces = [
-        ws for ws in workspaces
-        if Path(ws.path).resolve() != workspace_path
-    ]
+    new_workspaces = [ws for ws in workspaces if Path(ws.path).resolve() != workspace_path]
     if len(new_workspaces) == len(workspaces):
         print(f"workspace not found: {workspace_path}")
         return 1
@@ -704,8 +690,6 @@ def workspace_sync_command(args: argparse.Namespace) -> int:
     return 0
 
 
-
-
 def context_freshness_command(args: argparse.Namespace) -> int:
     """Show per-file freshness scores."""
     from ..context_index import ContextSQLiteIndex
@@ -713,9 +697,7 @@ def context_freshness_command(args: argparse.Namespace) -> int:
 
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
+    project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
     scoped = resolve_scope(
         context_path,
         requester_path=project_path,
@@ -737,9 +719,7 @@ def context_freshness_command(args: argparse.Namespace) -> int:
         decay_hours=decay_hours,
         threshold=args.threshold,
         relative_prefixes=(
-            visible_scope_prefixes(scoped)
-            if scoped.layout_version == LAYOUT_VERSION
-            else None
+            visible_scope_prefixes(scoped) if scoped.layout_version == LAYOUT_VERSION else None
         ),
         scoped=scoped if scoped.layout_version == LAYOUT_VERSION else None,
     )
@@ -858,9 +838,7 @@ def context_query_command(args: argparse.Namespace) -> int:
     """Query the SQLite-backed context index."""
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
+    project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
     allow_all_projects = bool(getattr(args, "all_projects", False))
     use_common = bool(getattr(args, "common", False))
     if use_common and allow_all_projects:
@@ -896,9 +874,7 @@ def context_query_command(args: argparse.Namespace) -> int:
         auto_index=not args.no_auto_index,
         auto_refresh=not args.no_auto_refresh,
         scoped=(
-            scoped
-            if scoped.layout_version == LAYOUT_VERSION and not allow_all_projects
-            else None
+            scoped if scoped.layout_version == LAYOUT_VERSION and not allow_all_projects else None
         ),
     )
     if scoped.layout_version == LAYOUT_VERSION and not allow_all_projects:
@@ -948,10 +924,7 @@ def context_query_command(args: argparse.Namespace) -> int:
         return 0
 
     for entry in entries:
-        line = (
-            f"{entry['mount_type']}\t{entry['relative_path']}\t"
-            f"{entry['size_bytes']} bytes"
-        )
+        line = f"{entry['mount_type']}\t{entry['relative_path']}\t{entry['size_bytes']} bytes"
         print(line)
         excerpt = entry.get("content_excerpt")
         if isinstance(excerpt, str) and excerpt.strip():
@@ -963,9 +936,7 @@ def context_index_rebuild_command(args: argparse.Namespace) -> int:
     """Rebuild the SQLite-backed context index."""
     config_path = Path(args.config) if args.config else None
     manager = load_manager(config_path)
-    project_path, context_path, _context_root, _context_dir = resolve_context_paths(
-        args, manager
-    )
+    project_path, context_path, _context_root, _context_dir = resolve_context_paths(args, manager)
     allow_all_projects = bool(getattr(args, "all_projects", False))
     use_common = bool(getattr(args, "common", False))
     if use_common and allow_all_projects:
@@ -1038,7 +1009,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 
     query_epilog = (
         "Examples:\n"
-        "  afs context query \"startup guidance\" --path .\n"
+        '  afs context query "startup guidance" --path .\n'
         "  afs context query sqlite --path . --mount scratchpad --mount knowledge\n"
         "  afs context query sqlite --path . --prefix docs/sqlite --limit 10 --include-content --json\n"
         "  afs query sqlite --path . --mount knowledge --prefix public/\n"
@@ -1064,7 +1035,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     def add_query_args(parser: argparse.ArgumentParser) -> None:
         add_context_args(parser)
         parser.add_argument("query", nargs="?", help="Search string for indexed paths/content.")
-        parser.add_argument("--mount", action="append", help="Restrict to a mount type (repeatable).")
+        parser.add_argument(
+            "--mount", action="append", help="Restrict to a mount type (repeatable)."
+        )
         parser.add_argument("--prefix", help="Restrict results to a relative path prefix.")
         parser.add_argument("--limit", type=int, default=25, help="Maximum indexed hits to return.")
         parser.add_argument(
@@ -1231,7 +1204,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     ctx_profile_show.set_defaults(func=context_profile_show_command)
 
     # context profile-apply
-    ctx_profile_apply = context_sub.add_parser("profile-apply", help="Apply resolved profile mounts.")
+    ctx_profile_apply = context_sub.add_parser(
+        "profile-apply", help="Apply resolved profile mounts."
+    )
     add_context_args(ctx_profile_apply)
     ctx_profile_apply.add_argument("--json", action="store_true", help="Output JSON.")
     ctx_profile_apply.set_defaults(func=context_profile_apply_command)
@@ -1252,7 +1227,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     ctx_freshness = context_sub.add_parser("freshness", help="Show per-file freshness scores.")
     add_context_args(ctx_freshness)
     ctx_freshness.add_argument("--mount", help="Filter by mount type.")
-    ctx_freshness.add_argument("--threshold", type=float, default=0.0, help="Minimum score threshold.")
+    ctx_freshness.add_argument(
+        "--threshold", type=float, default=0.0, help="Minimum score threshold."
+    )
     ctx_freshness.add_argument("--decay-hours", type=float, help="Decay window in hours.")
     ctx_freshness.add_argument(
         "--common",
@@ -1306,7 +1283,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Rebuild the context SQLite index.",
     )
     add_context_args(idx_rebuild)
-    idx_rebuild.add_argument("--mount", action="append", help="Restrict rebuild to a mount type (repeatable).")
+    idx_rebuild.add_argument(
+        "--mount", action="append", help="Restrict rebuild to a mount type (repeatable)."
+    )
     idx_rebuild.add_argument(
         "--include-content",
         action="store_true",
@@ -1374,8 +1353,8 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     ws_sync = ws_sub.add_parser("sync", help="Sync workspaces from WORKSPACE.toml.")
     ws_sync.add_argument(
         "--root",
-        default=str(Path.home() / "src"),
-        help="Workspace root (default: ~/src).",
+        default=str(default_workspace_root()),
+        help="Workspace root (default: discovered from the current directory).",
     )
     ws_sync.add_argument("--config", help="Config path.")
     ws_sync.add_argument("--no-sections", action="store_true", help="Ignore sections.")
