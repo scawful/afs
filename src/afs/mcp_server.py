@@ -636,6 +636,11 @@ def _coerce_bool(value: Any) -> bool:
     return value is True
 
 
+def _coerce_prompt_bool(value: Any) -> bool:
+    """Accept MCP string arguments for presentation flags, never consent."""
+    return value is True or (isinstance(value, str) and value.strip().lower() == "true")
+
+
 def _context_index_settings(manager: AFSManager) -> ContextIndexConfig:
     return manager.config.context_index
 
@@ -6462,8 +6467,8 @@ def _get_prompt(
             message_limit=_coerce_int(
                 arguments.get("message_limit"), default=10, minimum=1, maximum=100
             ),
-            short=_coerce_bool(arguments.get("short", False)),
-            native_skills=_coerce_bool(arguments.get("native_skills", False)),
+            short=_coerce_prompt_bool(arguments.get("short", False)),
+            native_skills=_coerce_prompt_bool(arguments.get("native_skills", False)),
             skills_prompt=str(arguments.get("skills_prompt", "") or ""),
             skills_top_k=_coerce_int(
                 arguments.get("skills_top_k"),

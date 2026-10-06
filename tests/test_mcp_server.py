@@ -3272,6 +3272,68 @@ def test_prompt_bootstrap_forwards_registered_project_path(tmp_path: Path) -> No
     assert build.call_args.kwargs["project_path"] == alpha.resolve()
 
 
+@pytest.mark.parametrize("short", ["true", True])
+def test_prompt_short_bootstrap_skips_full_scan(tmp_path: Path, short) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    with patch(
+        "afs.session_bootstrap.collect_context_status",
+        side_effect=AssertionError("compact startup must not scan context"),
+    ):
+        response = _handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 126,
+                "method": "prompts/get",
+                "params": {
+                    "name": "afs.session.bootstrap",
+                    "arguments": {"context_path": str(context_root), "short": short},
+                },
+            },
+            manager,
+        )
+    assert response is not None and "result" in response
+    text = response["result"]["messages"][0]["content"]["text"]
+    assert text.startswith("AFS: ")
+    assert "Skill roots:" in text
+
+
+@pytest.mark.parametrize("value, expected", [("true", True), ("false", False), (True, True)])
+def test_prompt_native_skills_accepts_text_flags(tmp_path: Path, value, expected) -> None:
+    manager = _make_manager(tmp_path)
+    with (
+        patch("afs.mcp_server.build_session_bootstrap", return_value={}) as build,
+        patch("afs.mcp_server.render_session_bootstrap", return_value="bootstrap"),
+    ):
+        response = _handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 127,
+                "method": "prompts/get",
+                "params": {
+                    "name": "afs.session.bootstrap",
+                    "arguments": {
+                        "context_path": str(manager.config.general.context_root),
+                        "native_skills": value,
+                        "short": "false",
+                    },
+                },
+            },
+            manager,
+        )
+    assert response is not None and "result" in response
+    assert build.call_args.kwargs["native_skills"] is expected
+    assert build.call_args.kwargs["short"] is False
+
+
+def test_prompt_text_flags_do_not_relax_consent() -> None:
+    from afs.mcp_server import _coerce_bool
+
+    assert _coerce_bool(True) is True
+    assert _coerce_bool("true") is False
+    assert _coerce_bool(1) is False
+
+
 def test_prompts_get_session_bootstrap(tmp_path: Path, monkeypatch) -> None:
     manager = _make_manager(tmp_path)
     afs_root = tmp_path / "afs-root"
