@@ -106,6 +106,42 @@ def test_dedupe_key_cannot_reuse_different_content(tmp_path: Path) -> None:
         store.create_approval(**args, preview={"text": "two"})
 
 
+@pytest.mark.parametrize("status", ["pending", "approved", "rejected", "applied"])
+def test_legacy_dedupe_preserves_content_and_requires_reapproval(tmp_path: Path, status: str) -> None:
+    from afs.approval_content import validate_approved_content
+
+    root = tmp_path / "context"
+    store = WorkAssistantStore(root)
+    args = {
+        "target_system": "chat", "target_id": "thread", "action": "send",
+        "summary": "send", "preview": {"text": "original"}, "dedupe_key": "legacy",
+    }
+    store.create_approval(**args)
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE approvals SET content_sha256 = '', status = ?, human_confirmed = 1",
+            (status,),
+        )
+    migrated = WorkAssistantStore(root)
+    before = migrated.get_approval("legacy")
+    assert before is not None
+    assert before["status"] == ("pending" if status == "approved" else status)
+    assert migrated.create_approval(**args) == "legacy"
+    assert migrated.get_approval("legacy") == before
+    with pytest.raises(PermissionError):
+        validate_approved_content(
+            before, target_system="chat", target_id="thread", action="send",
+            preview={"text": "original"},
+        )
+    for field, value in (
+        ("target_system", "email"), ("target_id", "other-thread"),
+        ("action", "edit"), ("preview", {"text": "changed"}),
+    ):
+        with pytest.raises(ValueError, match="different content"):
+            migrated.create_approval(**{**args, field: value})
+    assert migrated.get_approval("legacy") == before
+
+
 def test_claimed_payload_is_revalidated_and_claim_released(tmp_path: Path, monkeypatch) -> None:
     store = WorkAssistantStore(tmp_path / "context")
     approval_id = _approved_action(store)

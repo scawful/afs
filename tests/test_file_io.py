@@ -1,6 +1,7 @@
 """Conflict and publication guarantees shared by CLI and MCP writes."""
 
 import hashlib
+import os
 import stat
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -86,6 +87,45 @@ def test_preserves_existing_permissions(tmp_path: Path) -> None:
     path.chmod(0o640)
     write_text_checked(path, "new")
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file mode permissions")
+@pytest.mark.parametrize("append", [False, True])
+@pytest.mark.parametrize("conditional", [False, True])
+def test_read_only_destination_is_not_replaced(
+    tmp_path: Path, append: bool, conditional: bool
+) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses file mode permissions")
+    path = tmp_path / "readonly"
+    path.write_bytes(b"original")
+    path.chmod(0o444)
+    digest = hashlib.sha256(b"original").hexdigest() if conditional else None
+    try:
+        with pytest.raises(PermissionError):
+            write_text_checked(path, "changed", append=append, if_match=digest)
+        assert path.read_bytes() == b"original"
+        assert stat.S_IMODE(path.stat().st_mode) == 0o444
+    finally:
+        path.chmod(0o600)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file mode permissions")
+def test_unconditional_overwrite_needs_no_read_permission(tmp_path: Path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses file mode permissions")
+    path = tmp_path / "writeonly"
+    path.write_bytes(b"original")
+    path.chmod(0o200)
+    try:
+        with pytest.raises(PermissionError):
+            path.read_bytes()
+        digest = write_text_checked(path, "replacement")
+        assert digest == hashlib.sha256(b"replacement").hexdigest()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o200
+    finally:
+        path.chmod(0o600)
+    assert path.read_bytes() == b"replacement"
 
 
 def test_parallel_appends_do_not_lose_updates(tmp_path: Path) -> None:

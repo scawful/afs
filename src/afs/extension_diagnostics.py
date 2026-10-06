@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import tomllib
-
 from .extensions import load_extension_manifest
+from .toml_compat import tomllib
 
 # Keep aligned with the session event CLI and run_grounding_hooks call sites.
 CORE_HOOK_EVENTS = frozenset({

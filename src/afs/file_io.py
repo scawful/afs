@@ -98,18 +98,28 @@ def write_text_checked(
     assert_no_linklike_components(path)
     with _write_lock(path) as directory_fd:
         assert_no_linklike_components(path)
+        target_name = str(path) if directory_fd is None else path.name
+        needs_read = append or if_match is not None
         try:
+            # Refuse special files before opening them for write (a FIFO can
+            # fail or block on open). Recheck the opened descriptor below.
+            target_stat = os.stat(target_name, dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISREG(target_stat.st_mode):
+                raise ValueError("context write destination must be a regular file")
+            # Enforce effective write permission, including ACLs, without
+            # truncating the original. Ordinary overwrites need no read access.
             descriptor = os.open(
-                str(path) if directory_fd is None else path.name,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                target_name,
+                (os.O_RDWR if needs_read else os.O_WRONLY)
+                | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
                 dir_fd=directory_fd,
             )
-            with os.fdopen(descriptor, "rb") as reader:
-                file_stat = os.fstat(reader.fileno())
+            with os.fdopen(descriptor, "r+b" if needs_read else "wb") as handle:
+                file_stat = os.fstat(handle.fileno())
                 if not stat.S_ISREG(file_stat.st_mode):
                     raise ValueError("context write destination must be a regular file")
                 mode = stat.S_IMODE(file_stat.st_mode) & 0o777
-                previous = reader.read()
+                previous = handle.read() if needs_read else b""
             actual = hashlib.sha256(previous).hexdigest()
         except FileNotFoundError:
             previous, actual, mode = b"", "missing", 0o600

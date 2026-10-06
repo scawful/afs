@@ -747,10 +747,18 @@ class WorkAssistantStore:
         now = _now()
         with self._connect() as connection:
             existing = connection.execute(
-                "SELECT approval_id, content_sha256 FROM approvals WHERE approval_id = ?", (approval_id,)
+                """SELECT approval_id, content_sha256, target_system, target_id,
+                          action, preview_json
+                   FROM approvals WHERE approval_id = ?""", (approval_id,)
             ).fetchone()
             if existing:
-                if existing["content_sha256"] != digest:
+                # Legacy rows have no digest until a new decision. Compare
+                # their stored envelope without changing approval authority.
+                existing_digest = existing["content_sha256"] or approval_content_hash(
+                    target_system=existing["target_system"], target_id=existing["target_id"],
+                    action=existing["action"], preview=_json_loads(existing["preview_json"], {}),
+                )
+                if existing_digest != digest:
                     raise ValueError("approval dedupe key already refers to different content")
                 return str(existing["approval_id"])
             connection.execute(

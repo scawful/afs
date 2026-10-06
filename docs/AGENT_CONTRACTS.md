@@ -52,6 +52,8 @@ creation. A mismatch returns a failure without changing the destination file.
 Read again and reconcile the change; do not automatically retry without the
 precondition. Appends also accept `--if-match` and publish a complete replacement
 atomically. Existing ordinary writes participate in the same writer lock.
+Existing files must permit writing. An unconditional overwrite does not require
+read permission; appends and digest checks also need to read the existing bytes.
 
 MCP `context.write` and compatibility `fs.write` accept `if_match`; both use the
 same implementation as the filesystem API. `context.read` and `fs.read` return
@@ -96,6 +98,8 @@ The preview must contain the final outgoing text, attachment content digests,
 and delivery options. JSON object-key order is ignored. Text whitespace,
 Unicode, array order, destinations, and message splitting change the digest.
 Reusing a deduplication key with different content raises an error.
+Legacy records without a digest compare against their stored content when a
+deduplication key is reused; this does not grant or restore approval.
 
 Existing approved records without a content digest return to pending when the
 store opens. A new human decision binds their content. Approval decisions also
