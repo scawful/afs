@@ -10,6 +10,7 @@ session state, workflow hints, and memory manifests.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shlex
 from dataclasses import dataclass
@@ -57,6 +58,8 @@ def build_model_system_prompt(
     workflow: str | None = None,
     tool_profile: str | None = None,
     token_budget: int = 0,
+    scaffolding: str | None = None,
+    native_skills: bool | None = None,
 ) -> str:
     """Compose a system prompt from static base + dynamic session context.
 
@@ -74,10 +77,17 @@ def build_model_system_prompt(
         workflow: AFS workflow name for model hints.
         tool_profile: AFS tool profile for capability hints.
         token_budget: If > 0, truncate dynamic sections to fit.
+        scaffolding: minimal (default) or full workflow and repair coaching.
+        native_skills: Let the host load skill instructions from their roots.
 
     Returns:
         Assembled system prompt string.
     """
+    mode = scaffolding or os.getenv("AFS_PROMPT_SCAFFOLDING", "minimal")
+    if mode not in {"minimal", "full"}:
+        raise ValueError("AFS prompt scaffolding must be minimal or full")
+    if native_skills is None:
+        native_skills = os.getenv("AFS_NATIVE_SKILLS") == "1"
     sections: list[PromptSection] = []
 
     # --- Static section: base prompt (highest priority, cacheable) ---
@@ -100,7 +110,7 @@ def build_model_system_prompt(
         ))
 
     # --- Dynamic section: workflow and tool profile hints ---
-    workflow_hints = _workflow_hints(workflow, tool_profile, model_family)
+    workflow_hints = _workflow_hints(workflow, tool_profile, model_family) if mode == "full" else ""
     if workflow_hints:
         sections.append(PromptSection(
             content=workflow_hints,
@@ -125,6 +135,13 @@ def build_model_system_prompt(
         candidate = session_state.get("skills")
         if isinstance(candidate, dict):
             resolved_skills_state = candidate
+    if native_skills and isinstance(resolved_skills_state, dict):
+        resolved_skills_state = {
+            "available": True,
+            "mode": "native",
+            "roots": resolved_skills_state.get("roots", []),
+            "matches": [],
+        }
     skills_block = _skills_context_block(resolved_skills_state)
     if skills_block:
         sections.append(PromptSection(
@@ -160,7 +177,9 @@ def build_model_system_prompt(
             label="repo_policy",
         ))
 
-    structured_block = _structured_guidance_block(structured_guidance)
+    structured_block = _structured_guidance_block(
+        structured_guidance, include_repair_loop=mode == "full"
+    )
     if structured_block:
         sections.append(PromptSection(
             content=structured_block,
@@ -826,6 +845,12 @@ def _pack_context_block(pack_state: dict[str, Any] | None) -> str:
 def _skills_context_block(skills_state: dict[str, Any] | None) -> str:
     if not isinstance(skills_state, dict) or not skills_state.get("available"):
         return ""
+    if skills_state.get("mode") == "native":
+        roots = skills_state.get("roots", [])
+        return "\n".join([
+            "## Native Skills", "Use the host skill loader for these configured roots:",
+            *(str(root) for root in roots if isinstance(root, (str, Path))),
+        ])
 
     matches = skills_state.get("matches", [])
     if not isinstance(matches, list):
@@ -1079,13 +1104,17 @@ def _repo_policy_block(policy_state: dict[str, Any] | None) -> str:
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
-def _structured_guidance_block(structured_guidance: dict[str, Any] | None) -> str:
+def _structured_guidance_block(
+    structured_guidance: dict[str, Any] | None, *, include_repair_loop: bool = True
+) -> str:
     if not isinstance(structured_guidance, dict):
         return ""
 
     recommended_schema = str(structured_guidance.get("recommended_schema", "") or "").strip()
     followup_schema = str(structured_guidance.get("followup_schema", "") or "").strip()
     repair_loop = structured_guidance.get("repair_loop") if isinstance(structured_guidance.get("repair_loop"), list) else []
+    if not include_repair_loop:
+        repair_loop = []
 
     if not any([recommended_schema, followup_schema, repair_loop]):
         return ""

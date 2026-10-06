@@ -6,9 +6,34 @@ from afs.model_prompts import build_hook_injection, build_model_system_prompt
 from afs.skills import MAX_SKILL_BODY_CHARS, MAX_SKILL_BODY_MATCHES
 
 
+def test_minimal_prompt_keeps_schema_and_policy_without_generic_repair_coaching() -> None:
+    prompt = build_model_system_prompt(
+        base_prompt="Task requirements.", scaffolding="minimal", workflow="edit_fast",
+        policy_state={"available": True, "design_constraints": ["Keep the public API stable."]},
+        structured_guidance={"recommended_schema": "edit-intent", "repair_loop": ["Think again."]},
+    )
+    assert "Task requirements." in prompt
+    assert "Keep the public API stable." in prompt
+    assert "Recommended schema: edit-intent" in prompt
+    assert "Think again." not in prompt
+    assert "Workflow:" not in prompt
+
+
+def test_native_skill_prompt_does_not_repeat_skill_body() -> None:
+    prompt = build_model_system_prompt(
+        base_prompt="Task requirements.", native_skills=True,
+        skills_state={"available": True, "roots": ["/skills"], "matches": [
+            {"name": "sample", "body": "Repeated skill instructions.", "score": 10},
+        ]},
+    )
+    assert "Repeated skill instructions." not in prompt
+    assert "/skills" in prompt
+
+
 def test_build_model_system_prompt_includes_session_state_summary() -> None:
     prompt = build_model_system_prompt(
         base_prompt="Base behavior.",
+        scaffolding="full",
         workflow="edit_fast",
         tool_profile="edit_and_verify",
         session_state={

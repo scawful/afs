@@ -1,5 +1,8 @@
 # Agent Integration Upgrade Guide
 
+See [Compact startup and extension contracts](AGENT_CONTRACTS.md) for the short
+bootstrap, conditional writes, content-bound approvals, and extension migration.
+
 Use this when refreshing Codex, Claude, Gemini compatibility, Antigravity, hcode, or another local
 agent harness to follow AFS without adding unnecessary tool noise.
 
