@@ -57,6 +57,23 @@ def _run(parser: argparse.ArgumentParser, argv: list[str]) -> int:
     return args.func(args)
 
 
+def test_fs_write_if_match_and_read_version(capsys, monkeypatch, tmp_path: Path) -> None:
+    manager, project = _make_manager(tmp_path)
+    monkeypatch.setattr("afs.cli.fs.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+    common = ["scratchpad", "note", "--path", str(project), "--context-root",
+              str(manager.config.general.context_root), "--json"]
+    assert _run(parser, ["fs", "write", *common, "--content", "one", "--if-match", "missing"]) == 0
+    capsys.readouterr()
+    assert _run(parser, ["fs", "read", *common]) == 0
+    digest = json.loads(capsys.readouterr().out)["sha256"]
+    assert _run(parser, ["fs", "write", *common, "--content", "two", "--if-match", digest]) == 0
+    capsys.readouterr()
+    assert _run(parser, ["fs", "write", *common, "--content", "stale", "--if-match", digest]) == 1
+    assert "write conflict" in capsys.readouterr().out
+    assert (manager.config.general.context_root / "scratchpad" / "note").read_text() == "two"
+
+
 def test_fs_registers_delete_and_move_parsers() -> None:
     parser = _make_parser()
 

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .approval_content import approval_content_hash
 from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_paths import resolve_mount_root
 from .models import MountType
@@ -189,7 +190,8 @@ def _person_id_from_record(record: dict[str, Any]) -> str:
     explicit = str(record.get("person_id") or record.get("id") or "").strip()
     if explicit:
         return explicit
-    handles = record.get("handles") if isinstance(record.get("handles"), dict) else {}
+    handles_value = record.get("handles")
+    handles = handles_value if isinstance(handles_value, dict) else {}
     if "email" in handles:
         return _stable_id("person", "email", handles["email"])
     for key in sorted(handles):
@@ -207,7 +209,8 @@ def _normalize_person(raw: Any, *, role: str | None = None, target_type: str | N
         if "@" in text:
             data["handles"] = {"email": text}
 
-    handles = data.get("handles") if isinstance(data.get("handles"), dict) else {}
+    handles_value = data.get("handles")
+    handles = handles_value if isinstance(handles_value, dict) else {}
     normalized_handles = {
         _normalize_handle_key(str(key)): str(value).strip()
         for key, value in handles.items()
@@ -435,6 +438,7 @@ class WorkAssistantStore:
             row[1] for row in connection.execute("PRAGMA table_info(approvals)")
         }
         missing_columns = {
+            "content_sha256": "content_sha256 TEXT NOT NULL DEFAULT ''",
             "rationale": "rationale TEXT NOT NULL DEFAULT ''",
             "decision_via": "decision_via TEXT NOT NULL DEFAULT ''",
             "reviewer_subject": "reviewer_subject TEXT NOT NULL DEFAULT ''",
@@ -462,14 +466,14 @@ class WorkAssistantStore:
             """
             UPDATE approvals
             SET status = 'pending', updated_at = ?
-            WHERE status = 'approved' AND human_confirmed = 0
+            WHERE status = 'approved' AND (human_confirmed = 0 OR content_sha256 = '')
             """,
             (_now(),),
         )
 
     def upsert_person(self, person: dict[str, Any]) -> str:
         normalized = _normalize_person(person)
-        person_id = normalized["person_id"]
+        person_id = str(normalized["person_id"])
         now = _now()
         with self._connect() as connection:
             existing = connection.execute(
@@ -734,21 +738,36 @@ class WorkAssistantStore:
         expires_at: str | None = None,
         dedupe_key: str | None = None,
     ) -> str:
+        normalized_preview = {} if preview is None else preview
+        digest = approval_content_hash(
+            target_system=target_system, target_id=target_id, action=action,
+            preview=normalized_preview,
+        )
         approval_id = dedupe_key or f"approval_{uuid.uuid4().hex[:12]}"
         now = _now()
         with self._connect() as connection:
             existing = connection.execute(
-                "SELECT approval_id FROM approvals WHERE approval_id = ?", (approval_id,)
+                """SELECT approval_id, content_sha256, target_system, target_id,
+                          action, preview_json
+                   FROM approvals WHERE approval_id = ?""", (approval_id,)
             ).fetchone()
             if existing:
+                # Legacy rows have no digest until a new decision. Compare
+                # their stored envelope without changing approval authority.
+                existing_digest = existing["content_sha256"] or approval_content_hash(
+                    target_system=existing["target_system"], target_id=existing["target_id"],
+                    action=existing["action"], preview=_json_loads(existing["preview_json"], {}),
+                )
+                if existing_digest != digest:
+                    raise ValueError("approval dedupe key already refers to different content")
                 return str(existing["approval_id"])
             connection.execute(
                 """
                 INSERT INTO approvals (
                     approval_id, status, target_system, target_id, action, summary,
                     preview_json, affected_people_json, risk_level, permission_required,
-                    requested_by, approved_by, created_at, updated_at, expires_at, result_json
-                ) VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
+                    requested_by, approved_by, created_at, updated_at, expires_at, result_json, content_sha256
+                ) VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
                 """,
                 (
                     approval_id,
@@ -756,7 +775,7 @@ class WorkAssistantStore:
                     target_id,
                     action,
                     summary,
-                    _json_dumps(preview or {}),
+                    _json_dumps(normalized_preview),
                     _json_dumps(list(affected_people or [])),
                     risk_level,
                     permission_required,
@@ -765,6 +784,7 @@ class WorkAssistantStore:
                     now,
                     expires_at,
                     _json_dumps({}),
+                    digest,
                 ),
             )
         return approval_id
@@ -800,12 +820,18 @@ class WorkAssistantStore:
         """Return the broker scope for one decision in this exact database."""
         from .human_provenance import decision_scope_parts
 
+        approval = self.get_approval(approval_id)
+        digest = approval_content_hash(
+            target_system=approval["target_system"], target_id=approval["target_id"],
+            action=approval["action"], preview=approval["preview"],
+        ) if approval else "missing"
         return decision_scope_parts(
             "work-approval",
             decision,
             str(self.db_path),
             approval_id,
             rationale.strip(),
+            digest,
         )
 
     def approve(
@@ -1323,7 +1349,7 @@ class WorkAssistantStore:
 
     def summary(self) -> dict[str, Any]:
         with self._connect() as connection:
-            counts = {
+            counts: dict[str, Any] = {
                 name: int(
                     connection.execute(f"SELECT COUNT(*) AS count FROM {name}").fetchone()[
                         "count"
@@ -1360,12 +1386,24 @@ class WorkAssistantStore:
         human_confirmed: bool,
     ) -> bool:
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM approvals WHERE approval_id = ?", (approval_id,)
+            ).fetchone()
+            if row is None or row["status"] != "pending":
+                return False
+            digest = approval_content_hash(
+                target_system=row["target_system"], target_id=row["target_id"],
+                action=row["action"], preview=_json_loads(row["preview_json"], {}),
+            )
+            if status == "approved" and row["content_sha256"] and row["content_sha256"] != digest:
+                raise ValueError("approval content changed after request; create a new request")
             cursor = connection.execute(
                 """
                 UPDATE approvals
                 SET status = ?, approved_by = ?, rationale = ?, decision_via = ?,
                     reviewer_subject = ?, identity_authenticated = ?,
-                    human_confirmed = ?, updated_at = ?
+                    human_confirmed = ?, updated_at = ?, content_sha256 = ?
                 WHERE approval_id = ? AND status = 'pending'
                 """,
                 (
@@ -1377,6 +1415,7 @@ class WorkAssistantStore:
                     int(identity_authenticated),
                     int(human_confirmed),
                     _now(),
+                    digest,
                     approval_id,
                 ),
             )
@@ -1525,6 +1564,7 @@ class WorkAssistantStore:
             "action": row["action"],
             "summary": row["summary"],
             "preview": _json_loads(row["preview_json"], {}),
+            "content_sha256": row["content_sha256"],
             "affected_people": _json_loads(row["affected_people_json"], []),
             "risk_level": row["risk_level"],
             "permission_required": row["permission_required"],
@@ -1574,11 +1614,15 @@ class WorkAssistantStore:
 
 def enrich_logged_event(context_root: Path | None, event: dict[str, Any]) -> dict[str, int]:
     """Enrich native work-assistant state from a logged context/history event."""
+    if event.get("type") == "external":
+        return _empty_counts()
     if context_root is None or os.getenv("AFS_WORK_ASSISTANT_ENRICH_DISABLED") == "1":
         return _empty_counts()
 
-    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    metadata_value = event.get("metadata")
+    metadata = metadata_value if isinstance(metadata_value, dict) else {}
+    payload_value = event.get("payload")
+    payload = payload_value if isinstance(payload_value, dict) else {}
     if not _looks_work_relevant(event, metadata, payload):
         return _empty_counts()
 
@@ -1635,10 +1679,10 @@ def enrich_logged_event(context_root: Path | None, event: dict[str, Any]) -> dic
     for relationship in _as_list(metadata.get("relationships") or payload.get("relationships")):
         if not isinstance(relationship, dict):
             continue
-        person = relationship.get("person")
+        related_person = relationship.get("person")
         person_id = str(relationship.get("person_id") or "").strip()
-        if not person_id and person:
-            person_id = store.upsert_person(_normalize_person(person, target_type=target_type or None))
+        if not person_id and related_person:
+            person_id = store.upsert_person(_normalize_person(related_person, target_type=target_type or None))
             counts["people"] += 1
         if not person_id:
             continue

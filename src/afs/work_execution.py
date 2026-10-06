@@ -11,6 +11,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .approval_content import validate_approved_content
+from .atomic_io import atomic_write_text
 from .human_provenance import default_terminal_reader
 from .work_assistant import EXTERNAL_WRITE_ACTIONS, WorkAssistantStore
 
@@ -271,6 +273,10 @@ def execute_approved_action(
             "human-confirmed; re-run `afs work approvals approve` from a "
             "controlling terminal"
         )
+    validate_approved_content(
+        approval, target_system=approval["target_system"], target_id=approval["target_id"],
+        action=approval["action"], preview=approval["preview"],
+    )
     if not command:
         raise WorkApprovalExecutionError("executor command is required")
 
@@ -279,7 +285,8 @@ def execute_approved_action(
 
     resolved_command = [_resolve_executable(command[0]), *command[1:]]
     run_cwd = cwd.expanduser().resolve() if cwd else Path.cwd()
-    if store.claim_approval_execution(approval_id) is None:
+    claimed = store.claim_approval_execution(approval_id)
+    if claimed is None:
         raise WorkApprovalExecutionError(
             f"approval is already executing or no longer approved: {approval_id}"
         )
@@ -288,10 +295,17 @@ def execute_approved_action(
     # release it on an unexpected local failure; normal success/failure paths
     # transition it explicitly to applied/approved below.
     try:
+        if claimed["content_sha256"] != approval["content_sha256"]:
+            raise WorkApprovalExecutionError("approval content changed while claiming execution")
+        validate_approved_content(
+            claimed, target_system=claimed["target_system"], target_id=claimed["target_id"],
+            action=claimed["action"], preview=claimed["preview"],
+        )
+        payload = build_approval_payload(claimed, context_root=context_root, actor=actor)
         with tempfile.TemporaryDirectory(prefix="afs-work-approval-") as temp_dir:
             payload_path = Path(temp_dir) / "approval.json"
-            payload_path.write_text(
-                json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+            atomic_write_text(
+                payload_path, json.dumps(payload, indent=2, sort_keys=True), mode=0o600
             )
             env = os.environ.copy()
             env["AFS_CONTEXT_ROOT"] = str(context_root.expanduser().resolve())

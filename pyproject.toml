@@ -135,7 +135,6 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/cli/bundle.py" = ["BLE001"]
 "src/afs/cli/claude.py" = ["BLE001"]
 "src/afs/cli/comparison.py" = ["BLE001"]
-"src/afs/cli/core.py" = ["BLE001", "S110"]
 "src/afs/cli/gemini.py" = ["BLE001", "S110"]
 "src/afs/cli/optimize.py" = ["BLE001"]
 "src/afs/cli/personal.py" = ["BLE001"]
@@ -145,7 +144,6 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/comparison/framework.py" = ["BLE001"]
 "src/afs/config.py" = ["BLE001"]
 "src/afs/context_freshness.py" = ["BLE001", "S112"]
-"src/afs/context_fs.py" = ["BLE001"]
 "src/afs/context_index.py" = ["BLE001", "S112"]
 "src/afs/deployment/cli.py" = ["BLE001", "S110"]
 "src/afs/deployment/validator.py" = ["BLE001"]
@@ -172,7 +170,6 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/llm_memory.py" = ["BLE001"]
 "src/afs/manager.py" = ["BLE001"]
 "src/afs/manager_gui.py" = ["BLE001"]
-"src/afs/mcp/registry.py" = ["BLE001", "S110"]
 "src/afs/memory_consolidation.py" = ["BLE001", "S110"]
 "src/afs/missions.py" = ["BLE001", "S110"]
 "src/afs/next_action.py" = ["BLE001"]
@@ -278,10 +275,8 @@ module = [
     "afs.cli.claude",
     "afs.cli.comparison",
     "afs.cli.context",
-    "afs.cli.core",
     "afs.cli.embeddings",
     "afs.cli.encoder",
-    "afs.cli.events",
     "afs.cli.gemini",
     "afs.cli.generator",
     "afs.cli.generators",
@@ -318,7 +313,6 @@ module = [
     "afs.logging_config",
     "afs.manager",
     "afs.missions",
-    "afs.models",
     "afs.next_action",
     "afs.notifications.base",
     "afs.notifications.discord",
@@ -339,7 +333,6 @@ module = [
     "afs.sources.models",
     "afs.sources.registry",
     "afs.training.lifecycle",
-    "afs.work_assistant",
     "afs.workspace_sync",
 ]
 ignore_errors = true

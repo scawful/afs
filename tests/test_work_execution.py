@@ -54,6 +54,164 @@ def test_action_requires_human_ack_classification() -> None:
     assert action_requires_human_ack("") is False
 
 
+@pytest.mark.parametrize("change", ["text", "target", "split", "attachment"])
+def test_content_approval_rejects_changed_dispatch(tmp_path: Path, change: str) -> None:
+    from afs.approval_content import validate_approved_content
+
+    store = WorkAssistantStore(tmp_path / "context")
+    approval_id = _approved_action(store, preview={"text": "hello\nworld", "attachment": "abc"})
+    approval = store.get_approval(approval_id)
+    assert approval is not None
+    args = {
+        "target_system": approval["target_system"], "target_id": approval["target_id"],
+        "action": approval["action"], "preview": dict(approval["preview"]),
+    }
+    assert validate_approved_content(approval, **args) == approval["content_sha256"]
+    if change == "target":
+        args["target_id"] = "different-destination"
+    elif change == "split":
+        args["preview"]["text"] = ["hello", "world"]
+    else:
+        args["preview"][change] = "changed"
+    with pytest.raises(PermissionError, match="differs"):
+        validate_approved_content(approval, **args)
+
+
+def test_executor_rejects_tampered_stored_content(tmp_path: Path, monkeypatch) -> None:
+    store = WorkAssistantStore(tmp_path / "context")
+    approval_id = _approved_action(store)
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE approvals SET preview_json = ? WHERE approval_id = ?",
+            ('{"text":"unapproved"}', approval_id),
+        )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("executor must not run")
+
+    monkeypatch.setattr("afs.work_execution.subprocess.run", forbidden)
+    with pytest.raises(PermissionError, match="differs"):
+        execute_approved_action(
+            store, context_root=tmp_path / "context", approval_id=approval_id,
+            executor_command=[sys.executable], require_human_ack=False,
+        )
+
+
+def test_dedupe_key_cannot_reuse_different_content(tmp_path: Path) -> None:
+    store = WorkAssistantStore(tmp_path / "context")
+    args = {"target_system": "chat", "target_id": "thread", "action": "send", "summary": "send", "dedupe_key": "key"}
+    store.create_approval(**args, preview={"text": "one"})
+    assert store.create_approval(**args, preview={"text": "one"}) == "key"
+    with pytest.raises(ValueError, match="different content"):
+        store.create_approval(**args, preview={"text": "two"})
+
+
+@pytest.mark.parametrize("status", ["pending", "approved", "rejected", "applied"])
+def test_legacy_dedupe_preserves_content_and_requires_reapproval(tmp_path: Path, status: str) -> None:
+    from afs.approval_content import validate_approved_content
+
+    root = tmp_path / "context"
+    store = WorkAssistantStore(root)
+    args = {
+        "target_system": "chat", "target_id": "thread", "action": "send",
+        "summary": "send", "preview": {"text": "original"}, "dedupe_key": "legacy",
+    }
+    store.create_approval(**args)
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE approvals SET content_sha256 = '', status = ?, human_confirmed = 1",
+            (status,),
+        )
+    migrated = WorkAssistantStore(root)
+    before = migrated.get_approval("legacy")
+    assert before is not None
+    assert before["status"] == ("pending" if status == "approved" else status)
+    assert migrated.create_approval(**args) == "legacy"
+    assert migrated.get_approval("legacy") == before
+    with pytest.raises(PermissionError):
+        validate_approved_content(
+            before, target_system="chat", target_id="thread", action="send",
+            preview={"text": "original"},
+        )
+    for field, value in (
+        ("target_system", "email"), ("target_id", "other-thread"),
+        ("action", "edit"), ("preview", {"text": "changed"}),
+    ):
+        with pytest.raises(ValueError, match="different content"):
+            migrated.create_approval(**{**args, field: value})
+    assert migrated.get_approval("legacy") == before
+
+
+def test_claimed_payload_is_revalidated_and_claim_released(tmp_path: Path, monkeypatch) -> None:
+    store = WorkAssistantStore(tmp_path / "context")
+    approval_id = _approved_action(store)
+    claim = store.claim_approval_execution
+
+    def changed_claim(key):
+        row = claim(key)
+        assert row is not None
+        row["preview"] = {"text": "changed between read and claim"}
+        return row
+
+    monkeypatch.setattr(store, "claim_approval_execution", changed_claim)
+    with pytest.raises(PermissionError, match="differs"):
+        execute_approved_action(
+            store, context_root=tmp_path / "context", approval_id=approval_id,
+            executor_command=[sys.executable], require_human_ack=False,
+        )
+    assert store.get_approval(approval_id)["status"] == "approved"
+
+
+def test_legacy_approved_content_requires_a_new_human_decision(tmp_path: Path) -> None:
+    from afs.human_provenance import _broker_for_reader
+
+    root = tmp_path / "context"
+    store = WorkAssistantStore(root)
+    approval_id = _approved_action(store)
+    with store._connect() as connection:
+        connection.execute("UPDATE approvals SET content_sha256 = '' WHERE approval_id = ?", (approval_id,))
+    migrated = WorkAssistantStore(root)
+    assert migrated.get_approval(approval_id)["status"] == "pending"
+    authorization = _broker_for_reader(lambda _prompt: approval_id).confirm_token(
+        approval_id, "prompt",
+        scope=migrated.human_authorization_scope("approve", approval_id, "reviewed content"),
+    )
+    assert migrated.approve_human(
+        approval_id, rationale="reviewed content", authorization=authorization
+    )
+    assert len(migrated.get_approval(approval_id)["content_sha256"]) == 64
+
+
+def test_changed_pending_content_can_still_be_rejected(tmp_path: Path) -> None:
+    store = WorkAssistantStore(tmp_path / "context")
+    approval_id = store.create_approval(
+        target_system="chat", target_id="thread", action="send", summary="send",
+        preview={"text": "original"},
+    )
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE approvals SET preview_json = ? WHERE approval_id = ?",
+            ('{"text":"changed"}', approval_id),
+        )
+    assert store.reject(approval_id, rationale="content changed") is True
+    assert store.get_approval(approval_id)["status"] == "rejected"
+
+
+def test_empty_preview_values_remain_distinct_content(tmp_path: Path) -> None:
+    store = WorkAssistantStore(tmp_path / "context")
+    hashes = []
+    for preview in ("", [], {}, False, 0):
+        approval_id = store.create_approval(
+            target_system="local", target_id="target", action="write", summary="write",
+            preview=preview,
+        )
+        approval = store.get_approval(approval_id)
+        assert approval is not None
+        assert type(approval["preview"]) is type(preview)
+        hashes.append(approval["content_sha256"])
+    assert len(set(hashes)) == len(hashes)
+
+
 def test_action_requires_human_ack_covers_generic_and_novel_outward_actions() -> None:
     # The generic sentinel stamped on gated approvals with no specific verb used to
     # slip past the gate; it must now require confirmation.

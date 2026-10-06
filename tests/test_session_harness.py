@@ -279,7 +279,7 @@ def test_session_prepare_client_command_outputs_artifacts(
     assert "## Structured Workflow" in prompt_text
     assert "Recommended schema: design-brief" in prompt_text
     assert "## Session Context" in prompt_text
-    assert "Prompt contract:" in prompt_text
+    assert "Prompt contract:" not in prompt_text
     assert payload["artifact_paths"]["json"].endswith("session_client_codex.json")
     assert Path(payload["artifact_paths"]["json"]).exists()
     assert payload["integration"]["notify_command"] == "afs session event"
