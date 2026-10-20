@@ -390,7 +390,9 @@ def build_session_bootstrap(
     if short:
         from .session_brief import build_session_brief
 
-        return build_session_brief(manager, context_path, project_path=project_path)
+        return build_session_brief(
+            manager, context_path, project_path=project_path, agent_name=agent_name
+        )
     context_path = context_path.expanduser().resolve()
     resolved_scope = resolve_scope(context_path, requester_path=project_path)
     visible_scopes = list(visible_scope_ids(resolved_scope))

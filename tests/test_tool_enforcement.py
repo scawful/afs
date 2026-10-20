@@ -183,6 +183,7 @@ def test_tools_list_defaults_to_slim_catalog_without_profile(
         "handoff.create",
         "handoff.list",
         "handoff.read",
+        "messages.ack",
         "messages.read",
         "messages.send",
         "note.create",

@@ -17,6 +17,8 @@ from .hivemind import (
     HivemindBus,
     HivemindMessage,
     HivemindSubscription,
+    normalize_agent_name,
+    recipient_matches,
 )
 
 COMMON_SCOPE = "common"
@@ -84,6 +86,7 @@ class MessageBus(HivemindBus):
         topic: str | None = None,
         ttl_hours: int | None = None,
         scope_id: str | None = None,
+        reply_to: str | None = None,
     ) -> Message:
         effective_scope = normalize_scope_id(scope_id or self.scope_id)
         if not self.all_projects and effective_scope not in self.allowed_scope_ids:
@@ -98,7 +101,14 @@ class MessageBus(HivemindBus):
             topic=topic,
             ttl_hours=ttl_hours,
             scope_id=effective_scope,
+            reply_to=reply_to,
         )
+
+    def _find_message(self, msg_id: str) -> Message | None:
+        message = super()._find_message(msg_id)
+        if message is None or not self._scope_allowed(message):
+            return None
+        return message
 
     def read(
         self,
@@ -125,5 +135,7 @@ __all__ = [
     "Message",
     "MessageBus",
     "Subscription",
+    "normalize_agent_name",
     "normalize_scope_id",
+    "recipient_matches",
 ]

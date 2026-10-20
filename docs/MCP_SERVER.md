@@ -208,6 +208,7 @@ hints, or an explicit full-catalog/debug launch:
 - `context.list`
 - `messages.send`
 - `messages.read`
+- `messages.ack`
 - `note.create`
 - `note.read`
 - `note.list`
@@ -216,6 +217,23 @@ hints, or an explicit full-catalog/debug launch:
 - `handoff.list`
 - `skill.match`
 - `skill.read`
+
+`messages.read` with `to` returns that agent's inbox: directed messages plus
+broadcasts (`to` of `all`, `*` or `everyone`), each with a `state` of
+`unread`, `read` or `done`. Recipient names are matched by family, so
+`claude-kydrog` sees messages sent to `claude`, and `to` may list several
+names separated by `,`, `/` or `;`. `messages.send` accepts `text` (stored as
+`payload.text`) and `reply_to`. `messages.ack` records `read` (or `done` with
+`done=true`) for one recipient. Directed messages carry no default TTL, and
+`messages.clean` keeps them until a recipient acks `done`.
+
+The `afs.session.bootstrap` prompt accepts `agent_name`; the short brief then
+includes a `pending` section with that agent's unread messages, unacknowledged
+handoffs, open `inbox.md` lines, active `agent_board.md` claims and the state
+of any lock path pinned on the board.
+
+Harness configs that set `AFS_ALLOWED_TOOLS` must list these names explicitly;
+the allowlist filters calls, not just `tools/list`.
 
 In a version 2 central context, `project_path` authorizes the registered
 current-project scope. Normal reads include that scope plus `common`.

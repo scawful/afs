@@ -341,6 +341,61 @@ def _parse_models_output(output: str) -> list[dict[str, str]]:
     return models
 
 
+def antigravity_brain_list_command(args: argparse.Namespace) -> int:
+    from ..antigravity_brain import list_conversations
+
+    conversations = list_conversations(
+        Path(args.root).expanduser(),
+        since_days=args.days,
+        project=Path(args.project) if args.project else None,
+        limit=args.limit,
+    )
+    if args.json:
+        print(json.dumps([item.to_dict() for item in conversations], indent=2))
+        return 0
+    if not conversations:
+        print("no Antigravity brain conversations matched")
+        return 0
+    for item in conversations:
+        data = item.to_dict()
+        project = Path(item.project).name if item.project else "-"
+        print(f"{data['updated_at'][:16]}  {item.conversation_id}  [{project}]  {item.title}")
+    return 0
+
+
+def antigravity_brain_import_command(args: argparse.Namespace) -> int:
+    from ..antigravity_brain import import_body, load_conversation
+    from ..scratchpad import ScratchpadStore
+    from .friendly import _artifact_context, _render_artifact
+
+    conversation = load_conversation(Path(args.root).expanduser() / args.conversation_id)
+    if conversation is None:
+        print(f"no Antigravity brain artifacts for {args.conversation_id}")
+        return 1
+    manager, _project, context, scope_id, project_id = _artifact_context(args)
+    store = ScratchpadStore(context, scope_id=scope_id, config=manager.config)
+    artifact_id = conversation.artifact_id()
+    existing = store.read(artifact_id) if artifact_id else None
+    if existing is not None:
+        print(f"already imported: {existing.path}")
+        return 0
+    draft = store.create(
+        title=f"Antigravity: {conversation.title}",
+        body=import_body(conversation),
+        project_id=project_id,
+        agent_name="antigravity",
+        author_kind="agent",
+        provenance={
+            "source": "antigravity.brain",
+            "conversation_id": conversation.conversation_id,
+            "path": str(conversation.path),
+        },
+        artifact_id=artifact_id,
+    )
+    _render_artifact(draft, json_output=args.json)
+    return 0
+
+
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("antigravity", help="Manage Antigravity CLI integration.")
     sub = parser.add_subparsers(dest="antigravity_command")
@@ -388,3 +443,30 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     models.add_argument("--json", action="store_true", help="Print parsed JSON model data.")
     models.set_defaults(func=antigravity_models_command)
+
+    from ..antigravity_brain import DEFAULT_BRAIN_ROOT
+    from .friendly import _add_context_args
+
+    brain = sub.add_parser(
+        "brain", help="List or import Antigravity conversation artifacts (task/plan/walkthrough)."
+    )
+    brain_sub = brain.add_subparsers(dest="brain_command")
+    brain_list = brain_sub.add_parser("list", help="List recent brain conversations.")
+    brain_list.add_argument("--root", default=str(DEFAULT_BRAIN_ROOT), help="Brain directory.")
+    brain_list.add_argument("--days", type=float, help="Only conversations updated within N days.")
+    brain_list.add_argument("--project", help="Only conversations whose inferred git root is this.")
+    brain_list.add_argument("--limit", type=int, default=20)
+    brain_list.add_argument("--json", action="store_true")
+    brain_list.set_defaults(func=antigravity_brain_list_command)
+
+    brain_import = brain_sub.add_parser(
+        "import", help="Copy one conversation's artifacts into an AFS scratchpad draft."
+    )
+    _add_context_args(brain_import)
+    brain_import.add_argument("conversation_id")
+    brain_import.add_argument("--root", default=str(DEFAULT_BRAIN_ROOT), help="Brain directory.")
+    brain_import.add_argument(
+        "--common", action="store_true", help="Import into the shared common scope."
+    )
+    brain_import.add_argument("--json", action="store_true")
+    brain_import.set_defaults(func=antigravity_brain_import_command)

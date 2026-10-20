@@ -55,6 +55,16 @@ mcp_servers = ["afs"]
 startup = ["agy"]
 manifest_exports = []
 
+[[harnesses]]
+name = "cursor"
+kind = "ide"
+instructions = []
+skill_roots = []
+command_roots = []
+mcp_servers = ["afs"]
+startup = ["afs session bootstrap --short --agent-name cursor"]
+manifest_exports = []
+
 [[skills]]
 name = "agentic-context"
 canonical_path = "../src/afs/bundled_skills/agentic-context"

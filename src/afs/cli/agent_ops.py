@@ -513,13 +513,15 @@ def jobs_work_command(args: argparse.Namespace) -> int:
     if not command and not args.dry_run:
         raise ValueError("provide --command, set AFS_AGENT_JOB_COMMAND, or use --dry-run")
 
+    workspace_arg = args.workspace or getattr(args, "path", None)
+    workspace = Path(workspace_arg).expanduser() if workspace_arg else Path.cwd()
     all_results: list[dict[str, object]] = []
     while True:
         results = run_agent_job_worker(
             context_path,
             agent_name=args.agent,
             command=command,
-            workspace=Path(args.workspace).expanduser() if args.workspace else Path.cwd(),
+            workspace=workspace,
             limit=args.limit,
             timeout=args.timeout,
             dry_run=args.dry_run,
