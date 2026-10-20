@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,58 @@ def _validate_agent_name(agent_name: str) -> str:
     return agent_name
 
 
+BROADCAST_RECIPIENTS = frozenset({"all", "*", "everyone"})
+ACK_STATUSES = ("read", "done")
+_RECIPIENT_SEPARATORS = re.compile(r"[,/;]+")
+
+
+def normalize_agent_name(name: str) -> str:
+    """Return the comparable form of an agent label ("Codex RC Planning" -> "codex-rc-planning")."""
+    return re.sub(r"[\s_]+", "-", str(name).strip().lower()).strip("-")
+
+
+def _agent_family(name: str) -> str:
+    return name.split("-", 1)[0]
+
+
+def recipient_matches(to: str | None, recipient: str) -> bool:
+    """Return whether a ``to`` field addresses *recipient*.
+
+    ``to`` may list several recipients separated by ``,``, ``/`` or ``;``.
+    A harness name and its session names share a family, so ``claude`` and
+    ``claude-kydrog`` both receive messages sent to either label.
+    """
+    if to is None:
+        return True
+    wanted = normalize_agent_name(recipient)
+    if not wanted:
+        return False
+    for raw in _RECIPIENT_SEPARATORS.split(to):
+        token = normalize_agent_name(raw)
+        if not token:
+            continue
+        if token in BROADCAST_RECIPIENTS or token == wanted:
+            return True
+        if _agent_family(token) == wanted or token == _agent_family(wanted):
+            return True
+    return False
+
+
+def message_summary(payload: Any, width: int = 120) -> str:
+    """One-line preview of a message payload (``text``/``message``/``summary``/``ask`` first)."""
+    if isinstance(payload, dict):
+        for key in ("text", "message", "summary", "ask"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                text = " ".join(value.split())
+                break
+        else:
+            text = json.dumps(payload, ensure_ascii=False)
+    else:
+        text = str(payload)
+    return text if len(text) <= width else text[: width - 3] + "..."
+
+
 @dataclass
 class HivemindMessage:
     id: str
@@ -43,6 +96,7 @@ class HivemindMessage:
     topic: str | None = None
     expires_at: str | None = None
     scope_id: str = ""
+    reply_to: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -59,6 +113,8 @@ class HivemindMessage:
             d["expires_at"] = self.expires_at
         if self.scope_id:
             d["scope_id"] = self.scope_id
+        if self.reply_to is not None:
+            d["reply_to"] = self.reply_to
         return d
 
     @classmethod
@@ -73,6 +129,7 @@ class HivemindMessage:
             topic=data.get("topic"),
             expires_at=data.get("expires_at"),
             scope_id=str(data.get("scope_id", "") or ""),
+            reply_to=data.get("reply_to"),
         )
 
 
@@ -155,12 +212,21 @@ class HivemindBus:
         topic: str | None = None,
         ttl_hours: int | None = None,
         scope_id: str = "",
+        reply_to: str | None = None,
     ) -> HivemindMessage:
+        """Write one message.
+
+        Directed messages (``to`` set) get no default expiry: they stay
+        visible until the recipient marks them done or an explicit
+        ``ttl_hours`` elapses.
+        """
         safe_from_agent = _validate_agent_name(from_agent)
+        if reply_to is not None:
+            reply_to = _validate_agent_name(reply_to)
         now = datetime.now(timezone.utc)
         msg_id = f"{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
         effective_ttl = _normalize_ttl_hours(ttl_hours)
-        if effective_ttl is None:
+        if effective_ttl is None and to is None:
             effective_ttl = _normalize_ttl_hours(
                 getattr(getattr(self._config, "hivemind", None), "default_ttl_hours", None)
             )
@@ -179,6 +245,7 @@ class HivemindBus:
             topic=topic,
             expires_at=expires_at,
             scope_id=scope_id.strip(),
+            reply_to=reply_to,
         )
 
         agent_dir = self._root / safe_from_agent
@@ -270,11 +337,124 @@ class HivemindBus:
         since: datetime | None = None,
         limit: int = 50,
     ) -> list[HivemindMessage]:
-        """Read messages addressed to a specific agent."""
+        """Read messages addressed to a specific agent (see ``recipient_matches``)."""
         all_msgs = self.read(since=since, limit=0)
-        matched = [m for m in all_msgs if m.to == recipient or m.to is None]
+        matched = [m for m in all_msgs if recipient_matches(m.to, recipient)]
         matched.sort(key=lambda m: m.timestamp)
         return matched[-limit:] if len(matched) > limit else matched
+
+    def inbox(
+        self,
+        recipient: str,
+        *,
+        include_done: bool = False,
+        include_broadcasts: bool = True,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return messages for *recipient* with that recipient's ack state.
+
+        Each entry is the message dict plus ``state`` (``unread``, ``read``
+        or ``done``). The recipient's own messages are excluded.
+        """
+        me = normalize_agent_name(recipient)
+        entries: list[dict[str, Any]] = []
+        for message in self.read_for(recipient, limit=0):
+            if normalize_agent_name(message.from_agent) == me:
+                continue
+            if message.to is None and not include_broadcasts:
+                continue
+            state = self.ack_state(message.id, recipient)
+            if state == "done" and not include_done:
+                continue
+            entries.append({**message.to_dict(), "state": state})
+        return entries[-limit:] if limit and len(entries) > limit else entries
+
+    def _acks_dir(self) -> Path:
+        ack_dir = self._root / ".acks"
+        self._safe_path(ack_dir)
+        return ack_dir
+
+    def _find_message(self, msg_id: str) -> HivemindMessage | None:
+        safe_id = _validate_agent_name(msg_id)
+        self._safe_path(self._root)
+        if not self._root.exists():
+            return None
+        for agent_dir in sorted(self._root.iterdir()):
+            if agent_dir.name.startswith(".") or not agent_dir.is_dir():
+                continue
+            candidate = agent_dir / f"{safe_id}.json"
+            self._safe_path(candidate)
+            if not candidate.is_file():
+                continue
+            try:
+                return HivemindMessage.from_dict(
+                    json.loads(candidate.read_text(encoding="utf-8"))
+                )
+            except (json.JSONDecodeError, OSError):
+                return None
+        return None
+
+    def acks(self, msg_id: str) -> list[dict[str, str]]:
+        """Return the ack records for one message, oldest first."""
+        path = self._acks_dir() / f"{_validate_agent_name(msg_id)}.json"
+        self._safe_path(path)
+        if not path.is_file():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+        records = data.get("acks") if isinstance(data, dict) else None
+        if not isinstance(records, list):
+            return []
+        return [r for r in records if isinstance(r, dict)]
+
+    def ack_state(self, msg_id: str, recipient: str) -> str:
+        me = normalize_agent_name(recipient)
+        state = "unread"
+        for record in self.acks(msg_id):
+            if normalize_agent_name(str(record.get("by", ""))) != me:
+                continue
+            if record.get("status") == "done":
+                return "done"
+            state = "read"
+        return state
+
+    def ack(self, msg_id: str, by: str, *, status: str = "read", note: str = "") -> dict[str, Any]:
+        """Record that *by* read or finished a message. Returns the message with acks."""
+        if status not in ACK_STATUSES:
+            raise ValueError(f"status must be one of {', '.join(ACK_STATUSES)}")
+        actor = normalize_agent_name(by)
+        if not actor:
+            raise ValueError("ack requires a non-empty agent name")
+        message = self._find_message(msg_id)
+        if message is None:
+            raise KeyError(f"message not found: {msg_id}")
+        ack_dir = self._acks_dir()
+        ack_dir.mkdir(parents=True, exist_ok=True)
+        records = self.acks(message.id)
+        record: dict[str, str] = {
+            "by": actor,
+            "status": status,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+        if note:
+            record["note"] = note
+        records.append(record)
+        self._write_json(ack_dir / f"{message.id}.json", {"msg_id": message.id, "acks": records})
+        try:
+            from .history import log_hivemind_event
+
+            log_hivemind_event(
+                "ack",
+                actor,
+                msg_id=message.id,
+                metadata={"status": status},
+                context_root=self._context_path,
+            )
+        except Exception:
+            pass
+        return {**message.to_dict(), "acks": records}
 
     def _subscriptions_dir(self) -> Path:
         sub_dir = self._root / ".subscriptions"
@@ -387,7 +567,7 @@ class HivemindBus:
         matched = []
         for m in all_msgs:
             # Direct messages to this agent
-            if m.to == agent_name:
+            if m.to is not None and recipient_matches(m.to, agent_name):
                 matched.append(m)
             # Topicless broadcasts
             elif m.topic is None and m.to is None:
@@ -454,14 +634,18 @@ class HivemindBus:
                 except OSError:
                     continue
                 expired = False
+                awaiting_recipient = False
                 try:
                     msg = HivemindMessage.from_dict(
                         json.loads(msg_file.read_text(encoding="utf-8"))
                     )
                     expired = _message_is_expired(msg, now)
+                    awaiting_recipient = msg.to is not None and not any(
+                        record.get("status") == "done" for record in self.acks(msg.id)
+                    )
                 except (json.JSONDecodeError, OSError):
                     pass
-                aged_out = mtime < cutoff
+                aged_out = mtime < cutoff and not awaiting_recipient
                 if expired or aged_out:
                     if not dry_run:
                         try:
@@ -469,6 +653,9 @@ class HivemindBus:
                             msg_file.unlink()
                         except OSError:
                             continue
+                        ack_file = self._acks_dir() / msg_file.name
+                        self._safe_path(ack_file)
+                        ack_file.unlink(missing_ok=True)
                     agent_stats["removed"] += 1
                     removed_count += 1
                     if expired:

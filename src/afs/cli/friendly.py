@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..context_layout import LAYOUT_VERSION, detect_layout_version
+from ..hivemind import message_summary, normalize_agent_name
 from ..messages import MessageBus
 from ..project_registry import (
     COMMON_SCOPE_ID,
@@ -542,6 +543,108 @@ def handoff_ack_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def handoff_prompt_command(args: argparse.Namespace) -> int:
+    from ..handoff_prompt import render_folder_prompt, render_revision_prompt
+
+    harness = normalize_agent_name(args.harness)
+    project = Path(args.path).expanduser().resolve() if args.path else None
+    if args.folder:
+        text = render_folder_prompt(Path(args.folder), harness=harness, project_path=project)
+    elif args.identifier:
+        store, _project_id = _handoff_store(args)
+        packet = (
+            store.read(stream_id=args.identifier)
+            if args.thread
+            else store.read(session_id=args.identifier)
+        )
+        if packet is None:
+            print(f"handoff not found: {args.identifier}")
+            return 1
+        latest = store.read(stream_id=packet.stream_id) if packet.stream_id else None
+        text = render_revision_prompt(
+            packet, harness=harness, latest=latest, project_path=project
+        )
+    else:
+        print("provide a revision ID, a thread ID with --thread, or --folder DIR")
+        return 2
+    if args.json:
+        print(json.dumps({"harness": harness, "prompt": text}, indent=2))
+    else:
+        print(text, end="")
+    return 0
+
+
+def handoff_supersede_command(args: argparse.Namespace) -> int:
+    from ..file_io import FileWriteConflict
+    from ..handoff_prompt import supersede_folder
+
+    try:
+        marker = supersede_folder(
+            Path(args.folder), superseded_by=args.with_, by=args.by, reason=args.reason or ""
+        )
+    except FileWriteConflict:
+        print(f"already superseded: {args.folder}")
+        return 1
+    if args.json:
+        print(json.dumps(marker.to_dict(), indent=2))
+    else:
+        print(f"superseded: {marker.folder} -> {marker.superseded_by}")
+    return 0
+
+
+def _format_bytes(value: int) -> str:
+    size = float(value)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def handoff_folders_command(args: argparse.Namespace) -> int:
+    from ..coordination import BOARD_FILE, INBOX_FILE
+    from ..handoff_folders import folder_report
+    from .coordination import _coordination_file
+
+    root = (
+        Path(args.root).expanduser().resolve()
+        if args.root
+        else _coordination_file(args, "handoffs")
+    )
+    live_texts = tuple(
+        (root.parent / name).read_text(encoding="utf-8", errors="replace")
+        for name in (INBOX_FILE, BOARD_FILE)
+        if (root.parent / name).is_file()
+    )
+    report = folder_report(root, older_than_days=args.older_than_days, live_texts=live_texts)
+    if args.json:
+        report["largest"] = report["largest"][: args.limit]
+        report["candidates"] = report["candidates"][: args.limit]
+        print(json.dumps(report, indent=2))
+        return 0
+    print(f"handoff folders: {report['root']} (report only; nothing is moved or deleted)")
+    print(
+        f"  {report['folder_count']} folders, {_format_bytes(report['total_bytes'])}; "
+        f"{report['superseded_count']} marked superseded"
+    )
+    kinds = ", ".join(
+        f"{kind or 'none'} {_format_bytes(size)}"
+        for kind, size in list(report["bytes_by_kind"].items())[:5]
+    )
+    print(f"  by kind: {kinds}")
+    print(
+        f"  archive candidates (>= {args.older_than_days:g} days idle, not on inbox/board): "
+        f"{report['candidate_count']} folders, {_format_bytes(report['candidate_bytes'])}"
+    )
+    for item in report["candidates"][: args.limit]:
+        flag = " superseded" if item["superseded_by"] else ""
+        print(
+            f"  - {item['name']}  {_format_bytes(item['size_bytes'])}  "
+            f"{item['age_days']:g}d idle{flag}"
+        )
+    return 0
+
+
 def handoff_close_command(args: argparse.Namespace) -> int:
     store, _project_id = _handoff_store(args)
     if not store.close(args.identifier, actor=args.by, reason=args.reason or ""):
@@ -565,6 +668,24 @@ def _message_bus(args: argparse.Namespace) -> MessageBus:
 
 def messages_list_command(args: argparse.Namespace) -> int:
     bus = _message_bus(args)
+    recipient = getattr(args, "to", None)
+    if recipient:
+        entries = bus.inbox(
+            recipient, include_done=bool(getattr(args, "include_done", False)), limit=args.limit
+        )
+        if args.json:
+            print(json.dumps(entries, indent=2))
+        elif not entries:
+            print(f"no open messages for {recipient}")
+        else:
+            for entry in entries:
+                target = f" -> {entry['to']}" if entry.get("to") else " (broadcast)"
+                summary = message_summary(entry.get("payload"))
+                print(
+                    f"{entry['timestamp'][:19]}  {entry['id']}  [{entry['state']}]  "
+                    f"{entry['from']}{target}: {summary}"
+                )
+        return 0
     messages = bus.read(
         agent_name=args.agent,
         msg_type=args.type,
@@ -587,12 +708,15 @@ def messages_list_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _payload(value: str | None) -> dict[str, Any]:
-    if not value:
-        return {}
-    parsed = json.loads(value)
-    if not isinstance(parsed, dict):
-        raise ValueError("--payload must be a JSON object")
+def _payload(value: str | None, text: str | None = None) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
+    if value:
+        loaded = json.loads(value)
+        if not isinstance(loaded, dict):
+            raise ValueError("--payload must be a JSON object")
+        parsed = loaded
+    if text:
+        parsed.setdefault("text", text)
     return parsed
 
 
@@ -601,17 +725,37 @@ def messages_send_command(args: argparse.Namespace) -> int:
     message = bus.send(
         args.from_agent,
         args.type,
-        _payload(args.payload),
+        _payload(args.payload, getattr(args, "text", None)),
         to=args.to,
         topic=args.topic,
         ttl_hours=args.ttl_hours,
         scope_id=args.scope,
+        reply_to=getattr(args, "reply_to", None),
     )
     if args.json:
         print(json.dumps(message.to_dict(), indent=2))
     else:
         print(f"sent: {message.id}")
         print(f"scope_id: {message.scope_id}")
+    return 0
+
+
+def messages_ack_command(args: argparse.Namespace) -> int:
+    bus = _message_bus(args)
+    try:
+        result = bus.ack(
+            args.message_id,
+            args.by,
+            status="done" if args.done else "read",
+            note=args.note or "",
+        )
+    except KeyError:
+        print(f"message not found in this scope: {args.message_id}")
+        return 1
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"{result['acks'][-1]['status']}: {args.message_id} by {result['acks'][-1]['by']}")
     return 0
 
 
@@ -911,6 +1055,44 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     handoff_close.add_argument("--reason")
     handoff_close.set_defaults(func=handoff_close_command)
 
+    handoff_prompt = handoff_commands.add_parser(
+        "prompt", help="Print a paste-ready next-agent prompt for a handoff."
+    )
+    add_artifact_context(handoff_prompt)
+    handoff_prompt.add_argument(
+        "identifier", nargs="?", help="Revision ID, or thread ID with --thread."
+    )
+    handoff_prompt.add_argument("--thread", action="store_true")
+    handoff_prompt.add_argument("--folder", help="Handoff folder (handoffs/<topic>_<date>).")
+    handoff_prompt.add_argument(
+        "--for", dest="harness", required=True, help="Receiving harness: codex, claude, cursor, antigravity."
+    )
+    handoff_prompt.add_argument("--json", action="store_true")
+    handoff_prompt.set_defaults(func=handoff_prompt_command)
+
+    handoff_supersede = handoff_commands.add_parser(
+        "supersede",
+        help="Mark a handoff folder superseded by writing SUPERSEDED.json beside its files.",
+    )
+    handoff_supersede.add_argument("folder", help="Older handoff folder.")
+    handoff_supersede.add_argument(
+        "--with", dest="with_", required=True, help="Newer handoff folder, revision, or path."
+    )
+    handoff_supersede.add_argument("--by", required=True, help="Agent recording the change.")
+    handoff_supersede.add_argument("--reason")
+    handoff_supersede.add_argument("--json", action="store_true")
+    handoff_supersede.set_defaults(func=handoff_supersede_command)
+
+    handoff_folders = handoff_commands.add_parser(
+        "folders", help="Report size and idle age of handoff folders (read-only)."
+    )
+    _add_context_args(handoff_folders)
+    handoff_folders.add_argument("--root", help="Handoffs directory (default: scratchpad/handoffs).")
+    handoff_folders.add_argument("--older-than-days", type=float, default=14.0)
+    handoff_folders.add_argument("--limit", type=int, default=15)
+    handoff_folders.add_argument("--json", action="store_true")
+    handoff_folders.set_defaults(func=handoff_folders_command)
+
     messages = subparsers.add_parser(
         "messages",
         help="Send and read scoped inter-agent messages.",
@@ -932,7 +1114,15 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 
     listing = message_commands.add_parser("list", help="List visible messages.")
     add_message_context(listing)
-    listing.add_argument("--agent")
+    listing.add_argument("--agent", help="Filter by sender.")
+    listing.add_argument(
+        "--to",
+        help="Inbox view: messages addressed to this agent (or its family) plus broadcasts, "
+        "with read/done state.",
+    )
+    listing.add_argument(
+        "--include-done", action="store_true", help="With --to, also show messages marked done."
+    )
     listing.add_argument("--type")
     listing.add_argument("--topic")
     listing.add_argument("--limit", type=int, default=50)
@@ -944,12 +1134,29 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     send.add_argument("--from", dest="from_agent", required=True)
     send.add_argument("--type", default="status")
     send.add_argument("--payload", help="JSON object payload.")
-    send.add_argument("--to")
+    send.add_argument("--text", help="Plain-text body (stored as payload.text).")
+    send.add_argument(
+        "--to", help="Recipient(s); separate several with ',' or '/'. 'all' is a broadcast."
+    )
+    send.add_argument("--reply-to", help="Message ID this message answers.")
     send.add_argument("--topic")
-    send.add_argument("--ttl-hours", type=int)
+    send.add_argument(
+        "--ttl-hours",
+        type=int,
+        help="Expiry. Directed messages default to no expiry; broadcasts use the config default.",
+    )
     send.add_argument("--scope", help="Destination scope (default: current project).")
     send.add_argument("--json", action="store_true")
     send.set_defaults(func=messages_send_command)
+
+    ack = message_commands.add_parser("ack", help="Mark a message read or done for one agent.")
+    add_message_context(ack)
+    ack.add_argument("message_id")
+    ack.add_argument("--by", required=True, help="Agent acknowledging the message.")
+    ack.add_argument("--done", action="store_true", help="Mark done (hidden from the inbox).")
+    ack.add_argument("--note")
+    ack.add_argument("--json", action="store_true")
+    ack.set_defaults(func=messages_ack_command)
 
     subscribe = message_commands.add_parser("subscribe", help="Subscribe to topics.")
     add_message_context(subscribe)

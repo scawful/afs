@@ -1819,6 +1819,15 @@ def _tool_hivemind_send(arguments: dict[str, Any], manager: AFSManager) -> dict[
     ttl_hours = arguments.get("ttl_hours")
     if ttl_hours is not None:
         ttl_hours = _coerce_int(ttl_hours, default=24, minimum=1, maximum=24 * 30)
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    text = arguments.get("text")
+    if isinstance(text, str) and text.strip():
+        payload = {**payload}
+        payload.setdefault("text", text.strip())
+    reply_to = arguments.get("reply_to")
+    if isinstance(reply_to, str):
+        reply_to = reply_to.strip() or None
 
     context_path, scoped = _resolve_mcp_scope(arguments, manager)
     bus = MessageBus(
@@ -1835,8 +1844,38 @@ def _tool_hivemind_send(arguments: dict[str, Any], manager: AFSManager) -> dict[
         to=to,
         topic=topic,
         ttl_hours=ttl_hours,
+        reply_to=reply_to,
     )
     return msg.to_dict()
+
+
+def _tool_messages_ack(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    from .messages import MessageBus
+
+    message_id = arguments.get("message_id")
+    by = arguments.get("by")
+    if not isinstance(message_id, str) or not message_id.strip():
+        raise ValueError("message_id is required")
+    if not isinstance(by, str) or not by.strip():
+        raise ValueError("by is required")
+    status = "done" if arguments.get("done") is True else "read"
+    note = arguments.get("note")
+    context_path, scoped = _resolve_mcp_scope(arguments, manager)
+    bus = MessageBus(
+        context_path,
+        scope_id=scoped.scope_id,
+        config=manager.config,
+        include_legacy=scoped.layout_version != LAYOUT_VERSION,
+    )
+    try:
+        return bus.ack(
+            message_id.strip(),
+            by.strip(),
+            status=status,
+            note=note.strip() if isinstance(note, str) else "",
+        )
+    except KeyError as exc:
+        raise ValueError(f"message not found in this scope: {message_id}") from exc
 
 
 def _tool_hivemind_read(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
@@ -1863,6 +1902,17 @@ def _tool_hivemind_read(arguments: dict[str, Any], manager: AFSManager) -> dict[
         include_legacy=arguments.get("include_legacy") is True
         or scoped.layout_version != LAYOUT_VERSION,
     )
+    recipient = arguments.get("to")
+    if isinstance(recipient, str) and recipient.strip():
+        return {
+            "scope_id": "all-projects" if allow_all_projects else scoped.scope_id,
+            "to": recipient.strip(),
+            "messages": bus.inbox(
+                recipient.strip(),
+                include_done=arguments.get("include_done") is True,
+                limit=limit,
+            ),
+        }
     messages = bus.read(agent_name=agent_name, msg_type=msg_type, topic=topic, limit=limit)
     return {
         "scope_id": "all-projects" if allow_all_projects else scoped.scope_id,
@@ -3424,7 +3474,13 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                     "from": {"type": "string", "description": "Sending agent name."},
                     "type": {"type": "string", "default": "status"},
                     "payload": {"type": "object"},
-                    "to": {"type": "string"},
+                    "text": {"type": "string", "description": "Plain-text body (payload.text)."},
+                    "to": {
+                        "type": "string",
+                        "description": "Recipient(s) separated by ',' or '/'; 'all' broadcasts. "
+                        "Directed messages do not expire by default.",
+                    },
+                    "reply_to": {"type": "string", "description": "Message ID being answered."},
                     "topic": {"type": "string"},
                     "ttl_hours": {"type": "integer"},
                 },
@@ -3436,12 +3492,20 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
         ),
         MCPToolDefinition(
             name="messages.read",
-            description="Read messages visible to the current project plus common messages.",
+            description=(
+                "Read messages visible to the current project plus common messages. "
+                "Pass `to` for an inbox view with read/done state."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     **_mcp_scope_properties(include_all_projects=True),
-                    "agent": {"type": "string"},
+                    "agent": {"type": "string", "description": "Filter by sender."},
+                    "to": {
+                        "type": "string",
+                        "description": "Inbox for this agent: direct, family, and broadcast messages.",
+                    },
+                    "include_done": {"type": "boolean", "default": False},
                     "type": {"type": "string"},
                     "topic": {"type": "string"},
                     "limit": {"type": "integer", "default": 50},
@@ -3450,6 +3514,24 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_hivemind_read,
+            catalog="slim",
+        ),
+        MCPToolDefinition(
+            name="messages.ack",
+            description="Mark a message read, or done so it leaves the recipient's inbox.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    **_mcp_scope_properties(),
+                    "message_id": {"type": "string"},
+                    "by": {"type": "string", "description": "Acknowledging agent name."},
+                    "done": {"type": "boolean", "default": False},
+                    "note": {"type": "string"},
+                },
+                "required": ["message_id", "by"],
+                "additionalProperties": False,
+            },
+            handler=_tool_messages_ack,
             catalog="slim",
         ),
         MCPToolDefinition(
@@ -6178,6 +6260,11 @@ def _list_prompts(registry: MCPToolRegistry | None = None) -> list[dict[str, Any
             "description": "Build a scoped session-start packet with health, notes, tasks, messages, handoffs, and durable memory. Call this first in a new session.",
             "arguments": [
                 {"name": "short", "description": "Compact startup without scans (true/false).", "required": False},
+                {
+                    "name": "agent_name",
+                    "description": "Your harness/session name (e.g. cursor, codex-lyra); adds what is waiting for you.",
+                    "required": False,
+                },
                 {"name": "native_skills", "description": "List roots; let the host load skills (true/false).", "required": False},
                 {
                     "name": "context_path",
@@ -6468,6 +6555,7 @@ def _get_prompt(
                 arguments.get("message_limit"), default=10, minimum=1, maximum=100
             ),
             short=_coerce_prompt_bool(arguments.get("short", False)),
+            agent_name=str(arguments.get("agent_name", "") or "").strip() or "cli",
             native_skills=_coerce_prompt_bool(arguments.get("native_skills", False)),
             skills_prompt=str(arguments.get("skills_prompt", "") or ""),
             skills_top_k=_coerce_int(

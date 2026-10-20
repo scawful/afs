@@ -76,6 +76,7 @@ def test_render_launchd_plist_runs_agent_job_worker(tmp_path: Path) -> None:
     assert "--loop" in args
     assert "echo hi" in args
     assert "12" in args
+    assert payload["WorkingDirectory"] == str(tmp_path / "repo")
 
 
 def test_install_worker_launchd_dry_run_does_not_write(tmp_path: Path) -> None:

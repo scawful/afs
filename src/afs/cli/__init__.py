@@ -32,6 +32,7 @@ from . import (
     calibration,
     claude,
     context,
+    coordination,
     core,
     doctor,
     embeddings,
@@ -235,6 +236,7 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
     manager_gui.register_parsers(subparsers)
     next_action.register_parsers(subparsers)
     friendly.register_parsers(subparsers)
+    coordination.register_parsers(subparsers)
 
     # Register scoped local research and human-reviewed insight lifecycles.
     insights.register_parsers(subparsers)
