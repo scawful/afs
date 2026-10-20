@@ -9,6 +9,7 @@ append-only events, so a published revision is never rewritten.
 from __future__ import annotations
 
 import base64
+import builtins
 import json
 import os
 import re
@@ -575,14 +576,17 @@ class HandoffStore:
         streams.sort(key=lambda item: (item.updated_at, item.stream_id), reverse=True)
         return streams[: max(0, limit)]
 
-    def pending_for_agent(self, name: str) -> list[HandoffPacket]:
-        """Return unacknowledged, open revisions targeted at ``name``."""
+    def pending_for_agent(self, name: str) -> builtins.list[HandoffPacket]:
+        """Return unacknowledged, open revisions targeted at ``name`` (see ``recipient_matches``)."""
+        from .hivemind import normalize_agent_name, recipient_matches
 
+        me = normalize_agent_name(name)
         pending = [
             packet
             for packet in self.list(limit=1_000_000)
-            if packet.target_agent == name
-            and name not in packet.acknowledged_by
+            if packet.target_agent
+            and recipient_matches(packet.target_agent, name)
+            and me not in {normalize_agent_name(actor) for actor in packet.acknowledged_by}
             and not packet.closed
         ]
         priority_order = {"critical": 0, "high": 1, "normal": 2, "low": 3}
