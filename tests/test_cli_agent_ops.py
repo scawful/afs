@@ -143,3 +143,21 @@ def test_agent_hooks_status_prints_next_commands(tmp_path, capsys) -> None:
     assert f"afs agent-hooks install-worker --path {workspace.resolve()} --apply --load" in output
     assert f"afs agent-jobs status --path {workspace.resolve()}" in output
     assert f"afs agent-jobs inbox --path {workspace.resolve()}" in output
+
+
+def test_agent_jobs_work_defaults_workspace_to_project_path(tmp_path, monkeypatch) -> None:
+    from afs.cli import agent_ops
+
+    seen = {}
+    monkeypatch.setattr(agent_ops, "_resolve_context", lambda _args: tmp_path / ".context")
+
+    def fake_worker(_context, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(agent_ops, "run_agent_job_worker", fake_worker)
+    args = build_parser().parse_args(
+        ["agent-jobs", "work", "--agent", "worker", "--dry-run", "--path", str(tmp_path)]
+    )
+    assert args.func(args) == 0
+    assert seen["workspace"] == tmp_path

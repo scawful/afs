@@ -77,6 +77,46 @@ Common flows:
 ./scripts/afs repair
 ```
 
+### Cross-harness coordination
+
+Codex, Claude, Cursor and Antigravity sessions share the same surfaces:
+
+```bash
+# What is waiting for me (also injected by the session-start hooks)
+./scripts/afs session bootstrap --short --agent-name cursor --path "$PWD"
+./scripts/afs messages list --to cursor --path "$PWD"
+./scripts/afs messages send --to codex --text "please rerun CI" --path "$PWD"
+./scripts/afs messages ack <message-id> --by cursor --done --path "$PWD"
+
+# Text-file bridge for scratchpad inbox.md / agent_board.md (format unchanged)
+./scripts/afs inbox list --to cursor --path "$PWD"
+./scripts/afs inbox add --from cursor --to codex --ref handoffs/x/WORK.md "ask" --path "$PWD"
+./scripts/afs inbox done --line 548 --path "$PWD"
+./scripts/afs board show --owner Cursor --path "$PWD"
+./scripts/afs board set --owner Cursor --result ... --ran ... --next ... --holds none --handoff ...
+
+# Heavy-build lease compatible with /tmp/oos-heavy.lock
+./scripts/afs lease status oos-heavy
+./scripts/afs lease run oos-heavy --owner cursor --source "$PWD" -- ninja -C build
+./scripts/afs lease reclaim oos-heavy          # dry-run; --apply only when stale
+
+# Handoffs another harness can pick up
+./scripts/afs handoff prompt <revision-id> --for claude --path "$PWD"
+./scripts/afs handoff prompt --folder .context/scratchpad/handoffs/topic_2026-10-20 --for codex
+./scripts/afs handoff supersede handoffs/old --with handoffs/new --by cursor --reason "redo"
+
+# Read-only hygiene reports
+./scripts/afs handoff folders --path "$PWD" --older-than-days 14
+./scripts/afs worktrees report --repo "$PWD" --older-than-days 7
+```
+
+`lease status` reports `free`, `held`, `owner-exited` (owner PID gone but its
+build process group or processes under `--source` remain), `stale` or
+`legacy`. `reclaim` acts only on `stale`. `lease run` starts the command in its
+own process group, records it, forwards SIGINT/SIGTERM and releases after the
+group exits. `handoff supersede` writes `SUPERSEDED.json` beside the old files
+instead of editing them. The two reports never move, remove or prune anything.
+
 Durable `afs mission` records use `.context/.afs/compat/items/missions/` in
 v2. The separate legacy mission-runner agent still reads TOML definitions from
 `.context/scratchpad/missions/`; its v2 run output is written under
@@ -1128,10 +1168,17 @@ scoped ingestion can route project records to
 ./scripts/afs antigravity setup --scope project --project-path . --apply
 ./scripts/afs antigravity models
 ./scripts/afs antigravity models --json
+./scripts/afs antigravity brain list --days 14 --project ~/src/hobby/yaze
+./scripts/afs antigravity brain import <conversation-uuid> --path ~/src/hobby/yaze
 ```
 
 `setup` is dry-run by default and does not install `agy`. See
-`docs/ANTIGRAVITY_CLI.md`.
+`docs/ANTIGRAVITY_CLI.md`. `brain list` reads
+`~/.gemini/antigravity/brain/<uuid>/` artifacts (`handoff.md`,
+`walkthrough.md`, `task.md`, `implementation_plan.md`) and infers each
+conversation's project from the git roots they mention (linked worktrees map
+to their main checkout). `brain import` copies one conversation into a
+scratchpad draft; importing the same conversation again is a no-op.
 
 ## Gemini
 

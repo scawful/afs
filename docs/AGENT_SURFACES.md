@@ -176,15 +176,21 @@ Run the built-in stdio MCP server:
 
 Built-in tools:
 
-Default `tools/list` is intentionally tiny. It exposes only the core context
-bridge; everything else should come from prompts, CLI hints, or an explicit
-full-catalog/debug launch:
+Default `tools/list` is intentionally focused: the core context bridge plus
+scoped messages, notes, handoffs and skills (full list in
+`docs/MCP_SERVER.md`). Everything else should come from prompts, CLI hints, or
+an explicit full-catalog/debug launch. The core context bridge is:
 
 - `context.status`
 - `context.query`
 - `context.read`
 - `context.write`
 - `context.list`
+
+Harnesses that should coordinate (send, read and ack messages; create and read
+handoffs) must also list `messages.send`, `messages.read`, `messages.ack`,
+`handoff.create`, `handoff.list`, `handoff.read` and `note.create` in
+`AFS_ALLOWED_TOOLS`.
 
 `afs.session.bootstrap`, `afs.session.pack`, and `afs.scratchpad.review` are
 prompts from `prompts/list`, not tools. Work preflight, approvals, repair,

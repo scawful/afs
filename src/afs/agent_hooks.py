@@ -176,6 +176,8 @@ def render_launchd_plist(
             "    <key>PATH</key>",
             "    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>",
             "  </dict>",
+            "  <key>WorkingDirectory</key>",
+            f"  <string>{_xml_escape(str(context_path.expanduser()))}</string>",
             "  <key>RunAtLoad</key>",
             "  <true/>",
             "  <key>KeepAlive</key>",
