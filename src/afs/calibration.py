@@ -134,12 +134,12 @@ def _append_jsonl(
     *,
     boundary: Path | None = None,
 ) -> None:
-    from .agents.guardrails import _file_lock
+    from .agents.guardrails import file_lock
 
     path = _validated_store_path(path, boundary=boundary, allow_missing=True)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = _validated_store_path(path, boundary=boundary, allow_missing=True)
-    with _file_lock(path):
+    with file_lock(path):
         path = _validated_store_path(path, boundary=boundary, allow_missing=True)
         _repair_jsonl_tail_unlocked(path)
         flags = (
@@ -203,10 +203,10 @@ def _load_jsonl(
         path = _validated_store_path(path, boundary=boundary, allow_missing=False)
     except FileNotFoundError:
         return []
-    from .agents.guardrails import _file_lock
+    from .agents.guardrails import file_lock
 
     entries: list[dict[str, Any]] = []
-    lock_context = _file_lock(path) if create_lock else nullcontext()
+    lock_context = file_lock(path) if create_lock else nullcontext()
     try:
         with lock_context:
             path = _validated_store_path(

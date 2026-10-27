@@ -9,6 +9,7 @@ session can see what is already in flight.
 
 from __future__ import annotations
 
+import builtins
 import json
 import re
 import uuid
@@ -116,6 +117,7 @@ class Mission:
         if acceptance and not acceptance_human_confirmed:
             acceptance_suggestion = acceptance_suggestion or acceptance
             acceptance = ""
+        metadata = data.get("metadata")
         return cls(
             mission_id=str(data.get("mission_id", "")),
             title=str(data.get("title", "")),
@@ -140,7 +142,7 @@ class Mission:
             linked_handoffs=_str_list(data.get("linked_handoffs")),
             tags=_str_list(data.get("tags")),
             log=[entry for entry in data.get("log", []) if isinstance(entry, dict)],
-            metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else {},
+            metadata=metadata if isinstance(metadata, dict) else {},
             schema_version=str(data.get("schema_version", "1")).strip() or "1",
         )
 
@@ -263,10 +265,10 @@ class MissionStore:
     def _append_manifest(self, mission_id: str) -> None:
         mission_id = _validate_mission_id(mission_id)
         self._ensure_root()
-        from .agents.guardrails import _file_lock
+        from .agents.guardrails import file_lock
 
         self._lock_path(self._manifest_path)
-        with _file_lock(self._manifest_path):
+        with file_lock(self._manifest_path):
             manifest = self._load_manifest()
             if mission_id not in manifest:
                 manifest.append(mission_id)
@@ -413,7 +415,7 @@ class MissionStore:
                 break
         return missions
 
-    def active(self, *, limit: int = 20) -> list[Mission]:
+    def active(self, *, limit: int = 20) -> builtins.list[Mission]:
         """Return in-flight missions (active or blocked), newest first."""
         missions = [
             mission
@@ -433,11 +435,11 @@ class MissionStore:
         acceptance: str | None = None,
         acceptance_set_by: str = "",
         acceptance_authorization: Any = None,
-        next_steps: list[str] | None = None,
-        blockers: list[str] | None = None,
+        next_steps: builtins.list[str] | None = None,
+        blockers: builtins.list[str] | None = None,
         link_session: str | None = None,
         link_handoff: str | None = None,
-        add_tags: list[str] | None = None,
+        add_tags: builtins.list[str] | None = None,
         note: str | None = None,
         actor: str = "",
     ) -> Mission:
@@ -445,12 +447,12 @@ class MissionStore:
         # read-modify-write could lose the human decision if another writer
         # replaced the mission in between.  Serialize the complete update per
         # mission and consume any capability only after the lock is held.
-        from .agents.guardrails import _file_lock
+        from .agents.guardrails import file_lock
 
         self._ensure_root()
         mission_path = self._mission_path(mission_id)
         self._lock_path(mission_path)
-        with _file_lock(mission_path):
+        with file_lock(mission_path):
             mission = self.get(mission_id)
             if mission is None:
                 raise MissionNotFoundError(mission_id)
@@ -471,6 +473,7 @@ class MissionStore:
                 mission.summary = summary.strip()
             if owner is not None:
                 mission.owner = owner.strip()
+            provenance: dict[str, Any] | None
             if acceptance is not None:
                 proposed_acceptance = acceptance.strip()
                 acceptance_scope = self.human_acceptance_scope(

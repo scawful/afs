@@ -7,6 +7,7 @@ import logging
 import os
 import stat
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,21 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_DECAY_HOURS = 168.0  # 1 week
 _STALE_THRESHOLD = 0.3
+
+
+def _existing_mount_roots(
+    context_path: Path,
+    config: Any | None,
+) -> Iterator[tuple[MountType, Path]]:
+    """Yield resolvable, existing mount roots; unsafe or unresolvable mounts are logged and skipped."""
+    for mount_type in MountType:
+        try:
+            mount_root = resolve_mount_root(context_path, mount_type, config=config)
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.warning("skipping %s mount: %s", mount_type.value, exc)
+            continue
+        if mount_root.exists():
+            yield mount_type, mount_root
 
 
 def _iter_mount_files(mount_root: Path, *, no_links: bool = False):
@@ -90,15 +106,7 @@ def mount_freshness(
     now = time.time()
     result: dict[str, MountFreshness] = {}
 
-    for mount_type in MountType:
-        try:
-            mount_root = resolve_mount_root(
-                context_path, mount_type, config=config
-            )
-        except Exception:
-            continue
-        if not mount_root.exists():
-            continue
+    for mount_type, mount_root in _existing_mount_roots(context_path, config):
         roots = visible_mount_roots(mount_root, mount_type=mount_type, scoped=scope)
         if not roots:
             continue
@@ -249,15 +257,7 @@ def save_context_snapshot(
         )
 
     entries: list[dict[str, Any]] = []
-    for mount_type in MountType:
-        try:
-            mount_root = resolve_mount_root(
-                context_path, mount_type, config=config
-            )
-        except Exception:
-            continue
-        if not mount_root.exists():
-            continue
+    for mount_type, mount_root in _existing_mount_roots(context_path, config):
         for visible_root in visible_mount_roots(mount_root, mount_type=mount_type, scoped=scope):
             if not visible_root.exists():
                 continue
@@ -384,10 +384,7 @@ def _load_latest_snapshot(
                 return None
         if not target.exists():
             return None
-        try:
-            return json.loads(target.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
+        return _read_snapshot(target)
 
     # Find the most recent snapshot
     try:
@@ -403,17 +400,25 @@ def _load_latest_snapshot(
     if not snapshots:
         return None
 
-    try:
-        target = snapshots[0][0]
-        if harden:
+    target = snapshots[0][0]
+    if harden:
+        try:
             target = assert_no_linklike_components(
                 target,
                 boundary=snap_dir,
                 allow_missing=False,
             )
-        return json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
+        except (OSError, ValueError):
+            return None
+    return _read_snapshot(target)
+
+
+def _read_snapshot(target: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return None
+    return payload if isinstance(payload, dict) else None
 
 
 def context_diff_since_session(
@@ -448,15 +453,7 @@ def context_diff_since_session(
 
     # Build current filesystem state
     current_entries: dict[tuple[str, str], dict[str, Any]] = {}
-    for mount_type in MountType:
-        try:
-            mount_root = resolve_mount_root(
-                context_path, mount_type, config=config
-            )
-        except Exception:
-            continue
-        if not mount_root.exists():
-            continue
+    for mount_type, mount_root in _existing_mount_roots(context_path, config):
         for visible_root in visible_mount_roots(mount_root, mount_type=mount_type, scoped=scope):
             if not visible_root.exists():
                 continue

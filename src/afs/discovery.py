@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
@@ -9,6 +10,8 @@ from .config import load_config_model
 from .manager import AFSManager
 from .models import ContextRoot
 from .schema import AFSConfig
+
+logger = logging.getLogger(__name__)
 
 
 def discover_contexts(
@@ -47,8 +50,8 @@ def discover_contexts(
             seen.add(resolved)
             try:
                 contexts.append(manager.list_context(context_path=resolved))
-            except Exception:
-                continue
+            except (OSError, ValueError, RuntimeError) as exc:
+                logger.debug("skipping unreadable context %s: %s", resolved, exc)
 
     contexts.sort(key=lambda item: item.project_name.lower())
     return contexts

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..response_schemas import SCHEMA_URI_PREFIX
+
+logger = logging.getLogger(__name__)
 
 ToolHandler = Callable[[dict[str, Any], Any], dict[str, Any]]
 logger = logging.getLogger(__name__)
@@ -128,6 +131,28 @@ class ExtensionMCPStatus:
         }
 
 
+def _record_tool_call(
+    name: str,
+    arguments: dict[str, Any],
+    result: dict[str, Any],
+    elapsed_ms: int,
+    manager: Any,
+) -> None:
+    """Append an MCP tool-call history event; failures are logged, never raised."""
+    try:
+        from ..history import log_mcp_tool_call
+
+        log_mcp_tool_call(
+            name,
+            arguments,
+            result,
+            duration_ms=elapsed_ms,
+            context_root=manager.config.general.context_root,
+        )
+    except Exception:  # noqa: BLE001 - history is telemetry; must not alter the tool result
+        logger.debug("MCP tool-call history append failed for %s", name, exc_info=True)
+
+
 @dataclass
 class MCPToolRegistry:
     tools: dict[str, MCPToolDefinition] = field(default_factory=dict)
@@ -201,8 +226,6 @@ class MCPToolRegistry:
         arguments: dict[str, Any],
         manager: Any,
     ) -> dict[str, Any]:
-        import time
-
         from ..agent_scope import allowed_tools, assert_tool_allowed
 
         tool = self.tools.get(name)
@@ -230,18 +253,7 @@ class MCPToolRegistry:
             result = tool.handler(arguments, manager)
         except Exception as exc:  # noqa: BLE001 - arbitrary extension handler boundary
             elapsed_ms = int((time.monotonic() - start) * 1000)
-            try:
-                from ..history import log_mcp_tool_call
-
-                log_mcp_tool_call(
-                    name,
-                    arguments,
-                    {"error": str(exc)},
-                    duration_ms=elapsed_ms,
-                    context_root=manager.config.general.context_root,
-                )
-            except Exception:  # noqa: BLE001 - telemetry must preserve handler failure
-                logger.debug("MCP failure logging unavailable", exc_info=True)
+            _record_tool_call(name, arguments, {"error": str(exc)}, elapsed_ms, manager)
             raise
         elapsed_ms = int((time.monotonic() - start) * 1000)
 
@@ -249,17 +261,7 @@ class MCPToolRegistry:
         if tool.post_hook is not None:
             result = tool.post_hook(arguments, result, manager)
 
-        try:
-            from ..history import log_mcp_tool_call
-            log_mcp_tool_call(
-                name,
-                arguments,
-                result,
-                duration_ms=elapsed_ms,
-                context_root=manager.config.general.context_root,
-            )
-        except Exception:  # noqa: BLE001 - telemetry must preserve handler result
-            logger.debug("MCP result logging unavailable", exc_info=True)
+        _record_tool_call(name, arguments, result, elapsed_ms, manager)
         return result
 
     def read_resource(self, uri: str, manager: Any) -> dict[str, Any]:

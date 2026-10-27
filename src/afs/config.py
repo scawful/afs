@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,8 @@ from .runtime_paths import default_config_root, default_context_root
 from .schema import AFSConfig
 from .skills import normalize_skill_root
 from .toml_compat import tomllib
+
+logger = logging.getLogger(__name__)
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -261,7 +264,8 @@ def _merge_workspace_registry(config_data: dict[str, Any]) -> None:
     try:
         with open(registry_path, "rb") as f:
             registry = tomllib.load(f)
-    except Exception:
+    except (OSError, ValueError) as exc:
+        logger.warning("ignoring unreadable workspace registry %s: %s", registry_path, exc)
         return
 
     entries = registry.get("workspaces", [])

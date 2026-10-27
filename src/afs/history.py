@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -13,7 +14,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from .config import load_config_model
 from .context_layout import LAYOUT_VERSION, detect_layout_version
@@ -22,6 +23,8 @@ from .core import find_root, resolve_context_root
 from .index_storage import fsync_directory
 from .models import MountType
 from .path_safety import assert_no_linklike_components, lexical_absolute
+
+logger = logging.getLogger(__name__)
 
 SENSITIVE_MARKERS = ("key", "token", "secret", "password")
 EVENT_FILE_PREFIX = "events"
@@ -124,7 +127,7 @@ def _resolve_context_root(start_dir: Path | None = None) -> Path | None:
     root = find_root(start_dir)
     try:
         return resolve_context_root(config, root)
-    except Exception:
+    except (OSError, RuntimeError):
         return None
 
 
@@ -247,7 +250,7 @@ def _safe_v2_leaf(
     )
 
 
-def _open_text_no_follow(path: Path, flags: int, *, mode: int = 0o600):
+def _open_text_no_follow(path: Path, flags: int, *, mode: int = 0o600) -> TextIO:
     """Open a text file without following its leaf link where supported."""
 
     descriptor = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), mode)
@@ -534,10 +537,8 @@ def _maybe_enrich_work_assistant(
         from .work_assistant import enrich_logged_event
 
         enrich_logged_event(context_root, event)
-    except Exception:
-        # Work-assistant enrichment is a best-effort background side effect of
-        # logging. A failure here must never block the canonical history event.
-        return
+    except Exception:  # noqa: BLE001 - enrichment must never block the canonical history event
+        logger.warning("work-assistant enrichment failed for history event", exc_info=True)
 
 
 def append_history_event(
@@ -1235,9 +1236,9 @@ def _load_history_payload_from_root(
             ):
                 return None
         payload = json.loads(raw_payload)
-    except (OSError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
-    return payload
+    return payload if isinstance(payload, dict) else None
 
 
 def load_history_payload(event: dict[str, Any], history_root: Path) -> dict[str, Any] | None:

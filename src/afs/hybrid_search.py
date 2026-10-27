@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import uuid
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -616,7 +617,7 @@ class HybridSearchEngine:
         collection = _collection_from_hybrid_metadata(metadata)
 
         database_path = self.database_path
-        with sqlite3.connect(database_path) as connection:
+        with closing(sqlite3.connect(database_path)) as connection:
             connection.row_factory = sqlite3.Row
             documents = _load_scoped_documents(connection, allowed_scopes)
             by_id = {document.doc_id: document for document in documents}
@@ -758,7 +759,7 @@ class HybridSearchEngine:
         )
         try:
             database_path = self._safe_database_bundle(database_path)
-            with sqlite3.connect(database_path) as connection:
+            with closing(sqlite3.connect(database_path)) as connection, connection:
                 connection.execute("PRAGMA synchronous=FULL")
                 _create_schema(connection)
                 for document in documents:

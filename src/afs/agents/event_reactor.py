@@ -49,7 +49,7 @@ from ..protocols.canonical_json import (
     strict_json_loads,
 )
 from ..schema import MAX_AGENT_RESTARTS, AgentConfig
-from .guardrails import _file_lock
+from .guardrails import file_lock
 
 _log = logging.getLogger(__name__)
 
@@ -2667,7 +2667,7 @@ def open_event_batch(
                 f"could not durably set up event reactor state under {state_dir}: {exc}"
             ) from exc
         try:
-            stack.enter_context(_file_lock(_state_path(state_dir), timeout=lock_timeout))
+            stack.enter_context(file_lock(_state_path(state_dir), timeout=lock_timeout))
         except TimeoutError as exc:
             raise ReactorBusyError(
                 f"event reactor lock is held by another process ({exc})"

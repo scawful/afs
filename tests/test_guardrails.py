@@ -22,7 +22,7 @@ from afs.agents.guardrails import (
     GuardrailConfig,
     GuardrailedAgent,
     QuotaTracker,
-    _file_lock,
+    file_lock,
     resolve_model,
 )
 from afs.claude_defaults import DEFAULT_CLAUDE_GENERATION_MODEL
@@ -923,7 +923,7 @@ class TestFileLocking:
     def test_lock_basic(self, tmp_path: Path) -> None:
         target = tmp_path / "test.json"
         target.write_text("{}", encoding="utf-8")
-        with _file_lock(target):
+        with file_lock(target):
             # Should be able to read/write while holding lock
             target.write_text('{"locked": true}', encoding="utf-8")
         data = json.loads(target.read_text(encoding="utf-8"))
@@ -931,14 +931,14 @@ class TestFileLocking:
 
     def test_lock_creates_parent_dirs(self, tmp_path: Path) -> None:
         target = tmp_path / "deep" / "nested" / "test.json"
-        with _file_lock(target):
+        with file_lock(target):
             pass
         assert (tmp_path / "deep" / "nested" / "test.json.lock").exists()
 
     def test_lock_cleanup(self, tmp_path: Path) -> None:
         target = tmp_path / "test.json"
         target.write_text("{}", encoding="utf-8")
-        with _file_lock(target):
+        with file_lock(target):
             pass
         # Lock file should exist (not deleted, just unlocked)
         assert (tmp_path / "test.json.lock").exists()
@@ -959,7 +959,7 @@ class TestFileLocking:
         monkeypatch.setattr(guardrails, "fcntl", None)
         monkeypatch.setattr(guardrails, "msvcrt", FakeMsvcrt)
 
-        with _file_lock(tmp_path / "test.json"):
+        with file_lock(tmp_path / "test.json"):
             pass
 
         assert calls == [(FakeMsvcrt.LK_NBLCK, 1), (FakeMsvcrt.LK_UNLCK, 1)]
@@ -975,7 +975,7 @@ class TestFileLocking:
         monkeypatch.setattr(guardrails, "_try_lock", always_contended)
 
         with pytest.raises(TimeoutError, match="Lock timeout"):
-            with _file_lock(tmp_path / "test.json", timeout=0):
+            with file_lock(tmp_path / "test.json", timeout=0):
                 entered = True
 
         assert entered is False
