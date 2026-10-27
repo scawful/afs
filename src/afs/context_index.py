@@ -6,7 +6,8 @@ import hashlib
 import os
 import re
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -207,7 +208,7 @@ class ContextSQLiteIndex:
         for mount_type in selected_mounts:
             try:
                 mount_root = self._manager.resolve_mount_root(self._context_path, mount_type)
-            except Exception as exc:  # pragma: no cover - defensive
+            except (OSError, RuntimeError, ValueError) as exc:
                 errors.append(f"{mount_type.value}: resolve failed: {exc}")
                 continue
 
@@ -318,7 +319,7 @@ class ContextSQLiteIndex:
                     mount_type=mount_type,
                     scoped=scoped,
                 )
-            except Exception as exc:  # pragma: no cover - defensive
+            except (OSError, RuntimeError, ValueError) as exc:
                 errors.append(f"{mount_type.value}: resolve failed: {exc}")
                 continue
 
@@ -409,8 +410,9 @@ class ContextSQLiteIndex:
             return False
 
         mount_root = self._manager.resolve_mount_root(self._context_path, mount_type)
-        entry = mount_root / normalized
-        entry = self._safe_v2_index_entry(mount_type, normalized, entry)
+        entry: Path | None = self._safe_v2_index_entry(
+            mount_type, normalized, mount_root / normalized
+        )
         if entry is None:
             self.delete_relative_path(mount_type, normalized)
             return False
@@ -460,16 +462,21 @@ class ContextSQLiteIndex:
         candidate = absolute_path.expanduser().resolve()
         if candidate.exists():
             if candidate.is_dir():
-                rebuild_kwargs = {
-                    "mount_types": [mount_type],
-                    "include_content": include_content,
-                    "max_file_size_bytes": max_file_size_bytes,
-                    "max_content_chars": max_content_chars,
-                }
                 if scoped is not None and scoped.layout_version == LAYOUT_VERSION:
-                    self.rebuild_scoped(scoped, **rebuild_kwargs)
+                    self.rebuild_scoped(
+                        scoped,
+                        mount_types=[mount_type],
+                        include_content=include_content,
+                        max_file_size_bytes=max_file_size_bytes,
+                        max_content_chars=max_content_chars,
+                    )
                 else:
-                    self.rebuild(**rebuild_kwargs)
+                    self.rebuild(
+                        mount_types=[mount_type],
+                        include_content=include_content,
+                        max_file_size_bytes=max_file_size_bytes,
+                        max_content_chars=max_content_chars,
+                    )
                 return True
             self.upsert_relative_path(
                 mount_type,
@@ -539,7 +546,7 @@ class ContextSQLiteIndex:
         for mount_type in MountType:
             try:
                 mount_root = self._manager.resolve_mount_root(self._context_path, mount_type)
-            except Exception:
+            except (OSError, RuntimeError, ValueError):
                 continue
             if not mount_root.exists():
                 continue
@@ -789,16 +796,16 @@ class ContextSQLiteIndex:
 
         def visible(relative_path: str) -> bool:
             return _relative_path_matches_prefixes(relative_path, normalized_prefixes)
-        added: list[dict[str, str]] = []
-        modified: list[dict[str, str]] = []
-        deleted: list[dict[str, str]] = []
+        added: list[dict[str, str | int]] = []
+        modified: list[dict[str, str | int]] = []
+        deleted: list[dict[str, str | int]] = []
 
         for mount_type in selected_mounts:
             try:
                 mount_root = self._manager.resolve_mount_root(
                     self._context_path, mount_type
                 )
-            except Exception:
+            except (OSError, RuntimeError, ValueError):
                 continue
             if not mount_root.exists():
                 continue
@@ -938,7 +945,7 @@ class ContextSQLiteIndex:
                     mount_root = self._manager.resolve_mount_root(
                         self._context_path, mount_type
                     )
-                except Exception:
+                except (OSError, RuntimeError, ValueError):
                     continue
                 if not mount_root.exists():
                     files[mount_key] = []
@@ -1381,7 +1388,7 @@ class ContextSQLiteIndex:
             fingerprint = hashlib.sha256()
             try:
                 mount_root = self._manager.resolve_mount_root(self._context_path, mount_type)
-            except Exception:
+            except (OSError, RuntimeError, ValueError):
                 snapshot[mount_type.value] = _empty_mount_snapshot()
                 continue
             if not mount_root.exists():
@@ -1443,7 +1450,7 @@ class ContextSQLiteIndex:
                     mount_type=mount_type,
                     scoped=scoped,
                 )
-            except Exception:
+            except (OSError, RuntimeError, ValueError):
                 snapshot[mount_type.value] = _empty_mount_snapshot()
                 continue
             scoped_candidates: list[tuple[Path, str]] = []
@@ -1458,14 +1465,14 @@ class ContextSQLiteIndex:
                 scoped_candidates.extend(
                     _iter_mount_entries_with_prefix(root, prefix)
                 )
-            for entry, relative_path in sorted(
+            for raw_entry, relative_path in sorted(
                 scoped_candidates,
                 key=lambda candidate: candidate[1],
             ):
                 entry = self._safe_v2_index_entry(
                     mount_type,
                     relative_path,
-                    entry,
+                    raw_entry,
                 )
                 if entry is None or self._should_skip_relative_path(
                     mount_type,
@@ -1651,7 +1658,7 @@ class ContextSQLiteIndex:
         configured_name = DEFAULT_DB_FILENAME
         try:
             raw_name = self._manager.config.context_index.db_filename
-        except Exception:
+        except AttributeError:
             raw_name = DEFAULT_DB_FILENAME
         if isinstance(raw_name, str) and raw_name.strip():
             configured_name = raw_name.strip()
@@ -1940,12 +1947,22 @@ class ContextSQLiteIndex:
         except sqlite3.OperationalError:
             pass
 
-    def _connect(self) -> sqlite3.Connection:
+    def _open_connection(self) -> sqlite3.Connection:
         self._assert_managed_db_safe(require_parent=True)
         connection = sqlite3.connect(self._db_path, timeout=5.0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=5000")
         return connection
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection that commits or rolls back, then always closes."""
+        connection = self._open_connection()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _normalize_mount_types(mount_types: list[MountType] | None) -> list[MountType]:

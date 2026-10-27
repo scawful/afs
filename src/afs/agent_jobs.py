@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import os
 import re
 import stat
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_scope import assert_mount_allowed
-from .agents.guardrails import _file_lock
+from .agents.guardrails import file_lock
 from .context_paths import resolve_mount_root
 from .models import MountType
 
@@ -99,7 +100,7 @@ def _replace_durable(source: Path, destination: Path, *, replace: bool = True) -
     if replace:
         flags |= 0x1  # MOVEFILE_REPLACE_EXISTING
     if not move_file_ex(str(source), str(destination), flags):
-        raise ctypes.WinError()
+        raise ctypes.WinError()  # type: ignore[attr-defined]  # Windows-only; mypy analyzes as linux
 
 
 def _mkdir_durable(path: Path, *, durable_base: Path) -> None:
@@ -403,7 +404,7 @@ class AgentJobQueue:
         if not self._root.exists():
             return None
         self._assert_queue_directory(self._root)
-        with _file_lock(self._lock_path()):
+        with file_lock(self._lock_path()):
             return self._get_unlocked(job_id)
 
     def _get_unlocked(self, job_id: str) -> AgentJob | None:
@@ -429,7 +430,7 @@ class AgentJobQueue:
         # confirmation and state moves under one cross-process queue lock so
         # MoveFileEx cannot fail merely because the receipt handshake is
         # flushing or parsing the same live record.
-        with _file_lock(self._lock_path()):
+        with file_lock(self._lock_path()):
             for _attempt in range(3):
                 retry = False
                 for state in JOB_STATES:
@@ -457,10 +458,10 @@ class AgentJobQueue:
         if not self._root.exists():
             return []
         self._assert_queue_directory(self._root)
-        with _file_lock(self._lock_path()):
+        with file_lock(self._lock_path()):
             return self._list_unlocked(status=status)
 
-    def _list_unlocked(self, *, status: str | None = None) -> list[AgentJob]:
+    def _list_unlocked(self, *, status: str | None = None) -> builtins.list[AgentJob]:
         states = [status] if status else list(JOB_STATES)
         jobs: list[AgentJob] = []
         for state in states:
@@ -485,7 +486,7 @@ class AgentJobQueue:
         if status not in JOB_STATES:
             raise ValueError(f"Invalid job state: {status}")
         self._ensure_durable()
-        with _file_lock(self._lock_path()):
+        with file_lock(self._lock_path()):
             return self._move_unlocked(
                 job_id,
                 status,
@@ -543,7 +544,7 @@ class AgentJobQueue:
 
     def claim(self, job_id: str, agent_name: str) -> AgentJob:
         self._ensure_durable()
-        with _file_lock(self._lock_path()):
+        with file_lock(self._lock_path()):
             job = self._get_unlocked(job_id)
             if job is None:
                 raise FileNotFoundError(f"Agent job not found: {job_id}")

@@ -9,10 +9,16 @@ from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, Union
 
 from ..plugins import load_enabled_extensions
 
+if TYPE_CHECKING:
+    from ..schema import AFSConfig
+
 logger = logging.getLogger(__name__)
+
+ExtensionConfig = Union["AFSConfig", dict[str, Any], None]
 
 
 @dataclass(frozen=True)
@@ -143,7 +149,7 @@ def _load_core_agents() -> dict[str, AgentSpec]:
     return loaded
 
 
-def _load_extension_agents(config: object = None) -> dict[str, AgentSpec]:
+def _load_extension_agents(config: ExtensionConfig = None) -> dict[str, AgentSpec]:
     loaded: dict[str, AgentSpec] = {}
     for extension in load_enabled_extensions(config=config).values():
         for module_name in extension.agent_modules:
@@ -179,17 +185,17 @@ def _multi_extension_import_path(extension_roots: list[Path]):
         sys.path = original
 
 
-def get_agent_registry(config: object = None) -> dict[str, AgentSpec]:
+def get_agent_registry(config: ExtensionConfig = None) -> dict[str, AgentSpec]:
     registry = _load_core_agents()
     registry.update(_load_extension_agents(config=config))
     return registry
 
 
-def list_agents(config: object = None) -> list[AgentSpec]:
+def list_agents(config: ExtensionConfig = None) -> list[AgentSpec]:
     return sorted(get_agent_registry(config=config).values(), key=lambda spec: spec.name)
 
 
-def get_agent(name: str, config: object = None) -> AgentSpec | None:
+def get_agent(name: str, config: ExtensionConfig = None) -> AgentSpec | None:
     return get_agent_registry(config=config).get(name)
 
 

@@ -1531,14 +1531,14 @@ def test_v2_context_query_auto_index_does_not_traverse_or_replace_beta(
     index.delete_relative_prefix(MountType.KNOWLEDGE, f"projects/{alpha_id}")
     index.delete_relative_prefix(MountType.KNOWLEDGE, "common")
     statements: list[str] = []
-    original_connect = ContextSQLiteIndex._connect
+    original_open = ContextSQLiteIndex._open_connection
 
-    def traced_connect(current: ContextSQLiteIndex):
-        connection = original_connect(current)
+    def traced_open(current: ContextSQLiteIndex):
+        connection = original_open(current)
         connection.set_trace_callback(statements.append)
         return connection
 
-    monkeypatch.setattr(ContextSQLiteIndex, "_connect", traced_connect)
+    monkeypatch.setattr(ContextSQLiteIndex, "_open_connection", traced_open)
 
     real_iterdir = Path.iterdir
 

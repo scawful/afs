@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import builtins
 import json
+import logging
 import os
 import re
 import stat
@@ -35,6 +36,8 @@ from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_paths import resolve_mount_root
 from .models import MountType
 from .path_safety import assert_no_linklike_components
+
+logger = logging.getLogger(__name__)
 
 HANDOFF_SCHEMA_VERSION = "3"
 LEGACY_HANDOFF_SCHEMA_VERSION = "2"
@@ -1031,11 +1034,12 @@ class HandoffStore:
             return
         try:
             self._write_legacy_compatibility(packet)
-        except Exception:
-            # Canonical Markdown is the source of truth.  Compatibility is
-            # derived state and must never turn a committed write into a
-            # reported failure.
-            pass
+        except Exception:  # noqa: BLE001 - derived state must never fail a committed canonical write
+            logger.warning(
+                "legacy handoff compatibility update failed for %s",
+                packet.revision_id,
+                exc_info=True,
+            )
 
     def _write_legacy_compatibility(self, packet: HandoffPacket) -> None:
         legacy_codec = self._legacy_write_codec()
@@ -1185,8 +1189,8 @@ class HandoffStore:
                 },
                 context_root=self._context_path,
             )
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - history is telemetry; the handoff is already committed
+            logger.warning("handoff history append failed for %s", packet.revision_id, exc_info=True)
 
 
 __all__ = [

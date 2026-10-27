@@ -62,5 +62,5 @@ try:  # pragma: no cover - compatibility path
             "extract_with_stats",
         ]
     )
-except Exception:
+except Exception:  # noqa: BLE001, S110 - optional extension import boundary
     pass

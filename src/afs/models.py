@@ -148,10 +148,20 @@ class ProjectMetadata:
             created_at = created_at.isoformat()
         if not isinstance(created_at, str):
             created_at = datetime.now().isoformat()
-        description_value = data.get("description")
-        description = description_value if isinstance(description_value, str) else ""
-        agents = [agent for agent in data.get("agents", []) if isinstance(agent, str)]
-        manual_only = [p for p in data.get("manual_only", []) if isinstance(p, str)]
+        raw_description = data.get("description")
+        description = raw_description if isinstance(raw_description, str) else ""
+        raw_agents = data.get("agents")
+        agents = (
+            [agent for agent in raw_agents if isinstance(agent, str)]
+            if isinstance(raw_agents, list)
+            else []
+        )
+        raw_manual_only = data.get("manual_only")
+        manual_only = (
+            [p for p in raw_manual_only if isinstance(p, str)]
+            if isinstance(raw_manual_only, list)
+            else []
+        )
         directories: dict[str, str] = {}
         raw_dirs = data.get("directories")
         if isinstance(raw_dirs, dict):

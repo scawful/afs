@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import os
 import tempfile
 from collections.abc import Iterator
@@ -16,6 +17,8 @@ try:  # pragma: no cover - platform specific
     import fcntl
 except ImportError:  # pragma: no cover - platform specific
     fcntl = None
+
+logger = logging.getLogger(__name__)
 
 ACTIVE_AGENT_STATES = {"running", "awaiting_review"}
 RECENT_AGENT_WINDOW = timedelta(hours=24)
@@ -96,13 +99,14 @@ def resolve_agent_task(
         spec = get_agent(name)
         if spec and spec.description.strip():
             return spec.description.strip()
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - extension agent loading boundary; description is cosmetic
+        logger.debug("agent registry lookup failed for %s: %s", name, exc)
 
     if module.strip():
         try:
             loaded = importlib.import_module(module)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - arbitrary agent module import; description is cosmetic
+            logger.debug("agent module import failed for %s: %s", module, exc)
             loaded = None
         if loaded is not None:
             module_description = getattr(loaded, "AGENT_DESCRIPTION", "")

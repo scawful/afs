@@ -147,6 +147,11 @@ def _write_fake_afs_cli(
     return afs_cli
 
 
+def _clean_env() -> dict[str, str]:
+    """Copy the environment without the developer's ambient AFS_* settings."""
+    return {key: value for key, value in os.environ.items() if not key.startswith("AFS_")}
+
+
 def _write_fake_client(path: Path, log_path: Path) -> Path:
     path.write_text(
         "#!/usr/bin/env python3\n"
@@ -210,7 +215,7 @@ def _run_shell_init_helper(
     if create_context:
         (workspace / ".context").mkdir()
 
-    env = os.environ.copy()
+    env = _clean_env()
     env["AFS_ROOT"] = str(fake_root)
     env["AFS_VENV"] = str(fake_root / ".venv")
     env["FAKE_PYTHON_LOG"] = str(log_path)
@@ -287,7 +292,7 @@ def _run_client_session(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
-    env = os.environ.copy()
+    env = _clean_env()
     if env_overrides:
         env.update(env_overrides)
     env["FAKE_AFS_LOG"] = str(afs_log)
@@ -343,6 +348,7 @@ def test_afs_shell_init_exposes_afs_dev_alias(tmp_path: Path) -> None:
         ],
         capture_output=True,
         text=True,
+        env=_clean_env(),
         check=False,
     )
 
@@ -396,6 +402,7 @@ def test_afs_agent_hooks_route_harness_commands(tmp_path: Path) -> None:
         ],
         capture_output=True,
         text=True,
+        env=_clean_env(),
         check=False,
     )
 
@@ -436,6 +443,7 @@ def test_afs_agent_hooks_override_existing_aliases(tmp_path: Path) -> None:
         ],
         capture_output=True,
         text=True,
+        env=_clean_env(),
         check=False,
     )
 
@@ -459,6 +467,7 @@ def test_afs_agent_hooks_expose_raw_bypass_functions(tmp_path: Path) -> None:
         ],
         capture_output=True,
         text=True,
+        env=_clean_env(),
         check=False,
     )
 
@@ -545,7 +554,7 @@ def test_afs_verify_shell_helper_delegates_to_session_verify(tmp_path: Path) -> 
     workspace.mkdir()
     (workspace / ".context").mkdir()
 
-    env = os.environ.copy()
+    env = _clean_env()
     env["AFS_ROOT"] = str(fake_root)
     env["AFS_VENV"] = str(fake_root / ".venv")
     env["FAKE_VERIFY_LOG"] = str(verify_log)
@@ -605,7 +614,7 @@ def test_afs_session_verify_records_passed_event(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
-    env = os.environ.copy()
+    env = _clean_env()
     env["AFS_ROOT"] = str(root)
     env["AFS_CLI"] = str(root / "scripts" / "afs")
     env["AFS_SESSION_NOTIFY"] = str(copied_notify)
@@ -675,7 +684,7 @@ def test_afs_session_verify_records_failed_event_and_returns_command_status(tmp_
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
-    env = os.environ.copy()
+    env = _clean_env()
     env["AFS_ROOT"] = str(root)
     env["AFS_CLI"] = str(root / "scripts" / "afs")
     env["AFS_SESSION_NOTIFY"] = str(copied_notify)
@@ -726,7 +735,7 @@ def test_afs_check_prefers_venv_ruff(tmp_path: Path) -> None:
     )
     (venv_bin / "python").chmod((venv_bin / "python").stat().st_mode | stat.S_IXUSR)
 
-    env = os.environ.copy()
+    env = _clean_env()
     env["AFS_VENV"] = str(root / ".venv")
     env["FAKE_RUFF_LOG"] = str(log_path)
 
@@ -1068,7 +1077,7 @@ def test_afs_session_notify_uses_session_env_defaults(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
-    env = os.environ.copy()
+    env = _clean_env()
     env["AFS_ROOT"] = str(root)
     env["AFS_CLI"] = str(root / "scripts" / "afs")
     env["AFS_SESSION_CLIENT"] = "codex"

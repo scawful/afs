@@ -7,7 +7,8 @@ import logging
 import os
 import subprocess
 import time
-from contextlib import contextmanager
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,11 +82,11 @@ def _unlock(fd: int) -> None:
 
 
 @contextmanager
-def _file_lock(path: Path, *, timeout: float = 5.0):
-    """Acquire a non-blocking advisory file lock with a bounded timeout."""
+def file_lock(path: Path, *, timeout: float = 5.0) -> Iterator[None]:
+    """Acquire a non-blocking advisory file lock on ``<path>.lock`` with a bounded timeout."""
     lock_path = path.with_suffix(path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = None
+    fd: int | None = None
     acquired = False
     try:
         fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
@@ -104,10 +105,8 @@ def _file_lock(path: Path, *, timeout: float = 5.0):
         yield
     finally:
         if fd is not None and acquired:
-            try:
+            with suppress(OSError):
                 _unlock(fd)
-            except OSError:
-                pass
         if fd is not None:
             os.close(fd)
 
@@ -166,7 +165,7 @@ class QuotaTracker:
     def _load(self) -> None:
         if not self._path.exists():
             return
-        with _file_lock(self._path):
+        with file_lock(self._path):
             try:
                 self._entries = self._read_entries_unlocked()
             except (json.JSONDecodeError, OSError):
@@ -191,7 +190,7 @@ class QuotaTracker:
         self._path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def _save(self) -> None:
-        with _file_lock(self._path):
+        with file_lock(self._path):
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._write_entries_unlocked()
 
@@ -251,7 +250,7 @@ class QuotaTracker:
 
     def record_call(self, provider: str, cost_usd: float = 0.0) -> None:
         """Record an API call for quota tracking."""
-        with _file_lock(self._path):
+        with file_lock(self._path):
             self._path.parent.mkdir(parents=True, exist_ok=True)
             if self._path.exists():
                 try:

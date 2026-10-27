@@ -23,7 +23,7 @@ from ..path_safety import assert_no_linklike_components
 from ..profiles import resolve_active_profile
 from ..tasks import Task, TaskQueue
 from .base import AgentResult, emit_result, now_iso
-from .guardrails import _file_lock
+from .guardrails import file_lock
 
 AGENT_NAME = "tooling-watch"
 MAX_TASKS = 256
@@ -135,7 +135,7 @@ def run_watch(context: Path, state: Path, *, dry_run: bool = False) -> dict[str,
         return {"status": "ok", "observations": _collect(context, datetime.now(timezone.utc)), "alerts": 0}
     secure_mkdir(state.parent)
     bus = MessageBus(context, scope_id="common")
-    with _file_lock(state):
+    with file_lock(state):
         prior_error = ""
         try:
             prior_error = _read_json(error_path, {}).get("error", "")

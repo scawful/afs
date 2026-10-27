@@ -407,8 +407,7 @@ class ContextFileSystem:
                 max_file_size_bytes=settings.max_file_size_bytes,
                 max_content_chars=settings.max_content_chars,
             )
-        # Index plugins are an optional post-write boundary; preserve the write.
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - index sync is derived state; the file write already succeeded
             logger.debug("Context index sync skipped for %s: %s", relative_path, exc)
 
     def stat_entry(

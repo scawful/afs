@@ -113,7 +113,6 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/agent_context.py" = ["BLE001", "S110"]
 "src/afs/agent_job_worker.py" = ["BLE001"]
 "src/afs/agent_manifest_sync.py" = ["BLE001"]
-"src/afs/agent_registry.py" = ["BLE001", "S110"]
 "src/afs/agents/__init__.py" = ["BLE001"]
 "src/afs/agents/base.py" = ["BLE001"]
 "src/afs/agents/context_warm.py" = ["BLE001", "S110"]
@@ -136,14 +135,8 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/cli/sources.py" = ["BLE001"]
 "src/afs/cli/watch.py" = ["BLE001", "S110", "S112"]
 "src/afs/codebase_index.py" = ["BLE001"]
-"src/afs/config.py" = ["BLE001"]
-"src/afs/context_freshness.py" = ["BLE001", "S112"]
-"src/afs/context_index.py" = ["BLE001", "S112"]
 "src/afs/deployment/cli.py" = ["BLE001", "S110"]
 "src/afs/deployment/validator.py" = ["BLE001"]
-"src/afs/discovery.py" = ["BLE001", "S112"]
-"src/afs/embeddings.py" = ["BLE001", "S110"]
-"src/afs/extensions.py" = ["BLE001"]
 "src/afs/gateway/backends.py" = ["BLE001"]
 "src/afs/generators/__init__.py" = ["BLE001", "S110"]
 "src/afs/generators/cot/generator.py" = ["BLE001"]
@@ -151,28 +144,21 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/generators/model_generator.py" = ["BLE001"]
 "src/afs/grounding_hooks.py" = ["BLE001"]
 "src/afs/gws.py" = ["BLE001", "S110"]
-"src/afs/handoff.py" = ["BLE001", "S110"]
 "src/afs/health/afs_status.py" = ["BLE001"]
 "src/afs/health/cli.py" = ["BLE001"]
 "src/afs/health/daemon.py" = ["BLE001"]
 "src/afs/health/enhanced_checks.py" = ["BLE001", "S110"]
-"src/afs/history.py" = ["BLE001"]
-"src/afs/hivemind.py" = ["BLE001", "S110"]
-"src/afs/knowledge/__init__.py" = ["BLE001", "S110"]
 "src/afs/knowledge/graph_core.py" = ["BLE001"]
 "src/afs/manager.py" = ["BLE001"]
 "src/afs/manager_gui.py" = ["BLE001"]
-"src/afs/memory_consolidation.py" = ["BLE001", "S110"]
 "src/afs/missions.py" = ["BLE001", "S110"]
 "src/afs/next_action.py" = ["BLE001"]
 "src/afs/notifications/desktop.py" = ["BLE001"]
 "src/afs/notifications/discord.py" = ["BLE001"]
 "src/afs/notifications/email.py" = ["BLE001"]
 "src/afs/notifications/slack.py" = ["BLE001"]
-"src/afs/plugins.py" = ["BLE001"]
 "src/afs/registry/cli.py" = ["BLE001"]
 "src/afs/services/manager.py" = ["BLE001", "S110"]
-"src/afs/sources/registry.py" = ["BLE001", "S112"]
 "src/afs/workspace_sync.py" = ["BLE001"]
 "tests/test_agent_jobs.py" = ["BLE001"]
 
@@ -231,11 +217,9 @@ module = [
     "afs.agent_context",
     "afs.agent_job_inbox",
     "afs.agent_job_status",
-    "afs.agent_jobs",
     "afs.agent_manifest",
     "afs.agent_registry",
     "afs.agent_runs",
-    "afs.agents",
     "afs.agents.context_audit",
     "afs.agents.context_warm",
     "afs.agents.dashboard_export",
@@ -265,8 +249,6 @@ module = [
     "afs.cli.verify",
     "afs.codebase_explorer",
     "afs.config_loader",
-    "afs.context_freshness",
-    "afs.context_index",
     "afs.deployment.cli",
     "afs.embeddings",
     "afs.event_log",
@@ -280,12 +262,9 @@ module = [
     "afs.handoff",
     "afs.health.afs_status",
     "afs.health.enhanced_checks",
-    "afs.history",
     "afs.human_provenance",
     "afs.knowledge.graph_core",
     "afs.logging_config",
-    "afs.manager",
-    "afs.missions",
     "afs.next_action",
     "afs.notifications.base",
     "afs.notifications.discord",
