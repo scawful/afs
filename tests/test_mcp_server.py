@@ -209,7 +209,7 @@ def test_legacy_retrieval_tools_fail_before_reading_v2_indexes(
         raise AssertionError("legacy retrieval touched an unscoped v2 index")
 
     monkeypatch.setattr("afs.mcp_server._query_context_index", forbidden)
-    monkeypatch.setattr("afs.mcp_server._resolve_embedding_index_dir", forbidden)
+    monkeypatch.setattr("afs.mcp_server._resolve_embedding_index_dirs", forbidden)
     monkeypatch.setattr("afs.codebase_index.build_codebase_index", forbidden)
     monkeypatch.setattr("afs.codebase_index.search_codebase_index", forbidden)
 
@@ -5798,3 +5798,39 @@ def test_extension_tool_normalization_preserves_definition_fields() -> None:
     assert normalized.pre_hook is pre_hook
     assert normalized.post_hook is post_hook
     assert normalized.catalog == "slim"
+
+
+def test_afs_search_queries_every_per_project_embedding_collection(tmp_path: Path) -> None:
+    from afs.context_paths import resolve_mount_root
+    from afs.embeddings import build_embedding_index, create_embed_fn, register_embedding_backend
+
+    def factory(model: str, **_kwargs):
+        return lambda text: [1.0, float(len(text) % 3)]
+
+    register_embedding_backend("test-mcp-collections", factory)
+    manager = _make_manager(tmp_path)
+    context_root = tmp_path / "context"
+    knowledge = resolve_mount_root(context_root, MountType.KNOWLEDGE)
+    for project, body in (("alpha", "alpha palette notes"), ("beta", "beta palette notes")):
+        source = tmp_path / f"{project}-source"
+        source.mkdir()
+        (source / f"{project}.md").write_text(body, encoding="utf-8")
+        embed = create_embed_fn("test-mcp-collections", model="fake")
+        build_embedding_index([source], knowledge / project, embed_fn=embed)
+
+    response = _call_tool(
+        manager,
+        "afs.search",
+        {
+            "context_path": str(context_root),
+            "query": "palette",
+            "include_fts": False,
+            "include_symbols": False,
+        },
+    )
+
+    payload = response["result"]["structuredContent"]
+    paths = {result.get("source_path", result.get("path", "")) for result in payload["results"]}
+    assert payload["semantic_status"] == "ready"
+    assert any(path.endswith("alpha.md") for path in paths)
+    assert any(path.endswith("beta.md") for path in paths)
