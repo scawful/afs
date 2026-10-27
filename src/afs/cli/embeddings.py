@@ -15,6 +15,8 @@ from ..embeddings import (
     DEFAULT_GEMINI_MODEL,
     build_embedding_index,
     create_embed_fn,
+    create_query_embed_fn_from_index,
+    default_text_instructions,
     evaluate_embedding_index,
     load_embedding_eval_cases,
     search_embedding_index_detailed,
@@ -38,6 +40,9 @@ def embeddings_index_command(args: argparse.Namespace) -> int:
         print("No sources provided.")
         return 1
 
+    if args.provider == "auto":
+        print("--provider auto only applies to search; pick a provider to build an index.")
+        return 1
     embed_fn = _resolve_embed_fn(args)
     if embed_fn is None and args.provider != "none":
         return 1
@@ -101,15 +106,18 @@ def embeddings_search_command(args: argparse.Namespace) -> int:
         print(str(exc))
         return 1
 
-    embed_fn = _resolve_embed_fn(args, mode="query")
-    if embed_fn is None and args.provider != "none":
-        return 1
+    embed_fn = None
+    if args.provider != "auto":
+        embed_fn = _resolve_embed_fn(args, mode="query")
+        if embed_fn is None and args.provider != "none":
+            return 1
 
     try:
         response = search_embedding_index_detailed(
             index_root,
             args.query,
             embed_fn=embed_fn,
+            recreate_query_embedder=args.provider == "auto",
             top_k=args.top_k,
             min_score=args.min_score,
         )
@@ -156,9 +164,16 @@ def embeddings_eval_command(args: argparse.Namespace) -> int:
         print(f"No eval cases loaded from {query_path}")
         return 1
 
-    embed_fn = _resolve_embed_fn(args, mode="query")
-    if embed_fn is None and args.provider != "none":
-        return 1
+    if args.provider == "auto":
+        try:
+            embed_fn = create_query_embed_fn_from_index(index_root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(str(exc))
+            return 1
+    else:
+        embed_fn = _resolve_embed_fn(args, mode="query")
+        if embed_fn is None and args.provider != "none":
+            return 1
 
     result = evaluate_embedding_index(
         index_root,
@@ -255,6 +270,17 @@ def _resolve_embed_fn(args: argparse.Namespace, *, mode: str = "index"):
         model = _PROVIDER_DEFAULT_MODELS[args.provider]
     kwargs: dict[str, object] = {"model": model}
 
+    if args.provider in {"ollama", "openai"}:
+        default_document, default_query = default_text_instructions(model)
+        document_instruction = getattr(args, "document_instruction", None)
+        query_instruction = getattr(args, "query_instruction", None)
+        if document_instruction is None:
+            document_instruction = default_document
+        if query_instruction is None:
+            query_instruction = default_query
+        kwargs["task_type"] = query_instruction if mode == "query" else document_instruction
+        kwargs["query_task_type"] = query_instruction
+
     if args.provider == "ollama":
         kwargs["host"] = args.host
     elif args.provider == "hf":
@@ -292,9 +318,12 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     def add_provider_args(parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
             "--provider",
-            choices=["none", "ollama", "hf", "openai", "gemini"],
+            choices=["none", "auto", "ollama", "hf", "openai", "gemini"],
             default="none",
-            help="Embedding provider.",
+            help=(
+                "Embedding provider. For search, 'auto' recreates the query "
+                "embedder recorded in the collection metadata."
+            ),
         )
         parser.add_argument(
             "--model",
@@ -331,7 +360,24 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
             default="https://api.openai.com/v1",
             help="OpenAI-compatible embeddings base URL.",
         )
-        parser.add_argument("--openai-api-key", help="OpenAI-compatible API key override.")
+        parser.add_argument(
+            "--openai-api-key",
+            help="OpenAI-compatible API key override (not needed for localhost servers).",
+        )
+        parser.add_argument(
+            "--document-instruction",
+            help=(
+                "Text prefix for ollama/openai documents. Defaults to "
+                "'search_document:' for nomic-embed models."
+            ),
+        )
+        parser.add_argument(
+            "--query-instruction",
+            help=(
+                "Text prefix for ollama/openai queries. Defaults to "
+                "'search_query:' for nomic-embed models."
+            ),
+        )
         parser.add_argument(
             "--gemini-api-key", help="Gemini API key override (or set GEMINI_API_KEY)."
         )
