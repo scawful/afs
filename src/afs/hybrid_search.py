@@ -36,7 +36,7 @@ from .index_storage import (
     read_generation_id,
 )
 from .path_safety import assert_no_linklike_components, lexical_absolute
-from .sensitivity import SensitivityRuleSet
+from .sensitivity import SensitivityRuleSet, is_default_index_excluded
 
 HYBRID_INDEX_VERSION = 1
 RRF_K = 60
@@ -1126,6 +1126,9 @@ def _iter_safe_source_files(
     if not root.is_dir():
         result.errors.append(f"{root}: source is not a file or directory")
         return
+    if is_default_index_excluded(root):
+        result.skipped += 1
+        return
 
     gitignore = _load_ignore_file(root / ".afsignore")
     if source.policy.respect_gitignore:
@@ -1141,7 +1144,11 @@ def _iter_safe_source_files(
         for dirname in sorted(dirs):
             candidate = base_path / dirname
             rel = candidate.relative_to(root).as_posix()
-            if dirname in _HARD_DENY_DIRS or _is_hidden(rel, source.policy):
+            if (
+                dirname in _HARD_DENY_DIRS
+                or _is_hidden(rel, source.policy)
+                or is_default_index_excluded(candidate, relative_path=rel)
+            ):
                 continue
             try:
                 resolved = candidate.resolve(strict=True)
@@ -1212,6 +1219,8 @@ def _path_allowed(
     if not _is_within(path, root):
         return False
     if any(part in _HARD_DENY_DIRS for part in Path(relative_path).parts):
+        return False
+    if is_default_index_excluded(path, relative_path=relative_path):
         return False
     if _is_hidden(relative_path, policy):
         return False

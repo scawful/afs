@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
 import re
+import shutil
 import uuid
 from collections.abc import Iterable
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,8 @@ EVENT_FILE_PREFIX = "events"
 DEFAULT_MAX_INLINE_CHARS = 4000
 MAX_RECENT_HISTORY_RECORD_BYTES = 256 * 1024
 SAFE_HISTORY_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+EVENT_FILE_DATE = re.compile(rf"{EVENT_FILE_PREFIX}_(\d{{8}})\.jsonl\Z")
+DEFAULT_HISTORY_KEEP_DAYS = 30
 
 # Structured event type constants
 EVENT_MCP_TOOL = "mcp_tool"
@@ -1261,3 +1265,143 @@ def load_history_payload(event: dict[str, Any], history_root: Path) -> dict[str,
         if payload is not None:
             return payload
     return None
+
+
+@dataclass
+class HistoryArchiveEntry:
+    """One daily event log selected for compression."""
+
+    path: Path
+    bytes_before: int
+    bytes_after: int | None = None
+    skipped: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": str(self.path),
+            "bytes_before": self.bytes_before,
+            "bytes_after": self.bytes_after,
+            "skipped": self.skipped,
+        }
+
+
+@dataclass
+class HistoryArchiveReport:
+    """Outcome of :func:`archive_history_events`."""
+
+    keep_days: int
+    cutoff: str
+    dry_run: bool
+    entries: list[HistoryArchiveEntry] = field(default_factory=list)
+
+    @property
+    def bytes_before(self) -> int:
+        return sum(entry.bytes_before for entry in self.entries if entry.skipped is None)
+
+    @property
+    def bytes_after(self) -> int:
+        return sum(entry.bytes_after or 0 for entry in self.entries if entry.skipped is None)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "keep_days": self.keep_days,
+            "cutoff": self.cutoff,
+            "dry_run": self.dry_run,
+            "files": len([entry for entry in self.entries if entry.skipped is None]),
+            "bytes_before": self.bytes_before,
+            "bytes_after": self.bytes_after,
+            "entries": [entry.to_dict() for entry in self.entries],
+        }
+
+
+def archive_history_events(
+    history_root: Path,
+    *,
+    keep_days: int = DEFAULT_HISTORY_KEEP_DAYS,
+    dry_run: bool = False,
+    today: date | None = None,
+) -> HistoryArchiveReport:
+    """Gzip daily ``events_YYYYMMDD.jsonl`` logs older than ``keep_days``.
+
+    Nothing is deleted outright: each log is replaced by a verified
+    ``.jsonl.gz`` sibling, and an existing archive is never overwritten.
+    Archived days drop out of ``iter_history_events`` and reactor offsets.
+    For v2 layouts the legacy ``history/`` copies are archived before
+    ``history/common`` so an interrupted run cannot re-seed a canonical day.
+    """
+
+    if keep_days < 1:
+        raise ValueError("keep_days must be at least 1")
+    current = today or datetime.now(timezone.utc).date()
+    cutoff = current - timedelta(days=keep_days)
+    report = HistoryArchiveReport(keep_days=keep_days, cutoff=cutoff.isoformat(), dry_run=dry_run)
+
+    routing = _routing_for_history_root(history_root)
+    if routing.is_v2:
+        directories = [
+            root for root in (routing.legacy_root, routing.write_root) if root is not None
+        ]
+    else:
+        directories = [routing.write_root]
+
+    for directory in dict.fromkeys(directories):
+        if not directory.is_dir() or directory.is_symlink():
+            continue
+        for path in sorted(directory.glob(f"{EVENT_FILE_PREFIX}_*.jsonl")):
+            match = EVENT_FILE_DATE.match(path.name)
+            if match is None:
+                continue
+            try:
+                day = datetime.strptime(match.group(1), "%Y%m%d").date()
+            except ValueError:
+                continue
+            if day > cutoff:
+                continue
+            entry = _archive_history_file(path, directory, routing, dry_run=dry_run)
+            report.entries.append(entry)
+    return report
+
+
+def _archive_history_file(
+    path: Path,
+    directory: Path,
+    routing: _HistoryRouting,
+    *,
+    dry_run: bool,
+) -> HistoryArchiveEntry:
+    try:
+        if routing.is_v2:
+            _safe_v2_leaf(path, routing, allow_missing=False, boundary=directory)
+        stat = path.lstat()
+    except (OSError, ValueError) as exc:
+        return HistoryArchiveEntry(path=path, bytes_before=0, skipped=str(exc))
+    entry = HistoryArchiveEntry(path=path, bytes_before=stat.st_size)
+    if path.is_symlink() or not path.is_file():
+        entry.skipped = "not a regular file"
+        return entry
+    archive_path = path.with_name(f"{path.name}.gz")
+    if archive_path.exists() or archive_path.is_symlink():
+        entry.skipped = f"archive already exists: {archive_path.name}"
+        return entry
+    if dry_run:
+        return entry
+
+    temp_path = directory / f".{archive_path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        with path.open("rb") as source, gzip.open(temp_path, "wb") as target:
+            shutil.copyfileobj(source, target, 1024 * 1024)
+        with gzip.open(temp_path, "rb") as check:
+            restored = sum(len(chunk) for chunk in iter(lambda: check.read(1024 * 1024), b""))
+        if restored != stat.st_size:
+            entry.skipped = f"verification failed: {restored} != {stat.st_size} bytes"
+            return entry
+        os.utime(temp_path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        os.link(temp_path, archive_path, follow_symlinks=False)
+        entry.bytes_after = archive_path.stat().st_size
+        path.unlink()
+        fsync_directory(directory)
+    except (OSError, EOFError) as exc:
+        entry.skipped = str(exc)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return entry

@@ -11,6 +11,41 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+# Generated or personal trees that no indexer should ever read, regardless of
+# configured never_index rules: embedding payloads, backups, AFS runtime
+# state, and the user's media library.
+DEFAULT_INDEX_EXCLUDED_DIRS = frozenset({"embeddings", ".afs"})
+DEFAULT_INDEX_EXCLUDED_GLOBS = ("*.bak*", "embedding_index.json")
+DEFAULT_INDEX_EXCLUDED_ROOTS = ("~/Music",)
+
+
+def is_default_index_excluded(absolute_path: Path, *, relative_path: str = "") -> bool:
+    """Return True when a path falls under the built-in indexing exclusions.
+
+    Directory names are matched against components of ``relative_path`` only,
+    so a context root that itself lives under a directory named ``embeddings``
+    is not excluded wholesale.
+    """
+    # Path().parts drops "." segments; _normalize_relative_path's lstrip("./")
+    # would also eat the dot in ".afs".
+    relative_parts = Path(str(relative_path).replace("\\", "/").strip()).parts
+    if any(part in DEFAULT_INDEX_EXCLUDED_DIRS for part in relative_parts):
+        return True
+    name = absolute_path.name
+    if name in DEFAULT_INDEX_EXCLUDED_DIRS:
+        return True
+    if any(fnmatch.fnmatch(name, pattern) for pattern in DEFAULT_INDEX_EXCLUDED_GLOBS):
+        return True
+    try:
+        resolved = absolute_path.expanduser().resolve()
+    except OSError:
+        resolved = absolute_path.expanduser()
+    for root in DEFAULT_INDEX_EXCLUDED_ROOTS:
+        excluded_root = Path(os.path.expanduser(root)).resolve()
+        if resolved == excluded_root or excluded_root in resolved.parents:
+            return True
+    return False
+
 
 def matches_path_rules(
     absolute_path: Path,
