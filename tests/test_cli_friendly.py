@@ -186,6 +186,38 @@ def test_messages_commands_enforce_current_scope(tmp_path: Path, monkeypatch, ca
     assert messages_list_command(args(other, agent=None, type=None, topic=None, limit=10)) == 0
     assert json.loads(capsys.readouterr().out) == []
 
+    for sender, to, topic in (
+        ("codex-asm", "coordinator", "asm-review"),
+        ("codex-asm", "cursor", "asm-review"),
+        ("codex-wrap", "coordinator", "wrap"),
+    ):
+        messages_send_command(
+            args(
+                project,
+                from_agent=sender,
+                type="request",
+                payload=None,
+                to=to,
+                topic=topic,
+                ttl_hours=None,
+                scope=None,
+            )
+        )
+    capsys.readouterr()
+
+    inbox_args = args(
+        project,
+        agent=None,
+        to="coordinator",
+        include_done=False,
+        type=None,
+        topic="asm-review",
+        limit=1,
+    )
+    assert messages_list_command(inbox_args) == 0
+    inbox = json.loads(capsys.readouterr().out)
+    assert [(entry["from"], entry["topic"]) for entry in inbox] == [("codex-asm", "asm-review")]
+
     legacy_args = argparse.Namespace(
         config=None,
         path=str(other),
