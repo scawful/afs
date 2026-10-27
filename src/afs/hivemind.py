@@ -355,11 +355,16 @@ class HivemindBus:
         self,
         recipient: str,
         *,
+        agent_name: str | None = None,
         since: datetime | None = None,
+        msg_type: str | None = None,
+        topic: str | None = None,
         limit: int = 50,
     ) -> list[HivemindMessage]:
         """Read messages addressed to a specific agent (see ``recipient_matches``)."""
-        all_msgs = self.read(since=since, limit=0)
+        all_msgs = self.read(
+            agent_name=agent_name, since=since, msg_type=msg_type, topic=topic, limit=0
+        )
         matched = [m for m in all_msgs if recipient_matches(m.to, recipient)]
         matched.sort(key=lambda m: m.timestamp)
         return matched[-limit:] if len(matched) > limit else matched
@@ -368,6 +373,9 @@ class HivemindBus:
         self,
         recipient: str,
         *,
+        agent_name: str | None = None,
+        msg_type: str | None = None,
+        topic: str | None = None,
         include_done: bool = False,
         include_broadcasts: bool = True,
         limit: int = 50,
@@ -375,11 +383,14 @@ class HivemindBus:
         """Return messages for *recipient* with that recipient's ack state.
 
         Each entry is the message dict plus ``state`` (``unread``, ``read``
-        or ``done``). The recipient's own messages are excluded.
+        or ``done``). The recipient's own messages are excluded. Sender
+        (*agent_name*), *msg_type* and *topic* filters apply before *limit*.
         """
         me = normalize_agent_name(recipient)
         entries: list[dict[str, Any]] = []
-        for message in self.read_for(recipient, limit=0):
+        for message in self.read_for(
+            recipient, agent_name=agent_name, msg_type=msg_type, topic=topic, limit=0
+        ):
             if normalize_agent_name(message.from_agent) == me:
                 continue
             if message.to is None and not include_broadcasts:
