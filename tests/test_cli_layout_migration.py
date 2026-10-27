@@ -141,7 +141,11 @@ def test_mapping_v2_plans_and_previews_source_only_exclusions(
         )
         == 0
     )
-    planned = json.loads(capsys.readouterr().out)["plan"]
+    plan_payload = json.loads(capsys.readouterr().out)
+    planned = plan_payload["plan"]
+    assert plan_payload["retained_sources"] == planned["retained_sources"]
+    assert plan_payload["retained_paths"] == planned["retained_paths"]
+    assert "preserved in the v1 source" in plan_payload["retention_notice"]
     assert planned["schema_version"] == 3
     assert planned["retained_sources"] == [
         {
@@ -171,6 +175,7 @@ def test_mapping_v2_plans_and_previews_source_only_exclusions(
     assert preview["retained_path_count"] == 1
     assert preview["retained_sources"] == planned["retained_sources"]
     assert preview["retained_paths"] == planned["retained_paths"]
+    assert preview["retention_notice"] == plan_payload["retention_notice"]
     assert not destination.exists()
 
 

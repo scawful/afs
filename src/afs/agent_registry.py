@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import os
 import tempfile
 from collections.abc import Iterator
@@ -16,6 +17,8 @@ try:  # pragma: no cover - platform specific
     import fcntl
 except ImportError:  # pragma: no cover - platform specific
     fcntl = None
+
+logger = logging.getLogger(__name__)
 
 ACTIVE_AGENT_STATES = {"running", "awaiting_review"}
 RECENT_AGENT_WINDOW = timedelta(hours=24)
@@ -66,6 +69,11 @@ def _latest_timestamp(entry: dict[str, Any]) -> datetime | None:
     return None
 
 
+def _context_root_missing(entry: dict[str, Any]) -> bool:
+    root = str(entry.get("context_root", "") or "").strip()
+    return bool(root) and not Path(root).expanduser().exists()
+
+
 def _sort_key(entry: dict[str, Any]) -> tuple[int, float]:
     status = str(entry.get("status", ""))
     timestamp = _latest_timestamp(entry)
@@ -91,13 +99,14 @@ def resolve_agent_task(
         spec = get_agent(name)
         if spec and spec.description.strip():
             return spec.description.strip()
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - extension agent loading boundary; description is cosmetic
+        logger.debug("agent registry lookup failed for %s: %s", name, exc)
 
     if module.strip():
         try:
             loaded = importlib.import_module(module)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - arbitrary agent module import; description is cosmetic
+            logger.debug("agent module import failed for %s: %s", module, exc)
             loaded = None
         if loaded is not None:
             module_description = getattr(loaded, "AGENT_DESCRIPTION", "")
@@ -160,6 +169,21 @@ class AgentRegistry:
             if latest is not None and latest >= cutoff:
                 kept.append(entry)
         return kept
+
+    def reap(self, *, dry_run: bool = False) -> list[dict[str, Any]]:
+        """Drop entries whose ``context_root`` no longer exists on disk.
+
+        Active entries are otherwise kept forever by ``_prune``, so runs from
+        deleted temp dirs or worktrees accumulate.  Entries without a
+        ``context_root`` are kept.  Returns the removed (or, with
+        ``dry_run``, removable) entries.
+        """
+        if dry_run:
+            return [entry for entry in self._read_unlocked() if _context_root_missing(entry)]
+        with self._locked_entries() as entries:
+            removed = [entry for entry in entries if _context_root_missing(entry)]
+            entries[:] = [entry for entry in entries if not _context_root_missing(entry)]
+        return removed
 
     def entries(self) -> list[dict[str, Any]]:
         return self._read_unlocked()

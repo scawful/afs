@@ -30,6 +30,12 @@ from afs.schema import (
 DEFAULT_NAMES = {"context-warm", "index-rebuild", "skills-mine", "morning-briefing"}
 
 
+@pytest.fixture(autouse=True)
+def _isolated_agent_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep supervisor runs out of the user's ~/.afs/agent_registry.json."""
+    monkeypatch.setenv("AFS_AGENT_REGISTRY_PATH", str(tmp_path / "agent_registry.json"))
+
+
 def _config(tmp_path: Path, **agents_kwargs) -> AFSConfig:
     return AFSConfig(
         general=GeneralConfig(context_root=tmp_path / "context"),

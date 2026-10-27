@@ -235,7 +235,7 @@ def test_bundled_skill_budgets_and_human_gates_are_explicit() -> None:
     assert "never promote" in approval_rules
 
     approvals_body, _ = read_skill_body(skills["approvals-and-gates"].path)
-    assert "approvals approve <agent> <action>" in approvals_body
+    assert "approvals approve --request-id <gate_id>" in approvals_body
     assert "work approvals approve <approval_id>" in approvals_body
     assert "not the global supervisor store" in approvals_body
 

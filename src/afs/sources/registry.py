@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import sys
 from collections.abc import Iterable
 from contextlib import contextmanager
@@ -19,6 +20,8 @@ from .models import (
     SourceSyncResult,
     safe_source_id,
 )
+
+logger = logging.getLogger(__name__)
 
 SourceProvider = ContextSourceProvider | ResearchSourceProvider
 
@@ -124,7 +127,8 @@ def load_source_providers(config: Any = None) -> dict[str, ContextSourceProvider
         for spec in _iter_manifest_source_specs(manifest):
             try:
                 provider = load_source_provider(spec, manifest=manifest)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 - extension provider boundary; skip, don't block others
+                logger.warning("Skipping source provider %s: %s", spec.name, exc)
                 continue
             if not isinstance(provider, ContextSourceProvider):
                 continue

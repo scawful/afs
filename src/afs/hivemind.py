@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -17,6 +18,31 @@ from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_paths import resolve_mount_root
 from .models import MountType
 from .path_safety import assert_no_linklike_components
+
+logger = logging.getLogger(__name__)
+
+
+def _record_history(
+    op: str,
+    agent_name: str,
+    context_root: Path,
+    *,
+    msg_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Append a hivemind history event; failures are logged, never raised."""
+    try:
+        from .history import log_hivemind_event
+
+        log_hivemind_event(
+            op,
+            agent_name,
+            msg_id=msg_id,
+            metadata=metadata,
+            context_root=context_root,
+        )
+    except Exception:  # noqa: BLE001 - history is telemetry; the bus mutation already happened
+        logger.warning("hivemind history append failed (op=%s)", op, exc_info=True)
 
 
 def _validate_agent_name(agent_name: str) -> str:
@@ -254,25 +280,20 @@ class HivemindBus:
         self._safe_path(agent_dir, allow_missing=False)
         msg_path = agent_dir / f"{msg_id}.json"
         self._write_json(msg_path, message.to_dict())
-        try:
-            from .history import log_hivemind_event
-
-            log_hivemind_event(
-                "send",
-                safe_from_agent,
-                msg_id=msg_id,
-                metadata={
-                    "to": to,
-                    "msg_type": msg_type,
-                    "topic": topic,
-                    "ttl_hours": effective_ttl,
-                    "expires_at": expires_at,
-                    "scope_id": message.scope_id,
-                },
-                context_root=self._context_path,
-            )
-        except Exception:
-            pass
+        _record_history(
+            "send",
+            safe_from_agent,
+            self._context_path,
+            msg_id=msg_id,
+            metadata={
+                "to": to,
+                "msg_type": msg_type,
+                "topic": topic,
+                "ttl_hours": effective_ttl,
+                "expires_at": expires_at,
+                "scope_id": message.scope_id,
+            },
+        )
         return message
 
     def read(
@@ -442,18 +463,13 @@ class HivemindBus:
             record["note"] = note
         records.append(record)
         self._write_json(ack_dir / f"{message.id}.json", {"msg_id": message.id, "acks": records})
-        try:
-            from .history import log_hivemind_event
-
-            log_hivemind_event(
-                "ack",
-                actor,
-                msg_id=message.id,
-                metadata={"status": status},
-                context_root=self._context_path,
-            )
-        except Exception:
-            pass
+        _record_history(
+            "ack",
+            actor,
+            self._context_path,
+            msg_id=message.id,
+            metadata={"status": status},
+        )
         return {**message.to_dict(), "acks": records}
 
     def _subscriptions_dir(self) -> Path:
@@ -492,17 +508,12 @@ class HivemindBus:
             )
         sub_path = self._subscriptions_dir() / f"{safe_agent_name}.json"
         self._write_json(sub_path, sub.to_dict())
-        try:
-            from .history import log_hivemind_event
-
-            log_hivemind_event(
-                "subscribe",
-                safe_agent_name,
-                metadata={"topics": sub.topics, "ttl_hours": sub.ttl_hours},
-                context_root=self._context_path,
-            )
-        except Exception:
-            pass
+        _record_history(
+            "subscribe",
+            safe_agent_name,
+            self._context_path,
+            metadata={"topics": sub.topics, "ttl_hours": sub.ttl_hours},
+        )
         return sub
 
     def unsubscribe(self, agent_name: str, topics: list[str]) -> HivemindSubscription:
@@ -523,17 +534,12 @@ class HivemindBus:
             )
         sub_path = self._subscriptions_dir() / f"{safe_agent_name}.json"
         self._write_json(sub_path, sub.to_dict())
-        try:
-            from .history import log_hivemind_event
-
-            log_hivemind_event(
-                "unsubscribe",
-                safe_agent_name,
-                metadata={"topics": list(topics), "remaining_topics": sub.topics},
-                context_root=self._context_path,
-            )
-        except Exception:
-            pass
+        _record_history(
+            "unsubscribe",
+            safe_agent_name,
+            self._context_path,
+            metadata={"topics": list(topics), "remaining_topics": sub.topics},
+        )
         return sub
 
     def get_subscriptions(self, agent_name: str) -> HivemindSubscription | None:
@@ -688,21 +694,16 @@ class HivemindBus:
             "per_agent": per_agent,
         }
         if removed_count > 0 and not dry_run:
-            try:
-                from .history import log_hivemind_event
-
-                log_hivemind_event(
-                    "reap",
-                    "system",
-                    metadata={
-                        "removed_count": removed_count,
-                        "expired_count": expired_count,
-                        "aged_out_count": aged_out_count,
-                    },
-                    context_root=self._context_path,
-                )
-            except Exception:
-                pass
+            _record_history(
+                "reap",
+                "system",
+                self._context_path,
+                metadata={
+                    "removed_count": removed_count,
+                    "expired_count": expired_count,
+                    "aged_out_count": aged_out_count,
+                },
+            )
         return summary
 
 

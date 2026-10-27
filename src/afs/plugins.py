@@ -186,7 +186,7 @@ def load_plugins(
         for name in plugin_names:
             try:
                 loaded[name] = importlib.import_module(name)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - plugin import boundary; one bad plugin must not block others
                 logger.warning("Failed to load plugin %s: %s", name, exc)
     return loaded
 
@@ -207,7 +207,8 @@ def load_enabled_plugins(
             from .config import load_config_model
 
             config = load_config_model()
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - a broken config must not disable plugin-free startup
+            logger.warning("Falling back to default plugin config: %s", exc)
             config = PluginsConfig()
 
     plugins_config = _normalize_plugins_config(config)
@@ -234,7 +235,7 @@ def call_plugin_hook(
         if callable(handler):
             try:
                 results.append(handler(*args, **kwargs))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - plugin hook boundary; documented as ignoring failures
                 name = getattr(module, "__name__", "unknown")
                 logger.warning("Plugin hook %s failed in %s: %s", hook, name, exc)
     return results

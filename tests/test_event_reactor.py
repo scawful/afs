@@ -41,6 +41,12 @@ from afs.schema import AFSConfig, AgentConfig, GeneralConfig
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_agent_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep supervisor runs out of the user's ~/.afs/agent_registry.json."""
+    monkeypatch.setenv("AFS_AGENT_REGISTRY_PATH", str(tmp_path / "agent_registry.json"))
+
+
 def test_v2_reactor_does_not_follow_linked_daily_history_log(tmp_path: Path) -> None:
     context = tmp_path / ".context"
     scaffold_v2(context)

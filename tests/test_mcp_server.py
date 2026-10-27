@@ -947,6 +947,37 @@ def test_work_mcp_tools_capture_style_and_request_approval(tmp_path: Path) -> No
     )
 
 
+def test_approvals_list_tool_reads_gate_requests(tmp_path: Path) -> None:
+    from afs.agents.approvals import ApprovalGate
+
+    manager = _make_manager(tmp_path)
+    gate = ApprovalGate()
+    assert not gate.check("mission-runner", "git_push", "push", source="mission:a")
+    assert not gate.check("other-agent", "deploy", "ship", source="mission:b")
+
+    def call(arguments: dict[str, object], request_id: int) -> dict[str, object]:
+        response = _handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/call",
+                "params": {"name": "approvals.list", "arguments": arguments},
+            },
+            manager,
+        )
+        assert response is not None
+        return response["result"]["structuredContent"]
+
+    listed = call({}, 251)
+    assert listed["count"] == 2
+    assert {a["action"] for a in listed["approvals"]} == {"git_push", "deploy"}
+    assert listed["store"]["pending"] == 2
+
+    filtered = call({"source": "mission:a"}, 252)
+    assert [a["agent"] for a in filtered["approvals"]] == ["mission-runner"]
+    assert filtered["approvals"][0]["status"] == "pending"
+
+
 def test_events_analytics_tool_reports_mcp_usage(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     history_root = manager.config.general.context_root / "history"
@@ -1500,14 +1531,14 @@ def test_v2_context_query_auto_index_does_not_traverse_or_replace_beta(
     index.delete_relative_prefix(MountType.KNOWLEDGE, f"projects/{alpha_id}")
     index.delete_relative_prefix(MountType.KNOWLEDGE, "common")
     statements: list[str] = []
-    original_connect = ContextSQLiteIndex._connect
+    original_open = ContextSQLiteIndex._open_connection
 
-    def traced_connect(current: ContextSQLiteIndex):
-        connection = original_connect(current)
+    def traced_open(current: ContextSQLiteIndex):
+        connection = original_open(current)
         connection.set_trace_callback(statements.append)
         return connection
 
-    monkeypatch.setattr(ContextSQLiteIndex, "_connect", traced_connect)
+    monkeypatch.setattr(ContextSQLiteIndex, "_open_connection", traced_open)
 
     real_iterdir = Path.iterdir
 

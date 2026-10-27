@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import logging
 import math
 import os
 import uuid
@@ -16,6 +17,9 @@ from typing import Any
 
 from .gemini_defaults import DEFAULT_GEMINI_EMBEDDING_MODEL
 from .index_storage import atomic_write_text, fsync_directory, index_file_lock
+from .sensitivity import is_default_index_excluded
+
+logger = logging.getLogger(__name__)
 
 EmbeddingFactory = Callable[..., Callable[[str], list[float]]]
 _EMBEDDING_BACKENDS: dict[str, EmbeddingFactory] = {}
@@ -911,7 +915,7 @@ def _build_embedding_index_locked(
                     embed_failed = False
                     try:
                         chunk_embedding = embed_fn(chunk_text[:embed_chars])
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001 - provider callback boundary; recorded in errors
                         result.errors.append(f"{path} chunk {chunk_idx}: embed failed ({exc})")
                         semantic_failures += 1
                         embed_failed = True
@@ -1000,7 +1004,7 @@ def _build_embedding_index_locked(
             embed_failed = False
             try:
                 embedding = embed_fn(embed_text)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - provider callback boundary; recorded in errors
                 result.errors.append(f"{path}: embed failed ({exc})")
                 embedding = []
                 embed_failed = True
@@ -1109,8 +1113,8 @@ def _build_embedding_index_locked(
                 "errors_count": len(result.errors),
             },
         )
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 - history is telemetry; the index is already published
+        logger.warning("embedding index history append failed", exc_info=True)
     return result
 
 
@@ -1205,7 +1209,7 @@ def _search_embedding_index_detailed_locked(
     if embed_fn:
         try:
             query_embedding = embed_fn(query)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - provider callback boundary; reported as fallback
             query_embedding = None
             semantic_status = "fallback"
             semantic_reason = f"query embedding failed: {exc}"
@@ -1408,11 +1412,17 @@ def _iter_source_files(
                 yield root.parent, root
                 count += 1
         else:
+            if is_default_index_excluded(root):
+                continue
             for base, dirs, files in os.walk(root):
                 dirs[:] = sorted(
                     directory
                     for directory in dirs
                     if not _is_embedding_output_path(Path(base) / directory, root, output_dir)
+                    and not is_default_index_excluded(
+                        Path(base) / directory,
+                        relative_path=(Path(base) / directory).relative_to(root).as_posix(),
+                    )
                 )
                 if not include_hidden:
                     dirs[:] = [d for d in dirs if not d.startswith(".")]
@@ -1577,6 +1587,8 @@ def _matches_patterns(
         return False
     if rel in ("", "."):
         rel = path.name
+    if is_default_index_excluded(path, relative_path=rel):
+        return False
     if exclude_patterns and any(fnmatch.fnmatch(rel, pattern) for pattern in exclude_patterns):
         return False
     if not include_patterns:

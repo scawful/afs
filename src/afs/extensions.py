@@ -860,7 +860,7 @@ def discover_extension_manifests(
         except ExtensionManifestError as exc:
             logger.warning("Skipping extension manifest: %s", exc)
             continue
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - third-party manifest boundary; reported, not raised
             error = _unexpected_manifest_error(manifest_path, exc)
             logger.warning("Skipping extension manifest: %s", error)
             continue
@@ -913,7 +913,7 @@ def extension_load_report(
         except ExtensionManifestError as exc:
             errors.append({"path": str(manifest_path), "error": str(exc)})
             continue
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - third-party manifest boundary; reported, not raised
             error = _unexpected_manifest_error(manifest_path, exc)
             errors.append({"path": str(manifest_path), "error": str(error)})
             continue
@@ -976,7 +976,7 @@ def load_extensions(
         except ExtensionManifestError as exc:
             logger.warning("Not loading extension %r: %s", name, exc)
             continue
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - third-party manifest boundary; reported, not raised
             error = _unexpected_manifest_error(manifest_path, exc)
             logger.warning("Not loading extension %r: %s", name, error)
             continue
