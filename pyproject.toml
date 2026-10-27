@@ -120,12 +120,8 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/agents/dashboard_export.py" = ["BLE001", "S112"]
 "src/afs/agents/gemini_workspace_brief.py" = ["BLE001"]
 "src/afs/agents/mission_runner.py" = ["BLE001"]
-"src/afs/agents/researcher.py" = ["BLE001"]
 "src/afs/agents/supervisor.py" = ["BLE001", "S110"]
 "src/afs/agents/tether_bridge.py" = ["BLE001"]
-"src/afs/benchmark/__init__.py" = ["BLE001", "S110"]
-"src/afs/benchmark/base.py" = ["BLE001"]
-"src/afs/benchmark/suite.py" = ["BLE001", "S110"]
 "src/afs/benchmarks/quality.py" = ["BLE001"]
 "src/afs/benchmarks/resources.py" = ["BLE001"]
 "src/afs/bundler.py" = ["BLE001", "S112"]
@@ -134,14 +130,12 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/cli/_utils.py" = ["BLE001"]
 "src/afs/cli/briefing.py" = ["BLE001"]
 "src/afs/cli/bundle.py" = ["BLE001"]
-"src/afs/cli/comparison.py" = ["BLE001"]
 "src/afs/cli/gemini.py" = ["BLE001", "S110"]
 "src/afs/cli/optimize.py" = ["BLE001"]
 "src/afs/cli/personal.py" = ["BLE001"]
 "src/afs/cli/sources.py" = ["BLE001"]
 "src/afs/cli/watch.py" = ["BLE001", "S110", "S112"]
 "src/afs/codebase_index.py" = ["BLE001"]
-"src/afs/comparison/framework.py" = ["BLE001"]
 "src/afs/config.py" = ["BLE001"]
 "src/afs/context_freshness.py" = ["BLE001", "S112"]
 "src/afs/context_index.py" = ["BLE001", "S112"]
@@ -149,7 +143,6 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/deployment/validator.py" = ["BLE001"]
 "src/afs/discovery.py" = ["BLE001", "S112"]
 "src/afs/embeddings.py" = ["BLE001", "S110"]
-"src/afs/evaluation/semantic_eval.py" = ["BLE001"]
 "src/afs/extensions.py" = ["BLE001"]
 "src/afs/gateway/backends.py" = ["BLE001"]
 "src/afs/generators/__init__.py" = ["BLE001", "S110"]
@@ -177,7 +170,6 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/notifications/email.py" = ["BLE001"]
 "src/afs/notifications/slack.py" = ["BLE001"]
 "src/afs/plugins.py" = ["BLE001"]
-"src/afs/pretraining/corpus_builder.py" = ["BLE001"]
 "src/afs/registry/cli.py" = ["BLE001"]
 "src/afs/services/manager.py" = ["BLE001", "S110"]
 "src/afs/sources/registry.py" = ["BLE001", "S112"]
@@ -252,14 +244,9 @@ module = [
     "afs.agents.history_memory",
     "afs.agents.memory_export",
     "afs.agents.mission_runner",
-    "afs.agents.researcher",
     "afs.agents.scribe_draft",
     "afs.agents.supervisor",
     "afs.agents.workspace_analyst",
-    "afs.benchmark",
-    "afs.benchmark.base",
-    "afs.benchmark.leaderboard",
-    "afs.benchmark.suite",
     "afs.benchmarks.quality",
     "afs.benchmarks.resources",
     "afs.benchmarks.speed",
@@ -269,28 +256,19 @@ module = [
     "afs.cli._help",
     "afs.cli.antigravity",
     "afs.cli.briefing",
-    "afs.cli.comparison",
     "afs.cli.context",
     "afs.cli.embeddings",
-    "afs.cli.encoder",
     "afs.cli.gemini",
-    "afs.cli.generator",
-    "afs.cli.generators",
-    "afs.cli.pipeline",
     "afs.cli.review",
     "afs.cli.schema",
-    "afs.cli.tokenizer",
     "afs.cli.training",
     "afs.cli.verify",
     "afs.codebase_explorer",
-    "afs.comparison.framework",
     "afs.config_loader",
     "afs.context_freshness",
     "afs.context_index",
     "afs.deployment.cli",
     "afs.embeddings",
-    "afs.evaluation.harness",
-    "afs.evaluation.human",
     "afs.event_log",
     "afs.extensions",
     "afs.gateway.backends",
@@ -316,8 +294,6 @@ module = [
     "afs.orchestration",
     "afs.personal_context",
     "afs.plugins",
-    "afs.pretraining.corpus_builder",
-    "afs.pretraining.encoder_trainer",
     "afs.quality.analyzer",
     "afs.quality.metrics",
     "afs.registry.lineage",
