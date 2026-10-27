@@ -19,6 +19,7 @@ from ..missions import MissionStore
 from ..models import MountType
 from ..path_safety import assert_no_linklike_components
 from ..schema import AFSConfig
+from .approvals import pending_snapshot
 from .base import (
     AgentResult,
     build_base_parser,
@@ -125,7 +126,14 @@ def _read_quota(agent_output_root: Path) -> dict[str, Any]:
 
 
 def _read_approvals(agent_output_root: Path) -> list[dict[str, Any]]:
-    """Read pending approvals."""
+    """Read pending approvals.
+
+    The gate database next to ``approvals.json`` wins; the JSON file is read
+    only until a gate run has migrated it.
+    """
+    snapshot = pending_snapshot(agent_output_root / "approvals.json")
+    if snapshot is not None:
+        return [request.to_dict() for request in snapshot]
     data = _read_json(agent_output_root / "approvals.json")
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]

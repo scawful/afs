@@ -642,7 +642,7 @@ def test_collect_decisions_includes_gate_decisions(tmp_path: Path, monkeypatch) 
     from afs.agents.guardrails import ApprovalGate
 
     gate = ApprovalGate()
-    gate._queue("scout", "git_push", "push to origin")
+    gate.check("scout", "git_push", "push to origin")
     request = gate.find_pending("scout", "git_push")
     assert request is not None
     gate.approve_human(
@@ -673,8 +673,8 @@ def test_gate_refs_are_unique_per_request(tmp_path: Path, monkeypatch) -> None:
     from afs.agents.guardrails import ApprovalGate
 
     gate = ApprovalGate()
-    gate._queue("scout", "git_push", "push to origin")
-    gate._queue("scout", "mass_delete", "clean old artifacts")
+    gate.check("scout", "git_push", "push to origin")
+    gate.check("scout", "mass_delete", "clean old artifacts")
     approve_request = gate.find_pending("scout", "git_push")
     reject_request = gate.find_pending("scout", "mass_delete")
     assert approve_request is not None and reject_request is not None
@@ -715,7 +715,7 @@ def test_cleared_gate_decision_remains_in_calibration_history(
     from afs.agents.guardrails import ApprovalGate
 
     gate = ApprovalGate()
-    gate._queue("scout", "git_push", "push to origin")
+    gate.check("scout", "git_push", "push to origin")
     request = gate.find_pending("scout", "git_push")
     assert request is not None
     gate.approve_human(
@@ -729,8 +729,9 @@ def test_cleared_gate_decision_remains_in_calibration_history(
         ),
     )
     ref = gate.all_requests()[0].request_id
-    removed, remaining = gate.clear_completed()
-    assert (removed, remaining) == (1, 0)
+    # clear prunes only system-closed rows; human decisions are never pruned.
+    pruned, remaining = gate.clear_completed(older_than_days=0)
+    assert (pruned, remaining) == (0, 0)
 
     report = collect_decisions(context, days=7)
     assert ref in {entry["ref"] for entry in report["approvals"]}
@@ -1043,7 +1044,7 @@ def test_gate_outcomes_are_global_across_contexts(tmp_path: Path, monkeypatch) -
     context_b = _context(tmp_path / "b")
 
     gate = ApprovalGate()
-    gate._queue("scout", "git_push", "push to origin")
+    gate.check("scout", "git_push", "push to origin")
     request = gate.find_pending("scout", "git_push")
     assert request is not None
     gate.approve_human(
@@ -1056,7 +1057,7 @@ def test_gate_outcomes_are_global_across_contexts(tmp_path: Path, monkeypatch) -
             )
         ),
     )
-    ref = ApprovalGate()._pending[0].request_id
+    ref = ApprovalGate().all_requests()[0].request_id
 
     entry = record_human_outcome(
         context_a,

@@ -13,6 +13,19 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 
+@pytest.fixture(autouse=True)
+def _isolated_approval_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the global agent approval gate out of ``~/.config/afs/agents``.
+
+    Tests that need a specific store still set ``AFS_AGENT_APPROVALS_PATH``
+    themselves; their ``monkeypatch.setenv`` runs after this and wins.
+    """
+    monkeypatch.delenv("AFS_AGENT_APPROVALS_DB", raising=False)
+    monkeypatch.setenv(
+        "AFS_AGENT_APPROVALS_PATH", str(tmp_path / "isolated-approvals.json")
+    )
+
+
 @pytest.fixture
 def temp_dir() -> Path:
     """Create a temporary directory for test outputs."""

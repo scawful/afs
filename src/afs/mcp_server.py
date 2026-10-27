@@ -1053,6 +1053,22 @@ def _tool_work_approvals_list(arguments: dict[str, Any], manager: AFSManager) ->
     return {"context_path": str(context_path), "approvals": approvals, "count": len(approvals)}
 
 
+def _tool_approvals_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    """Agent approval-gate requests; same records as ``afs approvals list --json``."""
+    from .agents.approvals import ApprovalGate
+
+    gate = ApprovalGate()
+    requests = gate.all_requests() if bool(arguments.get("all", False)) else gate.pending_requests()
+    for field_name in ("agent", "source"):
+        value = arguments.get(field_name)
+        if isinstance(value, str) and value.strip():
+            requests = [r for r in requests if getattr(r, field_name) == value]
+    limit = _coerce_int(arguments.get("limit"), default=50, minimum=1, maximum=500)
+    # Oldest first, keeping the newest ``limit``.
+    approvals = [request.to_dict() for request in requests[-limit:]]
+    return {"approvals": approvals, "count": len(approvals), "store": gate.health()}
+
+
 def _tool_work_approvals_show(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     store, context_path = _work_store(arguments, manager)
     approval_id = arguments.get("approval_id")
@@ -4037,6 +4053,21 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_work_communication_preflight,
+        ),
+        MCPToolDefinition(
+            name="approvals.list",
+            description="List agent approval-gate requests (pending by default) with source, scope, payload, and expiry. Read-only; deciding needs `afs approvals approve|reject` at a terminal.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string"},
+                    "source": {"type": "string"},
+                    "all": {"type": "boolean", "default": False},
+                    "limit": {"type": "integer", "default": 50},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_approvals_list,
         ),
         MCPToolDefinition(
             name="work.approvals.list",

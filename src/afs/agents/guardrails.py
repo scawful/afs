@@ -7,7 +7,6 @@ import logging
 import os
 import subprocess
 import time
-import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -432,527 +431,20 @@ def cleanup_worktree(repo_path: Path, branch_name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Approval gates
+# Approval gates — SQLite store lives in ``approvals.py``; re-exported here
+# because callers import them from ``guardrails``.
 # ---------------------------------------------------------------------------
 
+from .approvals import (  # noqa: E402, F401 - re-exported
+    ALWAYS_APPROVE,
+    AUTO_APPROVE,
+    ApprovalGate,
+    ApprovalRequest,
+    ApprovalStateError,
+)
+
+# Legacy JSON location; the gate imports it once into ``approvals.sqlite3``.
 APPROVAL_FILE = default_config_root() / "agents" / "approvals.json"
-
-# Actions that always require approval
-ALWAYS_APPROVE = frozenset(
-    {
-        "git_push",
-        "git_force_push",
-        "file_delete",
-        "rom_edit",
-        "deploy",
-        "send_email",
-        "create_pr",
-        "merge_pr",
-    }
-)
-
-# Actions that can be auto-approved for background agents
-AUTO_APPROVE = frozenset(
-    {
-        "file_read",
-        "file_write_scratchpad",
-        "git_status",
-        "git_diff",
-        "git_log",
-        "context_read",
-        "context_write",
-        "run_tests",
-        "run_build",
-        "embedding_update",
-    }
-)
-
-
-def _new_request_id() -> str:
-    return f"gate_{uuid.uuid4().hex[:12]}"
-
-
-@dataclass
-class ApprovalRequest:
-    agent: str
-    action: str
-    detail: str
-    timestamp: str
-    status: str = "pending"  # pending, approved, rejected, auto_approved
-    reviewed_by: str = ""
-    reviewed_at: str = ""
-    rationale: str = ""
-    request_id: str = ""
-    reviewed_via: str = ""
-    reviewer_subject: str = ""
-    identity_authenticated: bool = False
-    human_confirmed: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "agent": self.agent,
-            "action": self.action,
-            "detail": self.detail,
-            "timestamp": self.timestamp,
-            "status": self.status,
-            "reviewed_by": self.reviewed_by,
-            "reviewed_at": self.reviewed_at,
-            "rationale": self.rationale,
-            "request_id": self.request_id,
-            "reviewed_via": self.reviewed_via,
-            "reviewer_subject": self.reviewer_subject,
-            "identity_authenticated": self.identity_authenticated,
-            "human_confirmed": self.human_confirmed,
-        }
-
-
-class ApprovalStateError(RuntimeError):
-    """The active approval store is unreadable and must not be overwritten."""
-
-
-class ApprovalGate:
-    """Gate that blocks dangerous actions until human review."""
-
-    def __init__(self, path: Path | None = None):
-        self._path = (
-            path.expanduser().resolve()
-            if path is not None
-            else _prefer_writable_state_path(
-                "approvals.json",
-                env_var="AFS_AGENT_APPROVALS_PATH",
-            )
-        )
-        self._pending: list[ApprovalRequest] = []
-        self._archive_path = self._path.with_name(f"{self._path.stem}.history.jsonl")
-        self._load()
-
-    def human_authorization_scope(self, decision: str, request_id: str, rationale: str) -> str:
-        """Return the broker scope for one decision in this exact store."""
-        from ..human_provenance import decision_scope_parts
-
-        return decision_scope_parts(
-            "approval-gate",
-            decision,
-            str(self._path),
-            request_id,
-            rationale.strip(),
-        )
-
-    def _load(self) -> None:
-        if not self._path.exists():
-            return
-        with _file_lock(self._path):
-            self._pending = self._read_unlocked()
-
-    def _read_unlocked(self) -> list[ApprovalRequest]:
-        """Read all requests from disk; caller must hold the file lock.
-
-        One malformed record is skipped rather than dropping the whole file.
-        Records written before request ids existed are backfilled with a
-        stable id and persisted immediately, so calibration refs never change
-        between loads.
-        """
-        try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            raise ApprovalStateError(
-                f"active approval state is unreadable at {self._path}; refusing to overwrite it"
-            ) from exc
-        if not isinstance(data, list):
-            raise ApprovalStateError(
-                f"active approval state must be a JSON list at {self._path}; "
-                "refusing to overwrite it"
-            )
-        requests: list[ApprovalRequest] = []
-        backfilled = False
-        for index, item in enumerate(data):
-            if not isinstance(item, dict):
-                raise ApprovalStateError(
-                    f"active approval record {index} is not a JSON object at "
-                    f"{self._path}; refusing to overwrite it"
-                )
-            try:
-                request = ApprovalRequest(**item)
-            except TypeError as exc:
-                raise ApprovalStateError(
-                    f"active approval record {index} is malformed at {self._path}; "
-                    "refusing to overwrite it"
-                ) from exc
-            # Persisted JSON is an untrusted boundary.  Values such as the
-            # string ``"false"`` are truthy in Python and must never become
-            # authorization provenance merely because they resemble a bool.
-            request.identity_authenticated = item.get("identity_authenticated") is True
-            request.human_confirmed = item.get("human_confirmed") is True
-            if not request.request_id:
-                request.request_id = _new_request_id()
-                backfilled = True
-            requests.append(request)
-        if backfilled:
-            self._write_unlocked(requests)
-        return requests
-
-    def _current_unlocked(self) -> list[ApprovalRequest]:
-        """Return current disk state; caller must hold the file lock."""
-        return self._read_unlocked() if self._path.exists() else list(self._pending)
-
-    def _write_unlocked(self, requests: list[ApprovalRequest]) -> None:
-        """Atomically replace requests on disk; caller must hold the file lock."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps([r.to_dict() for r in requests], indent=2)
-        temporary = self._path.with_name(f".{self._path.name}.{uuid.uuid4().hex}.tmp")
-        try:
-            with temporary.open("x", encoding="utf-8") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self._path)
-        finally:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                logger.warning("Could not remove approval temp file %s", temporary)
-
-    def _save(self) -> None:
-        with _file_lock(self._path):
-            self._write_unlocked(self._pending)
-
-    def _read_archive_unlocked(self) -> list[ApprovalRequest]:
-        """Read immutable completed-decision snapshots from the archive."""
-        if not self._archive_path.exists():
-            return []
-        try:
-            lines = self._archive_path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return []
-        requests: list[ApprovalRequest] = []
-        for line in lines:
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(item, dict):
-                continue
-            try:
-                request = ApprovalRequest(**item)
-            except TypeError:
-                continue
-            request.identity_authenticated = item.get("identity_authenticated") is True
-            request.human_confirmed = item.get("human_confirmed") is True
-            requests.append(request)
-        return requests
-
-    def _repair_archive_tail_unlocked(self) -> None:
-        """Repair a torn final JSONL record before appending more history.
-
-        The active approvals file is compacted only after the archive append
-        is durable. If a prior process died during that append, blindly
-        appending would concatenate the next record onto the partial tail and
-        make both unreadable. Preserve a complete final JSON value by adding
-        its missing newline; otherwise truncate only the incomplete tail.
-        """
-        if not self._archive_path.exists():
-            return
-        with self._archive_path.open("rb+") as handle:
-            data = handle.read()
-            if not data or data.endswith(b"\n"):
-                return
-            tail_start = data.rfind(b"\n") + 1
-            tail = data[tail_start:]
-            try:
-                json.loads(tail.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                handle.seek(tail_start)
-                handle.truncate()
-            else:
-                handle.seek(0, os.SEEK_END)
-                handle.write(b"\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-
-    def _archive_completed_unlocked(self, requests: list[ApprovalRequest]) -> None:
-        """Append new completed snapshots before removing them from active state.
-
-        The approvals-file lock serializes writers. Existing request ids are
-        skipped so a crash after the append but before rewriting active state
-        cannot duplicate the immutable history on retry.
-        """
-        if not requests:
-            return
-        self._repair_archive_tail_unlocked()
-        existing_ids = {request.request_id for request in self._read_archive_unlocked()}
-        additions = [request for request in requests if request.request_id not in existing_ids]
-        if not additions:
-            return
-        self._archive_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._archive_path.open("a", encoding="utf-8") as handle:
-            for request in additions:
-                handle.write(json.dumps(request.to_dict(), ensure_ascii=False) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-
-    def all_requests(self) -> list[ApprovalRequest]:
-        """Return archived history plus active requests, deduplicated by id."""
-        with _file_lock(self._path):
-            archived = self._read_archive_unlocked()
-            active = self._read_unlocked() if self._path.exists() else list(self._pending)
-        by_id = {request.request_id: request for request in archived}
-        for request in active:
-            by_id[request.request_id] = request
-        return list(by_id.values())
-
-    def clear_completed(self) -> tuple[int, int]:
-        """Archive completed records and compact active state.
-
-        Returns ``(archived, remaining)``. Approved/rejected rationales and
-        provenance remain available through :meth:`all_requests` and
-        calibration after compaction.
-
-        Read-modify-write under one file lock: clearing from the in-memory
-        snapshot and saving would clobber any request another process queued
-        after this gate loaded.
-        """
-        with _file_lock(self._path):
-            requests = self._read_unlocked() if self._path.exists() else list(self._pending)
-            completed = [r for r in requests if r.status != "pending"]
-            kept = [r for r in requests if r.status == "pending"]
-            removed = len(completed)
-            if completed:
-                self._archive_completed_unlocked(completed)
-                self._write_unlocked(kept)
-            self._pending = kept
-        return removed, len(kept)
-
-    def check(self, agent: str, action: str, detail: str = "") -> bool:
-        """Check if an action is allowed. Returns True if auto-approved or pre-approved."""
-        if action in AUTO_APPROVE:
-            return True
-        with _file_lock(self._path):
-            requests = self._current_unlocked()
-            if any(
-                req.agent == agent
-                and req.action == action
-                and req.detail == detail
-                and req.status == "approved"
-                and req.human_confirmed
-                for req in requests
-            ):
-                self._pending = requests
-                return True
-            self._queue_unlocked(requests, agent, action, detail)
-        return False
-
-    def _queue(self, agent: str, action: str, detail: str) -> None:
-        with _file_lock(self._path):
-            requests = self._current_unlocked()
-            self._queue_unlocked(requests, agent, action, detail)
-
-    def _queue_unlocked(
-        self,
-        requests: list[ApprovalRequest],
-        agent: str,
-        action: str,
-        detail: str,
-    ) -> None:
-        """Queue an exact request; caller must hold the file lock."""
-        if any(
-            req.agent == agent
-            and req.action == action
-            and req.detail == detail
-            and req.status == "pending"
-            for req in requests
-        ):
-            self._pending = requests
-            return
-        requests.append(
-            ApprovalRequest(
-                agent=agent,
-                action=action,
-                detail=detail,
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                request_id=_new_request_id(),
-            )
-        )
-        self._write_unlocked(requests)
-        self._pending = requests
-        logger.info("Queued approval request: agent=%s action=%s", agent, action)
-
-    def pending_requests(self) -> list[ApprovalRequest]:
-        with _file_lock(self._path):
-            requests = self._current_unlocked()
-            self._pending = requests
-        return [r for r in requests if r.status == "pending"]
-
-    def find_pending(self, agent: str, action: str) -> ApprovalRequest | None:
-        with _file_lock(self._path):
-            requests = self._current_unlocked()
-            self._pending = requests
-        for req in requests:
-            if req.agent == agent and req.action == action and req.status == "pending":
-                return req
-        return None
-
-    def approve(
-        self,
-        agent: str,
-        action: str,
-        reviewer: str = "human",
-        *,
-        rationale: str = "",
-        reviewed_via: str = "",
-    ) -> bool:
-        """Record a non-authoritative programmatic approval decision.
-
-        Compatibility callers may still record the result, but caller-supplied
-        reviewer/via strings are untrusted and this record never authorizes
-        :meth:`check`. Use :meth:`approve_human` with a broker capability for
-        an authoritative approval.
-        """
-        return self._resolve(
-            agent,
-            action,
-            "approved",
-            "unauthenticated",
-            rationale,
-            "programmatic",
-            reviewer_subject="",
-            identity_authenticated=False,
-            human_confirmed=False,
-            expected_request_id=None,
-        )
-
-    def approve_human(
-        self,
-        agent: str,
-        action: str,
-        *,
-        rationale: str,
-        authorization: Any,
-    ) -> bool:
-        """Authorize a pending request using a broker-minted capability."""
-        from ..human_provenance import consume_human_authorization
-
-        if not rationale.strip():
-            raise ValueError("a rationale is required for a human approval")
-        request = self.find_pending(agent, action)
-        if request is None:
-            return False
-        scope = self.human_authorization_scope("approve", request.request_id, rationale)
-        if not consume_human_authorization(authorization, scope=scope):
-            raise ValueError("a HumanDecisionBroker authorization is required")
-        identity = authorization.identity
-        return self._resolve(
-            agent,
-            action,
-            "approved",
-            identity.reviewer,
-            rationale,
-            authorization.confirmed_via,
-            reviewer_subject=identity.subject,
-            identity_authenticated=identity.authenticated,
-            human_confirmed=True,
-            expected_request_id=request.request_id,
-        )
-
-    def reject(
-        self,
-        agent: str,
-        action: str,
-        reviewer: str = "human",
-        *,
-        rationale: str = "",
-        reviewed_via: str = "",
-    ) -> bool:
-        """Record a fail-safe, non-authoritative programmatic rejection."""
-        return self._resolve(
-            agent,
-            action,
-            "rejected",
-            "unauthenticated",
-            rationale,
-            "programmatic",
-            reviewer_subject="",
-            identity_authenticated=False,
-            human_confirmed=False,
-            expected_request_id=None,
-        )
-
-    def reject_human(
-        self,
-        agent: str,
-        action: str,
-        *,
-        rationale: str,
-        authorization: Any,
-    ) -> bool:
-        """Record a human-confirmed rejection using a broker capability."""
-        from ..human_provenance import consume_human_authorization
-
-        if not rationale.strip():
-            raise ValueError("a rationale is required for a human rejection")
-        request = self.find_pending(agent, action)
-        if request is None:
-            return False
-        scope = self.human_authorization_scope("reject", request.request_id, rationale)
-        if not consume_human_authorization(authorization, scope=scope):
-            raise ValueError("a HumanDecisionBroker authorization is required")
-        identity = authorization.identity
-        return self._resolve(
-            agent,
-            action,
-            "rejected",
-            identity.reviewer,
-            rationale,
-            authorization.confirmed_via,
-            reviewer_subject=identity.subject,
-            identity_authenticated=identity.authenticated,
-            human_confirmed=True,
-            expected_request_id=request.request_id,
-        )
-
-    def _resolve(
-        self,
-        agent: str,
-        action: str,
-        status: str,
-        reviewer: str,
-        rationale: str,
-        reviewed_via: str,
-        *,
-        reviewer_subject: str,
-        identity_authenticated: bool,
-        human_confirmed: bool,
-        expected_request_id: str | None,
-    ) -> bool:
-        """Resolve a pending request under the file lock.
-
-        Re-reads the store while holding the lock so a decision never
-        overwrites requests queued by another process between our load and
-        save.
-        """
-        with _file_lock(self._path):
-            requests = self._read_unlocked() if self._path.exists() else list(self._pending)
-            for req in requests:
-                if (
-                    req.agent == agent
-                    and req.action == action
-                    and req.status == "pending"
-                    and (expected_request_id is None or req.request_id == expected_request_id)
-                ):
-                    req.status = status
-                    req.reviewed_by = reviewer
-                    req.reviewed_at = datetime.now(timezone.utc).isoformat()
-                    req.rationale = rationale.strip()
-                    req.reviewed_via = reviewed_via
-                    req.reviewer_subject = reviewer_subject
-                    req.identity_authenticated = identity_authenticated
-                    req.human_confirmed = human_confirmed
-                    self._write_unlocked(requests)
-                    self._pending = requests
-                    return True
-            self._pending = requests
-            return False
 
 
 # ---------------------------------------------------------------------------
@@ -973,6 +465,8 @@ class GuardrailConfig:
     max_iterations: int = 50  # RALPH loop iteration cap
     checkpoint_interval: int = 5  # write progress every N iterations
     dry_run: bool = False  # log actions without executing
+    # Actions gated even when they appear in AUTO_APPROVE.
+    require_approval_for: frozenset[str] = frozenset()
 
 
 class GuardrailedAgent:
@@ -986,9 +480,20 @@ class GuardrailedAgent:
             guard.record_call(model.provider, cost_usd=0.01)
     """
 
-    def __init__(self, agent_name: str, config: GuardrailConfig | None = None):
+    def __init__(
+        self,
+        agent_name: str,
+        config: GuardrailConfig | None = None,
+        *,
+        source: str = "",
+        run_id: str = "",
+    ):
         self.agent_name = agent_name
         self.config = config or GuardrailConfig()
+        # ``source`` lets a new run supersede this requester's stale requests;
+        # ``run_id`` binds ``once`` approvals to the run that consumed them.
+        self.source = source
+        self.run_id = run_id
         self._tracker = (
             QuotaTracker(quotas=self.config.quotas) if self.config.enable_quota else None
         )
@@ -1004,7 +509,14 @@ class GuardrailedAgent:
             task_tier=tier,
         )
 
-    def can_do(self, action: str, detail: str = "") -> bool:
+    def can_do(
+        self,
+        action: str,
+        detail: str = "",
+        *,
+        payload: Any = None,
+        scope: str = "standing",
+    ) -> bool:
         """Check if action is allowed through approval gate."""
         if not self.config.enable_approvals:
             return True
@@ -1012,7 +524,24 @@ class GuardrailedAgent:
             logger.info("[DRY RUN] Would request approval: %s — %s", action, detail)
             return False
         assert self._gate is not None
-        return self._gate.check(self.agent_name, action, detail)
+        return self._gate.check(
+            self.agent_name,
+            action,
+            detail,
+            source=self.source,
+            run_id=self.run_id,
+            scope=scope,
+            payload=payload,
+            force=action in self.config.require_approval_for,
+        )
+
+    def withdraw(self, action: str, reason: str = "") -> int:
+        """Withdraw this requester's pending requests for ``action``."""
+        if self._gate is None or self.config.dry_run:
+            return 0
+        return self._gate.withdraw(
+            self.agent_name, action=action, source=self.source, reason=reason
+        )
 
     def record_call(self, provider: str, cost_usd: float = 0.0) -> None:
         """Record an API call for quota tracking."""
@@ -1042,7 +571,9 @@ class GuardrailedAgent:
     def pending_approvals(self) -> list[ApprovalRequest]:
         """Return pending approval requests for this agent."""
         if self._gate:
-            return [r for r in self._gate.pending_requests() if r.agent == self.agent_name]
+            return self._gate.pending_requests(
+                agent=self.agent_name, source=self.source or None
+            )
         return []
 
     @property
