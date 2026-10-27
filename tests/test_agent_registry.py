@@ -298,3 +298,26 @@ def test_inherited_supervisor_scope_rejects_unexpected_result_name(
     assert nested["status"] == "ok"
     assert "context_root" not in nested
     assert "run_id" not in nested
+
+
+def test_reap_drops_entries_with_missing_context_root(tmp_path: Path) -> None:
+    live_root = tmp_path / "live"
+    live_root.mkdir()
+    registry = AgentRegistry(tmp_path / "registry.json")
+    registry.mark_started(name="kept", context_root=str(live_root), run_id="a")
+    registry.mark_started(name="unscoped", run_id="b")
+    registry.mark_started(name="stale", context_root=str(tmp_path / "gone"), run_id="c")
+    registry.update(
+        name="stale-review",
+        status="awaiting_review",
+        context_root=str(tmp_path / "gone-too"),
+    )
+
+    preview = registry.reap(dry_run=True)
+    assert {entry["name"] for entry in preview} == {"stale", "stale-review"}
+    assert len(registry.entries()) == 4
+
+    removed = registry.reap()
+    assert {entry["name"] for entry in removed} == {"stale", "stale-review"}
+    assert {entry["name"] for entry in registry.entries()} == {"kept", "unscoped"}
+    assert registry.reap() == []

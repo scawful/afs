@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ..context_paths import resolve_mount_root
 from ..event_log import build_session_replay, summarize_event_analytics
-from ..history import query_events
+from ..history import DEFAULT_HISTORY_KEEP_DAYS, archive_history_events, query_events
 from ..manager import AFSManager
 from ..models import MountType
 from ._utils import load_manager, resolve_context_paths
@@ -183,6 +183,38 @@ def events_replay_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def events_archive_command(args: argparse.Namespace) -> int:
+    """Gzip daily event logs older than the retention window."""
+    _manager, _context_path, history_root = _resolve_manager_context_history(args)
+    try:
+        report = archive_history_events(
+            history_root,
+            keep_days=args.keep_days,
+            dry_run=args.dry_run,
+        )
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        verb = "would archive" if report.dry_run else "archived"
+        archived = [entry for entry in report.entries if entry.skipped is None]
+        print(
+            f"{verb} {len(archived)} file(s) dated on or before {report.cutoff} "
+            f"({report.bytes_before} bytes"
+            + ("" if report.dry_run else f" -> {report.bytes_after} bytes")
+            + ")"
+        )
+        for entry in report.entries:
+            if entry.skipped is not None:
+                print(f"skipped {entry.path}: {entry.skipped}")
+            elif args.verbose:
+                print(f"  {entry.path}")
+    return 1 if any(entry.skipped for entry in report.entries) else 0
+
+
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register events command parsers."""
     def _add_context_args(parser: argparse.ArgumentParser) -> None:
@@ -239,3 +271,21 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     replay_parser.add_argument("--include-payloads", action="store_true", help="Include event payloads in JSON output.")
     replay_parser.add_argument("--json", action="store_true", help="Output JSON.")
     replay_parser.set_defaults(func=events_replay_command)
+
+    archive_parser = events_sub.add_parser(
+        "archive",
+        help="Gzip daily event logs older than the retention window (never deletes).",
+    )
+    _add_context_args(archive_parser)
+    archive_parser.add_argument(
+        "--keep-days",
+        type=int,
+        default=DEFAULT_HISTORY_KEEP_DAYS,
+        help=f"Uncompressed days to keep (default {DEFAULT_HISTORY_KEEP_DAYS}).",
+    )
+    archive_parser.add_argument(
+        "--dry-run", action="store_true", help="List files and sizes without writing."
+    )
+    archive_parser.add_argument("--verbose", action="store_true", help="List each file.")
+    archive_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    archive_parser.set_defaults(func=events_archive_command, _skip_cli_history=True)

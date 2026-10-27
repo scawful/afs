@@ -66,6 +66,11 @@ def _latest_timestamp(entry: dict[str, Any]) -> datetime | None:
     return None
 
 
+def _context_root_missing(entry: dict[str, Any]) -> bool:
+    root = str(entry.get("context_root", "") or "").strip()
+    return bool(root) and not Path(root).expanduser().exists()
+
+
 def _sort_key(entry: dict[str, Any]) -> tuple[int, float]:
     status = str(entry.get("status", ""))
     timestamp = _latest_timestamp(entry)
@@ -160,6 +165,21 @@ class AgentRegistry:
             if latest is not None and latest >= cutoff:
                 kept.append(entry)
         return kept
+
+    def reap(self, *, dry_run: bool = False) -> list[dict[str, Any]]:
+        """Drop entries whose ``context_root`` no longer exists on disk.
+
+        Active entries are otherwise kept forever by ``_prune``, so runs from
+        deleted temp dirs or worktrees accumulate.  Entries without a
+        ``context_root`` are kept.  Returns the removed (or, with
+        ``dry_run``, removable) entries.
+        """
+        if dry_run:
+            return [entry for entry in self._read_unlocked() if _context_root_missing(entry)]
+        with self._locked_entries() as entries:
+            removed = [entry for entry in entries if _context_root_missing(entry)]
+            entries[:] = [entry for entry in entries if not _context_root_missing(entry)]
+        return removed
 
     def entries(self) -> list[dict[str, Any]]:
         return self._read_unlocked()
