@@ -1925,6 +1925,9 @@ def _tool_hivemind_read(arguments: dict[str, Any], manager: AFSManager) -> dict[
             "to": recipient.strip(),
             "messages": bus.inbox(
                 recipient.strip(),
+                agent_name=agent_name,
+                msg_type=msg_type,
+                topic=topic,
                 include_done=arguments.get("include_done") is True,
                 limit=limit,
             ),
@@ -3530,7 +3533,8 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
             name="messages.read",
             description=(
                 "Read messages visible to the current project plus common messages. "
-                "Pass `to` for an inbox view with read/done state."
+                "Pass `to` for an inbox view with read/done state; agent, type and "
+                "topic filters still apply."
             ),
             input_schema={
                 "type": "object",

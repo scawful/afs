@@ -671,7 +671,12 @@ def messages_list_command(args: argparse.Namespace) -> int:
     recipient = getattr(args, "to", None)
     if recipient:
         entries = bus.inbox(
-            recipient, include_done=bool(getattr(args, "include_done", False)), limit=args.limit
+            recipient,
+            agent_name=args.agent,
+            msg_type=args.type,
+            topic=args.topic,
+            include_done=bool(getattr(args, "include_done", False)),
+            limit=args.limit,
         )
         if args.json:
             print(json.dumps(entries, indent=2))

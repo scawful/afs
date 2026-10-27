@@ -1909,6 +1909,47 @@ def test_v2_message_tools_default_to_project_plus_common(tmp_path: Path) -> None
     }
 
 
+def test_messages_read_inbox_applies_topic_sender_and_type(tmp_path: Path) -> None:
+    manager, context_root, alpha, _beta, _alpha_id, _beta_id = _make_v2_manager(tmp_path)
+    coordinator = "Codex-Sequence-Coordinator"
+    topic = "asm-z3dk-review-and-lyra-source03"
+
+    def send(sender: str, msg_type: str, to: str, msg_topic: str | None) -> str:
+        arguments: dict[str, object] = {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "from": sender,
+            "type": msg_type,
+            "to": to,
+        }
+        if msg_topic is not None:
+            arguments["topic"] = msg_topic
+        response = _call_tool(manager, "messages.send", arguments)
+        return response["result"]["structuredContent"]["id"]
+
+    on_topic = send("codex-asm", "request", coordinator, topic)
+    on_topic_status = send("codex-lyra", "status", coordinator, topic)
+    send("codex-asm", "request", "cursor", topic)
+    send("codex-wrap", "status", coordinator, "wrap")
+    send("codex-wrap", "status", coordinator, None)
+
+    def read(**filters: object) -> list[str]:
+        arguments: dict[str, object] = {
+            "context_path": str(context_root),
+            "project_path": str(alpha),
+            "to": coordinator,
+            **filters,
+        }
+        result = _call_tool(manager, "messages.read", arguments)["result"]["structuredContent"]
+        assert result["to"] == coordinator
+        return [message["id"] for message in result["messages"]]
+
+    assert read(topic=topic, limit=2) == [on_topic, on_topic_status]
+    assert read(topic=topic, agent="codex-asm") == [on_topic]
+    assert read(topic=topic, type="status") == [on_topic_status]
+    assert read(topic="missing") == []
+
+
 def test_v2_legacy_hivemind_reap_requires_literal_all_projects(
     tmp_path: Path,
 ) -> None:
