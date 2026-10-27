@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -421,6 +422,56 @@ def test_v2_dashboard_skips_linked_managed_reports_and_missions(
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
+
+def test_approvals_read_from_gate_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate database wins over approvals.json; expired rows don't count."""
+    import afs.agents.approvals as approvals_module
+    from afs.agents.approvals import ApprovalGate
+
+    agent_root = tmp_path / "agents"
+    scratchpad = tmp_path / "scratchpad"
+    scratchpad.mkdir()
+    _write_json(agent_root / "approvals.json", [])
+    gate = ApprovalGate(agent_root / "approvals.json")
+    assert not gate.check("mission-runner", "deploy", "ship")
+
+    def build() -> dict:
+        return agent.build_dashboard(
+            agent_output_root=agent_root,
+            scratchpad_root=scratchpad,
+            missions_root=tmp_path / "no_missions",
+        )
+
+    assert build()["approvals_pending"] == 1
+
+    later = approvals_module._now() + timedelta(hours=73)
+    monkeypatch.setattr(approvals_module, "_now", lambda: later)
+    assert build()["approvals_pending"] == 0
+    # The dashboard only reads; expiring the row is the gate's job.
+    monkeypatch.undo()
+    [row] = gate.all_requests()
+    assert row.status == "pending"
+
+
+def test_approvals_read_never_creates_gate_database(tmp_path: Path) -> None:
+    agent_root = tmp_path / "agents"
+    scratchpad = tmp_path / "scratchpad"
+    scratchpad.mkdir()
+    _write_json(agent_root / "approvals.json", [
+        {"agent": "mission-runner", "status": "pending", "action": "deploy"},
+    ])
+
+    dashboard = agent.build_dashboard(
+        agent_output_root=agent_root,
+        scratchpad_root=scratchpad,
+        missions_root=tmp_path / "no_missions",
+    )
+
+    assert dashboard["approvals_pending"] == 1
+    assert sorted(p.name for p in agent_root.iterdir()) == ["approvals.json"]
+
 
 def test_malformed_json_files(tmp_path: Path) -> None:
     """Malformed JSON files should not crash the dashboard builder."""

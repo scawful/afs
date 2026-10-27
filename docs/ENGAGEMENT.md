@@ -49,13 +49,41 @@ explicitly unauthenticated and is not a human calibration judgment.
 Rationales appear in `approvals history` and are resurfaced by calibration
 review.
 
-`afs approvals clear` compacts the active queue but first appends every
-completed record to an immutable JSONL history beside the queue. Approved and
-rejected rationales, provenance, calibration refs, and decision timestamps
-therefore survive clearing.
+### Gate Request Lifecycle
+
+Agent-gate requests live in one SQLite database,
+`~/.config/afs/agents/approvals.sqlite3` (override with `--approvals-file` or
+`AFS_AGENT_APPROVALS_DB`). `afs approvals list --json` is the one reader for
+other tools; the Barista widget, `afs-supervisor-ctl status`, and the MCP
+`approvals.list` tool (read-only) all show the same rows.
+
+- `pending` waits for a person. Only a terminal-confirmed decision moves it to
+  `approved` or `rejected`.
+- The system closes requests nobody needs: `expired` (past `expires_at`,
+  72 hours by default, reaped on every list and check), `superseded` (a newer
+  request from the same `source` for the same agent/action), and `withdrawn`
+  (the requester stopped needing it, for example a mission phase that no
+  longer requires approval). System states are never human judgments, so
+  calibration ignores them.
+- An approval's `scope` is `standing` (authorizes every matching check) or
+  `once` (consumed by the first run that uses it; the mission runner asks for
+  `once`). `afs approvals revoke --request-id <id> --because "…"` stops a
+  standing approval without a terminal prompt, because it only removes
+  permission.
+- `payload` carries the run-specific context a reviewer needs (mission phase,
+  prior phase notes, finding text); `detail` stays stable across runs so a
+  re-run supersedes its old request instead of piling up a new one.
+
+`afs approvals reject --stale --because "…"` rejects every pending request
+older than `--older-than` hours (default 24) after one terminal confirmation.
+`afs approvals clear` prunes only expired/superseded/withdrawn rows older than
+30 days; approved and rejected rows, with their rationales and provenance, are
+kept for calibration.
 
 Every gate request carries a unique `request_id` (`gate_...`) used as its
-calibration ref; legacy records are backfilled with stable ids on first load.
+calibration ref. The legacy `approvals.json` / `approvals.history.jsonl` pair
+is imported once by request id and never written again; malformed legacy rows
+are skipped and counted, never fatal.
 
 ## Mission Acceptance
 

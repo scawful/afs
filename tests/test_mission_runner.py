@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from afs.agents.approvals import ApprovalGate
 from afs.agents.guardrails import GuardrailConfig, GuardrailedAgent
 from afs.agents.mission_runner import (
     Mission,
@@ -32,6 +33,33 @@ from afs.schema import AFSConfig, GeneralConfig
 def _isolated_agent_registry(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("AFS_AGENT_REGISTRY_PATH", str(tmp_path / "agent_registry.json"))
     monkeypatch.setenv("HOME", str(tmp_path))
+
+
+def _human_approve(request_id: str) -> None:
+    from afs.human_provenance import _broker_for_reader
+
+    gate = ApprovalGate()
+    authorization = _broker_for_reader(lambda _prompt: "confirm").confirm_token(
+        "confirm",
+        "prompt",
+        scope=gate.human_authorization_scope("approve", request_id, "reviewed"),
+    )
+    assert gate.approve_human(
+        request_id=request_id, rationale="reviewed", authorization=authorization
+    )
+
+
+def _gated_mission(*, decide_gated: bool = True) -> Mission:
+    return Mission(
+        name="gated-test",
+        tier="standard",
+        guardrails=MissionGuardrails(max_iterations=20),
+        phases=[
+            MissionPhase(name="observe", outputs=["obs.json"]),
+            MissionPhase(name="decide", requires_approval=decide_gated, outputs=["decide.json"]),
+            MissionPhase(name="act", outputs=["act.json"]),
+        ],
+    )
 
 
 @pytest.fixture
@@ -353,7 +381,28 @@ class TestPhaseExecution:
         assert deferred[0]["action"] == "context_repair"
 
     def test_act_skips_unapproved(self, context_root: Path) -> None:
-        """Act phase should skip actions that need approval."""
+        """Act phase should skip actions the mission gates behind approval."""
+        output_dir = context_root / "scratchpad" / "missions" / "test-act"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "decisions.json").write_text(json.dumps({
+            "data": {"actions": [{"action": "embedding_update", "reason": "3 files changed"}]},
+        }), encoding="utf-8")
+        phase = MissionPhase(name="act", outputs=["results.json"])
+        mission = Mission(name="test")
+        guard = GuardrailedAgent("test", GuardrailConfig(
+            enable_approvals=True, require_approval_for=frozenset({"embedding_update"}),
+        ))
+        result = _run_phase_tools(phase, mission, guard, output_dir, context_root)
+        skipped = result.get("data", {}).get("skipped", [])
+        assert len(skipped) == 1
+        assert skipped[0]["reason"] == "approval required"
+        [request] = guard.pending_approvals()
+        assert request.detail == "act embedding_update"
+        assert request.scope == "once"
+        assert json.loads(request.payload)["reason"] == "3 files changed"
+
+    def test_act_skips_unhandled_action_without_queueing(self, context_root: Path) -> None:
+        """An action with no executor must not ask a human for approval."""
         output_dir = context_root / "scratchpad" / "missions" / "test-act"
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "decisions.json").write_text(json.dumps({
@@ -364,8 +413,8 @@ class TestPhaseExecution:
         guard = GuardrailedAgent("test", GuardrailConfig(enable_approvals=True))
         result = _run_phase_tools(phase, mission, guard, output_dir, context_root)
         skipped = result.get("data", {}).get("skipped", [])
-        assert len(skipped) == 1
-        assert skipped[0]["reason"] == "approval required"
+        assert skipped == [{"action": "git_push", "reason": "no handler for git_push"}]
+        assert guard.pending_approvals() == []
 
     def test_unknown_phase_type_handled(self, context_root: Path) -> None:
         """Unknown phase types should not crash."""
@@ -455,20 +504,45 @@ class TestRunMission:
         self, context_root: Path, tmp_path: Path,
     ) -> None:
         mission_path = tmp_path / "test.toml"
-        mission = Mission(
-            name="gated-test",
-            tier="standard",
-            guardrails=MissionGuardrails(max_iterations=20),
-            phases=[
-                MissionPhase(name="observe", outputs=["obs.json"]),
-                MissionPhase(name="decide", requires_approval=True, outputs=["decide.json"]),
-                MissionPhase(name="act", outputs=["act.json"]),
-            ],
-        )
-        result = _run_mission(mission_path, mission, context_root)
+        result = _run_mission(mission_path, _gated_mission(), context_root)
         assert result["status"] == "awaiting_approval"
         assert len(result["phases"]) == 2  # stopped after decide
         assert result["phases"][1]["status"] == "awaiting_approval"
+        [pending] = result["pending_approvals"]
+        assert pending["source"] == "mission:gated-test"
+        assert pending["run_id"] == result["run_id"]
+        payload = json.loads(pending["payload"])
+        assert [p["phase"] for p in payload["prior_phases"]] == ["observe"]
+
+    def test_phase_approval_is_used_by_one_rerun(
+        self, context_root: Path, tmp_path: Path,
+    ) -> None:
+        mission_path = tmp_path / "test.toml"
+        first = _run_mission(mission_path, _gated_mission(), context_root)
+        _human_approve(first["pending_approvals"][0]["request_id"])
+
+        second = _run_mission(mission_path, _gated_mission(), context_root)
+        assert second["phases"][1]["status"] == "ok"
+        assert second["status"] != "awaiting_approval"
+
+        third = _run_mission(mission_path, _gated_mission(), context_root)
+        assert third["status"] == "awaiting_approval"
+
+    def test_rerun_supersedes_and_ungated_phase_withdraws(
+        self, context_root: Path, tmp_path: Path,
+    ) -> None:
+        mission_path = tmp_path / "test.toml"
+        first = _run_mission(mission_path, _gated_mission(), context_root)
+        second = _run_mission(mission_path, _gated_mission(), context_root)
+        gate = ApprovalGate()
+        old_id = first["pending_approvals"][0]["request_id"]
+        new_id = second["pending_approvals"][0]["request_id"]
+        assert gate.get(old_id).status == "superseded"
+        assert gate.get(old_id).superseded_by == new_id
+
+        third = _run_mission(mission_path, _gated_mission(decide_gated=False), context_root)
+        assert third["pending_approvals"] == []
+        assert gate.get(new_id).status == "withdrawn"
 
     def test_mission_writes_result_file(
         self, context_root: Path, tmp_path: Path,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from argparse import Namespace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from afs.agents.guardrails import ApprovalGate, ApprovalRequest
@@ -15,6 +15,8 @@ from afs.cli.approvals import (
     approvals_history_command,
     approvals_list_command,
     approvals_reject_command,
+    approvals_revoke_command,
+    approvals_show_command,
     register_parsers,
 )
 
@@ -121,12 +123,12 @@ def test_approve_flow(tmp_path: Path, capsys, monkeypatch) -> None:
     # Verify it's now approved in the file, with the rationale and provenance
     gate = ApprovalGate(path=approvals_file)
     assert len(gate.pending_requests()) == 0
-    assert gate._pending[0].status == "approved"
-    assert gate._pending[0].reviewed_by  # OS user, never a claimable flag
-    assert gate._pending[0].reviewed_via == "controlling_terminal"
-    assert gate._pending[0].human_confirmed is True
-    assert gate._pending[0].rationale == "push is release-gated"
-    assert gate._pending[0].request_id.startswith("gate_")
+    assert gate.all_requests()[0].status == "approved"
+    assert gate.all_requests()[0].reviewed_by  # OS user, never a claimable flag
+    assert gate.all_requests()[0].reviewed_via == "controlling_terminal"
+    assert gate.all_requests()[0].human_confirmed is True
+    assert gate.all_requests()[0].rationale == "push is release-gated"
+    assert gate.all_requests()[0].request_id.startswith("gate_")
 
 
 def test_approve_refused_headless(tmp_path: Path, capsys, monkeypatch) -> None:
@@ -205,11 +207,11 @@ def test_reject_flow(tmp_path: Path, capsys, monkeypatch) -> None:
     # CLI judgments carry broker-derived human provenance.
     gate = ApprovalGate(path=approvals_file)
     assert len(gate.pending_requests()) == 0
-    assert gate._pending[0].status == "rejected"
-    assert gate._pending[0].reviewed_by
-    assert gate._pending[0].reviewed_via == "controlling_terminal"
-    assert gate._pending[0].human_confirmed is True
-    assert gate._pending[0].rationale == "branch is frozen"
+    assert gate.all_requests()[0].status == "rejected"
+    assert gate.all_requests()[0].reviewed_by
+    assert gate.all_requests()[0].reviewed_via == "controlling_terminal"
+    assert gate.all_requests()[0].human_confirmed is True
+    assert gate.all_requests()[0].rationale == "branch is frozen"
 
 
 def test_reject_not_found(tmp_path: Path, capsys) -> None:
@@ -241,10 +243,21 @@ def test_reject_requires_rationale(tmp_path: Path, capsys) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_clear_removes_completed(tmp_path: Path, capsys) -> None:
+def _closed_request(agent: str, status: str, days_ago: float) -> ApprovalRequest:
+    request = _sample_request(agent=agent, action="git_push", status=status)
+    stamp = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+    request.timestamp = stamp
+    request.reviewed_by = "system"
+    request.reviewed_at = stamp
+    return request
+
+
+def test_clear_prunes_only_old_system_closed(tmp_path: Path, capsys) -> None:
     requests = [
-        _sample_request(agent="scout", action="git_push", status="approved"),
-        _sample_request(agent="scout", action="deploy", status="rejected"),
+        _closed_request("old-expired", "expired", days_ago=40),
+        _closed_request("old-withdrawn", "withdrawn", days_ago=31),
+        _closed_request("new-expired", "expired", days_ago=2),
+        _closed_request("old-approved", "approved", days_ago=90),
         _sample_request(agent="janitor", action="file_delete", status="pending"),
     ]
     approvals_file = _make_gate(tmp_path, requests)
@@ -252,16 +265,16 @@ def test_clear_removes_completed(tmp_path: Path, capsys) -> None:
     exit_code = approvals_clear_command(_ns(approvals_file))
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "Archived 2" in out
+    assert "Pruned 2" in out
     assert "1 pending" in out
 
-    # Verify only the pending request remains
     gate = ApprovalGate(path=approvals_file)
-    assert len(gate._pending) == 1
-    assert gate._pending[0].agent == "janitor"
-    assert gate._pending[0].status == "pending"
-    archived = [request for request in gate.all_requests() if request.status != "pending"]
-    assert len(archived) == 2
+    kept = {r.agent: r.status for r in gate.all_requests()}
+    assert kept == {
+        "new-expired": "expired",
+        "old-approved": "approved",
+        "janitor": "pending",
+    }
 
 
 def test_clear_nothing_to_clear(tmp_path: Path, capsys) -> None:
@@ -271,12 +284,12 @@ def test_clear_nothing_to_clear(tmp_path: Path, capsys) -> None:
     exit_code = approvals_clear_command(_ns(approvals_file))
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "Archived 0" in out
+    assert "Pruned 0" in out
 
 
 def test_clear_json(tmp_path: Path, capsys) -> None:
     requests = [
-        _sample_request(status="approved"),
+        _closed_request("old", "superseded", days_ago=45),
         _sample_request(agent="x", action="y", status="pending"),
     ]
     approvals_file = _make_gate(tmp_path, requests)
@@ -284,6 +297,7 @@ def test_clear_json(tmp_path: Path, capsys) -> None:
     exit_code = approvals_clear_command(_ns(approvals_file, json=True))
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
+    assert payload["pruned"] == 1
     assert payload["cleared"] == 1
     assert payload["remaining"] == 1
 
@@ -443,7 +457,7 @@ def test_approve_by_request_id_picks_that_row(tmp_path: Path, capsys, monkeypatc
     assert "gate_second00000" in capsys.readouterr().out
 
     gate = ApprovalGate(path=approvals_file)
-    by_id = {r.request_id: r for r in gate._pending}
+    by_id = {r.request_id: r for r in gate.all_requests()}
     assert by_id["gate_second00000"].status == "approved"
     assert by_id["gate_second00000"].human_confirmed is True
     assert by_id["gate_first000000"].status == "pending"
@@ -467,7 +481,7 @@ def test_reject_by_request_id_picks_that_row(tmp_path: Path, capsys, monkeypatch
     assert exit_code == 0
 
     gate = ApprovalGate(path=approvals_file)
-    by_id = {r.request_id: r for r in gate._pending}
+    by_id = {r.request_id: r for r in gate.all_requests()}
     assert by_id["gate_first000000"].status == "rejected"
     assert by_id["gate_second00000"].status == "pending"
 
@@ -502,3 +516,166 @@ def test_parser_accepts_request_id_without_pair() -> None:
     assert args.request_id == "gate_abc"
     args = parser.parse_args(["approvals", "reject", "myagent", "deploy", "--because", "no"])
     assert args.request_id is None
+
+
+# ---------------------------------------------------------------------------
+# lifecycle: show, reject --stale, revoke, non-pending lookups
+# ---------------------------------------------------------------------------
+
+
+def _aged(agent: str, hours: float) -> ApprovalRequest:
+    request = _sample_request(agent=agent, action="git_push", detail=f"{agent} push")
+    request.timestamp = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    return request
+
+
+def test_list_shows_source_and_expiry(tmp_path: Path, capsys) -> None:
+    approvals_file = _make_gate(tmp_path)
+    ApprovalGate(path=approvals_file).check(
+        "mission-runner", "deploy", "ship", source="mission:nightly", run_id="run_1"
+    )
+    assert approvals_list_command(_ns(approvals_file)) == 0
+    out = capsys.readouterr().out
+    assert "SOURCE" in out and "EXPIRES" in out
+    assert "mission:nightly" in out
+    assert "72h" in out
+
+
+def test_list_warns_about_skipped_legacy_rows(tmp_path: Path, capsys) -> None:
+    approvals_file = tmp_path / "approvals.json"
+    good = _sample_request().to_dict()
+    approvals_file.write_text(json.dumps([{"agent": 3}, good]), encoding="utf-8")
+
+    assert approvals_list_command(_ns(approvals_file, json=True)) == 0
+    captured = capsys.readouterr()
+    assert len(json.loads(captured.out)) == 1
+    assert "1 malformed legacy approval record" in captured.err
+
+
+def test_show_prints_payload(tmp_path: Path, capsys) -> None:
+    approvals_file = _make_gate(tmp_path)
+    gate = ApprovalGate(path=approvals_file)
+    gate.check("mission-runner", "deploy", "ship", scope="once", payload={"plan": ["a", "b"]})
+    request_id = gate.pending_requests()[0].request_id
+
+    assert approvals_show_command(_ns(approvals_file, request_id=request_id)) == 0
+    out = capsys.readouterr().out
+    assert "scope:" in out and "once" in out
+    assert '"plan"' in out
+
+    assert approvals_show_command(_ns(approvals_file, request_id="gate_nope")) == 1
+
+
+def test_decide_reports_non_pending_status(tmp_path: Path, capsys) -> None:
+    approvals_file = _make_gate(tmp_path, [_aged("old", hours=100)])
+    request_id = ApprovalGate(path=approvals_file).all_requests()[0].request_id
+
+    exit_code = approvals_approve_command(
+        _ns(approvals_file, agent=None, action=None, request_id=request_id, because="x")
+    )
+    assert exit_code == 1
+    assert f"Request {request_id} is expired, not pending." in capsys.readouterr().out
+
+
+def test_reject_stale_batch_needs_one_tty_ack(tmp_path: Path, capsys, monkeypatch) -> None:
+    approvals_file = _make_gate(
+        tmp_path, [_aged("old-a", hours=30), _aged("old-b", hours=48), _aged("fresh", hours=1)]
+    )
+    prompts: list[str] = []
+
+    def reader(prompt: str) -> str:
+        prompts.append(prompt)
+        return "reject 2"
+
+    monkeypatch.setattr(cli_approvals, "_TTY_READER", reader)
+    exit_code = approvals_reject_command(
+        _ns(
+            approvals_file,
+            agent=None,
+            action=None,
+            request_id=None,
+            stale=True,
+            older_than=24.0,
+            because="stale mission requests",
+        )
+    )
+    assert exit_code == 0
+    assert len(prompts) == 1
+    assert "Rejected 2 stale request(s)" in capsys.readouterr().out
+
+    by_agent = {r.agent: r for r in ApprovalGate(path=approvals_file).all_requests()}
+    assert by_agent["fresh"].status == "pending"
+    for agent in ("old-a", "old-b"):
+        assert by_agent[agent].status == "rejected"
+        assert by_agent[agent].human_confirmed is True
+        assert by_agent[agent].reviewed_via == "controlling_terminal"
+        assert by_agent[agent].rationale == "stale mission requests"
+
+
+def test_reject_stale_refused_on_wrong_token(tmp_path: Path, capsys, monkeypatch) -> None:
+    approvals_file = _make_gate(tmp_path, [_aged("old-a", hours=30)])
+    monkeypatch.setattr(cli_approvals, "_TTY_READER", lambda prompt: "yes")
+    exit_code = approvals_reject_command(
+        _ns(
+            approvals_file,
+            agent=None,
+            action=None,
+            request_id=None,
+            stale=True,
+            older_than=24.0,
+            because="stale",
+        )
+    )
+    assert exit_code == 2
+    assert [r.status for r in ApprovalGate(path=approvals_file).all_requests()] == ["pending"]
+
+
+def test_reject_stale_rejects_named_request(tmp_path: Path, capsys) -> None:
+    approvals_file = _make_gate(tmp_path, [_aged("old-a", hours=30)])
+    exit_code = approvals_reject_command(
+        _ns(
+            approvals_file,
+            agent=None,
+            action=None,
+            request_id="gate_x",
+            stale=True,
+            older_than=24.0,
+            because="stale",
+        )
+    )
+    assert exit_code == 2
+    assert "--stale" in capsys.readouterr().err
+
+
+def test_revoke_stops_a_standing_approval(tmp_path: Path, capsys, monkeypatch) -> None:
+    approvals_file = _make_gate(tmp_path, [_sample_request()])
+    monkeypatch.setattr(cli_approvals, "_TTY_READER", lambda prompt: "scout:git_push")
+    assert (
+        approvals_approve_command(
+            _ns(approvals_file, agent="scout", action="git_push", because="release-gated")
+        )
+        == 0
+    )
+    gate = ApprovalGate(path=approvals_file)
+    request = gate.all_requests()[0]
+    assert gate.check("scout", "git_push", request.detail) is True
+
+    assert (
+        approvals_revoke_command(
+            _ns(approvals_file, request_id=request.request_id, because="branch frozen")
+        )
+        == 0
+    )
+    assert gate.check("scout", "git_push", request.detail) is False
+    revoked = gate.get(request.request_id)
+    assert revoked is not None
+    assert revoked.status == "approved" and revoked.human_confirmed is True
+    assert revoked.revoked_reason == "branch frozen"
+
+    assert (
+        approvals_revoke_command(
+            _ns(approvals_file, request_id=request.request_id, because="again")
+        )
+        == 1
+    )
+    assert "already revoked" in capsys.readouterr().out

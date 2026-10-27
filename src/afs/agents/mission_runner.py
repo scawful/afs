@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,9 @@ from .guardrails import GuardrailConfig, GuardrailedAgent
 logger = logging.getLogger(__name__)
 
 AGENT_NAME = "mission-runner"
+# Act-phase actions with an executor below. Anything else is skipped before
+# the approval gate, so a human is never asked to approve a no-op.
+ACT_HANDLERS = frozenset({"embedding_update", "context_write"})
 AGENT_DESCRIPTION = (
     "Read legacy mission-runner TOML definitions from scratchpad/missions/, "
     "execute OODA phases (observe → orient → decide → act), write v2 "
@@ -660,9 +664,13 @@ def _phase_act(
 
     for action_spec in actions:
         action = action_spec.get("action", "")
-        reason = action_spec.get("reason", "")
+        if action not in ACT_HANDLERS:
+            data["skipped"].append({"action": action, "reason": f"no handler for {action}"})
+            continue
 
-        if not guard.can_do(action, reason):
+        # The reason text changes run to run; keep it in the payload so the
+        # request key (and any standing approval) stays stable.
+        if not guard.can_do(action, f"act {action}", payload=action_spec, scope="once"):
             data["skipped"].append({"action": action, "reason": "approval required"})
             notes.append(f"Skipped {action}: needs approval")
             continue
@@ -707,9 +715,6 @@ def _phase_act(
                     data["executed"].append({"action": action, "result": str(report_path)})
                     notes.append(f"Wrote report to {report_path.name}")
 
-            else:
-                data["skipped"].append({"action": action, "reason": f"no handler for {action}"})
-
         except Exception as exc:
             data["errors"].append({"action": action, "error": str(exc)})
             notes.append(f"Error executing {action}: {exc}")
@@ -732,8 +737,13 @@ def _execute_phase(
     guard: GuardrailedAgent,
     output_dir: Path,
     context_root: Path | None = None,
+    prior_phases: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Any]:
-    """Execute a single OODA phase. Returns phase result dict."""
+    """Execute a single OODA phase. Returns phase result dict.
+
+    ``prior_phases`` are this run's earlier phase results; a gated phase
+    attaches their summaries to its approval request for the reviewer.
+    """
     started = now_iso()
     emit_progress(AGENT_NAME, f"phase_{phase.name}", mission.name)
 
@@ -750,6 +760,20 @@ def _execute_phase(
         if not guard.can_do(
             f"mission_phase_{phase.name}",
             f"Mission '{mission.name}' phase '{phase.name}': {phase.description}",
+            payload={
+                "mission": mission.name,
+                "phase": phase.name,
+                "description": phase.description,
+                "prior_phases": [
+                    {
+                        "phase": prior.get("phase", ""),
+                        "status": prior.get("status", ""),
+                        "notes": prior.get("notes", []),
+                    }
+                    for prior in prior_phases
+                ],
+            },
+            scope="once",
         ):
             result["status"] = "awaiting_approval"
             result["notes"].append(f"Phase {phase.name} requires human approval")
@@ -820,18 +844,30 @@ def _run_mission(
         allow_missing=False,
     )
 
+    run_id = f"run_{uuid.uuid4().hex[:12]}"
     guard = GuardrailedAgent(
         AGENT_NAME,
         config=GuardrailConfig(
             task_tier=mission.tier,
             max_iterations=mission.guardrails.max_iterations,
             dry_run=mission.guardrails.dry_run,
+            require_approval_for=frozenset(mission.guardrails.require_approval_for),
         ),
+        source=f"mission:{mission.name}",
+        run_id=run_id,
     )
+    # A phase whose TOML no longer sets requires_approval leaves no request
+    # waiting on a human.
+    for phase in mission.phases:
+        if not phase.requires_approval:
+            guard.withdraw(
+                f"mission_phase_{phase.name}", reason="phase no longer requires approval"
+            )
 
     mission_result: dict[str, Any] = {
         "mission": mission.name,
         "description": mission.description,
+        "run_id": run_id,
         "started_at": now_iso(),
         "phases": [],
         "status": "ok",
@@ -849,7 +885,14 @@ def _run_mission(
             )
             break
 
-        phase_result = _execute_phase(phase, mission, guard, output_dir, context_root)
+        phase_result = _execute_phase(
+            phase,
+            mission,
+            guard,
+            output_dir,
+            context_root,
+            prior_phases=mission_result["phases"],
+        )
         mission_result["phases"].append(phase_result)
 
         if phase_result["status"] == "awaiting_approval":

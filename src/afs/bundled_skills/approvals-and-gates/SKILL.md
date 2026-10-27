@@ -25,22 +25,31 @@ resolves them.
 ## Supervisor Approvals
 
 ```bash
-afs approvals list                                    # pending agent/action pairs
-afs approvals history                                 # including resolved, with rationales
-afs approvals approve <agent> <action> --because "…"  # USER-DIRECTED ONLY
-afs approvals reject <agent> <action> --because "…"   # USER-DIRECTED ONLY
-afs approvals clear                                   # archive completed; compact active
+afs approvals list [--json]                           # pending requests (expired ones are reaped)
+afs approvals show --request-id <gate_id>             # one request with its payload
+afs approvals history                                 # every state, with rationales
+afs approvals approve --request-id <gate_id> --because "…"  # USER-DIRECTED ONLY
+afs approvals reject --request-id <gate_id> --because "…"   # USER-DIRECTED ONLY
+afs approvals reject --stale --because "…"            # USER-DIRECTED ONLY; one confirmation
+afs approvals revoke --request-id <gate_id> --because "…"   # USER-DIRECTED ONLY
+afs approvals clear                                   # prune old system-closed rows
 ```
 
-`--because` is required on approve/reject (empty rationales are refused), and
-both prompt for an interactive human confirmation — headless approval fails
-closed. The rationale is stored in history and resurfaced by
+Agents read the same store through the MCP `approvals.list` tool; it never
+decides anything.
+
+`--because` is required on approve/reject/revoke (empty rationales are
+refused), and approve/reject prompt for an interactive human confirmation —
+headless approval fails closed. The rationale is resurfaced by
 `afs calibration review`. `--approvals-file <path>` overrides this global
-supervisor-approval store.
-Clearing preserves completed decision records in append-only history. The
-terminal broker is a cooperative same-user guard, not a hostile-process
-sandbox; public programmatic decisions are labeled unauthenticated and never
-authorize guarded execution.
+supervisor-approval store (SQLite).
+
+Requests expire after 72 hours, a newer request from the same source
+supersedes the older one, and a requester can withdraw its own request. These
+system states are not human judgments. `clear` never removes approved or
+rejected rows. The terminal broker is a cooperative same-user guard, not a
+hostile-process sandbox; public programmatic decisions are labeled
+unauthenticated and never authorize guarded execution.
 
 ## Context-Local Work Approvals
 
