@@ -191,6 +191,16 @@ def test_staleness_needs_both_explicit_fields_and_respects_timezone(delivery):
     assert "progress stale" in watch.run_watch(context, state)["observations"][task.id]["issues"]
 
 
+@pytest.mark.parametrize("updated_at", [1700000000, "2026-01-01T00:00:00"])
+def test_invalid_progress_timestamp_is_error_not_crash(delivery, updated_at):
+    context, queue, task, state, _source = delivery
+    _update(queue, task, updated_at=updated_at, stale_after_hours=2)
+    result = watch.run_watch(context, state)
+    assert result["status"] == "error"
+    assert "invalid explicit progress expiry" in result["error"]
+    assert not state.exists()
+
+
 @pytest.mark.parametrize("key,value", [("source_path", "relative.py"), ("sha256", "bad"),
                                       ("installed_path", 123), ("state", "unknown")])
 def test_invalid_delivery_metadata_is_error(delivery, key, value):
