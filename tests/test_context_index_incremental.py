@@ -3,10 +3,15 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from afs.context_index import ContextSQLiteIndex
+from afs.context_layout import scaffold_v2
 from afs.manager import AFSManager
 from afs.models import MountType
+from afs.project_registry import ProjectRegistry
 from afs.schema import AFSConfig, GeneralConfig
+from afs.scopes import resolve_scope
 
 
 def _make_index(tmp_path: Path) -> tuple[ContextSQLiteIndex, Path]:
@@ -140,3 +145,48 @@ def test_legacy_implicit_rowid_schema_is_migrated(tmp_path: Path) -> None:
     assert "file_index_legacy" not in tables
     assert _query_paths(index, "legacytoken") == {"legacy.md"}
     _fts_consistent(db_path)
+
+
+def _seed_dash_slash_siblings(root: Path) -> None:
+    # "-" (0x2D) sorts before "/" (0x2F): a depth-first walk yields
+    # dimensions/child.md before dimensions-local.md, SQLite the reverse.
+    (root / "dimensions").mkdir(parents=True)
+    (root / "dimensions" / "child.md").write_text("child", encoding="utf-8")
+    (root / "dimensions-local.md").write_text("sibling", encoding="utf-8")
+
+
+def test_needs_refresh_is_false_after_rebuild_with_dash_slash_siblings(
+    tmp_path: Path,
+) -> None:
+    index, scratchpad = _make_index(tmp_path)
+    _seed_dash_slash_siblings(scratchpad)
+
+    index.rebuild(mount_types=[MountType.SCRATCHPAD])
+
+    assert index.needs_refresh(mount_types=[MountType.SCRATCHPAD]) is False
+    (scratchpad / "dimensions" / "child.md").write_text("child edited", encoding="utf-8")
+    assert index.needs_refresh(mount_types=[MountType.SCRATCHPAD]) is True
+
+
+def test_needs_refresh_scoped_is_false_after_rebuild_with_dash_slash_siblings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "AFS_ALLOWED_MOUNTS",
+        "memory,history,scratchpad,hivemind,knowledge,tools,global,items,monorepo",
+    )
+    context = tmp_path / ".context"
+    alpha = tmp_path / "alpha"
+    alpha.mkdir()
+    scaffold_v2(context)
+    record = ProjectRegistry(context).register(alpha)
+    _seed_dash_slash_siblings(context / "knowledge" / "projects" / record.project_id)
+    _seed_dash_slash_siblings(context / "knowledge" / "common")
+    manager = AFSManager(config=AFSConfig(general=GeneralConfig(context_root=context)))
+    index = ContextSQLiteIndex(manager, context, db_path=tmp_path / "index.sqlite3")
+    scope = resolve_scope(context, requester_path=alpha)
+
+    index.rebuild_scoped(scope, mount_types=[MountType.KNOWLEDGE])
+
+    assert index.needs_refresh_scoped(scope, mount_types=[MountType.KNOWLEDGE]) is False

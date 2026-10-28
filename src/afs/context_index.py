@@ -1450,9 +1450,14 @@ class ContextSQLiteIndex:
                 snapshot[mount_type.value] = _empty_mount_snapshot()
                 continue
 
-            for entry, relative_path in _iter_mount_entries(
-                mount_root,
-                prune=self._policy_prune(mount_type),
+            # Hash in relative_path order to match _indexed_snapshot's
+            # ORDER BY: a depth-first walk puts "a/b" before "a-b".
+            for entry, relative_path in sorted(
+                _iter_mount_entries(
+                    mount_root,
+                    prune=self._policy_prune(mount_type),
+                ),
+                key=lambda candidate: candidate[1],
             ):
                 entry = self._safe_v2_index_entry(
                     mount_type,
@@ -1726,6 +1731,8 @@ class ContextSQLiteIndex:
             }
             for mount in mount_types
         }
+        # BINARY collation on relative_path equals Python str ordering; the
+        # filesystem snapshots sort by relative_path to hash in the same order.
         with self._connect() as connection:
             rows = connection.execute(
                 f"""
