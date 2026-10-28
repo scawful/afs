@@ -875,29 +875,32 @@ def _query_context_index(
         else index.has_entries(mount_types=mount_types)
     )
     should_auto_refresh = False
-    if settings.enabled and effective_auto_index:
-        needs_refresh = False
-        if has_entries and effective_auto_refresh:
-            needs_refresh = (
-                index.needs_refresh_scoped(scoped, mount_types=mount_types)
+    rebuild_mounts = mount_types
+    if settings.enabled and effective_auto_index and not refresh:
+        if not has_entries:
+            should_auto_refresh = True
+        elif effective_auto_refresh:
+            # Rebuild only the drifted mounts; an empty list would select all.
+            stale_mounts = (
+                index.stale_mounts_scoped(scoped, mount_types=mount_types)
                 if scoped is not None and scoped.layout_version == LAYOUT_VERSION
-                else index.needs_refresh(mount_types=mount_types)
+                else index.stale_mounts(mount_types=mount_types)
             )
-        should_auto_refresh = not has_entries or (
-            effective_auto_refresh and needs_refresh
-        )
+            if stale_mounts:
+                rebuild_mounts = stale_mounts
+                should_auto_refresh = True
     if refresh or should_auto_refresh:
         summary = (
             index.rebuild_scoped(
                 scoped,
-                mount_types=mount_types,
+                mount_types=rebuild_mounts,
                 include_content=settings.include_content,
                 max_file_size_bytes=effective_max_file_size_bytes,
                 max_content_chars=effective_max_content_chars,
             )
             if scoped is not None and scoped.layout_version == LAYOUT_VERSION
             else index.rebuild(
-                mount_types=mount_types,
+                mount_types=rebuild_mounts,
                 include_content=settings.include_content,
                 max_file_size_bytes=effective_max_file_size_bytes,
                 max_content_chars=effective_max_content_chars,

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .context_layout import LAYOUT_VERSION, LayoutStateError, detect_layout_version
+from .history import EVENT_FILE_DATE
 from .index_policy import IndexPathPolicy, index_policy_signature
 from .manager import AFSManager
 from .models import ContextCategory, MountType
@@ -651,22 +652,53 @@ class ContextSQLiteIndex:
             return self.has_entries(mount_types=mount_types)
         return self.count_entries_scoped(scoped, mount_types=mount_types) > 0
 
-    def needs_refresh(self, *, mount_types: list[MountType] | None = None) -> bool:
+    def stale_mounts(self, *, mount_types: list[MountType] | None = None) -> list[MountType]:
+        """Return the selected mounts whose filesystem drifted from the index.
+
+        Callers that auto-refresh should rebuild only these mounts.  Never pass
+        an empty result to ``rebuild``: an empty list selects every mount.
+        """
         self._refresh_path_policy()
         selected_mounts = self._normalize_mount_types(mount_types)
         if not selected_mounts:
-            return False
+            return []
 
         fs_snapshot = self._filesystem_snapshot(selected_mounts)
         db_snapshot = self._indexed_snapshot(selected_mounts)
+        return [
+            mount_type
+            for mount_type in selected_mounts
+            if fs_snapshot.get(mount_type.value, _empty_mount_snapshot())
+            != db_snapshot.get(mount_type.value, _empty_mount_snapshot())
+        ]
 
-        for mount_type in selected_mounts:
-            key = mount_type.value
-            if fs_snapshot.get(key, _empty_mount_snapshot()) != db_snapshot.get(
-                key, _empty_mount_snapshot()
-            ):
-                return True
-        return False
+    def needs_refresh(self, *, mount_types: list[MountType] | None = None) -> bool:
+        return bool(self.stale_mounts(mount_types=mount_types))
+
+    def stale_mounts_scoped(
+        self,
+        scoped: ResolvedScope,
+        *,
+        mount_types: list[MountType] | None = None,
+    ) -> list[MountType]:
+        """Return authorized mounts whose current/common rows drifted."""
+
+        self._assert_scope_matches(scoped)
+        if scoped.layout_version != LAYOUT_VERSION:
+            return self.stale_mounts(mount_types=mount_types)
+        self._refresh_path_policy()
+        selected_mounts = self._normalize_scoped_mount_types(scoped, mount_types)
+        fs_snapshot = self._filesystem_snapshot_scoped(selected_mounts, scoped)
+        db_snapshot = self._indexed_snapshot(
+            selected_mounts,
+            relative_prefixes=visible_scope_prefixes(scoped),
+        )
+        return [
+            mount_type
+            for mount_type in selected_mounts
+            if fs_snapshot.get(mount_type.value, _empty_mount_snapshot())
+            != db_snapshot.get(mount_type.value, _empty_mount_snapshot())
+        ]
 
     def needs_refresh_scoped(
         self,
@@ -676,21 +708,7 @@ class ContextSQLiteIndex:
     ) -> bool:
         """Compare only authorized current/common filesystem and index rows."""
 
-        self._assert_scope_matches(scoped)
-        if scoped.layout_version != LAYOUT_VERSION:
-            return self.needs_refresh(mount_types=mount_types)
-        self._refresh_path_policy()
-        selected_mounts = self._normalize_scoped_mount_types(scoped, mount_types)
-        fs_snapshot = self._filesystem_snapshot_scoped(selected_mounts, scoped)
-        db_snapshot = self._indexed_snapshot(
-            selected_mounts,
-            relative_prefixes=visible_scope_prefixes(scoped),
-        )
-        return any(
-            fs_snapshot.get(mount_type.value, _empty_mount_snapshot())
-            != db_snapshot.get(mount_type.value, _empty_mount_snapshot())
-            for mount_type in selected_mounts
-        )
+        return bool(self.stale_mounts_scoped(scoped, mount_types=mount_types))
 
     @staticmethod
     def health_mount_types() -> list[MountType]:
@@ -1476,15 +1494,24 @@ class ContextSQLiteIndex:
                     stat = entry.stat()
                 except OSError:
                     continue
-                modified = _iso_utc(stat.st_mtime)
+                is_dir = entry.is_dir()
+                size_bytes, modified = _snapshot_size_and_modified(
+                    mount_type.value,
+                    relative_path,
+                    is_dir=is_dir,
+                    size_bytes=stat.st_size,
+                    modified_at=_iso_utc(stat.st_mtime),
+                )
                 count += 1
-                if max_modified is None or modified > max_modified:
+                if modified is not None and (
+                    max_modified is None or modified > max_modified
+                ):
                     max_modified = modified
                 _update_snapshot_fingerprint(
                     fingerprint,
                     relative_path=relative_path,
-                    is_dir=entry.is_dir(),
-                    size_bytes=stat.st_size,
+                    is_dir=is_dir,
+                    size_bytes=size_bytes,
                     modified_at=modified,
                 )
             snapshot[mount_type.value] = MountSnapshot(
@@ -1551,15 +1578,24 @@ class ContextSQLiteIndex:
                     stat = entry.stat()
                 except OSError:
                     continue
-                modified = _iso_utc(stat.st_mtime)
+                is_dir = entry.is_dir()
+                size_bytes, modified = _snapshot_size_and_modified(
+                    mount_type.value,
+                    relative_path,
+                    is_dir=is_dir,
+                    size_bytes=stat.st_size,
+                    modified_at=_iso_utc(stat.st_mtime),
+                )
                 count += 1
-                if max_modified is None or modified > max_modified:
+                if modified is not None and (
+                    max_modified is None or modified > max_modified
+                ):
                     max_modified = modified
                 _update_snapshot_fingerprint(
                     fingerprint,
                     relative_path=relative_path,
-                    is_dir=entry.is_dir(),
-                    size_bytes=stat.st_size,
+                    is_dir=is_dir,
+                    size_bytes=size_bytes,
                     modified_at=modified,
                 )
             snapshot[mount_type.value] = MountSnapshot(
@@ -1747,7 +1783,14 @@ class ContextSQLiteIndex:
             )
             for row in rows:
                 state = snapshot_state[row["mount_type"]]
-                modified = row["modified_at"]
+                is_dir = bool(row["is_dir"])
+                size_bytes, modified = _snapshot_size_and_modified(
+                    row["mount_type"],
+                    row["relative_path"],
+                    is_dir=is_dir,
+                    size_bytes=int(row["size_bytes"]),
+                    modified_at=row["modified_at"],
+                )
                 state["count"] += 1
                 if isinstance(modified, str) and (
                     state["max_modified"] is None or modified > state["max_modified"]
@@ -1756,8 +1799,8 @@ class ContextSQLiteIndex:
                 _update_snapshot_fingerprint(
                     state["fingerprint"],
                     relative_path=row["relative_path"],
-                    is_dir=bool(row["is_dir"]),
-                    size_bytes=int(row["size_bytes"]),
+                    is_dir=is_dir,
+                    size_bytes=size_bytes,
                     modified_at=modified,
                 )
         snapshot: dict[str, MountSnapshot] = {}
@@ -2429,6 +2472,30 @@ def _relative_prefix_sql(
 
 def _empty_mount_snapshot() -> MountSnapshot:
     return MountSnapshot(count=0, max_modified=None, fingerprint=hashlib.sha256(b"").hexdigest())
+
+
+def _snapshot_size_and_modified(
+    mount_type: str,
+    relative_path: str,
+    *,
+    is_dir: bool,
+    size_bytes: int,
+    modified_at: str | None,
+) -> tuple[int, str | None]:
+    """Return the size and mtime a staleness snapshot hashes for one entry.
+
+    Every CLI and MCP call appends to the daily history log
+    (``events_YYYYMMDD.jsonl``), so hashing its size or mtime would mark the
+    history mount stale after each command.  Those logs count by presence
+    only: a new day's log, or an archived one, still changes the snapshot.
+    """
+    if (
+        mount_type == MountType.HISTORY.value
+        and not is_dir
+        and EVENT_FILE_DATE.match(relative_path.rsplit("/", 1)[-1]) is not None
+    ):
+        return 0, None
+    return size_bytes, modified_at
 
 
 def _update_snapshot_fingerprint(
