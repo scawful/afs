@@ -124,6 +124,46 @@ def test_context_query_auto_indexes_and_returns_entries(
     assert "index_rebuild" in payload
 
 
+def test_context_query_auto_refresh_rebuilds_only_stale_mounts(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    manager, project_path, context_root = _make_manager(tmp_path)
+    (context_root / "scratchpad" / "notes.md").write_text("scratch marker", encoding="utf-8")
+    memory_note = context_root / "memory" / "facts.md"
+    memory_note.write_text("memory marker", encoding="utf-8")
+    ContextSQLiteIndex(manager, context_root).rebuild(
+        mount_types=[MountType.SCRATCHPAD, MountType.MEMORY]
+    )
+    memory_note.write_text("memory marker, edited", encoding="utf-8")
+
+    monkeypatch.setattr("afs.cli.context.load_manager", lambda _config_path: manager)
+    parser = _make_parser()
+    argv = [
+        "context",
+        "query",
+        "marker",
+        "--mount",
+        "scratchpad",
+        "--mount",
+        "memory",
+        "--path",
+        str(project_path),
+        "--context-root",
+        str(context_root),
+        "--json",
+    ]
+
+    def query() -> dict:
+        args = parser.parse_args(argv)
+        assert args.func(args) == 0
+        return json.loads(capsys.readouterr().out)
+
+    first = query()
+    assert set(first["index_rebuild"]["by_mount_type"]) == {"memory"}
+    assert {entry["relative_path"] for entry in first["entries"]} == {"notes.md", "facts.md"}
+    assert "index_rebuild" not in query()
+
+
 def test_v2_context_query_auto_indexes_only_current_and_common_scope(
     capsys, monkeypatch, tmp_path: Path
 ) -> None:
