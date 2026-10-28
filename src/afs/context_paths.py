@@ -42,6 +42,8 @@ def load_context_metadata(context_path: Path) -> ProjectMetadata | None:
         data = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(data, dict):
+        return None
     return ProjectMetadata.from_dict(data)
 
 

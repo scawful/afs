@@ -139,20 +139,22 @@ for provider, info in d.items():
 
     echo ""
     echo "=== Pending Approvals ==="
-    APPROVAL_FILE="${AFS_APPROVAL_FILE:-${LOG_DIR}/approvals.json}"
-    if [ -f "$APPROVAL_FILE" ]; then
-        python3 -c "
-import json
-data = json.load(open('$APPROVAL_FILE'))
-pending = [r for r in data if r.get('status') == 'pending']
-if not pending:
-    print('  (none)')
-else:
-    for r in pending:
-        print(f\"  [{r['agent']}] {r['action']}: {r.get('detail', '')[:60]}\")
-" 2>/dev/null || echo "(could not parse approvals)"
+    # `afs approvals list` is the one reader of the gate store; it also
+    # expires requests past their TTL. AFS_APPROVAL_FILE overrides the store.
+    local python_bin="${AFS_SUPERVISOR_PYTHON:-${AFS_VENV:-${AFS_ROOT}/.venv}/bin/python}"
+    if [ ! -x "$python_bin" ]; then
+        python_bin="$(command -v python3 || true)"
+    fi
+    local list_ok=0
+    if [ -n "${AFS_APPROVAL_FILE:-}" ]; then
+        PYTHONPATH="${AFS_ROOT}/src" "$python_bin" -m afs approvals \
+            --approvals-file "$AFS_APPROVAL_FILE" list 2>&1 | sed 's/^/  /' || list_ok=$?
     else
-        echo "  (none)"
+        PYTHONPATH="${AFS_ROOT}/src" "$python_bin" -m afs approvals list 2>&1 \
+            | sed 's/^/  /' || list_ok=$?
+    fi
+    if [ "$list_ok" -ne 0 ]; then
+        echo "  (could not read approvals; run: afs approvals list)"
     fi
 }
 

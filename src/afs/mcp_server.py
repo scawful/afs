@@ -1053,6 +1053,22 @@ def _tool_work_approvals_list(arguments: dict[str, Any], manager: AFSManager) ->
     return {"context_path": str(context_path), "approvals": approvals, "count": len(approvals)}
 
 
+def _tool_approvals_list(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
+    """Agent approval-gate requests; same records as ``afs approvals list --json``."""
+    from .agents.approvals import ApprovalGate
+
+    gate = ApprovalGate()
+    requests = gate.all_requests() if bool(arguments.get("all", False)) else gate.pending_requests()
+    for field_name in ("agent", "source"):
+        value = arguments.get(field_name)
+        if isinstance(value, str) and value.strip():
+            requests = [r for r in requests if getattr(r, field_name) == value]
+    limit = _coerce_int(arguments.get("limit"), default=50, minimum=1, maximum=500)
+    # Oldest first, keeping the newest ``limit``.
+    approvals = [request.to_dict() for request in requests[-limit:]]
+    return {"approvals": approvals, "count": len(approvals), "store": gate.health()}
+
+
 def _tool_work_approvals_show(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     store, context_path = _work_store(arguments, manager)
     approval_id = arguments.get("approval_id")
@@ -2808,27 +2824,27 @@ def _resolve_codebase_index_dir(context_path: Path, manager: AFSManager) -> Path
     return codebase_index_dir(context_path)
 
 
-def _resolve_embedding_index_dir(context_path: Path, manager: AFSManager) -> Path | None:
-    """Return the embedding index dir if it exists, else None."""
+def _resolve_embedding_index_dirs(context_path: Path, manager: AFSManager) -> list[Path]:
+    """Return every embedding collection under the knowledge and scratchpad mounts.
+
+    Per-project collections live at ``knowledge/<project>/embedding_index.json``;
+    older layouts used ``knowledge/embeddings`` or ``scratchpad/embeddings``.
+    """
     from .context_paths import resolve_mount_root
+    from .embeddings import discover_embedding_indexes
     from .models import MountType
 
-    try:
-        knowledge = resolve_mount_root(context_path, MountType.KNOWLEDGE)
-        candidate = knowledge / "embeddings"
-        if (candidate / "embedding_index.json").exists():
-            return candidate
-    except Exception as exc:  # noqa: BLE001 - optional embedding-index boundary
-        _warn_fallback(f"knowledge embedding index discovery failed for {context_path}", exc)
-    # Fallback: look in scratchpad
-    try:
-        scratchpad = resolve_mount_root(context_path, MountType.SCRATCHPAD)
-        candidate = scratchpad / "embeddings"
-        if (candidate / "embedding_index.json").exists():
-            return candidate
-    except Exception as exc:  # noqa: BLE001 - optional embedding-index boundary
-        _warn_fallback(f"scratchpad embedding index discovery failed for {context_path}", exc)
-    return None
+    found: dict[str, Path] = {}
+    for mount_type in (MountType.KNOWLEDGE, MountType.SCRATCHPAD):
+        try:
+            mount_root = resolve_mount_root(context_path, mount_type)
+            for index_root in discover_embedding_indexes(mount_root, max_depth=1):
+                found.setdefault(str(index_root), index_root)
+        except Exception as exc:  # noqa: BLE001 - optional embedding-index boundary
+            _warn_fallback(
+                f"{mount_type.value} embedding index discovery failed for {context_path}", exc
+            )
+    return list(found.values())
 
 
 def _reject_legacy_retrieval_tool_in_v2(context_path: Path, *, tool_name: str) -> None:
@@ -2977,10 +2993,14 @@ def _tool_afs_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str
 
     # Embedding leg
     if include_embeddings:
-        emb_dir = _resolve_embedding_index_dir(context_path, manager)
-        if emb_dir is not None:
+        emb_dirs = _resolve_embedding_index_dirs(context_path, manager)
+        if emb_dirs:
             provider = arguments.get("provider")
             model = arguments.get("model")
+            emb_top_k = min(limit, 15)
+            statuses: list[str] = []
+            reasons: list[str] = []
+            emb_results = []
             try:
                 from .embeddings import create_embed_fn, search_embedding_index_detailed
 
@@ -2990,25 +3010,41 @@ def _tool_afs_search(arguments: dict[str, Any], manager: AFSManager) -> dict[str
                     if isinstance(model, str) and model.strip():
                         kwargs["model"] = model.strip()
                     embed_fn = create_embed_fn(provider.strip(), **kwargs)
-                emb_response = search_embedding_index_detailed(
-                    emb_dir,
-                    query,
-                    embed_fn=embed_fn,
-                    recreate_query_embedder=embed_fn is None,
-                    top_k=min(limit, 15),
-                    min_score=0.2,
-                )
-                semantic_status = emb_response.semantic_status
-                semantic_reason = emb_response.semantic_reason
-                emb_results = emb_response.results
-                emb_entries = [r.to_dict() for r in emb_results]
-                if emb_entries:
-                    sources_used.append(
-                        "semantic" if semantic_status == "ready" else "indexed_text"
-                    )
             except Exception as exc:  # noqa: BLE001 - reported through semantic status
-                semantic_status = "fallback"
-                semantic_reason = f"embedding search unavailable: {exc}"
+                emb_dirs = []
+                statuses.append("fallback")
+                reasons.append(f"embedding search unavailable: {exc}")
+            for emb_dir in emb_dirs:
+                try:
+                    emb_response = search_embedding_index_detailed(
+                        emb_dir,
+                        query,
+                        embed_fn=embed_fn,
+                        recreate_query_embedder=embed_fn is None,
+                        top_k=emb_top_k,
+                        min_score=0.2,
+                    )
+                except Exception as exc:  # noqa: BLE001 - reported through semantic status
+                    statuses.append("fallback")
+                    reasons.append(f"{emb_dir.name}: embedding search unavailable: {exc}")
+                    continue
+                statuses.append(emb_response.semantic_status)
+                if emb_response.semantic_reason:
+                    reasons.append(f"{emb_dir.name}: {emb_response.semantic_reason}")
+                emb_results.extend(emb_response.results)
+            # Scores are only comparable within one collection contract, but every
+            # collection here is cosine or keyword scored in [0, 1].
+            emb_results.sort(key=lambda result: result.score, reverse=True)
+            emb_entries = [r.to_dict() for r in emb_results[:emb_top_k]]
+            if "ready" in statuses:
+                semantic_status = "ready"
+            elif statuses:
+                semantic_status = statuses[0]
+            semantic_reason = "; ".join(reasons) if reasons else None
+            if emb_entries:
+                sources_used.append(
+                    "semantic" if semantic_status == "ready" else "indexed_text"
+                )
         else:
             semantic_status = "unavailable"
             semantic_reason = "no embedding index was discovered"
@@ -4037,6 +4073,21 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_work_communication_preflight,
+        ),
+        MCPToolDefinition(
+            name="approvals.list",
+            description="List agent approval-gate requests (pending by default) with source, scope, payload, and expiry. Read-only; deciding needs `afs approvals approve|reject` at a terminal.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string"},
+                    "source": {"type": "string"},
+                    "all": {"type": "boolean", "default": False},
+                    "limit": {"type": "integer", "default": 50},
+                },
+                "additionalProperties": False,
+            },
+            handler=_tool_approvals_list,
         ),
         MCPToolDefinition(
             name="work.approvals.list",

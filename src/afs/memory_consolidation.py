@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 import uuid
@@ -24,6 +25,8 @@ from .history import iter_history_events, resolve_history_root
 from .models import MountType
 from .path_safety import assert_no_linklike_components
 from .schema import AFSConfig
+
+logger = logging.getLogger(__name__)
 
 # Type alias for the optional LLM summarizer callable.
 # Signature: (events, context_root) -> str | None
@@ -384,9 +387,8 @@ def consolidate_history_to_memory(
                 if isinstance(llm_summary, str) and llm_summary.strip():
                     entry["output"] = llm_summary.strip()
                     entry["_metadata"]["summarizer"] = "llm"
-            except Exception:
-                # Never crash — keep the counter-based entry on failure.
-                pass
+            except Exception:  # noqa: BLE001 - summarizer callback boundary; keep the counter-based entry
+                logger.warning("memory summarizer failed for %s", entry_id, exc_info=True)
         rendered_entries.append(json.dumps(entry, ensure_ascii=False) + "\n")
         result.entries_written += 1
         result.consolidated_events += len(batch)

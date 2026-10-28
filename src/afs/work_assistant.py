@@ -8,7 +8,8 @@ import re
 import shlex
 import sqlite3
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -284,12 +285,18 @@ class WorkAssistantStore:
         self._assert_managed_db_safe(require_parent=True)
         self._ensure_schema()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection that commits or rolls back, then always closes."""
         self._assert_managed_db_safe(require_parent=True)
         connection = sqlite3.connect(self.db_path, timeout=5.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _assert_managed_db_safe(self, *, require_parent: bool = False) -> None:
         """Reject redirected default v2 database and SQLite sidecar paths."""

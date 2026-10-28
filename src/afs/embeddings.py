@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import ipaddress
 import json
+import logging
 import math
 import os
 import uuid
@@ -13,9 +15,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .gemini_defaults import DEFAULT_GEMINI_EMBEDDING_MODEL
 from .index_storage import atomic_write_text, fsync_directory, index_file_lock
+from .sensitivity import is_default_index_excluded
+
+logger = logging.getLogger(__name__)
 
 EmbeddingFactory = Callable[..., Callable[[str], list[float]]]
 _EMBEDDING_BACKENDS: dict[str, EmbeddingFactory] = {}
@@ -28,6 +34,10 @@ GEMINI_QUERY_TASK = "RETRIEVAL_QUERY"
 EMBEDDING_BUILD_LOCK = ".embedding-build.lock"
 EMBEDDING_PUBLICATION_LOCK = ".embedding-publication.lock"
 EMBEDDING_GENERATIONS_DIR = "generations"
+DEFAULT_OLLAMA_HOST = "http://localhost:11435"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+NOMIC_DOCUMENT_INSTRUCTION = "search_document:"
+NOMIC_QUERY_INSTRUCTION = "search_query:"
 
 
 @dataclass(frozen=True)
@@ -42,6 +52,7 @@ class EmbeddingCollectionMetadata:
     query_instruction: str = ""
     normalized: bool = False
     health: str = "keyword_only"
+    endpoint: str = ""
 
     @classmethod
     def from_index(cls, payload: dict[str, Any]) -> EmbeddingCollectionMetadata:
@@ -59,6 +70,7 @@ class EmbeddingCollectionMetadata:
             query_instruction=str(collection.get("query_instruction") or ""),
             normalized=bool(collection.get("normalized", False)),
             health=str(collection.get("health") or "legacy"),
+            endpoint=str(collection.get("endpoint") or ""),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -71,6 +83,7 @@ class EmbeddingCollectionMetadata:
             "query_instruction": self.query_instruction,
             "normalized": self.normalized,
             "health": self.health,
+            "endpoint": self.endpoint,
         }
 
 
@@ -185,6 +198,7 @@ def create_embed_fn(provider: str, **kwargs) -> Callable[[str], list[float]]:
     factory = _EMBEDDING_BACKENDS.get(normalized)
     if not factory:
         raise ValueError(f"Unknown embedding provider: {provider}")
+    query_task_type = kwargs.pop("query_task_type", None)
     embed_fn = factory(**kwargs)
     provider_defaults: dict[str, tuple[str, str, int | None]] = {
         "gemini": (DEFAULT_GEMINI_MODEL, GEMINI_DOCUMENT_TASK, DEFAULT_GEMINI_DIMENSION),
@@ -199,29 +213,63 @@ def create_embed_fn(provider: str, **kwargs) -> Callable[[str], list[float]]:
         kwargs.get("output_dimensionality") or kwargs.get("dimension"),
         default=default_dimension,
     )
+    endpoint_defaults = {"ollama": DEFAULT_OLLAMA_HOST, "openai": DEFAULT_OPENAI_BASE_URL}
+    endpoint = str(
+        kwargs.get("host") or kwargs.get("base_url") or endpoint_defaults.get(normalized, "")
+    )
+    annotations = {
+        "_afs_embedding_provider": normalized,
+        "_afs_embedding_model": model,
+        "_afs_embedding_dimension": dimension,
+        "_afs_embedding_instruction": task_type,
+        "_afs_embedding_endpoint": endpoint,
+    }
+    if query_task_type is not None:
+        annotations["_afs_embedding_query_instruction"] = str(query_task_type)
     # Functions are intentionally annotated instead of wrapped so provider
     # implementations retain their normal exception and tracing behavior.
     try:
-        embed_fn._afs_embedding_provider = normalized  # type: ignore[attr-defined]
-        embed_fn._afs_embedding_model = model  # type: ignore[attr-defined]
-        embed_fn._afs_embedding_dimension = dimension  # type: ignore[attr-defined]
-        embed_fn._afs_embedding_instruction = task_type  # type: ignore[attr-defined]
+        for name, value in annotations.items():
+            setattr(embed_fn, name, value)
     except (AttributeError, TypeError):
         backend = embed_fn
 
         def embed_fn(text: str) -> list[float]:
             return backend(text)
 
-        embed_fn._afs_embedding_provider = normalized  # type: ignore[attr-defined]
-        embed_fn._afs_embedding_model = model  # type: ignore[attr-defined]
-        embed_fn._afs_embedding_dimension = dimension  # type: ignore[attr-defined]
-        embed_fn._afs_embedding_instruction = task_type  # type: ignore[attr-defined]
+        for name, value in annotations.items():
+            setattr(embed_fn, name, value)
     return embed_fn
+
+
+def default_text_instructions(model: str) -> tuple[str, str]:
+    """Return (document, query) text prefixes a model was trained with."""
+    if "nomic-embed" in model.lower():
+        return NOMIC_DOCUMENT_INSTRUCTION, NOMIC_QUERY_INSTRUCTION
+    return "", ""
+
+
+def _apply_text_instruction(instruction: str, text: str) -> str:
+    """Prefix text with a task instruction such as nomic's ``search_query:``."""
+    instruction = instruction.strip()
+    return f"{instruction} {text}" if instruction else text
+
+
+def _is_loopback_url(url: str) -> bool:
+    host = urlparse(url).hostname or ""
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def create_ollama_embed_fn(
     model: str = "nomic-embed-text",
-    host: str = "http://localhost:11435",
+    host: str = DEFAULT_OLLAMA_HOST,
+    *,
+    task_type: str = "",
 ) -> Callable[[str], list[float]]:
     try:
         import httpx
@@ -231,7 +279,7 @@ def create_ollama_embed_fn(
     def embed(text: str) -> list[float]:
         response = httpx.post(
             f"{host}/api/embeddings",
-            json={"model": model, "prompt": text},
+            json={"model": model, "prompt": _apply_text_instruction(task_type, text)},
             timeout=30.0,
         )
         response.raise_for_status()
@@ -245,19 +293,25 @@ def create_ollama_embed_fn(
 def create_openai_embed_fn(
     model: str,
     *,
-    base_url: str = "https://api.openai.com/v1",
+    base_url: str = DEFAULT_OPENAI_BASE_URL,
     api_key: str | None = None,
     timeout: float = 30.0,
+    task_type: str = "",
 ) -> Callable[[str], list[float]]:
-    """Create an OpenAI-compatible embeddings backend."""
+    """Create an OpenAI-compatible embeddings backend.
+
+    Loopback servers such as LM Studio (``http://localhost:1234/v1``) do not
+    need an API key; remote endpoints still do.
+    """
     try:
         import httpx
     except ImportError as exc:
         raise RuntimeError("httpx not installed") from exc
 
     resolved_api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("LITELLM_API_KEY")
-    if not resolved_api_key:
+    if not resolved_api_key and not _is_loopback_url(base_url):
         raise RuntimeError("Missing API key for OpenAI-compatible embeddings backend")
+    headers = {"Authorization": f"Bearer {resolved_api_key}"} if resolved_api_key else {}
 
     base = base_url.rstrip("/")
     url = f"{base}/embeddings" if base.endswith("/v1") else f"{base}/v1/embeddings"
@@ -265,8 +319,8 @@ def create_openai_embed_fn(
     def embed(text: str) -> list[float]:
         response = httpx.post(
             url,
-            json={"model": model, "input": text},
-            headers={"Authorization": f"Bearer {resolved_api_key}"},
+            json={"model": model, "input": _apply_text_instruction(task_type, text)},
+            headers=headers,
             timeout=timeout,
         )
         response.raise_for_status()
@@ -541,6 +595,10 @@ def _create_query_embed_fn_from_metadata(
         )
     elif api_key is not None:
         kwargs["api_key"] = api_key
+    if metadata.endpoint and metadata.provider == "ollama":
+        kwargs["host"] = metadata.endpoint
+    elif metadata.endpoint and metadata.provider == "openai":
+        kwargs["base_url"] = metadata.endpoint
     return create_embed_fn(metadata.provider, **kwargs)
 
 
@@ -570,9 +628,13 @@ def _embed_fn_collection_metadata(
             "dimension": None,
             "document_instruction": "",
             "query_instruction": "",
+            "endpoint": "",
         }
     provider = str(getattr(embed_fn, "_afs_embedding_provider", "custom"))
     instruction = str(getattr(embed_fn, "_afs_embedding_instruction", ""))
+    query_instruction = getattr(embed_fn, "_afs_embedding_query_instruction", None)
+    if query_instruction is None:
+        query_instruction = GEMINI_QUERY_TASK if provider == "gemini" else instruction
     return {
         "provider": provider,
         "model": str(getattr(embed_fn, "_afs_embedding_model", "callable")),
@@ -580,7 +642,8 @@ def _embed_fn_collection_metadata(
             getattr(embed_fn, "_afs_embedding_dimension", None), default=None
         ),
         "document_instruction": instruction,
-        "query_instruction": GEMINI_QUERY_TASK if provider == "gemini" else instruction,
+        "query_instruction": str(query_instruction),
+        "endpoint": str(getattr(embed_fn, "_afs_embedding_endpoint", "")),
     }
 
 
@@ -911,7 +974,7 @@ def _build_embedding_index_locked(
                     embed_failed = False
                     try:
                         chunk_embedding = embed_fn(chunk_text[:embed_chars])
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001 - provider callback boundary; recorded in errors
                         result.errors.append(f"{path} chunk {chunk_idx}: embed failed ({exc})")
                         semantic_failures += 1
                         embed_failed = True
@@ -1000,7 +1063,7 @@ def _build_embedding_index_locked(
             embed_failed = False
             try:
                 embedding = embed_fn(embed_text)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - provider callback boundary; recorded in errors
                 result.errors.append(f"{path}: embed failed ({exc})")
                 embedding = []
                 embed_failed = True
@@ -1109,8 +1172,8 @@ def _build_embedding_index_locked(
                 "errors_count": len(result.errors),
             },
         )
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 - history is telemetry; the index is already published
+        logger.warning("embedding index history append failed", exc_info=True)
     return result
 
 
@@ -1205,7 +1268,7 @@ def _search_embedding_index_detailed_locked(
     if embed_fn:
         try:
             query_embedding = embed_fn(query)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - provider callback boundary; reported as fallback
             query_embedding = None
             semantic_status = "fallback"
             semantic_reason = f"query embedding failed: {exc}"
@@ -1408,11 +1471,17 @@ def _iter_source_files(
                 yield root.parent, root
                 count += 1
         else:
+            if is_default_index_excluded(root):
+                continue
             for base, dirs, files in os.walk(root):
                 dirs[:] = sorted(
                     directory
                     for directory in dirs
                     if not _is_embedding_output_path(Path(base) / directory, root, output_dir)
+                    and not is_default_index_excluded(
+                        Path(base) / directory,
+                        relative_path=(Path(base) / directory).relative_to(root).as_posix(),
+                    )
                 )
                 if not include_hidden:
                     dirs[:] = [d for d in dirs if not d.startswith(".")]
@@ -1577,6 +1646,8 @@ def _matches_patterns(
         return False
     if rel in ("", "."):
         rel = path.name
+    if is_default_index_excluded(path, relative_path=rel):
+        return False
     if exclude_patterns and any(fnmatch.fnmatch(rel, pattern) for pattern in exclude_patterns):
         return False
     if not include_patterns:
@@ -1663,9 +1734,8 @@ def _resolve_hf_token(token: str | None) -> str | None:
 
 register_embedding_backend(
     "ollama",
-    lambda model="nomic-embed-text", host="http://localhost:11435", **_: create_ollama_embed_fn(
-        model=model,
-        host=host,
+    lambda model="nomic-embed-text", host=DEFAULT_OLLAMA_HOST, task_type="", **_: (
+        create_ollama_embed_fn(model=model, host=host, task_type=task_type)
     ),
 )
 register_embedding_backend(
@@ -1683,12 +1753,13 @@ register_embedding_backend(
 )
 register_embedding_backend(
     "openai",
-    lambda model, base_url="https://api.openai.com/v1", api_key=None, timeout=30.0, **_: (
+    lambda model, base_url=DEFAULT_OPENAI_BASE_URL, api_key=None, timeout=30.0, task_type="", **_: (
         create_openai_embed_fn(
             model=model,
             base_url=base_url,
             api_key=api_key,
             timeout=timeout,
+            task_type=task_type,
         )
     ),
 )

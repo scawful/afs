@@ -39,10 +39,3 @@ __all__ = [
     "ProjectRecord",
     "COMMON_SCOPE_ID",
 ]
-
-# Registry and model management (optional import)
-try:
-    from . import registry
-    __all__.append("registry")
-except ImportError:
-    pass

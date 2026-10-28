@@ -6,8 +6,16 @@ import signal
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from afs.agents.supervisor import AgentSupervisor
 from afs.schema import AgentConfig
+
+
+@pytest.fixture(autouse=True)
+def _isolated_agent_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep supervisor runs out of the user's ~/.afs/agent_registry.json."""
+    monkeypatch.setenv("AFS_AGENT_REGISTRY_PATH", str(tmp_path / "agent_registry.json"))
 
 
 def test_supervisor_awaiting_review_state(tmp_path: Path) -> None:

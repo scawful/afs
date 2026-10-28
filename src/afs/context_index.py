@@ -6,7 +6,8 @@ import hashlib
 import os
 import re
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +18,11 @@ from .manager import AFSManager
 from .models import ContextCategory, MountType
 from .project_registry import assert_no_linklike_components
 from .scopes import ResolvedScope, visible_mount_roots, visible_scope_prefixes
-from .sensitivity import matches_path_rules
+from .sensitivity import (
+    DEFAULT_INDEX_EXCLUDED_DIRS,
+    is_default_index_excluded,
+    matches_path_rules,
+)
 
 DEFAULT_DB_FILENAME = "context_index.sqlite3"
 DEFAULT_MAX_FILE_SIZE_BYTES = 256 * 1024
@@ -66,6 +71,51 @@ _TEXT_SUFFIXES = {
     ".65s",
 }
 
+_FILE_INDEX_COLUMNS = (
+    "context_path",
+    "mount_type",
+    "relative_path",
+    "absolute_path",
+    "is_dir",
+    "size_bytes",
+    "modified_at",
+    "content_text",
+    "content_hash",
+    "indexed_at",
+)
+
+_CREATE_FILE_INDEX_SQL = """
+CREATE TABLE IF NOT EXISTS file_index (
+    id INTEGER PRIMARY KEY,
+    context_path TEXT NOT NULL,
+    mount_type TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    absolute_path TEXT NOT NULL,
+    is_dir INTEGER NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    modified_at TEXT,
+    content_text TEXT,
+    content_hash TEXT,
+    indexed_at TEXT NOT NULL,
+    UNIQUE (context_path, mount_type, relative_path)
+)
+"""
+
+# ON CONFLICT DO UPDATE fires file_index_au; INSERT OR REPLACE would delete
+# the old row without firing file_index_ad and orphan its FTS entry.
+_UPSERT_ROW_SQL = f"""
+INSERT INTO file_index ({", ".join(_FILE_INDEX_COLUMNS)})
+VALUES ({", ".join("?" for _ in _FILE_INDEX_COLUMNS)})
+ON CONFLICT (context_path, mount_type, relative_path) DO UPDATE SET
+    absolute_path = excluded.absolute_path,
+    is_dir = excluded.is_dir,
+    size_bytes = excluded.size_bytes,
+    modified_at = excluded.modified_at,
+    content_text = excluded.content_text,
+    content_hash = excluded.content_hash,
+    indexed_at = excluded.indexed_at
+"""
+
 
 @dataclass
 class IndexSummary:
@@ -78,6 +128,8 @@ class IndexSummary:
     skipped_large_files: int
     skipped_binary_files: int
     errors: list[str]
+    rows_inserted: int = 0
+    rows_updated: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -86,11 +138,20 @@ class IndexSummary:
             "indexed_at": self.indexed_at,
             "rows_written": self.rows_written,
             "rows_deleted": self.rows_deleted,
+            "rows_inserted": self.rows_inserted,
+            "rows_updated": self.rows_updated,
             "by_mount_type": dict(self.by_mount_type),
             "skipped_large_files": self.skipped_large_files,
             "skipped_binary_files": self.skipped_binary_files,
             "errors": list(self.errors),
         }
+
+
+@dataclass(frozen=True)
+class RowSyncCounts:
+    inserted: int
+    updated: int
+    deleted: int
 
 
 @dataclass(frozen=True)
@@ -147,7 +208,7 @@ class ContextSQLiteIndex:
         for mount_type in selected_mounts:
             try:
                 mount_root = self._manager.resolve_mount_root(self._context_path, mount_type)
-            except Exception as exc:  # pragma: no cover - defensive
+            except (OSError, RuntimeError, ValueError) as exc:
                 errors.append(f"{mount_type.value}: resolve failed: {exc}")
                 continue
 
@@ -190,27 +251,12 @@ class ContextSQLiteIndex:
                 rows.append(row)
                 by_mount_type[mount_type.value] = by_mount_type.get(mount_type.value, 0) + 1
 
-        rows_deleted = 0
         with self._connect() as connection:
-            rows_deleted = self._delete_rows_for_mounts(selected_mounts, connection=connection)
-            if rows:
-                connection.executemany(
-                    """
-                    INSERT INTO file_index (
-                        context_path,
-                        mount_type,
-                        relative_path,
-                        absolute_path,
-                        is_dir,
-                        size_bytes,
-                        modified_at,
-                        content_text,
-                        content_hash,
-                        indexed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    rows,
-                )
+            sync = self._sync_rows(
+                connection,
+                rows,
+                predicate=self._mount_rows_predicate(selected_mounts),
+            )
             self._commit_mutation(connection, truncate_wal=True)
 
         return IndexSummary(
@@ -218,11 +264,13 @@ class ContextSQLiteIndex:
             db_path=str(self._db_path),
             indexed_at=indexed_at,
             rows_written=len(rows),
-            rows_deleted=rows_deleted,
+            rows_deleted=sync.deleted,
             by_mount_type=by_mount_type,
             skipped_large_files=skipped_large_files,
             skipped_binary_files=skipped_binary_files,
             errors=errors,
+            rows_inserted=sync.inserted,
+            rows_updated=sync.updated,
         )
 
     def rebuild_scoped(
@@ -271,7 +319,7 @@ class ContextSQLiteIndex:
                     mount_type=mount_type,
                     scoped=scoped,
                 )
-            except Exception as exc:  # pragma: no cover - defensive
+            except (OSError, RuntimeError, ValueError) as exc:
                 errors.append(f"{mount_type.value}: resolve failed: {exc}")
                 continue
 
@@ -327,28 +375,11 @@ class ContextSQLiteIndex:
             prefixes_by_mount[mount_type] = tuple(prefixes)
 
         with self._connect() as connection:
-            rows_deleted = self._delete_rows_for_scoped_prefixes(
-                prefixes_by_mount,
-                connection=connection,
+            sync = self._sync_rows(
+                connection,
+                rows,
+                predicate=self._scoped_rows_predicate(prefixes_by_mount),
             )
-            if rows:
-                connection.executemany(
-                    """
-                    INSERT INTO file_index (
-                        context_path,
-                        mount_type,
-                        relative_path,
-                        absolute_path,
-                        is_dir,
-                        size_bytes,
-                        modified_at,
-                        content_text,
-                        content_hash,
-                        indexed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    rows,
-                )
             self._commit_mutation(connection, truncate_wal=True)
 
         return IndexSummary(
@@ -356,11 +387,13 @@ class ContextSQLiteIndex:
             db_path=str(self._db_path),
             indexed_at=indexed_at,
             rows_written=len(rows),
-            rows_deleted=rows_deleted,
+            rows_deleted=sync.deleted,
             by_mount_type=by_mount_type,
             skipped_large_files=skipped_large_files,
             skipped_binary_files=skipped_binary_files,
             errors=errors,
+            rows_inserted=sync.inserted,
+            rows_updated=sync.updated,
         )
 
     def upsert_relative_path(
@@ -377,8 +410,9 @@ class ContextSQLiteIndex:
             return False
 
         mount_root = self._manager.resolve_mount_root(self._context_path, mount_type)
-        entry = mount_root / normalized
-        entry = self._safe_v2_index_entry(mount_type, normalized, entry)
+        entry: Path | None = self._safe_v2_index_entry(
+            mount_type, normalized, mount_root / normalized
+        )
         if entry is None:
             self.delete_relative_path(mount_type, normalized)
             return False
@@ -405,23 +439,7 @@ class ContextSQLiteIndex:
         )
 
         with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT OR REPLACE INTO file_index (
-                    context_path,
-                    mount_type,
-                    relative_path,
-                    absolute_path,
-                    is_dir,
-                    size_bytes,
-                    modified_at,
-                    content_text,
-                    content_hash,
-                    indexed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                row,
-            )
+            connection.execute(_UPSERT_ROW_SQL, row)
             self._commit_mutation(connection)
         return True
 
@@ -444,16 +462,21 @@ class ContextSQLiteIndex:
         candidate = absolute_path.expanduser().resolve()
         if candidate.exists():
             if candidate.is_dir():
-                rebuild_kwargs = {
-                    "mount_types": [mount_type],
-                    "include_content": include_content,
-                    "max_file_size_bytes": max_file_size_bytes,
-                    "max_content_chars": max_content_chars,
-                }
                 if scoped is not None and scoped.layout_version == LAYOUT_VERSION:
-                    self.rebuild_scoped(scoped, **rebuild_kwargs)
+                    self.rebuild_scoped(
+                        scoped,
+                        mount_types=[mount_type],
+                        include_content=include_content,
+                        max_file_size_bytes=max_file_size_bytes,
+                        max_content_chars=max_content_chars,
+                    )
                 else:
-                    self.rebuild(**rebuild_kwargs)
+                    self.rebuild(
+                        mount_types=[mount_type],
+                        include_content=include_content,
+                        max_file_size_bytes=max_file_size_bytes,
+                        max_content_chars=max_content_chars,
+                    )
                 return True
             self.upsert_relative_path(
                 mount_type,
@@ -523,7 +546,7 @@ class ContextSQLiteIndex:
         for mount_type in MountType:
             try:
                 mount_root = self._manager.resolve_mount_root(self._context_path, mount_type)
-            except Exception:
+            except (OSError, RuntimeError, ValueError):
                 continue
             if not mount_root.exists():
                 continue
@@ -773,16 +796,16 @@ class ContextSQLiteIndex:
 
         def visible(relative_path: str) -> bool:
             return _relative_path_matches_prefixes(relative_path, normalized_prefixes)
-        added: list[dict[str, str]] = []
-        modified: list[dict[str, str]] = []
-        deleted: list[dict[str, str]] = []
+        added: list[dict[str, str | int]] = []
+        modified: list[dict[str, str | int]] = []
+        deleted: list[dict[str, str | int]] = []
 
         for mount_type in selected_mounts:
             try:
                 mount_root = self._manager.resolve_mount_root(
                     self._context_path, mount_type
                 )
-            except Exception:
+            except (OSError, RuntimeError, ValueError):
                 continue
             if not mount_root.exists():
                 continue
@@ -922,7 +945,7 @@ class ContextSQLiteIndex:
                     mount_root = self._manager.resolve_mount_root(
                         self._context_path, mount_type
                     )
-                except Exception:
+                except (OSError, RuntimeError, ValueError):
                     continue
                 if not mount_root.exists():
                     files[mount_key] = []
@@ -1226,7 +1249,7 @@ class ContextSQLiteIndex:
                     fi.content_text,
                     bm25(file_index_fts) AS relevance_score
                 FROM file_index_fts
-                JOIN file_index fi ON fi.rowid = file_index_fts.rowid
+                JOIN file_index fi ON fi.id = file_index_fts.rowid
                 WHERE file_index_fts MATCH ?
                   AND {" AND ".join(where)}
                 ORDER BY relevance_score ASC, fi.is_dir ASC, fi.modified_at DESC, fi.relative_path ASC
@@ -1365,7 +1388,7 @@ class ContextSQLiteIndex:
             fingerprint = hashlib.sha256()
             try:
                 mount_root = self._manager.resolve_mount_root(self._context_path, mount_type)
-            except Exception:
+            except (OSError, RuntimeError, ValueError):
                 snapshot[mount_type.value] = _empty_mount_snapshot()
                 continue
             if not mount_root.exists():
@@ -1427,7 +1450,7 @@ class ContextSQLiteIndex:
                     mount_type=mount_type,
                     scoped=scoped,
                 )
-            except Exception:
+            except (OSError, RuntimeError, ValueError):
                 snapshot[mount_type.value] = _empty_mount_snapshot()
                 continue
             scoped_candidates: list[tuple[Path, str]] = []
@@ -1442,14 +1465,14 @@ class ContextSQLiteIndex:
                 scoped_candidates.extend(
                     _iter_mount_entries_with_prefix(root, prefix)
                 )
-            for entry, relative_path in sorted(
+            for raw_entry, relative_path in sorted(
                 scoped_candidates,
                 key=lambda candidate: candidate[1],
             ):
                 entry = self._safe_v2_index_entry(
                     mount_type,
                     relative_path,
-                    entry,
+                    raw_entry,
                 )
                 if entry is None or self._should_skip_relative_path(
                     mount_type,
@@ -1550,6 +1573,8 @@ class ContextSQLiteIndex:
         absolute_path = entry
         if absolute_path is None:
             absolute_path = self._manager.resolve_mount_root(self._context_path, mount_type) / relative_path
+        if is_default_index_excluded(absolute_path, relative_path=relative_path):
+            return True
         virtual_path = f"{mount_type.value}/{relative_path}".strip("/")
         return matches_path_rules(
             absolute_path,
@@ -1633,7 +1658,7 @@ class ContextSQLiteIndex:
         configured_name = DEFAULT_DB_FILENAME
         try:
             raw_name = self._manager.config.context_index.db_filename
-        except Exception:
+        except AttributeError:
             raw_name = DEFAULT_DB_FILENAME
         if isinstance(raw_name, str) and raw_name.strip():
             configured_name = raw_name.strip()
@@ -1679,23 +1704,8 @@ class ContextSQLiteIndex:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=NORMAL")
             connection.execute("PRAGMA wal_autocheckpoint=1")
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS file_index (
-                    context_path TEXT NOT NULL,
-                    mount_type TEXT NOT NULL,
-                    relative_path TEXT NOT NULL,
-                    absolute_path TEXT NOT NULL,
-                    is_dir INTEGER NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    modified_at TEXT,
-                    content_text TEXT,
-                    content_hash TEXT,
-                    indexed_at TEXT NOT NULL,
-                    PRIMARY KEY (context_path, mount_type, relative_path)
-                )
-                """
-            )
+            self._migrate_implicit_rowid(connection)
+            connection.execute(_CREATE_FILE_INDEX_SQL)
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_file_index_context_mount
@@ -1718,6 +1728,41 @@ class ContextSQLiteIndex:
             self._repair_checkpoint_visibility(connection)
             connection.commit()
 
+    def _migrate_implicit_rowid(self, connection: sqlite3.Connection) -> None:
+        """Give legacy ``file_index`` tables an explicit INTEGER PRIMARY KEY.
+
+        The external-content FTS table is keyed on the content table's rowid.
+        VACUUM may renumber implicit rowids, which silently desyncs the two.
+        """
+
+        def needs_migration() -> bool:
+            columns = connection.execute("PRAGMA table_info(file_index)").fetchall()
+            return bool(columns) and not any(
+                column["name"] == "id" and column["pk"] == 1 for column in columns
+            )
+
+        if not needs_migration():
+            return
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            if not needs_migration():
+                connection.rollback()
+                return
+            for trigger in ("file_index_ai", "file_index_ad", "file_index_au"):
+                connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            connection.execute("DROP TABLE IF EXISTS file_index_fts")
+            connection.execute("ALTER TABLE file_index RENAME TO file_index_legacy")
+            connection.execute(_CREATE_FILE_INDEX_SQL)
+            columns = ", ".join(_FILE_INDEX_COLUMNS)
+            connection.execute(
+                f"INSERT INTO file_index ({columns}) SELECT {columns} FROM file_index_legacy"
+            )
+            connection.execute("DROP TABLE file_index_legacy")
+            connection.commit()
+        except sqlite3.Error:
+            connection.rollback()
+            raise
+
     def _initialize_fts(self, connection: sqlite3.Connection) -> bool:
         try:
             connection.execute(
@@ -1727,7 +1772,7 @@ class ContextSQLiteIndex:
                     relative_path,
                     content_text,
                     content='file_index',
-                    content_rowid='rowid'
+                    content_rowid='id'
                 )
                 """
             )
@@ -1737,7 +1782,7 @@ class ContextSQLiteIndex:
                 AFTER INSERT ON file_index
                 BEGIN
                     INSERT INTO file_index_fts(rowid, relative_path, content_text)
-                    VALUES (new.rowid, new.relative_path, COALESCE(new.content_text, ''));
+                    VALUES (new.id, new.relative_path, COALESCE(new.content_text, ''));
                 END
                 """
             )
@@ -1747,7 +1792,7 @@ class ContextSQLiteIndex:
                 AFTER DELETE ON file_index
                 BEGIN
                     INSERT INTO file_index_fts(file_index_fts, rowid, relative_path, content_text)
-                    VALUES ('delete', old.rowid, old.relative_path, COALESCE(old.content_text, ''));
+                    VALUES ('delete', old.id, old.relative_path, COALESCE(old.content_text, ''));
                 END
                 """
             )
@@ -1757,15 +1802,19 @@ class ContextSQLiteIndex:
                 AFTER UPDATE ON file_index
                 BEGIN
                     INSERT INTO file_index_fts(file_index_fts, rowid, relative_path, content_text)
-                    VALUES ('delete', old.rowid, old.relative_path, COALESCE(old.content_text, ''));
+                    VALUES ('delete', old.id, old.relative_path, COALESCE(old.content_text, ''));
                     INSERT INTO file_index_fts(rowid, relative_path, content_text)
-                    VALUES (new.rowid, new.relative_path, COALESCE(new.content_text, ''));
+                    VALUES (new.id, new.relative_path, COALESCE(new.content_text, ''));
                 END
                 """
             )
 
             row_count = connection.execute("SELECT COUNT(1) FROM file_index").fetchone()[0]
-            fts_count = connection.execute("SELECT COUNT(1) FROM file_index_fts").fetchone()[0]
+            # Scanning an external-content FTS table reads file_index itself, so
+            # count the docsize shadow table to see what is actually indexed.
+            fts_count = connection.execute(
+                "SELECT COUNT(1) FROM file_index_fts_docsize"
+            ).fetchone()[0]
             if row_count > 0 and fts_count == 0:
                 connection.execute("INSERT INTO file_index_fts(file_index_fts) VALUES ('rebuild')")
             return True
@@ -1781,75 +1830,101 @@ class ContextSQLiteIndex:
             return
         self._checkpoint_wal(connection, truncate=True)
 
-    def _delete_rows_for_mounts(
+    def _sync_rows(
+        self,
+        connection: sqlite3.Connection,
+        rows: list[tuple[Any, ...]],
+        *,
+        predicate: tuple[str, list[Any]] | None,
+    ) -> RowSyncCounts:
+        """Write only the inserts, updates, and deletes that ``rows`` requires.
+
+        Rows matched by ``predicate`` but absent from ``rows`` are deleted.
+        Unchanged rows are left alone so a refresh does not churn the table,
+        the FTS index, or the freelist.
+        """
+        connection.execute("BEGIN IMMEDIATE")
+        existing: dict[tuple[str, str], sqlite3.Row] = {}
+        if predicate is not None:
+            where_sql, params = predicate
+            for current in connection.execute(
+                "SELECT id, mount_type, relative_path, absolute_path, is_dir, "
+                "size_bytes, modified_at, content_hash FROM file_index "
+                f"WHERE {where_sql}",
+                params,
+            ):
+                existing[(current["mount_type"], current["relative_path"])] = current
+
+        inserts: list[tuple[Any, ...]] = []
+        updates: list[tuple[Any, ...]] = []
+        for row in rows:
+            current = existing.pop((row[1], row[2]), None)
+            if current is None:
+                inserts.append(row)
+                continue
+            stored = (
+                current["absolute_path"],
+                current["is_dir"],
+                current["size_bytes"],
+                current["modified_at"],
+                current["content_hash"],
+            )
+            if stored != (row[3], row[4], row[5], row[6], row[8]):
+                updates.append((*row[3:], current["id"]))
+
+        stale_ids = [(current["id"],) for current in existing.values()]
+        if stale_ids:
+            connection.executemany("DELETE FROM file_index WHERE id = ?", stale_ids)
+        if updates:
+            connection.executemany(
+                """
+                UPDATE file_index SET
+                    absolute_path = ?,
+                    is_dir = ?,
+                    size_bytes = ?,
+                    modified_at = ?,
+                    content_text = ?,
+                    content_hash = ?,
+                    indexed_at = ?
+                WHERE id = ?
+                """,
+                updates,
+            )
+        if inserts:
+            connection.executemany(_UPSERT_ROW_SQL, inserts)
+        return RowSyncCounts(
+            inserted=len(inserts),
+            updated=len(updates),
+            deleted=len(stale_ids),
+        )
+
+    def _mount_rows_predicate(
         self,
         mount_types: list[MountType],
-        *,
-        connection: sqlite3.Connection | None = None,
-    ) -> int:
+    ) -> tuple[str, list[Any]] | None:
         if not mount_types:
-            return 0
+            return None
         placeholders = ", ".join("?" for _ in mount_types)
-        params = [str(self._context_path), *[mount.value for mount in mount_types]]
-        if connection is None:
-            with self._connect() as owned_connection:
-                cursor = owned_connection.execute(
-                    f"""
-                    DELETE FROM file_index
-                    WHERE context_path = ?
-                      AND mount_type IN ({placeholders})
-                    """,
-                    params,
-                )
-                self._commit_mutation(owned_connection)
-                if cursor.rowcount is None or cursor.rowcount < 0:
-                    return 0
-                return int(cursor.rowcount)
-        cursor = connection.execute(
-            f"""
-            DELETE FROM file_index
-            WHERE context_path = ?
-              AND mount_type IN ({placeholders})
-            """,
-            params,
+        return (
+            f"context_path = ? AND mount_type IN ({placeholders})",
+            [str(self._context_path), *[mount.value for mount in mount_types]],
         )
-        if cursor.rowcount is None or cursor.rowcount < 0:
-            return 0
-        return int(cursor.rowcount)
 
-    def _delete_rows_for_scoped_prefixes(
+    def _scoped_rows_predicate(
         self,
         prefixes_by_mount: dict[MountType, tuple[str, ...]],
-        *,
-        connection: sqlite3.Connection,
-    ) -> int:
-        deleted = 0
+    ) -> tuple[str, list[Any]] | None:
+        clauses: list[str] = []
+        params: list[Any] = [str(self._context_path)]
         for mount_type, prefixes in prefixes_by_mount.items():
-            normalized = tuple(
-                _normalize_relative_prefix(prefix) for prefix in prefixes if prefix
-            )
-            if not normalized:
+            prefix_clause, prefix_params = _relative_prefix_sql(prefixes)
+            if not prefix_clause:
                 continue
-            predicates: list[str] = []
-            params: list[Any] = [str(self._context_path), mount_type.value]
-            for prefix in normalized:
-                predicates.append(
-                    "(relative_path = ? OR substr(relative_path, 1, length(?)) = ?)"
-                )
-                descendant = f"{prefix}/"
-                params.extend((prefix, descendant, descendant))
-            cursor = connection.execute(
-                f"""
-                DELETE FROM file_index
-                WHERE context_path = ?
-                  AND mount_type = ?
-                  AND ({' OR '.join(predicates)})
-                """,
-                params,
-            )
-            if cursor.rowcount is not None and cursor.rowcount >= 0:
-                deleted += int(cursor.rowcount)
-        return deleted
+            clauses.append(f"(mount_type = ? AND {prefix_clause})")
+            params.extend((mount_type.value, *prefix_params))
+        if not clauses:
+            return None
+        return f"context_path = ? AND ({' OR '.join(clauses)})", params
 
     def _commit_mutation(
         self,
@@ -1872,12 +1947,22 @@ class ContextSQLiteIndex:
         except sqlite3.OperationalError:
             pass
 
-    def _connect(self) -> sqlite3.Connection:
+    def _open_connection(self) -> sqlite3.Connection:
         self._assert_managed_db_safe(require_parent=True)
         connection = sqlite3.connect(self._db_path, timeout=5.0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=5000")
         return connection
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection that commits or rolls back, then always closes."""
+        connection = self._open_connection()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _normalize_mount_types(mount_types: list[MountType] | None) -> list[MountType]:
@@ -1926,6 +2011,7 @@ INDEX_SCAN_SKIP_NAMES = {
     ".svn",
     "dist",
     ".DS_Store",
+    *DEFAULT_INDEX_EXCLUDED_DIRS,
 }
 
 

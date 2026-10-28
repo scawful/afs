@@ -888,16 +888,9 @@ class AFSManager:
             if detect_layout_version(context_path) == LAYOUT_VERSION
             else {mount_type.value: name for mount_type, name in self._directory_map.items()}
         )
-        if not metadata_path.exists():
-            metadata = ProjectMetadata(
-                created_at=datetime.now().isoformat(),
-                description=f"AFS for {project_path.name}",
-                directories=directory_map,
-            )
-            self._write_metadata(metadata_path, metadata)
-            return metadata
-
-        metadata = self._load_metadata(context_path)
+        metadata = (
+            self._load_metadata(context_path) if metadata_path.exists() else None
+        )
         if metadata is None:
             metadata = ProjectMetadata(
                 created_at=datetime.now().isoformat(),
@@ -1323,6 +1316,8 @@ class AFSManager:
         try:
             payload = json.loads(metadata_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
             return None
         return ProjectMetadata.from_dict(payload)
 

@@ -51,6 +51,10 @@ _TTY_READER = None
 _MAX_MAPPING_BYTES = 1024 * 1024
 _MAX_RATIONALE_CHARS = 4096
 _MAX_RETENTION_REASON_CHARS = 1024
+_RETENTION_NOTICE = (
+    "Source-retained entries and paths are excluded from the candidate and "
+    "preserved in the v1 source."
+)
 
 
 @dataclass(frozen=True)
@@ -190,6 +194,26 @@ def _terminal_text(value: Any, *, limit: int = 4096) -> str:
     return " ".join(printable.split())[:limit]
 
 
+def _plan_retentions(
+    plan: MigrationPlan,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    payload = plan.to_dict()
+    retained_sources = payload.get("retained_sources", [])
+    retained_paths = payload.get("retained_paths", [])
+    if not isinstance(retained_sources, list) or not isinstance(retained_paths, list):
+        raise ValueError("migration plan retention fields must be lists")
+    return retained_sources, retained_paths
+
+
+def _add_retention_context(payload: dict[str, Any], plan: MigrationPlan) -> None:
+    retained_sources, retained_paths = _plan_retentions(plan)
+    if not retained_sources and not retained_paths:
+        return
+    payload["retained_sources"] = retained_sources
+    payload["retained_paths"] = retained_paths
+    payload["retention_notice"] = _RETENTION_NOTICE
+
+
 def _assert_manifest_path_outside_roots(
     path: Path,
     *,
@@ -324,12 +348,18 @@ def _print_payload(payload: dict[str, Any], *, as_json: bool) -> None:
             print(f"{key}:")
             if value:
                 for item in value:
-                    rendered = (
-                        json.dumps(item, ensure_ascii=False, sort_keys=True)
-                        if isinstance(item, dict)
-                        else _terminal_text(item)
-                    )
-                    print(f"- {rendered}")
+                    if isinstance(item, dict) and set(item) == {"source", "reason"}:
+                        print(
+                            f"- {_terminal_text(item['source'])}: "
+                            f"{_terminal_text(item['reason'])}"
+                        )
+                    else:
+                        rendered = (
+                            json.dumps(item, ensure_ascii=False, sort_keys=True)
+                            if isinstance(item, dict)
+                            else _terminal_text(item)
+                        )
+                        print(f"- {rendered}")
             else:
                 print("- (none)")
         elif isinstance(value, bool):
@@ -433,6 +463,7 @@ def layout_plan_command(args: argparse.Namespace) -> int:
         if args.rollback_output
         else None,
     }
+    _add_retention_context(payload, plan)
     if args.json:
         print(json.dumps(payload, indent=2))
     else:
@@ -459,6 +490,8 @@ def layout_plan_command(args: argparse.Namespace) -> int:
             print("source_only_nested_exclusions:")
             for retained in plan.retained_paths:
                 print(f"- {_terminal_text(retained.source)} — {_terminal_text(retained.reason)}")
+        if plan.retained_sources or plan.retained_paths:
+            print(f"retention_notice: {_RETENTION_NOTICE}")
         if plan.blocking_entries:
             print("blocking_entries:")
             for entry in plan.blocking_entries:
@@ -491,12 +524,14 @@ def layout_migrate_command(args: argparse.Namespace) -> int:
     if preview.status == "already_applied":
         payload = preview.to_dict()
         payload["mode"] = "verified_existing_candidate"
+        _add_retention_context(payload, plan)
         _print_payload(payload, as_json=args.json)
         return 0
 
     if not args.apply:
         payload = preview.to_dict()
         payload["mode"] = "preview"
+        _add_retention_context(payload, plan)
         _print_payload(payload, as_json=args.json)
         return 0
 

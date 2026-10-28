@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import afs.agents.approvals as approvals_module
 import afs.agents.guardrails as guardrails
 from afs.agents.guardrails import (
     ALWAYS_APPROVE,
@@ -20,7 +22,7 @@ from afs.agents.guardrails import (
     GuardrailConfig,
     GuardrailedAgent,
     QuotaTracker,
-    _file_lock,
+    file_lock,
     resolve_model,
 )
 from afs.claude_defaults import DEFAULT_CLAUDE_GENERATION_MODEL
@@ -295,6 +297,39 @@ def test_ensure_worktree_refuses_ambiguous_existing_path(
 # ---------------------------------------------------------------------------
 
 
+def _hours_ago(hours: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+
+def _shift_clock(
+    monkeypatch: pytest.MonkeyPatch, *, hours: float = 0.0, days: float = 0.0
+) -> None:
+    """Freeze the gate clock ``hours``/``days`` past its current reading."""
+    shifted = approvals_module._now() + timedelta(hours=hours, days=days)
+    monkeypatch.setattr(approvals_module, "_now", lambda: shifted)
+
+
+def _human_approve(gate: ApprovalGate, request_id: str, rationale: str = "reviewed") -> None:
+    from afs.human_provenance import _broker_for_reader
+
+    authorization = _broker_for_reader(lambda _prompt: "confirm").confirm_token(
+        "confirm",
+        "prompt",
+        scope=gate.human_authorization_scope("approve", request_id, rationale),
+    )
+    assert gate.approve_human(
+        request_id=request_id, rationale=rationale, authorization=authorization
+    )
+
+
+def _concurrent_checker(path: str, agent: str, count: int, barrier: Any) -> None:
+    """Worker for the multi-process approval test."""
+    gate = ApprovalGate(path=Path(path))
+    barrier.wait(timeout=10)
+    for n in range(count):
+        gate.check(agent, "git_push", f"target {n}")
+
+
 class TestApprovalGate:
     def test_auto_approve_read_actions(self, tmp_path: Path) -> None:
         gate = ApprovalGate(path=tmp_path / "approvals.json")
@@ -371,25 +406,25 @@ class TestApprovalGate:
         assert gate.check("agent1", "git_push", "origin/release") is False
         assert [request.detail for request in gate.pending_requests()] == ["origin/release"]
 
-    def test_corrupt_active_state_is_never_overwritten(self, tmp_path: Path) -> None:
+    def test_torn_legacy_file_is_skipped_and_never_overwritten(self, tmp_path: Path) -> None:
         path = tmp_path / "approvals.json"
-        gate = ApprovalGate(path=path)
         path.write_text('{"torn":', encoding="utf-8")
         corrupted = path.read_bytes()
 
-        with pytest.raises(ApprovalStateError, match="refusing to overwrite"):
-            gate.check("agent1", "git_push", "origin/main")
+        gate = ApprovalGate(path=path)
+        assert gate.check("agent1", "git_push", "origin/main") is False
 
         assert path.read_bytes() == corrupted
-        with pytest.raises(ApprovalStateError, match="refusing to overwrite"):
-            ApprovalGate(path=path)
+        assert gate.health()["legacy_skipped"] == 1
+        assert [r.detail for r in gate.pending_requests()] == ["origin/main"]
 
     def test_programmatic_approve_does_not_authorize_action(self, tmp_path: Path) -> None:
         gate = ApprovalGate(path=tmp_path / "approvals.json")
         gate.check("agent1", "git_push")
         assert gate.approve("agent1", "git_push", reviewer="human", reviewed_via="tty") is True
-        assert gate._pending[0].human_confirmed is False
-        assert gate._pending[0].reviewed_via == "programmatic"
+        decided = gate.all_requests()[0]
+        assert decided.human_confirmed is False
+        assert decided.reviewed_via == "programmatic"
         assert gate.check("agent1", "git_push") is False
 
     def test_broker_authorized_approve_allows_action(self, tmp_path: Path) -> None:
@@ -440,17 +475,15 @@ class TestApprovalGate:
         assert [r.request_id for r in reloaded.pending_requests()] == ids
 
     def test_legacy_records_are_backfilled_with_stable_ids(self, tmp_path: Path) -> None:
-        import json as json_module
-
         path = tmp_path / "approvals.json"
         path.write_text(
-            json_module.dumps(
+            json.dumps(
                 [
                     {
                         "agent": "old",
                         "action": "git_push",
                         "detail": "",
-                        "timestamp": "2026-01-01T00:00:00+00:00",
+                        "timestamp": _hours_ago(1),
                         "status": "pending",
                         "reviewed_by": "",
                         "reviewed_at": "",
@@ -461,137 +494,116 @@ class TestApprovalGate:
         )
         first = ApprovalGate(path=path).pending_requests()[0].request_id
         assert first.startswith("gate_")
-        # The backfilled id was persisted, so a second load sees the same one.
+        # The id is derived from the record, so a fresh import sees the same one.
+        path.with_suffix(".sqlite3").unlink()
         second = ApprovalGate(path=path).pending_requests()[0].request_id
         assert second == first
 
+    def test_legacy_pending_past_ttl_expires_on_import(self, tmp_path: Path) -> None:
+        path = tmp_path / "approvals.json"
+        path.write_text(
+            json.dumps(
+                [
+                    {"agent": "old", "action": "git_push", "timestamp": _hours_ago(100)},
+                    {"agent": "new", "action": "git_push", "timestamp": _hours_ago(1)},
+                ]
+            ),
+            encoding="utf-8",
+        )
+        gate = ApprovalGate(path=path)
+        by_agent = {r.agent: r for r in gate.all_requests()}
+        assert by_agent["old"].status == "expired"
+        assert by_agent["old"].human_confirmed is False
+        assert by_agent["new"].status == "pending"
+
     def test_decision_does_not_clobber_concurrent_queue(self, tmp_path: Path) -> None:
-        """A decision re-reads the store under the lock, so requests queued by
-        another process between our load and save are preserved."""
+        """Each operation is its own transaction, so a request queued by
+        another gate between two calls is never lost."""
         path = tmp_path / "approvals.json"
         gate_a = ApprovalGate(path=path)
         gate_a.check("agent1", "git_push")
 
-        # Another process queues a second request after gate_a loaded.
         gate_b = ApprovalGate(path=path)
         gate_b.check("agent2", "deploy")
 
         assert gate_a.approve("agent1", "git_push", rationale="reviewed") is True
-        final = ApprovalGate(path=path)
-        assert len(final._pending) == 2
-        statuses = {(r.agent, r.status) for r in final._pending}
-        assert ("agent1", "approved") in statuses
-        assert ("agent2", "pending") in statuses
+        statuses = {(r.agent, r.status) for r in ApprovalGate(path=path).all_requests()}
+        assert statuses == {("agent1", "approved"), ("agent2", "pending")}
 
-    def test_clear_does_not_clobber_concurrent_queue(self, tmp_path: Path) -> None:
-        """clear_completed re-reads under the lock, so a request queued by
-        another process after this gate loaded survives the clear."""
-        path = tmp_path / "approvals.json"
-        gate_a = ApprovalGate(path=path)
-        gate_a.check("agent1", "git_push")
-        gate_a.approve("agent1", "git_push", rationale="reviewed")
-
-        # Another process queues a new request after gate_a's last read.
-        gate_b = ApprovalGate(path=path)
-        gate_b.check("agent2", "deploy")
-
-        removed, remaining = gate_a.clear_completed()
-        assert removed == 1
-        assert remaining == 1
-        final = ApprovalGate(path=path)
-        assert [(r.agent, r.status) for r in final._pending] == [("agent2", "pending")]
-        history = final.all_requests()
-        archived = [request for request in history if request.agent == "agent1"]
-        assert len(archived) == 1
-        assert archived[0].rationale == "reviewed"
-
-    def test_clear_repairs_torn_archive_tail_before_compacting(self, tmp_path: Path) -> None:
+    def test_clear_prunes_old_system_rows_and_keeps_decisions(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         path = tmp_path / "approvals.json"
         gate = ApprovalGate(path=path)
         gate.check("agent1", "git_push")
-        request = gate.find_pending("agent1", "git_push")
-        assert request is not None
-        assert gate.reject("agent1", "git_push", rationale="unsafe target")
+        gate.approve("agent1", "git_push", rationale="reviewed")
+        gate.check("agent2", "deploy", source="mission:a")
+        gate.withdraw("agent2", source="mission:a", reason="phase removed")
+        gate.check("agent3", "deploy")
 
-        # Simulate a process dying partway through a prior JSONL append.
-        gate._archive_path.write_bytes(b'{"request_id":"torn"')
-
+        assert gate.clear_completed() == (0, 1)
+        _shift_clock(monkeypatch, days=31)
         assert gate.clear_completed() == (1, 0)
-        history = gate.all_requests()
-        assert [item.request_id for item in history] == [request.request_id]
-        assert history[0].rationale == "unsafe target"
-        assert gate._archive_path.read_bytes().endswith(b"\n")
 
-    def test_resolve_replace_failure_preserves_active_approvals(
+        remaining = {(r.agent, r.status) for r in gate.all_requests()}
+        # agent3 expired on the way (72h TTL); expiry is recent, so it is kept.
+        assert remaining == {("agent1", "approved"), ("agent3", "expired")}
+
+    def test_torn_history_line_is_skipped(self, tmp_path: Path) -> None:
+        path = tmp_path / "approvals.json"
+        good = {
+            "agent": "agent1",
+            "action": "git_push",
+            "timestamp": _hours_ago(200),
+            "status": "rejected",
+            "rationale": "unsafe target",
+            "request_id": "gate_old",
+        }
+        (tmp_path / "approvals.history.jsonl").write_text(
+            json.dumps(good) + '\n{"request_id":"torn"', encoding="utf-8"
+        )
+        gate = ApprovalGate(path=path)
+        history = gate.all_requests()
+        assert [(r.request_id, r.rationale) for r in history] == [("gate_old", "unsafe target")]
+        assert gate.health()["legacy_skipped"] == 1
+
+    def test_failed_decision_rolls_back(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         path = tmp_path / "approvals.json"
         gate = ApprovalGate(path=path)
         gate.check("agent1", "git_push", "preserve this request")
-        original = path.read_bytes()
+        original_mark = ApprovalGate._mark_decided
 
-        def fail_replace(source: Path, destination: Path) -> None:
-            source_path = Path(source)
-            assert source_path.parent == path.parent
-            assert Path(destination) == path
-            assert json.loads(source_path.read_text(encoding="utf-8"))[0]["rationale"] == "reviewed"
-            raise OSError("simulated crash before replace")
+        def mark_then_crash(*args: Any, **kwargs: Any) -> bool:
+            assert original_mark(*args, **kwargs)
+            raise OSError("simulated crash before commit")
 
-        monkeypatch.setattr(guardrails.os, "replace", fail_replace)
-
-        with pytest.raises(OSError, match="simulated crash before replace"):
+        monkeypatch.setattr(ApprovalGate, "_mark_decided", staticmethod(mark_then_crash))
+        with pytest.raises(OSError, match="simulated crash before commit"):
             gate.approve("agent1", "git_push", rationale="reviewed")
 
-        assert path.read_bytes() == original
-        assert [(item.status, item.rationale) for item in gate._pending] == [("pending", "")]
-        assert not list(path.parent.glob(f".{path.name}.*.tmp"))
-        reloaded = ApprovalGate(path=path).pending_requests()
-        assert [(item.status, item.detail) for item in reloaded] == [
-            ("pending", "preserve this request")
+        reloaded = ApprovalGate(path=path).all_requests()
+        assert [(r.status, r.rationale, r.detail) for r in reloaded] == [
+            ("pending", "", "preserve this request")
         ]
 
-    def test_resolve_fsync_failure_preserves_active_approvals(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        path = tmp_path / "approvals.json"
-        gate = ApprovalGate(path=path)
-        gate.check("agent1", "deploy", "preserve this request")
-        original = path.read_bytes()
-
-        def fail_fsync(_fd: int) -> None:
-            raise OSError("simulated full disk during flush")
-
-        monkeypatch.setattr(guardrails.os, "fsync", fail_fsync)
-
-        with pytest.raises(OSError, match="simulated full disk during flush"):
-            gate.reject("agent1", "deploy", rationale="unsafe")
-
-        assert path.read_bytes() == original
-        assert [(item.status, item.rationale) for item in gate._pending] == [("pending", "")]
-        assert not list(path.parent.glob(f".{path.name}.*.tmp"))
-        reloaded = ApprovalGate(path=path).pending_requests()
-        assert [(item.status, item.detail) for item in reloaded] == [
-            ("pending", "preserve this request")
-        ]
-
-    def test_one_malformed_record_fails_closed_without_dropping_rest(self, tmp_path: Path) -> None:
-        import json as json_module
-
+    def test_one_malformed_record_is_skipped_without_dropping_rest(self, tmp_path: Path) -> None:
         path = tmp_path / "approvals.json"
         good = {
             "agent": "agent1",
             "action": "git_push",
             "detail": "",
-            "timestamp": "2026-01-01T00:00:00+00:00",
+            "timestamp": _hours_ago(1),
             "status": "pending",
         }
         bad = {"agent": "agent2", "unexpected_field": True}
-        original = json_module.dumps([bad, good]).encode()
+        original = json.dumps([bad, good]).encode()
         path.write_bytes(original)
 
-        with pytest.raises(ApprovalStateError, match="record 0 is malformed"):
-            ApprovalGate(path=path)
-
+        gate = ApprovalGate(path=path)
+        assert [r.agent for r in gate.pending_requests()] == ["agent1"]
+        assert gate.health()["legacy_skipped"] == 1
         assert path.read_bytes() == original
 
     def test_persistence_across_instances(self, tmp_path: Path) -> None:
@@ -602,11 +614,14 @@ class TestApprovalGate:
         gate2 = ApprovalGate(path=path)
         assert len(gate2.pending_requests()) == 1
 
-    def test_corrupt_file_fails_closed(self, tmp_path: Path) -> None:
-        path = tmp_path / "approvals.json"
-        path.write_text("not json", encoding="utf-8")
-        with pytest.raises(ApprovalStateError, match="refusing to overwrite"):
-            ApprovalGate(path=path)
+    def test_corrupt_database_fails_closed(self, tmp_path: Path) -> None:
+        path = tmp_path / "approvals.sqlite3"
+        path.write_bytes(b"not a database, just bytes " * 64)
+        corrupted = path.read_bytes()
+        gate = ApprovalGate(path=path)
+        with pytest.raises(ApprovalStateError, match="unreadable"):
+            gate.check("agent1", "git_push")
+        assert path.read_bytes() == corrupted
 
     def test_unknown_action_queued(self, tmp_path: Path) -> None:
         gate = ApprovalGate(path=tmp_path / "approvals.json")
@@ -653,9 +668,161 @@ class TestApprovalGate:
         gate = ApprovalGate(path=path)
         assert gate.check("agent1", "git_push", "origin/main") is False
         assert any(item.status == "pending" for item in gate.pending_requests())
-        loaded = [item for item in gate._pending if item.request_id == "gate_untrusted"][0]
+        loaded = gate.get("gate_untrusted")
+        assert loaded is not None
         assert loaded.human_confirmed is False
         assert loaded.identity_authenticated is False
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def test_pending_request_expires_after_ttl(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        gate = ApprovalGate(path=tmp_path / "approvals.json", ttl_hours=2)
+        gate.check("agent1", "git_push")
+        _shift_clock(monkeypatch, hours=1)
+        assert len(gate.pending_requests()) == 1
+
+        _shift_clock(monkeypatch, hours=2)
+        assert gate.pending_requests() == []
+        expired = gate.all_requests()[0]
+        assert (expired.status, expired.reviewed_via) == ("expired", "ttl")
+        assert expired.human_confirmed is False
+        # An expired request cannot be approved; the next check queues anew.
+        assert gate.approve("agent1", "git_push") is False
+        assert gate.check("agent1", "git_push") is False
+        assert len(gate.pending_requests()) == 1
+
+    def test_new_run_supersedes_older_request_from_same_source(self, tmp_path: Path) -> None:
+        gate = ApprovalGate(path=tmp_path / "approvals.json")
+        assert gate.check("runner", "deploy", "v1", source="mission:a", run_id="run_1") is False
+        # The same run asking again does not requeue.
+        assert gate.check("runner", "deploy", "v1", source="mission:a", run_id="run_1") is False
+        assert len(gate.pending_requests()) == 1
+
+        gate.check("runner", "deploy", "v2", source="mission:a", run_id="run_2")
+        gate.check("runner", "deploy", "v1", source="mission:b", run_id="run_3")
+        by_run = {r.run_id: r for r in gate.all_requests()}
+        assert by_run["run_1"].status == "superseded"
+        assert by_run["run_1"].superseded_by == by_run["run_2"].request_id
+        assert by_run["run_2"].status == "pending"
+        assert by_run["run_3"].status == "pending"
+
+    def test_once_approval_is_consumed_by_one_run(self, tmp_path: Path) -> None:
+        gate = ApprovalGate(path=tmp_path / "approvals.json")
+        key = ("runner", "mission_phase_act", "phase act")
+        assert gate.check(*key, source="mission:a", run_id="run_1", scope="once") is False
+        _human_approve(gate, gate.pending_requests()[0].request_id)
+
+        assert gate.check(*key, source="mission:a", run_id="run_2", scope="once") is True
+        assert gate.check(*key, source="mission:a", run_id="run_2", scope="once") is True
+        assert gate.check(*key, source="mission:a", run_id="run_3", scope="once") is False
+        consumed = [r for r in gate.all_requests() if r.status == "approved"][0]
+        assert consumed.consumed_by_run == "run_2"
+        assert [r.run_id for r in gate.pending_requests()] == ["run_3"]
+
+    def test_withdraw_closes_pending_requests_for_source(self, tmp_path: Path) -> None:
+        gate = ApprovalGate(path=tmp_path / "approvals.json")
+        gate.check("runner", "mission_phase_a", source="mission:a")
+        gate.check("runner", "mission_phase_b", source="mission:a")
+        gate.check("runner", "mission_phase_a", source="mission:b")
+
+        assert gate.withdraw("runner", action="mission_phase_a", source="mission:a") == 1
+        assert gate.withdraw("runner", source="mission:a", reason="mission retired") == 1
+        assert [r.source for r in gate.pending_requests()] == ["mission:b"]
+        with pytest.raises(ValueError, match="action or a source"):
+            gate.withdraw("runner")
+
+    def test_revoke_stops_authorization_and_keeps_decision(self, tmp_path: Path) -> None:
+        gate = ApprovalGate(path=tmp_path / "approvals.json")
+        gate.check("agent1", "git_push", "origin/main")
+        request_id = gate.pending_requests()[0].request_id
+        _human_approve(gate, request_id)
+        assert gate.check("agent1", "git_push", "origin/main") is True
+
+        with pytest.raises(ValueError, match="reason"):
+            gate.revoke(request_id, reason=" ")
+        assert gate.revoke(request_id, reason="branch frozen") is True
+        assert gate.revoke(request_id, reason="again") is False
+        assert gate.check("agent1", "git_push", "origin/main") is False
+
+        kept = gate.get(request_id)
+        assert kept is not None
+        assert (kept.status, kept.human_confirmed) == ("approved", True)
+        assert kept.revoked_reason == "branch frozen"
+
+    def test_rejected_run_stays_blocked_without_requeue(self, tmp_path: Path) -> None:
+        from afs.human_provenance import _broker_for_reader
+
+        gate = ApprovalGate(path=tmp_path / "approvals.json")
+        gate.check("runner", "deploy", source="mission:a", run_id="run_1")
+        request_id = gate.pending_requests()[0].request_id
+        authorization = _broker_for_reader(lambda _prompt: "confirm").confirm_token(
+            "confirm",
+            "prompt",
+            scope=gate.human_authorization_scope("reject", request_id, "not now"),
+        )
+        assert gate.reject_human(
+            request_id=request_id, rationale="not now", authorization=authorization
+        )
+        assert gate.check("runner", "deploy", source="mission:a", run_id="run_1") is False
+        assert gate.pending_requests() == []
+        assert gate.check("runner", "deploy", source="mission:a", run_id="run_2") is False
+        assert [r.run_id for r in gate.pending_requests()] == ["run_2"]
+
+    def test_batch_reject_is_bound_to_the_exact_id_set(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from afs.human_provenance import _broker_for_reader
+
+        gate = ApprovalGate(path=tmp_path / "approvals.json")
+        gate.check("old-a", "deploy")
+        gate.check("old-b", "deploy")
+        _shift_clock(monkeypatch, hours=30)
+        gate.check("fresh", "deploy")
+
+        stale = sorted(r.request_id for r in gate.stale_pending(24))
+        assert len(stale) == 2
+        broker = _broker_for_reader(lambda _prompt: "reject 2")
+        wrong_set = broker.confirm_token(
+            "reject 2",
+            "prompt",
+            scope=gate.batch_authorization_scope("reject", stale[:1], "stale"),
+        )
+        with pytest.raises(ValueError, match="authorization"):
+            gate.reject_human_batch(stale, rationale="stale", authorization=wrong_set)
+
+        authorization = broker.confirm_token(
+            "reject 2",
+            "prompt",
+            scope=gate.batch_authorization_scope("reject", stale, "stale"),
+        )
+        assert gate.reject_human_batch(stale, rationale="stale", authorization=authorization) == stale
+        statuses = {r.agent: (r.status, r.human_confirmed) for r in gate.all_requests()}
+        assert statuses == {
+            "old-a": ("rejected", True),
+            "old-b": ("rejected", True),
+            "fresh": ("pending", False),
+        }
+
+    def test_concurrent_checks_from_many_processes(self, tmp_path: Path) -> None:
+        path = tmp_path / "approvals.sqlite3"
+        ctx = multiprocessing.get_context("spawn")
+        barrier = ctx.Barrier(4)
+        workers = [
+            ctx.Process(target=_concurrent_checker, args=(str(path), f"agent{i}", 5, barrier))
+            for i in range(4)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=60)
+            assert worker.exitcode == 0
+
+        pending = ApprovalGate(path=path).pending_requests()
+        assert sorted((r.agent, r.detail) for r in pending) == sorted(
+            (f"agent{i}", f"target {n}") for i in range(4) for n in range(5)
+        )
 
     def test_auto_approve_constants(self) -> None:
         assert "file_read" in AUTO_APPROVE
@@ -756,7 +923,7 @@ class TestFileLocking:
     def test_lock_basic(self, tmp_path: Path) -> None:
         target = tmp_path / "test.json"
         target.write_text("{}", encoding="utf-8")
-        with _file_lock(target):
+        with file_lock(target):
             # Should be able to read/write while holding lock
             target.write_text('{"locked": true}', encoding="utf-8")
         data = json.loads(target.read_text(encoding="utf-8"))
@@ -764,14 +931,14 @@ class TestFileLocking:
 
     def test_lock_creates_parent_dirs(self, tmp_path: Path) -> None:
         target = tmp_path / "deep" / "nested" / "test.json"
-        with _file_lock(target):
+        with file_lock(target):
             pass
         assert (tmp_path / "deep" / "nested" / "test.json.lock").exists()
 
     def test_lock_cleanup(self, tmp_path: Path) -> None:
         target = tmp_path / "test.json"
         target.write_text("{}", encoding="utf-8")
-        with _file_lock(target):
+        with file_lock(target):
             pass
         # Lock file should exist (not deleted, just unlocked)
         assert (tmp_path / "test.json.lock").exists()
@@ -792,7 +959,7 @@ class TestFileLocking:
         monkeypatch.setattr(guardrails, "fcntl", None)
         monkeypatch.setattr(guardrails, "msvcrt", FakeMsvcrt)
 
-        with _file_lock(tmp_path / "test.json"):
+        with file_lock(tmp_path / "test.json"):
             pass
 
         assert calls == [(FakeMsvcrt.LK_NBLCK, 1), (FakeMsvcrt.LK_UNLCK, 1)]
@@ -808,7 +975,7 @@ class TestFileLocking:
         monkeypatch.setattr(guardrails, "_try_lock", always_contended)
 
         with pytest.raises(TimeoutError, match="Lock timeout"):
-            with _file_lock(tmp_path / "test.json", timeout=0):
+            with file_lock(tmp_path / "test.json", timeout=0):
                 entered = True
 
         assert entered is False
