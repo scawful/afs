@@ -974,6 +974,7 @@ def context_index_rebuild_command(args: argparse.Namespace) -> int:
         or manager.config.context_index.max_file_size_bytes,
         "max_content_chars": args.max_content_chars
         or manager.config.context_index.max_content_chars,
+        "dry_run": bool(getattr(args, "dry_run", False)),
     }
     summary = (
         index.rebuild_scoped(scoped, **rebuild_kwargs)
@@ -990,12 +991,25 @@ def context_index_rebuild_command(args: argparse.Namespace) -> int:
     print(f"context_path: {payload['context_path']}")
     print(f"db_path: {payload['db_path']}")
     print(f"indexed_at: {payload['indexed_at']}")
+    if payload["dry_run"]:
+        print("dry_run: true (index unchanged; counts show what a rebuild would do)")
     print(f"rows_written: {payload['rows_written']}")
     print(f"rows_deleted: {payload['rows_deleted']}")
+    if payload["dry_run"]:
+        print(f"rows_inserted: {payload['rows_inserted']}")
+        print(f"rows_updated: {payload['rows_updated']}")
     if payload["by_mount_type"]:
         print("by_mount_type:")
         for mount_key, count in sorted(payload["by_mount_type"].items()):
             print(f"- {mount_key}: {count}")
+    index_policy = payload["index_policy"]
+    if index_policy:
+        print("index_policy:")
+        print(f"- ignore_file: {index_policy['ignore_file'] or 'none'}")
+        print(f"- ignore_patterns: {index_policy['ignore_patterns']}")
+        print(f"- config_file: {index_policy['config_file'] or 'none'}")
+        allowlists = ", ".join(index_policy["allowlists"]) or "none"
+        print(f"- allowlists: {allowlists}")
     if payload["errors"]:
         print("errors:")
         for error in payload["errors"]:
@@ -1315,6 +1329,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--max-content-chars",
         type=int,
         help="Maximum content chars to retain per indexed file.",
+    )
+    idx_rebuild.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Count what a rebuild would insert, update, and delete without changing the index.",
     )
     idx_rebuild.add_argument("--json", action="store_true", help="Output JSON.")
     idx_rebuild.set_defaults(func=context_index_rebuild_command)

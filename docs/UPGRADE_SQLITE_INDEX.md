@@ -64,6 +64,70 @@ enabled = false
 When disabled, `context.query` and `context.index.rebuild` MCP tools still exist
 but return empty results. Writes and mounts skip the sync step entirely.
 
+### Index path policy (`.afsignore`, `.afsindex.toml`)
+
+Two optional files at the context root narrow what the index stores. When
+neither file exists, indexing behaves exactly as before. Both files are re-read
+when their size or mtime changes, so edits apply on the next rebuild, refresh,
+or write without restarting anything.
+
+`.afsignore` uses the same syntax as hybrid search:
+
+- Blank lines and `#` comments are skipped, `!` negates, and the last matching
+  line wins.
+- Patterns use fnmatch, so `*` also crosses `/`. `**/` also matches zero
+  directories. A pattern without `/` matches any single path component.
+- A trailing `/` marks a directory. An excluded directory excludes everything
+  below it; a `!` line cannot re-include a path whose parent is excluded.
+- Each line is matched against `<mount_type>/<relative_path>`, the same virtual
+  path `sensitivity.never_index` sees. In v2 that path still includes
+  `common/` or `projects/<id>/`.
+
+```gitignore
+# .afsignore
+scratchpad/**/node_modules/
+scratchpad/**/*.log
+scratchpad/archive/
+```
+
+`.afsindex.toml` holds per-mount allowlists. Under an allowlisted mount, a file
+is indexed only when its suffix is listed and it is either:
+
+1. a receipt (case-insensitive basename glob) no larger than
+   `receipt_max_bytes`, at any depth, or
+2. at most `max_depth` directories below the mount root and no larger than
+   `max_bytes`.
+
+Depth is measured below the v2 scope, so `projects/<id>/notes.md` is depth 0.
+Directories are kept up to `max_depth`. `skip_hash_dirs` drops directories named
+with 12 or more lowercase hex characters, and the walk does not descend into
+them. Omitted keys do not filter. Example for a busy agent scratchpad:
+
+```toml
+# .afsindex.toml
+[allowlist.scratchpad]
+suffixes = [".md", ".org", ".txt", ".json", ".toml", ".yaml", ".yml"]
+max_depth = 2
+max_bytes = 65536
+receipt_globs = ["RESULT*", "SUMMARY*", "README*", "HANDOFF*", "PLAN*", "STATUS*", "*receipt*"]
+receipt_max_bytes = 262144
+skip_hash_dirs = true
+```
+
+A malformed file or section fails open: it is ignored, and the reason appears
+in the rebuild summary `errors` as `index policy: ...`. Rebuild output reports
+the active policy under `index_policy`.
+
+Preview a policy before applying it:
+
+```bash
+./scripts/afs index rebuild --path "<afs-root>" --mount scratchpad --dry-run --json
+```
+
+`--dry-run` reports `rows_inserted`, `rows_updated`, and `rows_deleted` from
+the same plan a real rebuild uses, without writing rows. It still creates an
+empty index database file if none exists.
+
 ## New MCP tools
 
 ### `context.index.rebuild`
