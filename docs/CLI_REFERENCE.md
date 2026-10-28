@@ -542,6 +542,9 @@ Indexed query usage:
   `--all-projects` flag; an ordinary scoped refresh preserves other projects'
   existing index rows without traversing their directories. Use `--common`
   when operating directly from the central context root without a project.
+- `index rebuild` honors optional `.afsignore` and `.afsindex.toml` files at
+  the context root; see `docs/UPGRADE_SQLITE_INDEX.md` ("Index path policy").
+  `--dry-run` reports insert/update/delete counts without writing rows.
 
 Examples:
 
@@ -550,6 +553,7 @@ Examples:
 ./scripts/afs context query sqlite --path "<afs-root>" --mount scratchpad --mount knowledge
 ./scripts/afs context query sqlite --path "<afs-root>" --prefix docs/sqlite/ --limit 10 --include-content --json
 ./scripts/afs index rebuild --path "<afs-root>" --mount scratchpad
+./scripts/afs index rebuild --path "<afs-root>" --mount scratchpad --dry-run --json
 ./scripts/afs index rebuild --path "$PWD" --mount knowledge --all-projects
 ```
 

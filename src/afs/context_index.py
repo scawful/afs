@@ -6,14 +6,15 @@ import hashlib
 import os
 import re
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .context_layout import LAYOUT_VERSION, detect_layout_version
+from .context_layout import LAYOUT_VERSION, LayoutStateError, detect_layout_version
+from .index_policy import IndexPathPolicy, index_policy_signature
 from .manager import AFSManager
 from .models import ContextCategory, MountType
 from .project_registry import assert_no_linklike_components
@@ -130,6 +131,8 @@ class IndexSummary:
     errors: list[str]
     rows_inserted: int = 0
     rows_updated: int = 0
+    dry_run: bool = False
+    index_policy: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -144,6 +147,8 @@ class IndexSummary:
             "skipped_large_files": self.skipped_large_files,
             "skipped_binary_files": self.skipped_binary_files,
             "errors": list(self.errors),
+            "dry_run": self.dry_run,
+            "index_policy": dict(self.index_policy),
         }
 
 
@@ -152,6 +157,20 @@ class RowSyncCounts:
     inserted: int
     updated: int
     deleted: int
+
+
+@dataclass(frozen=True)
+class _RowSyncPlan:
+    inserts: list[tuple[Any, ...]]
+    updates: list[tuple[Any, ...]]
+    stale_ids: list[tuple[Any, ...]]
+
+    def counts(self) -> RowSyncCounts:
+        return RowSyncCounts(
+            inserted=len(self.inserts),
+            updated=len(self.updates),
+            deleted=len(self.stale_ids),
+        )
 
 
 @dataclass(frozen=True)
@@ -179,6 +198,8 @@ class ContextSQLiteIndex:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._assert_managed_db_safe(require_parent=True)
         self._fts_enabled = False
+        self._path_policy = IndexPathPolicy.load(self._context_path)
+        self._policy_v2: bool | None = None
         self._initialize()
 
     @property
@@ -196,12 +217,14 @@ class ContextSQLiteIndex:
         include_content: bool = True,
         max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE_BYTES,
         max_content_chars: int = DEFAULT_MAX_CONTENT_CHARS,
+        dry_run: bool = False,
     ) -> IndexSummary:
+        policy = self._refresh_path_policy()
         selected_mounts = self._normalize_mount_types(mount_types)
         indexed_at = datetime.now(timezone.utc).isoformat()
         rows: list[tuple[Any, ...]] = []
         by_mount_type: dict[str, int] = {mount_type.value: 0 for mount_type in selected_mounts}
-        errors: list[str] = []
+        errors: list[str] = [f"index policy: {error}" for error in policy.errors]
         skipped_large_files = 0
         skipped_binary_files = 0
 
@@ -215,7 +238,10 @@ class ContextSQLiteIndex:
             if not mount_root.exists():
                 continue
 
-            for entry, relative_path in _iter_mount_entries(mount_root):
+            for entry, relative_path in _iter_mount_entries(
+                mount_root,
+                prune=self._policy_prune(mount_type),
+            ):
                 entry = self._safe_v2_index_entry(
                     mount_type,
                     relative_path,
@@ -251,13 +277,11 @@ class ContextSQLiteIndex:
                 rows.append(row)
                 by_mount_type[mount_type.value] = by_mount_type.get(mount_type.value, 0) + 1
 
-        with self._connect() as connection:
-            sync = self._sync_rows(
-                connection,
-                rows,
-                predicate=self._mount_rows_predicate(selected_mounts),
-            )
-            self._commit_mutation(connection, truncate_wal=True)
+        sync = self._write_rows(
+            rows,
+            predicate=self._mount_rows_predicate(selected_mounts),
+            dry_run=dry_run,
+        )
 
         return IndexSummary(
             context_path=str(self._context_path),
@@ -271,6 +295,8 @@ class ContextSQLiteIndex:
             errors=errors,
             rows_inserted=sync.inserted,
             rows_updated=sync.updated,
+            dry_run=dry_run,
+            index_policy=policy.describe() if policy.active or policy.errors else {},
         )
 
     def rebuild_scoped(
@@ -281,6 +307,7 @@ class ContextSQLiteIndex:
         include_content: bool = True,
         max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE_BYTES,
         max_content_chars: int = DEFAULT_MAX_CONTENT_CHARS,
+        dry_run: bool = False,
     ) -> IndexSummary:
         """Rebuild only rows visible to one v2 project/common requester.
 
@@ -296,15 +323,17 @@ class ContextSQLiteIndex:
                 include_content=include_content,
                 max_file_size_bytes=max_file_size_bytes,
                 max_content_chars=max_content_chars,
+                dry_run=dry_run,
             )
 
+        policy = self._refresh_path_policy()
         selected_mounts = self._normalize_scoped_mount_types(scoped, mount_types)
         indexed_at = datetime.now(timezone.utc).isoformat()
         rows: list[tuple[Any, ...]] = []
         by_mount_type: dict[str, int] = {
             mount_type.value: 0 for mount_type in selected_mounts
         }
-        errors: list[str] = []
+        errors: list[str] = [f"index policy: {error}" for error in policy.errors]
         skipped_large_files = 0
         skipped_binary_files = 0
         prefixes_by_mount: dict[MountType, tuple[str, ...]] = {}
@@ -335,7 +364,14 @@ class ContextSQLiteIndex:
                 prefixes.append(prefix)
                 if not root.exists():
                     continue
-                candidates = [(root, prefix), *_iter_mount_entries_with_prefix(root, prefix)]
+                candidates = [
+                    (root, prefix),
+                    *_iter_mount_entries_with_prefix(
+                        root,
+                        prefix,
+                        prune=self._policy_prune(mount_type),
+                    ),
+                ]
                 for entry, relative_path in candidates:
                     entry = self._safe_v2_index_entry(
                         mount_type,
@@ -374,13 +410,11 @@ class ContextSQLiteIndex:
                     by_mount_type[mount_type.value] += 1
             prefixes_by_mount[mount_type] = tuple(prefixes)
 
-        with self._connect() as connection:
-            sync = self._sync_rows(
-                connection,
-                rows,
-                predicate=self._scoped_rows_predicate(prefixes_by_mount),
-            )
-            self._commit_mutation(connection, truncate_wal=True)
+        sync = self._write_rows(
+            rows,
+            predicate=self._scoped_rows_predicate(prefixes_by_mount),
+            dry_run=dry_run,
+        )
 
         return IndexSummary(
             context_path=str(self._context_path),
@@ -394,6 +428,8 @@ class ContextSQLiteIndex:
             errors=errors,
             rows_inserted=sync.inserted,
             rows_updated=sync.updated,
+            dry_run=dry_run,
+            index_policy=policy.describe() if policy.active or policy.errors else {},
         )
 
     def upsert_relative_path(
@@ -409,6 +445,7 @@ class ContextSQLiteIndex:
         if not normalized:
             return False
 
+        self._refresh_path_policy()
         mount_root = self._manager.resolve_mount_root(self._context_path, mount_type)
         entry: Path | None = self._safe_v2_index_entry(
             mount_type, normalized, mount_root / normalized
@@ -615,6 +652,7 @@ class ContextSQLiteIndex:
         return self.count_entries_scoped(scoped, mount_types=mount_types) > 0
 
     def needs_refresh(self, *, mount_types: list[MountType] | None = None) -> bool:
+        self._refresh_path_policy()
         selected_mounts = self._normalize_mount_types(mount_types)
         if not selected_mounts:
             return False
@@ -641,6 +679,7 @@ class ContextSQLiteIndex:
         self._assert_scope_matches(scoped)
         if scoped.layout_version != LAYOUT_VERSION:
             return self.needs_refresh(mount_types=mount_types)
+        self._refresh_path_policy()
         selected_mounts = self._normalize_scoped_mount_types(scoped, mount_types)
         fs_snapshot = self._filesystem_snapshot_scoped(selected_mounts, scoped)
         db_snapshot = self._indexed_snapshot(
@@ -782,6 +821,7 @@ class ContextSQLiteIndex:
 
         Returns lists of new, modified, and deleted paths per mount type.
         """
+        self._refresh_path_policy()
         if scoped is not None:
             self._assert_scope_matches(scoped)
         selected_mounts = (
@@ -823,11 +863,18 @@ class ContextSQLiteIndex:
                         continue
                     prefix = root.relative_to(mount_root).as_posix()
                     scoped_entries.extend(
-                        _iter_mount_entries_with_prefix(root, prefix)
+                        _iter_mount_entries_with_prefix(
+                            root,
+                            prefix,
+                            prune=self._policy_prune(mount_type),
+                        )
                     )
                 mount_entries = scoped_entries
             else:
-                mount_entries = _iter_mount_entries(mount_root)
+                mount_entries = _iter_mount_entries(
+                    mount_root,
+                    prune=self._policy_prune(mount_type),
+                )
             for entry, relative_path in mount_entries:
                 if not visible(relative_path):
                     continue
@@ -919,6 +966,7 @@ class ContextSQLiteIndex:
         Score = max(0, 1 - age_seconds / decay_seconds) for indexed files.
         Modified or deleted files get 0.0.
         """
+        self._refresh_path_policy()
         if scoped is not None:
             self._assert_scope_matches(scoped)
         selected_mounts = (
@@ -964,11 +1012,18 @@ class ContextSQLiteIndex:
                             continue
                         prefix = root.relative_to(mount_root).as_posix()
                         scoped_entries.extend(
-                            _iter_mount_entries_with_prefix(root, prefix)
+                            _iter_mount_entries_with_prefix(
+                                root,
+                                prefix,
+                                prune=self._policy_prune(mount_type),
+                            )
                         )
                     mount_entries = scoped_entries
                 else:
-                    mount_entries = _iter_mount_entries(mount_root)
+                    mount_entries = _iter_mount_entries(
+                        mount_root,
+                        prune=self._policy_prune(mount_type),
+                    )
                 for entry, relative_path in mount_entries:
                     if not visible(relative_path):
                         continue
@@ -1395,7 +1450,10 @@ class ContextSQLiteIndex:
                 snapshot[mount_type.value] = _empty_mount_snapshot()
                 continue
 
-            for entry, relative_path in _iter_mount_entries(mount_root):
+            for entry, relative_path in _iter_mount_entries(
+                mount_root,
+                prune=self._policy_prune(mount_type),
+            ):
                 entry = self._safe_v2_index_entry(
                     mount_type,
                     relative_path,
@@ -1463,7 +1521,11 @@ class ContextSQLiteIndex:
                     continue
                 scoped_candidates.append((root, prefix))
                 scoped_candidates.extend(
-                    _iter_mount_entries_with_prefix(root, prefix)
+                    _iter_mount_entries_with_prefix(
+                        root,
+                        prefix,
+                        prune=self._policy_prune(mount_type),
+                    )
                 )
             for raw_entry, relative_path in sorted(
                 scoped_candidates,
@@ -1576,11 +1638,64 @@ class ContextSQLiteIndex:
         if is_default_index_excluded(absolute_path, relative_path=relative_path):
             return True
         virtual_path = f"{mount_type.value}/{relative_path}".strip("/")
-        return matches_path_rules(
+        if matches_path_rules(
             absolute_path,
             relative_path=virtual_path,
             patterns=self._manager.config.sensitivity.never_index,
+        ):
+            return True
+        if not self._path_policy.active:
+            return False
+        return self._path_policy.excludes(
+            mount_type.value,
+            relative_path,
+            scope_relative_path=self._policy_scope_path(mount_type, relative_path),
+            path=absolute_path,
         )
+
+    def _refresh_path_policy(self) -> IndexPathPolicy:
+        """Reload ``.afsignore``/``.afsindex.toml`` when either file changed."""
+        if index_policy_signature(self._context_path) != self._path_policy.signature:
+            self._path_policy = IndexPathPolicy.load(self._context_path)
+        self._policy_v2 = None
+        return self._path_policy
+
+    def _policy_scope_path(self, mount_type: MountType, relative_path: str) -> str:
+        """Strip a v2 ``common/`` or ``projects/<id>/`` prefix for allowlist rules."""
+        if mount_type.value not in self._path_policy.allowlists:
+            return relative_path
+        if ContextCategory.from_mount_type(mount_type) is None:
+            return relative_path
+        if self._policy_v2 is None:
+            try:
+                self._policy_v2 = (
+                    detect_layout_version(self._context_path) == LAYOUT_VERSION
+                )
+            except LayoutStateError:
+                self._policy_v2 = False
+        if not self._policy_v2:
+            return relative_path
+        parts = relative_path.split("/")
+        if parts[0] == "common":
+            return "/".join(parts[1:])
+        if parts[0] == "projects":
+            return "/".join(parts[2:])
+        return relative_path
+
+    def _policy_prune(self, mount_type: MountType) -> Callable[[str], bool] | None:
+        """Return a directory filter that skips subtrees the policy excludes."""
+        policy = self._path_policy
+        if not policy.prunes_mount(mount_type.value):
+            return None
+
+        def prune(relative_path: str) -> bool:
+            return policy.prunes(
+                mount_type.value,
+                relative_path,
+                scope_relative_path=self._policy_scope_path(mount_type, relative_path),
+            )
+
+        return prune
 
     def _indexed_snapshot(
         self,
@@ -1844,6 +1959,31 @@ class ContextSQLiteIndex:
         the FTS index, or the freelist.
         """
         connection.execute("BEGIN IMMEDIATE")
+        plan = self._plan_row_sync(connection, rows, predicate=predicate)
+        self._apply_row_sync(connection, plan)
+        return plan.counts()
+
+    def _write_rows(
+        self,
+        rows: list[tuple[Any, ...]],
+        *,
+        predicate: tuple[str, list[Any]] | None,
+        dry_run: bool,
+    ) -> RowSyncCounts:
+        with self._connect() as connection:
+            if dry_run:
+                return self._plan_row_sync(connection, rows, predicate=predicate).counts()
+            sync = self._sync_rows(connection, rows, predicate=predicate)
+            self._commit_mutation(connection, truncate_wal=True)
+        return sync
+
+    @staticmethod
+    def _plan_row_sync(
+        connection: sqlite3.Connection,
+        rows: list[tuple[Any, ...]],
+        *,
+        predicate: tuple[str, list[Any]] | None,
+    ) -> _RowSyncPlan:
         existing: dict[tuple[str, str], sqlite3.Row] = {}
         if predicate is not None:
             where_sql, params = predicate
@@ -1873,9 +2013,13 @@ class ContextSQLiteIndex:
                 updates.append((*row[3:], current["id"]))
 
         stale_ids = [(current["id"],) for current in existing.values()]
-        if stale_ids:
-            connection.executemany("DELETE FROM file_index WHERE id = ?", stale_ids)
-        if updates:
+        return _RowSyncPlan(inserts=inserts, updates=updates, stale_ids=stale_ids)
+
+    @staticmethod
+    def _apply_row_sync(connection: sqlite3.Connection, plan: _RowSyncPlan) -> None:
+        if plan.stale_ids:
+            connection.executemany("DELETE FROM file_index WHERE id = ?", plan.stale_ids)
+        if plan.updates:
             connection.executemany(
                 """
                 UPDATE file_index SET
@@ -1888,15 +2032,10 @@ class ContextSQLiteIndex:
                     indexed_at = ?
                 WHERE id = ?
                 """,
-                updates,
+                plan.updates,
             )
-        if inserts:
-            connection.executemany(_UPSERT_ROW_SQL, inserts)
-        return RowSyncCounts(
-            inserted=len(inserts),
-            updated=len(updates),
-            deleted=len(stale_ids),
-        )
+        if plan.inserts:
+            connection.executemany(_UPSERT_ROW_SQL, plan.inserts)
 
     def _mount_rows_predicate(
         self,
@@ -2022,7 +2161,11 @@ def _is_text_candidate(path: Path) -> bool:
     return suffix == ""
 
 
-def _iter_mount_entries(mount_root: Path):
+def _iter_mount_entries(
+    mount_root: Path,
+    *,
+    prune: Callable[[str], bool] | None = None,
+):
     try:
         children = sorted(mount_root.iterdir(), key=lambda item: item.name)
     except OSError:
@@ -2034,6 +2177,8 @@ def _iter_mount_entries(mount_root: Path):
         yield child, child.relative_to(mount_root).as_posix()
 
         if not child.is_dir():
+            continue
+        if prune is not None and prune(child.name):
             continue
 
         if child.is_symlink():
@@ -2049,7 +2194,12 @@ def _iter_mount_entries(mount_root: Path):
         if not scan_root.exists() or not scan_root.is_dir():
             continue
 
-        for nested in _walk_skipping(scan_root):
+        nested_prune = (
+            _relative_prune(prune, scan_root, prefix)
+            if prefix
+            else _relative_prune(prune, mount_root, "")
+        )
+        for nested in _walk_skipping(scan_root, prune=nested_prune):
             nested_relative = nested.relative_to(scan_root).as_posix()
             if not nested_relative:
                 continue
@@ -2059,16 +2209,27 @@ def _iter_mount_entries(mount_root: Path):
                 yield nested, nested.relative_to(mount_root).as_posix()
 
 
-def _iter_mount_entries_with_prefix(root: Path, prefix: str):
+def _iter_mount_entries_with_prefix(
+    root: Path,
+    prefix: str,
+    *,
+    prune: Callable[[str], bool] | None = None,
+):
     """Yield lexical descendants without following any link-like directory."""
 
-    for entry in _walk_skipping(root):
+    if prune is not None and prefix and prune(prefix):
+        return
+    for entry in _walk_skipping(root, prune=_relative_prune(prune, root, prefix)):
         relative = entry.relative_to(root).as_posix()
         yield entry, f"{prefix}/{relative}" if prefix else relative
 
 
-def _walk_skipping(root: Path):
-    """Walk directory tree, skipping known junk directories."""
+def _walk_skipping(
+    root: Path,
+    *,
+    prune: Callable[[Path], bool] | None = None,
+):
+    """Walk directory tree, skipping known junk directories and pruned subtrees."""
     try:
         children = sorted(root.iterdir(), key=lambda item: item.name)
     except OSError:
@@ -2078,7 +2239,25 @@ def _walk_skipping(root: Path):
             continue
         yield child
         if not child.is_symlink() and child.is_dir():
-            yield from _walk_skipping(child)
+            if prune is not None and prune(child):
+                continue
+            yield from _walk_skipping(child, prune=prune)
+
+
+def _relative_prune(
+    prune: Callable[[str], bool] | None,
+    root: Path,
+    prefix: str,
+) -> Callable[[Path], bool] | None:
+    """Adapt a relative-path prune filter to the absolute paths a walk yields."""
+    if prune is None:
+        return None
+
+    def prune_path(path: Path) -> bool:
+        relative = path.relative_to(root).as_posix()
+        return prune(f"{prefix}/{relative}" if prefix else relative)
+
+    return prune_path
 
 
 def count_mount_files(mount_root: Path) -> int:

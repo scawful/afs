@@ -29,6 +29,7 @@ from .embeddings import (
     EmbeddingCollectionMetadata,
     create_embed_fn,
 )
+from .index_policy import ignore_matches, load_ignore_file
 from .index_storage import (
     atomic_write_text,
     fsync_directory,
@@ -1131,9 +1132,9 @@ def _iter_safe_source_files(
         result.skipped += 1
         return
 
-    gitignore = _load_ignore_file(root / ".afsignore")
+    gitignore = load_ignore_file(root / ".afsignore")
     if source.policy.respect_gitignore:
-        gitignore.extend(_load_ignore_file(root / ".gitignore"))
+        gitignore.extend(load_ignore_file(root / ".gitignore"))
     hard_files = (
         source.policy.max_files_active if source.active else source.policy.max_files_inactive
     )
@@ -1162,7 +1163,7 @@ def _iter_safe_source_files(
                     _is_within(resolved, denied_root)
                     for denied_root in excluded_source_roots
                 )
-                or _gitignored(rel + "/", gitignore)
+                or ignore_matches(rel + "/", gitignore)
             ):
                 continue
             safe_dirs.append(dirname)
@@ -1243,7 +1244,7 @@ def _path_allowed(
         fnmatch.fnmatch(relative_path, pattern) for pattern in policy.include_globs
     ):
         return False
-    return not (policy.respect_gitignore and _gitignored(relative_path, gitignore))
+    return not (policy.respect_gitignore and ignore_matches(relative_path, gitignore))
 
 
 def _sensitivity_blocked(
@@ -1275,40 +1276,6 @@ def _safe_read_text(path: Path, policy: SourcePolicy, result: HybridBuildResult)
     if len(raw) > policy.max_bytes or b"\x00" in raw:
         return None
     return raw.decode("utf-8", errors="replace")
-
-
-def _load_ignore_file(path: Path) -> list[tuple[str, bool]]:
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return []
-    patterns: list[tuple[str, bool]] = []
-    for line in lines:
-        pattern = line.strip()
-        if not pattern or pattern.startswith("#"):
-            continue
-        negated = pattern.startswith("!")
-        if negated:
-            pattern = pattern[1:]
-        patterns.append((pattern.lstrip("/"), negated))
-    return patterns
-
-
-def _gitignored(relative_path: str, patterns: list[tuple[str, bool]]) -> bool:
-    ignored = False
-    rel = relative_path.rstrip("/")
-    for pattern, negated in patterns:
-        directory_pattern = pattern.endswith("/")
-        candidate = pattern.rstrip("/")
-        if "/" not in candidate:
-            matched = any(fnmatch.fnmatch(part, candidate) for part in Path(rel).parts)
-        else:
-            matched = fnmatch.fnmatch(rel, candidate) or fnmatch.fnmatch(rel, candidate + "/**")
-        if directory_pattern:
-            matched = matched or rel.startswith(candidate + "/")
-        if matched:
-            ignored = not negated
-    return ignored
 
 
 def _is_hidden(relative_path: str, policy: SourcePolicy) -> bool:
