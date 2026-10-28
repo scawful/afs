@@ -78,6 +78,7 @@ def test_versioned_collection_records_provider_model_dimension_and_instructions(
         "query_instruction": GEMINI_DOCUMENT_TASK,
         "normalized": False,
         "health": "healthy",
+        "endpoint": "",
     }
 
 
