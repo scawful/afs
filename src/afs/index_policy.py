@@ -237,9 +237,9 @@ def _optional_count(data: dict[str, Any], key: str) -> int | None:
     value = data.get(key)
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{key} must be a non-negative integer")
-    return value
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    raise ValueError(f"{key} must be a non-negative integer")
 
 
 def index_policy_signature(context_path: Path) -> PolicySignature:
