@@ -1780,27 +1780,27 @@ def _query_sections(
         else index.has_entries(mount_types=mount_types)
     )
     if settings.enabled:
-        needs_refresh = False
+        stale_mounts: list[MountType] = []
         if settings.auto_refresh and has_entries:
-            needs_refresh = (
-                index.needs_refresh_scoped(scoped, mount_types=mount_types)
+            stale_mounts = (
+                index.stale_mounts_scoped(scoped, mount_types=mount_types)
                 if is_scoped_v2
-                else index.needs_refresh(mount_types=mount_types)
+                else index.stale_mounts(mount_types=mount_types)
             )
-        if (not has_entries and settings.auto_index) or (
-            settings.auto_refresh and has_entries and needs_refresh
-        ):
+        if (not has_entries and settings.auto_index) or stale_mounts:
+            # Rebuild only the drifted mounts; an empty list would select all.
+            rebuild_mounts = stale_mounts or mount_types
             if is_scoped_v2:
                 index.rebuild_scoped(
                     scoped,
-                    mount_types=mount_types,
+                    mount_types=rebuild_mounts,
                     include_content=settings.include_content,
                     max_file_size_bytes=settings.max_file_size_bytes,
                     max_content_chars=settings.max_content_chars,
                 )
             else:
                 index.rebuild(
-                    mount_types=mount_types,
+                    mount_types=rebuild_mounts,
                     include_content=settings.include_content,
                     max_file_size_bytes=settings.max_file_size_bytes,
                     max_content_chars=settings.max_content_chars,

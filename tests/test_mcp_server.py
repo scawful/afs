@@ -7,6 +7,7 @@ import time
 import unicodedata
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -17,7 +18,7 @@ from afs.agents.supervisor import AgentSupervisor
 from afs.context_index import ContextSQLiteIndex
 from afs.context_layout import scaffold_v2
 from afs.extensions import load_extension_manifest
-from afs.history import append_history_event
+from afs.history import append_history_event, log_event
 from afs.manager import AFSManager
 from afs.mcp.registry import MCPToolDefinition, MCPToolRegistry
 from afs.mcp_server import (
@@ -2962,6 +2963,45 @@ def test_context_query_auto_refreshes_after_external_rename(tmp_path: Path) -> N
     assert any(entry["relative_path"] == "after.md" for entry in structured["entries"])
     assert not any(entry["relative_path"] == "before.md" for entry in structured["entries"])
     assert "index_rebuild" in structured
+
+
+def test_context_query_history_self_writes_do_not_retrigger_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AFS_HISTORY_DISABLED", raising=False)
+    manager = _make_manager(tmp_path)
+    monkeypatch.setattr("afs.history.load_config_model", lambda **_kwargs: manager.config)
+    context_root = manager.config.general.context_root
+    note = context_root / "scratchpad" / "notes.md"
+    note.write_text("self-write marker", encoding="utf-8")
+    # Start from an existing daily log so every tool call below only appends.
+    assert log_event("context", "test", op="seed", context_root=context_root)
+    arguments = {
+        "context_path": str(context_root),
+        "mount_types": ["scratchpad", "history"],
+        "query": "self-write marker",
+        "auto_index": True,
+    }
+
+    def query(request_id: int) -> dict[str, Any]:
+        response = _call_tool(manager, "context.query", arguments, request_id=request_id)
+        return response["result"]["structuredContent"]  # type: ignore[index]
+
+    first = query(60)
+    assert set(first["index_rebuild"]["by_mount_type"]) == {"scratchpad", "history"}
+
+    # Each call appends its own event to today's log; that is not drift.
+    assert "index_rebuild" not in query(61)
+
+    # A real edit rebuilds only the drifted mount.
+    note.write_text("self-write marker, edited", encoding="utf-8")
+    third = query(62)
+    assert set(third["index_rebuild"]["by_mount_type"]) == {"scratchpad"}
+    assert any(entry["relative_path"] == "notes.md" for entry in third["entries"])
+
+    assert "index_rebuild" not in query(63)
+    events_log = next((context_root / "history").glob("events_*.jsonl"))
+    assert len(events_log.read_text(encoding="utf-8").splitlines()) >= 5
 
 
 def test_initialize_advertises_resources_and_prompts(tmp_path: Path) -> None:

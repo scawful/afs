@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -190,3 +191,91 @@ def test_needs_refresh_scoped_is_false_after_rebuild_with_dash_slash_siblings(
     index.rebuild_scoped(scope, mount_types=[MountType.KNOWLEDGE])
 
     assert index.needs_refresh_scoped(scope, mount_types=[MountType.KNOWLEDGE]) is False
+
+
+def _append_with_later_mtime(path: Path, text: str) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(text)
+    later = path.stat().st_mtime + 60
+    os.utime(path, (later, later))
+
+
+def test_stale_mounts_lists_only_drifted_mounts(tmp_path: Path) -> None:
+    index, scratchpad = _make_index(tmp_path)
+    memory = scratchpad.parent / "memory"
+    memory.mkdir()
+    (scratchpad / "a.md").write_text("a", encoding="utf-8")
+    (memory / "b.md").write_text("b", encoding="utf-8")
+    mounts = [MountType.SCRATCHPAD, MountType.MEMORY]
+    index.rebuild(mount_types=mounts)
+
+    assert index.stale_mounts(mount_types=mounts) == []
+    assert index.needs_refresh(mount_types=mounts) is False
+    (memory / "b.md").write_text("b edited", encoding="utf-8")
+    assert index.stale_mounts(mount_types=mounts) == [MountType.MEMORY]
+    assert index.needs_refresh(mount_types=mounts) is True
+
+
+def test_history_event_log_appends_do_not_mark_history_stale(tmp_path: Path) -> None:
+    index, scratchpad = _make_index(tmp_path)
+    history = scratchpad.parent / "history"
+    history.mkdir()
+    events = history / "events_20261028.jsonl"
+    events.write_text('{"op": "invoke"}\n', encoding="utf-8")
+    index.rebuild(mount_types=[MountType.HISTORY])
+
+    _append_with_later_mtime(events, '{"op": "call"}\n')
+
+    assert index.stale_mounts(mount_types=[MountType.HISTORY]) == []
+    (history / "events_20261029.jsonl").write_text("{}\n", encoding="utf-8")
+    assert index.stale_mounts(mount_types=[MountType.HISTORY]) == [MountType.HISTORY]
+
+
+def test_presence_only_rule_covers_only_history_event_logs(tmp_path: Path) -> None:
+    index, scratchpad = _make_index(tmp_path)
+    history = scratchpad.parent / "history"
+    history.mkdir()
+    notes = history / "notes.jsonl"
+    notes.write_text("{}\n", encoding="utf-8")
+    lookalike = scratchpad / "events_20261028.jsonl"
+    lookalike.write_text("{}\n", encoding="utf-8")
+    mounts = [MountType.SCRATCHPAD, MountType.HISTORY]
+    index.rebuild(mount_types=mounts)
+
+    _append_with_later_mtime(notes, "{}\n")
+    _append_with_later_mtime(lookalike, "{}\n")
+
+    assert index.stale_mounts(mount_types=mounts) == mounts
+
+
+def test_scoped_history_event_log_appends_do_not_mark_history_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "AFS_ALLOWED_MOUNTS",
+        "memory,history,scratchpad,hivemind,knowledge,tools,global,items,monorepo",
+    )
+    context = tmp_path / ".context"
+    alpha = tmp_path / "alpha"
+    alpha.mkdir()
+    scaffold_v2(context)
+    ProjectRegistry(context).register(alpha)
+    events = context / "history" / "common" / "events_20261028.jsonl"
+    events.parent.mkdir(parents=True, exist_ok=True)
+    events.write_text('{"op": "invoke"}\n', encoding="utf-8")
+    guide = context / "knowledge" / "common" / "guide.md"
+    guide.parent.mkdir(parents=True, exist_ok=True)
+    guide.write_text("guide", encoding="utf-8")
+    manager = AFSManager(config=AFSConfig(general=GeneralConfig(context_root=context)))
+    index = ContextSQLiteIndex(manager, context, db_path=tmp_path / "index.sqlite3")
+    scope = resolve_scope(context, requester_path=alpha)
+    mounts = [MountType.HISTORY, MountType.KNOWLEDGE]
+    index.rebuild_scoped(scope, mount_types=mounts)
+
+    _append_with_later_mtime(events, '{"op": "call"}\n')
+
+    assert index.stale_mounts_scoped(scope, mount_types=mounts) == []
+    assert index.needs_refresh_scoped(scope, mount_types=mounts) is False
+    guide.write_text("guide edited", encoding="utf-8")
+    assert index.stale_mounts_scoped(scope, mount_types=mounts) == [MountType.KNOWLEDGE]

@@ -802,26 +802,23 @@ def _maybe_refresh_context_index(
         if scoped is not None and scoped.layout_version == LAYOUT_VERSION
         else index.has_entries(mount_types=mount_types)
     )
-    should_rebuild = (
-        manager.config.context_index.enabled
-        and auto_index
-        and (
-            not has_entries
-            or (
-                auto_refresh
-                and (
-                    index.needs_refresh_scoped(scoped, mount_types=mount_types)
-                    if scoped is not None and scoped.layout_version == LAYOUT_VERSION
-                    else index.needs_refresh(mount_types=mount_types)
-                )
-            )
-        )
-    )
-    if not should_rebuild:
+    if not (manager.config.context_index.enabled and auto_index):
         return None
+    rebuild_mounts = mount_types
+    if has_entries:
+        if not auto_refresh:
+            return None
+        # Rebuild only the drifted mounts; an empty list would select all.
+        rebuild_mounts = (
+            index.stale_mounts_scoped(scoped, mount_types=mount_types)
+            if scoped is not None and scoped.layout_version == LAYOUT_VERSION
+            else index.stale_mounts(mount_types=mount_types)
+        )
+        if not rebuild_mounts:
+            return None
 
     rebuild_kwargs = {
-        "mount_types": mount_types,
+        "mount_types": rebuild_mounts,
         "include_content": manager.config.context_index.include_content,
         "max_file_size_bytes": manager.config.context_index.max_file_size_bytes,
         "max_content_chars": manager.config.context_index.max_content_chars,
