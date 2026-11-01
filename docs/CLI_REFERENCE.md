@@ -88,6 +88,15 @@ Codex, Claude, Cursor and Antigravity sessions share the same surfaces:
 ./scripts/afs messages send --to codex --text "please rerun CI" --path "$PWD"
 ./scripts/afs messages ack <message-id> --by cursor --done --path "$PWD"
 
+# Push delivery ("doorbell"): Claude/Codex lifecycle hooks pipe their JSON
+# payload to `messages hook`, which surfaces messages that arrived after the
+# session registered, once per session, and prints nothing otherwise. Tool and
+# prompt hooks get a one-line digest; only a request/blocker addressed to the
+# host blocks Stop (once per turn). Delivery is not an ack.
+./scripts/afs messages hook --host claude            # stdin: hook payload
+./scripts/afs messages sessions --path "$PWD"         # recorded Claude/Codex sessions
+./scripts/afs messages send --to codex --type request --text "..." --ring --path "$PWD"   # + codex queue pointer
+
 # Text-file bridge for scratchpad inbox.md / agent_board.md (format unchanged)
 ./scripts/afs inbox list --to cursor --path "$PWD"
 ./scripts/afs inbox add --from cursor --to codex --ref handoffs/x/WORK.md "ask" --path "$PWD"
