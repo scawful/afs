@@ -88,11 +88,7 @@ class MessageBus(HivemindBus):
         scope_id: str | None = None,
         reply_to: str | None = None,
     ) -> Message:
-        effective_scope = normalize_scope_id(scope_id or self.scope_id)
-        if not self.all_projects and effective_scope not in self.allowed_scope_ids:
-            raise PermissionError(
-                f"scope {effective_scope!r} is outside this message bus view"
-            )
+        effective_scope = self._require_scope(scope_id)
         return super().send(
             from_agent,
             msg_type,
@@ -103,6 +99,35 @@ class MessageBus(HivemindBus):
             scope_id=effective_scope,
             reply_to=reply_to,
         )
+
+    def _require_scope(self, scope_id: str | None) -> str:
+        effective_scope = normalize_scope_id(scope_id or self.scope_id)
+        if not self.all_projects and effective_scope not in self.allowed_scope_ids:
+            raise PermissionError(
+                f"scope {effective_scope!r} is outside this message bus view"
+            )
+        return effective_scope
+
+    def register_session(
+        self,
+        host: str,
+        session_id: str,
+        *,
+        scope_id: str | None = None,
+        cwd: str = "",
+        source: str = "",
+    ) -> dict[str, str]:
+        return super().register_session(
+            host,
+            session_id,
+            scope_id=self._require_scope(scope_id),
+            cwd=cwd,
+            source=source,
+        )
+
+    def live_sessions(self, host: str, *, scope_id: str | None = None) -> list[dict[str, Any]]:
+        """Return *host* sessions in one scope (this view's scope by default)."""
+        return super().live_sessions(host, scope_id=self._require_scope(scope_id))
 
     def _find_message(self, msg_id: str) -> Message | None:
         message = super()._find_message(msg_id)

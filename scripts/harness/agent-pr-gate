@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""Require scawful's approval before an agent opens a pull request in a hobby repo.
+
+Agents push branches and record ready work on the coord board/AFS; scawful decides
+when a branch becomes a PR. Hook entry points (stdin JSON from the host):
+
+  agent-pr-gate hook --host cursor-shell   Cursor beforeShellExecution
+  agent-pr-gate hook --host cursor-mcp     Cursor beforeMCPExecution
+  agent-pr-gate hook --host claude         Claude Code PreToolUse
+  agent-pr-gate hook --host codex          Codex PreToolUse
+
+Cursor and Claude Code show an approval prompt. Codex cannot prompt from a hook,
+so it is denied unless scawful opened a window from his own terminal:
+
+  agent-pr-gate allow [--minutes N]   agent-pr-gate revoke   agent-pr-gate status
+
+Agents may not run `allow` themselves; the hook denies it. Hook errors fail open.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+HOBBY = Path.home() / "src" / "hobby"
+STATE = Path.home() / ".local" / "state" / "agent-pr-gate"
+GRANT = STATE / "grant.json"
+LOG = STATE / "decisions.jsonl"
+
+SEP = r"[^|;&\n]*?"
+GH_PR_CREATE = re.compile(rf"\bgh\s+{SEP}\bpr\s+(?:create|new)\b")
+GH_API_PULLS = re.compile(rf"\bgh\s+api\b{SEP}/pulls(?=[\s'\"?]|$)")
+GH_API_WRITE = re.compile(
+    r"(?:-X\s*|--method[=\s]+)POST\b|\s(?:-f|-F|--field|--raw-field|--input)[\s=]"
+)
+SELF_GRANT = re.compile(r"agent-pr-gate\b[^|;&\n]*\ballow\b|agent-pr-gate/grant")
+REPO_ARG = re.compile(r"(?:-R|--repo)[=\s]+['\"]?(?:[\w.-]+/)?([\w.-]+)")
+API_REPO = re.compile(r"repos/[\w.-]+/([\w.-]+)/pulls")
+
+AGENT_MESSAGE = (
+    "Opening pull requests in hobby repos needs scawful's approval. Push the branch "
+    "and record it as ready (coord board or AFS) instead; scawful decides when it "
+    "becomes a PR."
+)
+
+
+def hobby_repos() -> set[str]:
+    try:
+        return {p.name for p in HOBBY.iterdir() if p.is_dir()}
+    except OSError:
+        return set()
+
+
+def grant_active() -> bool:
+    try:
+        return json.loads(GRANT.read_text()).get("expires", 0) > time.time()
+    except (OSError, ValueError):
+        return False
+
+
+def in_hobby(cwd: str | None, text: str) -> bool:
+    if cwd:
+        try:
+            Path(cwd).expanduser().resolve().relative_to(HOBBY.resolve())
+            return True
+        except (ValueError, OSError):
+            pass
+    if "/src/hobby" in text:
+        return True
+    names = hobby_repos()
+    return any(
+        m.group(1) in names
+        for pattern in (REPO_ARG, API_REPO)
+        for m in pattern.finditer(text)
+    )
+
+
+def classify_shell(command: str, cwd: str | None) -> str | None:
+    if SELF_GRANT.search(command):
+        return "self-grant"
+    creates = bool(GH_PR_CREATE.search(command)) or (
+        bool(GH_API_PULLS.search(command)) and bool(GH_API_WRITE.search(command))
+    )
+    if creates and in_hobby(cwd, command):
+        return "pr-create"
+    return None
+
+
+def classify_mcp(tool_name: str, tool_input: object, cwd: str | None) -> str | None:
+    if "create_pull_request" not in tool_name:
+        return None
+    text = json.dumps(tool_input)
+    names = hobby_repos()
+    values = tool_input.values() if isinstance(tool_input, dict) else []
+    if in_hobby(cwd, text) or any(isinstance(v, str) and v in names for v in values):
+        return "pr-create"
+    return None
+
+
+def log(entry: dict) -> None:
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        with LOG.open("a") as f:
+            f.write(json.dumps({"t": int(time.time()), **entry}) + "\n")
+    except OSError:
+        pass
+
+
+def respond(host: str, decision: str, reason: str) -> None:
+    # An open window defers to the host's normal approval instead of granting "allow".
+    if decision == "allow":
+        if host.startswith("cursor"):
+            print("{}")
+        return
+    if host.startswith("cursor"):
+        print(json.dumps({
+            "permission": decision,
+            "user_message": f"PR gate: {reason}",
+            "agent_message": reason,
+        }))
+        return
+    if host == "codex" and decision == "ask":
+        decision = "deny"
+        reason += (" scawful can open a window from his own terminal with "
+                   "`agent-pr-gate allow --minutes 30`.")
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": decision,
+        "permissionDecisionReason": reason,
+    }}))
+
+
+def run_hook(host: str) -> int:
+    event = json.load(sys.stdin)
+    cwd = event.get("cwd") or next(iter(event.get("workspace_roots") or []), None)
+    if host == "cursor-shell":
+        verdict = classify_shell(event.get("command", ""), cwd)
+        subject = event.get("command", "")
+    elif host == "cursor-mcp":
+        name = event.get("tool_name", "")
+        raw = event.get("tool_input", {})
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                pass
+        verdict = classify_mcp(name, raw, cwd)
+        subject = name
+    else:
+        name = event.get("tool_name", "")
+        tool_input = event.get("tool_input") or {}
+        if name == "Bash":
+            subject = tool_input.get("command", "")
+            verdict = classify_shell(subject, cwd)
+        else:
+            subject = name
+            verdict = classify_mcp(name, tool_input, cwd)
+
+    if verdict is None:
+        if host.startswith("cursor"):
+            print("{}")
+        return 0
+    if verdict == "self-grant":
+        decision, reason = "deny", "Only scawful can open a PR window, from his own terminal."
+    elif grant_active():
+        decision, reason = "allow", "scawful's PR window is open."
+    else:
+        decision, reason = "ask", AGENT_MESSAGE
+    log({"host": host, "verdict": verdict, "decision": decision, "cwd": cwd,
+         "subject": subject[:300]})
+    respond(host, decision, reason)
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    hook = sub.add_parser("hook")
+    hook.add_argument("--host", required=True,
+                      choices=["cursor-shell", "cursor-mcp", "claude", "codex"])
+    allow = sub.add_parser("allow")
+    allow.add_argument("--minutes", type=int, default=30)
+    sub.add_parser("revoke")
+    sub.add_parser("status")
+    args = parser.parse_args()
+
+    if args.cmd == "hook":
+        try:
+            return run_hook(args.host)
+        except Exception as exc:  # noqa: BLE001 - a broken gate must not block shells
+            log({"host": args.host, "error": repr(exc)})
+            if args.host.startswith("cursor"):
+                print("{}")
+            return 0
+    if args.cmd == "allow":
+        STATE.mkdir(parents=True, exist_ok=True)
+        expires = time.time() + args.minutes * 60
+        GRANT.write_text(json.dumps({"expires": expires}))
+        print(f"PR window open until {time.strftime('%H:%M', time.localtime(expires))}")
+    elif args.cmd == "revoke":
+        GRANT.unlink(missing_ok=True)
+        print("PR window closed")
+    else:
+        if grant_active():
+            expires = json.loads(GRANT.read_text())["expires"]
+            print(f"PR window open until {time.strftime('%H:%M', time.localtime(expires))}")
+        else:
+            print("PR window closed; agents need approval to open PRs")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
