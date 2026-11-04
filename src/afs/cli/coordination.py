@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -301,28 +302,58 @@ def _register_lease(subparsers: argparse._SubParsersAction) -> None:
 
 
 def worktrees_report_command(args: argparse.Namespace) -> int:
+    import hashlib
+
     from ..worktree_report import worktree_report
 
-    report = worktree_report(Path(args.repo), older_than_days=args.older_than_days)
+    def audit(op: str, metadata: dict[str, Any]) -> None:
+        if args.audit_context:
+            from ..history import log_session_event
+            event = log_session_event(op, context_root=Path(args.audit_context), metadata=metadata)
+            if not event:
+                raise ValueError("Requested worktree audit could not be persisted")
+
+    audit("worktree_report_started", {"repo": str(Path(args.repo).resolve()), "dry_run": True})
+    try:
+        report = worktree_report(Path(args.repo), older_than_days=args.older_than_days,
+                                 base_ref=args.base_ref,
+                                 mission_records=tuple(Path(p) for p in args.mission_record))
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        audit("worktree_report_failed", {"error_type": type(exc).__name__, "dry_run": True})
+        raise
+    audit("worktree_report_completed", {
+        "report_sha256": hashlib.sha256(json.dumps(report, sort_keys=True).encode()).hexdigest(),
+        "base_commit": report["base_commit"], "linked_count": report["linked_count"],
+        "candidate_count": report["candidate_count"], "dry_run": True,
+    })
     rows = report["worktrees"] if args.all else report["candidates"]
     if args.json:
-        print(json.dumps({**report, "worktrees": report["worktrees"][: args.limit]}, indent=2))
+        # JSON is the complete audit-bound payload. Limit only human display.
+        print(json.dumps(report, indent=2))
         return 0
     print(f"worktrees: {report['repo']} (report only; nothing is removed)")
     print(
         f"  {report['linked_count']} linked, {report['dirty_count']} dirty, "
-        f"{report['candidate_count']} removal candidates "
-        f"(>= {args.older_than_days:g} days idle vs {report['default_branch']})"
+        f"{report['candidate_count']} cleanup review candidates "
+        f"(target {report['default_branch']} @ {report['base_commit'][:12]})"
     )
     for row in rows[: args.limit]:
         state = "dirty" if row["dirty"] else "clean" if row["dirty"] is False else "?"
         reason = f"  <- {row['candidate']}" if row["candidate"] else ""
         print(
             f"  - {row['idle_days']:>5g}d  {state:5}  {row['branch'] or row['head']}  "
-            f"{row['path']}{reason}"
+            f"{row['path']!r}{reason}"
         )
-    if report["candidates"]:
-        print("  remove one with: git worktree remove <path>  (prune missing: git worktree prune)")
+        plan = row["exit_plan"]
+        print(f"    exit={plan['intended_exit']} owner={plan.get('owner', 'unknown')!r} "
+              f"review_ready={plan['ready_for_review']}")
+        for blocker in plan["blockers"]:
+            print(f"    hold: {blocker}")
+    if args.all:
+        for branch in report["unattached_branches"][: args.limit]:
+            print(f"  branch without worktree: {branch['branch']!r} @ {branch['head'][:12]} "
+                  f"merged={branch['merged']} — retained; ownership/adoption review required")
+    print("  Commit age is not owner activity. No merge, cleanup or approval is performed.")
     return 0
 
 
@@ -393,8 +424,12 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     worktree_commands = worktrees.add_subparsers(dest="worktrees_command")
     report = worktree_commands.add_parser("report", help="List idle, merged or missing worktrees.")
     report.add_argument("--repo", default=".", help="Repository path (default: current directory).")
+    report.add_argument("--base-ref", help="Exact intended target ref (resolved and pinned for this report).")
+    report.add_argument("--mission-record", action="append", default=[],
+                        help="Existing AFS mission JSON with metadata.worktree_exit (repeatable).")
+    report.add_argument("--audit-context", help="Opt in to start/result events in this host-owned AFS context.")
     report.add_argument("--older-than-days", type=float, default=7.0)
     report.add_argument("--all", action="store_true", help="List every linked worktree.")
-    report.add_argument("--limit", type=int, default=25)
+    report.add_argument("--limit", type=int, default=25, help="Human display limit; JSON always contains the complete report.")
     report.add_argument("--json", action="store_true")
     report.set_defaults(func=worktrees_report_command)

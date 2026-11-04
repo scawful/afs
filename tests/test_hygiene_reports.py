@@ -74,6 +74,8 @@ def test_worktree_report_marks_merged_clean_idle_worktrees(tmp_path: Path) -> No
 
     by_branch = {row["branch"]: row for row in report["worktrees"]}
     assert report["default_branch"] == "main"
-    assert by_branch["merged"]["candidate"] == "clean, merged into default branch"
+    assert by_branch["merged"]["merged"] is True
+    assert by_branch["merged"]["candidate"] == ""
+    assert "No owner/task" in by_branch["merged"]["exit_plan"]["blockers"][0]
     assert by_branch["dirty"]["dirty"] is True and by_branch["dirty"]["candidate"] == ""
-    assert report["candidate_count"] == 1
+    assert report["candidate_count"] == 0
