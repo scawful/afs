@@ -394,6 +394,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Read or update the scratchpad agent_board.md (one section per owner).",
     )
     board_commands = board.add_subparsers(dest="board_command")
+    from .commitments import register_board_parser
+
+    register_board_parser(board_commands)
 
     show = board_commands.add_parser("show", help="Show pinned lines and owner sections.")
     _add_context_args(show)

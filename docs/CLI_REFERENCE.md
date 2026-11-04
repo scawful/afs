@@ -1478,3 +1478,11 @@ background service:
 ./scripts/afs context repair --dry-run
 ./scripts/afs context repair --rebuild-index
 ```
+
+## Accepted task agreements (opt-in)
+
+`afs handoff agree --event-file EVENT.json` records an explicit versioned agreement
+transition and returns its derived board. `afs handoff agreement TASK_ID` exposes
+revision state and exact evidence bindings; `afs board accepted --json` replays
+accepted records. See [Accepted agreements](ACCEPTED_AGREEMENTS.md) for lifecycle,
+queue guards, migration, rollback, and authority boundaries.

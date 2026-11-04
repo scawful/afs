@@ -1030,6 +1030,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Create and follow immutable cross-session handoff threads.",
     )
     handoff_commands = handoff.add_subparsers(dest="handoff_command")
+    from .commitments import register_handoff_parser
+
+    register_handoff_parser(handoff_commands)
 
     def add_handoff_content(parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--title", required=True, help="Readable handoff title.")
