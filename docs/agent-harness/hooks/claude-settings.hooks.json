@@ -1,0 +1,60 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<AFS_ROOT>/.venv/bin/python <AFS_ROOT>/scripts/harness/afs-session-start --host claude",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|mcp__.*create_pull_request",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<AFS_ROOT>/scripts/harness/agent-pr-gate hook --host claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<AFS_ROOT>/scripts/afs messages hook --host claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<AFS_ROOT>/scripts/afs messages hook --host claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<AFS_ROOT>/scripts/afs messages hook --host claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

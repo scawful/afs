@@ -69,6 +69,31 @@ def test_inbox_tracks_read_and_done_per_recipient(tmp_path: Path) -> None:
     assert bus.inbox("claude")[0]["state"] == "unread"
 
 
+def test_inbox_applies_sender_type_and_topic_before_limit(tmp_path: Path) -> None:
+    bus = MessageBus(_context(tmp_path), scope_id="project:alpha")
+    coordinator = "Codex-Sequence-Coordinator"
+    first = bus.send("codex-asm", "request", {}, to=coordinator, topic="asm-review")
+    second = bus.send("codex-lyra", "status", {}, to=coordinator, topic="asm-review")
+    bus.send("codex-asm", "request", {}, to="cursor", topic="asm-review")
+    bus.send("codex-wrap", "status", {}, to=coordinator, topic="wrap")
+    bus.send("codex-wrap", "status", {}, to=coordinator)
+
+    def ids(entries: list[dict]) -> list[str]:
+        return [entry["id"] for entry in entries]
+
+    assert ids(bus.inbox(coordinator, topic="asm-review", limit=2)) == [first.id, second.id]
+    assert ids(bus.inbox(coordinator, topic="asm-review", agent_name="codex-asm")) == [first.id]
+    assert ids(bus.inbox(coordinator, topic="asm-review", msg_type="status")) == [second.id]
+    assert bus.inbox(coordinator, topic="missing") == []
+
+    bus.ack(first.id, coordinator, status="done")
+    assert ids(bus.inbox(coordinator, topic="asm-review")) == [second.id]
+    assert [
+        (entry["id"], entry["state"])
+        for entry in bus.inbox(coordinator, topic="asm-review", include_done=True)
+    ] == [(first.id, "done"), (second.id, "unread")]
+
+
 def test_reply_to_round_trips(tmp_path: Path) -> None:
     bus = MessageBus(_context(tmp_path), scope_id="project:alpha")
     ask = bus.send("codex", "request", {"text": "?"}, to="cursor")

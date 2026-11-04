@@ -10,6 +10,7 @@ This docs set covers the **core AFS platform** in `lab/afs`.
 - [Agent Surfaces](AGENT_SURFACES.md)
 - [Agent Operations](AGENT_OPERATIONS.md)
 - [Agent Integration Upgrade](AGENT_INTEGRATION_UPGRADE.md)
+- [Agent Harness Kit](agent-harness/README.md)
 - [Guided Setup](SETUP_GUIDE.md)
 - [Architecture](ARCHITECTURE.md)
 - [Profiles, Skills, and Hooks](PROFILES.md)

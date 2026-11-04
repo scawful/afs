@@ -1,0 +1,4 @@
+interface:
+  display_name: "Focused Verification"
+  short_description: "Pick and run the fastest trustworthy validation for code, config, services, devices, or docs."
+  default_prompt: "Choose and run focused verification for this change, then report commands, outcome, and residual risk."
