@@ -1,0 +1,4 @@
+interface:
+  display_name: "Handoff Writer"
+  short_description: "Create durable AFS or repo handoffs with current state, proof, risks, and next steps."
+  default_prompt: "Write a concise handoff for this work with exact paths, verified commands, risks, and the next step."

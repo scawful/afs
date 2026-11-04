@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "afs": {
+      "command": "<AFS_ROOT>/scripts/afs",
+      "args": ["mcp", "serve"],
+      "env": {
+        "AFS_ROOT": "<AFS_ROOT>",
+        "AFS_VENV": "<AFS_ROOT>/.venv",
+        "PYTHONPATH": "<AFS_ROOT>/src",
+        "AFS_PROMPT_SCAFFOLDING": "minimal",
+        "AFS_NATIVE_SKILLS": "1",
+        "AFS_MCP_TOOL_CATALOG": "slim",
+        "AFS_ALLOWED_TOOLS": "context.status,context.query,context.read,context.list,context.write,messages.send,messages.read,messages.ack,handoff.create,handoff.list,handoff.read,note.create,note.list,note.read"
+      }
+    }
+  }
+}

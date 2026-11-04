@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "name": "afs-startup",
+            "type": "command",
+            "command": "bash <HOME>/.gemini/hooks/afs_start.sh"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": []
+  }
+}

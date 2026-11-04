@@ -1,0 +1,536 @@
+#!/usr/bin/env python3
+"""Preserve ignored/untracked worktree data before a separate chat archive.
+
+This command never archives, deletes, follows source symlinks, or stops processes.
+`inventory` is read-only. `capture` needs a reviewed inventory and explicit byte
+budget. `check` revalidates a capture immediately before a separate archive.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import ctypes
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import shutil
+import sqlite3
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+
+SCHEMA = "worktree-preservation/v1"
+DEFAULT_STORE = Path.home() / ".local/share/worktree-preservation"
+RESERVE = 30 * 1024**3
+
+
+class Hold(RuntimeError):
+    """The source must remain in place until this condition is resolved."""
+
+
+def encoded(value):
+    return json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode()
+
+
+def digest(value):
+    return hashlib.sha256(encoded(value)).hexdigest()
+
+
+def run(args, cwd=None, allowed=(0,), timeout=30, require_quiet_stderr=False):
+    try:
+        result = subprocess.run(args, cwd=cwd, capture_output=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise Hold(f"inspection failed: {args[0]}: {error}") from error
+    if result.returncode not in allowed or (require_quiet_stderr and result.stderr.strip()):
+        raise Hold(f"inspection failed: {args[0]}: {result.stderr.decode(errors='replace').strip()}")
+    return result.stdout
+
+
+def plain_path(value, *, missing=False):
+    path = Path(os.path.abspath(os.path.expanduser(str(value))))
+    for part in reversed((path, *path.parents)):
+        try:
+            mode = part.lstat().st_mode
+        except FileNotFoundError:
+            if missing:
+                continue
+            raise Hold(f"missing path: {part}") from None
+        if stat.S_ISLNK(mode):
+            raise Hold(f"symlink path component: {part}")
+    return path
+
+
+def safe_relative(value):
+    parts = PurePosixPath(value).parts
+    if (not parts or value != PurePosixPath(value).as_posix() or value.startswith("/")
+            or any(p in ("", ".", "..", ".git") for p in parts)):
+        raise Hold(f"unsafe manifest path: {value!r}")
+    return parts
+
+
+def signature(st):
+    return [st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+
+
+def darwin_xattr(path, name=None, value=None):
+    """Darwin Python lacks os.*xattr; use the native no-follow API."""
+    library = ctypes.CDLL(None, use_errno=True)
+    if value is not None:
+        function = library.setxattr
+        function.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p,
+                             ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+        function.restype = ctypes.c_int
+        result = function(os.fsencode(path), os.fsencode(name), value, len(value), 0, 1)
+        if result < 0:
+            raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()), str(path))
+        return None
+    by_fd = isinstance(path, int)
+    function = (library.flistxattr if name is None else library.fgetxattr) if by_fd else (
+        library.listxattr if name is None else library.getxattr)
+    first = path if by_fd else os.fsencode(path)
+    prefix = [first] if name is None else [first, os.fsencode(name)]
+    function.argtypes = ([ctypes.c_int if by_fd else ctypes.c_char_p] if name is None else [
+        ctypes.c_int if by_fd else ctypes.c_char_p, ctypes.c_char_p]) + [
+        ctypes.c_void_p, ctypes.c_size_t] + ([] if name is None else [ctypes.c_uint32]) + [ctypes.c_int]
+    function.restype = ctypes.c_ssize_t
+    options = 0 if by_fd else 1
+    suffix = [options] if name is None else [0, options]  # XATTR_NOFOLLOW for paths.
+    size = function(*prefix, None, 0, *suffix)
+    if size < 0:
+        raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()), str(path))
+    buffer = ctypes.create_string_buffer(size)
+    count = function(*prefix, buffer, size, *suffix)
+    if count < 0:
+        raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()), str(path))
+    result = buffer.raw[:count]
+    return [os.fsdecode(v) for v in result.split(b"\0") if v] if name is None else result
+
+
+def attrs(path):
+    try:
+        if sys.platform == "darwin":
+            return {key: base64.b64encode(darwin_xattr(path, key)).decode()
+                    for key in sorted(darwin_xattr(path))}
+        if isinstance(path, int):
+            return {key: base64.b64encode(os.getxattr(path, key)).decode()
+                    for key in sorted(os.listxattr(path))}
+        return {key: base64.b64encode(os.getxattr(path, key, follow_symlinks=False)).decode()
+                for key in sorted(os.listxattr(path, follow_symlinks=False))}
+    except (OSError, NotImplementedError) as error:
+        raise Hold(f"cannot preserve extended attributes: {path}: {error}") from error
+
+
+def active_users(root):
+    """Use both command arguments and open files/CWD. Unknown inspection is a HOLD."""
+    excluded = {os.getpid()}
+    processes = run(["ps", "-axo", "pid=,ppid=,command="]).decode(errors="replace").splitlines()
+    parsed = [line.strip().split(None, 2) for line in processes]
+    parents = {int(p[0]): int(p[1]) for p in parsed if len(p) == 3}
+    current = os.getpid()
+    while current in parents and current > 1:
+        current = parents[current]
+        excluded.add(current)
+    hits = [{"pid": int(p[0]), "reason": "process command references worktree"}
+            for p in parsed if len(p) == 3 and int(p[0]) not in excluded and str(root) in p[2]]
+    lsof = shutil.which("lsof")
+    if not lsof:
+        raise Hold("lsof is required to check open files and process working directories")
+    raw = run([lsof, "-nP", "+D", str(root), "-Fpcfn"], allowed=(0, 1), timeout=45,
+              require_quiet_stderr=True)
+    pid = None
+    for line in raw.decode(errors="replace").splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:])
+        elif line.startswith("n") and pid not in excluded:
+            hits.append({"pid": pid, "reason": f"open file/CWD: {line[1:]}"})
+    return hits
+
+
+def attachment_roots(thread, database):
+    """Read only the supported app's local inventory; never mutate its database."""
+    database = plain_path(database)
+    connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+    try:
+        row = connection.execute("SELECT cwd FROM threads WHERE id=?", (thread,)).fetchone()
+        if not row:
+            raise Hold(f"chat not found in local inventory: {thread}")
+        rows = connection.execute(
+            "SELECT identity_key,payload FROM thread_attachments WHERE thread_id=? AND attachment_type='worktree'",
+            (thread,),
+        ).fetchall()
+    except sqlite3.Error as error:
+        raise Hold(f"app inventory unavailable/schema changed: {error}") from error
+    finally:
+        connection.close()
+    roots = {json.loads(payload).get("root", identity) for identity, payload in rows}
+    # The chat's primary working directory can be another managed checkout.
+    cwd = plain_path(row[0])
+    root = run(["git", "rev-parse", "--show-toplevel"], cwd=cwd).decode().strip()
+    # A primary/shared checkout is protected by the app and is not removed on
+    # archive. Include a secondary Git worktree even without an attachment row.
+    git_dir = run(["git", "rev-parse", "--absolute-git-dir"], cwd=cwd).decode().strip()
+    common_dir = run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=cwd).decode().strip()
+    if git_dir != common_dir:
+        roots.add(root)
+    return sorted(roots)
+
+
+def open_source(root, relative):
+    """Anchor every component to a no-follow directory descriptor."""
+    parts = safe_relative(relative)
+    parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+    finally:
+        os.close(parent)
+
+
+def inspect_root(value):
+    root = plain_path(value)
+    if not root.is_dir():
+        raise Hold(f"worktree is not a directory: {root}")
+    top = run(["git", "rev-parse", "--show-toplevel"], cwd=root).decode().strip()
+    if top != str(root):
+        raise Hold(f"use the exact Git worktree root: {top}")
+    tracked = set(run(["git", "ls-files", "-z"], cwd=root).split(b"\0"))
+    stage = run(["git", "ls-files", "--stage", "-z"], cwd=root)
+    if any(row.startswith(b"160000 ") for row in stage.split(b"\0")):
+        raise Hold(f"submodule requires separate preservation: {root}")
+    entries = []
+    device = root.stat().st_dev
+
+    def walk(directory_fd, parent_parts=()):
+        for child in sorted(os.scandir(directory_fd), key=lambda x: os.fsencode(x.name)):
+            parts = (*parent_parts, child.name)
+            path = root.joinpath(*parts)
+            relative = PurePosixPath(*parts).as_posix()
+            if relative == ".git":
+                continue
+            if child.name == ".git":
+                raise Hold(f"embedded Git repository requires separate preservation: {path}")
+            st = child.stat(follow_symlinks=False)
+            if st.st_dev != device:
+                raise Hold(f"unexpected mounted filesystem: {path}")
+            if stat.S_ISDIR(st.st_mode):
+                fd = os.open(child.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                try:
+                    if signature(os.fstat(fd)) != signature(st):
+                        raise Hold(f"directory changed during scan: {path}")
+                    attributes = attrs(fd)
+                    walk(fd, parts)
+                finally:
+                    os.close(fd)
+                kind = "directory"
+            elif stat.S_ISREG(st.st_mode):
+                kind = "file"
+                fd = os.open(child.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                try:
+                    if signature(os.fstat(fd)) != signature(st):
+                        raise Hold(f"file changed during scan: {path}")
+                    attributes = attrs(fd)
+                finally:
+                    os.close(fd)
+            elif stat.S_ISLNK(st.st_mode):
+                kind = "symlink"
+                attributes = attrs(path)
+            else:
+                raise Hold(f"socket/FIFO/device or unsupported file: {path}")
+            # Include directories too, preserving empty ignored directories and modes.
+            if kind == "directory" or os.fsencode(relative) not in tracked:
+                entry = {"path": relative, "kind": kind, "stat": signature(st),
+                         "mode": stat.S_IMODE(st.st_mode), "mtime_ns": st.st_mtime_ns,
+                         "xattrs": attributes}
+                if kind == "symlink":
+                    entry["target"] = os.readlink(child.name, dir_fd=directory_fd)
+                entries.append(entry)
+
+    directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        walk(directory_fd)
+    finally:
+        os.close(directory_fd)
+    entries.sort(key=lambda e: os.fsencode(e["path"]))
+    return {"root": str(root), "head": run(["git", "rev-parse", "HEAD"], cwd=root).decode().strip(),
+            "status_b64": base64.b64encode(run(["git", "status", "--porcelain=v1", "-z"], cwd=root)).decode(),
+            "entries": entries,
+            "bytes": sum(e["stat"][3] for e in entries if e["kind"] == "file") + sum(
+                len(base64.b64decode(value)) for e in entries for value in e["xattrs"].values())}
+
+
+def inventory(roots, thread=None, database=None):
+    if not roots and not thread:
+        raise Hold("no worktree roots supplied")
+    data = {"schema": SCHEMA, "thread": thread, "database": database,
+            "worktrees": [inspect_root(root) for root in sorted(set(map(str, roots)))]}
+    data["inventory_sha256"] = digest(data)
+    return data
+
+
+def validate_inventory(data):
+    if data.get("schema") != SCHEMA:
+        raise Hold("unsupported inventory schema")
+    actual = data.copy()
+    wanted = actual.pop("inventory_sha256", None)
+    if wanted != digest(actual):
+        raise Hold("inventory checksum mismatch")
+
+
+def require_idle(data):
+    for worktree in data["worktrees"]:
+        hits = active_users(Path(worktree["root"]))
+        if hits:
+            raise Hold(f"active worktree: {worktree['root']}: {json.dumps(hits[:6])}")
+
+
+def same_inventory(data):
+    if data.get("thread"):
+        roots = attachment_roots(data["thread"], data["database"])
+        if roots != sorted(w["root"] for w in data["worktrees"]):
+            raise Hold("chat worktree inventory changed")
+    current = inventory([w["root"] for w in data["worktrees"]], data.get("thread"), data.get("database"))
+    if current != data:
+        raise Hold("source changed since reviewed inventory; inventory again")
+
+
+def object_path(store, sha):
+    if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
+        raise Hold("invalid object hash")
+    return plain_path(store / "objects" / sha[:2] / sha[2:], missing=True)
+
+
+def hash_file(path):
+    hasher = hashlib.sha256()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise Hold(f"object is not a regular file: {path}")
+        while chunk := stream.read(1024 * 1024):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def capture(data, store, max_bytes, reserve=RESERVE):
+    validate_inventory(data)
+    require_idle(data)
+    same_inventory(data)
+    store = plain_path(store, missing=True)
+    for worktree in data["worktrees"]:
+        root = Path(worktree["root"])
+        if store == root or root in store.parents:
+            raise Hold("preservation store must be outside every source worktree")
+    required = sum(w["bytes"] for w in data["worktrees"])
+    if required > max_bytes:
+        raise Hold(f"inventory is {required} bytes, exceeding reviewed byte budget {max_bytes}")
+    ancestor = next(p for p in (store, *store.parents) if p.exists())
+    if shutil.disk_usage(ancestor).free < required + reserve:
+        raise Hold(f"insufficient capacity: need {required} bytes plus {reserve} bytes reserve")
+    store.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (store / "objects").mkdir(mode=0o700, exist_ok=True)
+    manifests = store / "manifests"
+    manifests.mkdir(mode=0o700, exist_ok=True)
+    copied = json.loads(json.dumps(data))
+    for worktree in copied["worktrees"]:
+        root = Path(worktree["root"])
+        for entry in worktree["entries"]:
+            if entry["kind"] != "file":
+                continue
+            path = root.joinpath(*safe_relative(entry["path"]))
+            plain_path(path)
+            fd = open_source(root, entry["path"])
+            with os.fdopen(fd, "rb") as source:
+                if signature(os.fstat(source.fileno())) != entry["stat"]:
+                    raise Hold(f"source changed before read: {path}")
+                with tempfile.NamedTemporaryFile(dir=store, prefix="pending-", delete=False) as out:
+                    temporary = Path(out.name)
+                    os.chmod(temporary, 0o600)
+                    hasher = hashlib.sha256()
+                    try:
+                        while chunk := source.read(1024 * 1024):
+                            hasher.update(chunk)
+                            out.write(chunk)
+                        out.flush()
+                        os.fsync(out.fileno())
+                        if signature(os.fstat(source.fileno())) != entry["stat"]:
+                            raise Hold(f"source changed during read: {path}")
+                    except BaseException:
+                        temporary.unlink(missing_ok=True)
+                        raise
+                sha = hasher.hexdigest()
+                target = object_path(store, sha)
+                target.parent.mkdir(mode=0o700, exist_ok=True)
+                if target.exists():
+                    if hash_file(target) != sha:
+                        raise Hold(f"existing CAS object corrupt: {target}")
+                else:
+                    # Atomic no-overwrite publication; distinct captures can share objects.
+                    os.link(temporary, target, follow_symlinks=False)
+                temporary.unlink()
+                if hash_file(target) != sha:
+                    raise Hold(f"CAS verification failed: {path}")
+                entry["sha256"] = sha
+    require_idle(data)
+    same_inventory(data)
+    receipt = {"schema": SCHEMA, "store": str(store), "captured_at": time.time(),
+               "inventory": data, "captured": copied, "bytes": required}
+    receipt["receipt_sha256"] = digest(receipt)
+    destination = manifests / f"{uuid.uuid4()}.json"
+    with destination.open("xb") as stream:
+        os.chmod(destination, 0o600)
+        stream.write(encoded(receipt) + b"\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    verify_receipt(receipt)
+    return {"receipt": str(destination), "bytes": required, "receipt_sha256": receipt["receipt_sha256"]}
+
+
+def verify_receipt(receipt):
+    data = receipt.copy()
+    wanted = data.pop("receipt_sha256", None)
+    if receipt.get("schema") != SCHEMA or digest(data) != wanted:
+        raise Hold("receipt checksum/schema mismatch")
+    validate_inventory(receipt["inventory"])
+    original = json.loads(json.dumps(receipt["captured"]))
+    store = plain_path(receipt["store"])
+    for worktree in original["worktrees"]:
+        for entry in worktree["entries"]:
+            safe_relative(entry["path"])
+            if entry["kind"] == "file":
+                sha = entry.pop("sha256")
+                if hash_file(object_path(store, sha)) != sha:
+                    raise Hold(f"CAS hash mismatch: {entry['path']}")
+    if original != receipt["inventory"]:
+        raise Hold("capture does not exactly cover reviewed inventory")
+
+
+def check_archive(receipt):
+    """Fresh source bytes, attachment set, metadata, objects, and process checks."""
+    verify_receipt(receipt)
+    data = receipt["inventory"]
+    if not data.get("thread") or not data.get("database"):
+        raise Hold("archive check requires a chat attachment inventory; inventory with --thread")
+    require_idle(data)
+    same_inventory(data)
+    for worktree in receipt["captured"]["worktrees"]:
+        root = Path(worktree["root"])
+        for entry in worktree["entries"]:
+            if entry["kind"] != "file":
+                continue
+            fd = open_source(root, entry["path"])
+            with os.fdopen(fd, "rb") as source:
+                if signature(os.fstat(source.fileno())) != entry["stat"]:
+                    raise Hold(f"source changed before archive check: {entry['path']}")
+                hasher = hashlib.sha256()
+                while chunk := source.read(1024 * 1024):
+                    hasher.update(chunk)
+                if (signature(os.fstat(source.fileno())) != entry["stat"]
+                        or hasher.hexdigest() != entry["sha256"]):
+                    raise Hold(f"source changed during archive check: {entry['path']}")
+    require_idle(data)
+    same_inventory(data)
+    return {"verified": True, "receipt_sha256": receipt["receipt_sha256"],
+            "archive_preflight_passed_at": time.time(), "valid_for_seconds": 60,
+            "thread": data["thread"],
+            "scope": "Agent must archive this exact chat immediately; UI bypass is unguarded."}
+
+
+def restore(receipt, destination):
+    verify_receipt(receipt)
+    destination = plain_path(destination, missing=True)
+    if destination.exists():
+        raise Hold("restore destination must be absent; restore never overwrites")
+    destination.mkdir(mode=0o700, parents=True)
+    store = Path(receipt["store"])
+    restored = []
+    for index, worktree in enumerate(receipt["captured"]["worktrees"]):
+        root = destination / f"worktree-{index}"
+        root.mkdir(mode=0o700)
+        entries = worktree["entries"]
+        for entry in entries:
+            path = root.joinpath(*safe_relative(entry["path"]))
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if entry["kind"] == "directory":
+                path.mkdir(mode=0o700, exist_ok=True)
+            elif entry["kind"] == "file":
+                with object_path(store, entry["sha256"]).open("rb") as source, path.open("xb") as out:
+                    shutil.copyfileobj(source, out)
+                    out.flush()
+                    os.fsync(out.fileno())
+                if hash_file(path) != entry["sha256"]:
+                    raise Hold(f"restored hash mismatch: {path}")
+        # Symlinks last: no restored symlink can redirect earlier writes.
+        for entry in entries:
+            if entry["kind"] == "symlink":
+                path = root.joinpath(*safe_relative(entry["path"]))
+                path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                path.symlink_to(entry["target"])
+        for entry in sorted(entries, key=lambda e: len(PurePosixPath(e["path"]).parts), reverse=True):
+            path = root.joinpath(*safe_relative(entry["path"]))
+            if entry["kind"] != "symlink":
+                path.chmod(entry["mode"])
+            elif stat.S_IMODE(path.lstat().st_mode) != entry["mode"]:
+                os.chmod(path, entry["mode"], follow_symlinks=False)
+            os.utime(path, ns=(entry["mtime_ns"], entry["mtime_ns"]), follow_symlinks=False)
+            for key, value in entry["xattrs"].items():
+                if sys.platform == "darwin":
+                    darwin_xattr(path, key, base64.b64decode(value))
+                else:
+                    os.setxattr(path, key, base64.b64decode(value), follow_symlinks=False)
+            if stat.S_IMODE(path.lstat().st_mode) != entry["mode"] or attrs(path) != entry["xattrs"]:
+                raise Hold(f"restored metadata verification failed: {path}")
+        restored.append({"source": worktree["root"], "restored": str(root)})
+    return {"restored": restored, "receipt_sha256": receipt["receipt_sha256"]}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    inv = sub.add_parser("inventory")
+    inv.add_argument("--worktree", action="append", default=[])
+    inv.add_argument("--thread")
+    inv.add_argument("--database", default=str(Path.home() / ".codex/state_5.sqlite"))
+    cap = sub.add_parser("capture")
+    cap.add_argument("--inventory", required=True)
+    cap.add_argument("--store", default=str(DEFAULT_STORE))
+    cap.add_argument("--max-bytes", type=int, required=True)
+    for command in ("verify", "check", "restore"):
+        p = sub.add_parser(command)
+        p.add_argument("--receipt", required=True)
+        if command == "restore":
+            p.add_argument("--destination", required=True)
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "inventory":
+            roots = args.worktree
+            if args.thread:
+                roots = sorted(set(roots) | set(attachment_roots(args.thread, args.database)))
+            result = inventory(roots, args.thread, args.database if args.thread else None)
+        elif args.command == "capture":
+            result = capture(json.loads(Path(args.inventory).read_text()), args.store, args.max_bytes)
+        else:
+            receipt = json.loads(Path(args.receipt).read_text())
+            verify_receipt(receipt)
+            result = {"verified": True, "receipt_sha256": receipt["receipt_sha256"]}
+            if args.command == "check":
+                result = check_archive(receipt)
+            elif args.command == "restore":
+                result = restore(receipt, args.destination)
+        print(json.dumps(result, indent=2))
+        return 0
+    except (Hold, OSError, ValueError, KeyError) as error:
+        print(json.dumps({"status": "HOLD", "reason": str(error)}), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
