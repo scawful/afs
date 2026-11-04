@@ -5,14 +5,18 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .agent_scope import assert_mount_allowed
+from .atomic_io import atomic_write_text
 from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_paths import resolve_mount_root
+from .file_io import _write_lock
 from .models import MountType
 from .path_safety import assert_no_linklike_components
 
@@ -105,7 +109,7 @@ class TaskQueue:
         self._ensure_root()
         path = self._task_path(task.id)
         self._safe_path(path)
-        path.write_text(json.dumps(task.to_dict(), indent=2), encoding="utf-8")
+        atomic_write_text(path, json.dumps(task.to_dict(), indent=2))
 
     def _task_path(self, task_id: str) -> Path:
         safe_id = _validate_task_id(task_id)
@@ -173,10 +177,29 @@ class TaskQueue:
         tasks.sort(key=lambda t: (t.priority, t.created_at))
         return tasks
 
+    @contextmanager
+    def transaction(self, task_id: str) -> Iterator[None]:
+        """Serialize task/opt-in agreement writers through the existing AFS lock."""
+        self._ensure_root()
+        with _write_lock(self._task_path(task_id)):
+            yield
+
+    def _assert_legacy_mutation_allowed(self, task: Task) -> None:
+        from .commitments import assert_legacy_task_mutation_allowed
+
+        assert_legacy_task_mutation_allowed(
+            self._context_path, task.id, scope_id=task.context.get("scope_id", "common")
+        )
+
     def claim(self, task_id: str, agent_name: str) -> Task:
+        with self.transaction(task_id):
+            return self._claim(task_id, agent_name)
+
+    def _claim(self, task_id: str, agent_name: str) -> Task:
         task = self.get(task_id)
         if task is None:
             raise FileNotFoundError(f"Task not found: {task_id}")
+        self._assert_legacy_mutation_allowed(task)
         if task.status not in ("pending",):
             raise ValueError(f"Cannot claim task in status: {task.status}")
         task.status = "claimed"
@@ -192,9 +215,16 @@ class TaskQueue:
         *,
         result: dict[str, Any] | None = None,
     ) -> Task:
+        with self.transaction(task_id):
+            return self._update_status(task_id, status, result=result)
+
+    def _update_status(
+        self, task_id: str, status: str, *, result: dict[str, Any] | None = None
+    ) -> Task:
         task = self.get(task_id)
         if task is None:
             raise FileNotFoundError(f"Task not found: {task_id}")
+        self._assert_legacy_mutation_allowed(task)
         if status not in VALID_STATUSES:
             raise ValueError(f"Invalid status: {status}")
         task.status = status

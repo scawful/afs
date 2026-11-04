@@ -10,6 +10,7 @@ from typing import Any
 
 from ..context_layout import LAYOUT_VERSION, detect_layout_version
 from ..hivemind import message_summary, normalize_agent_name
+from ..message_doorbell import HOOK_HOSTS, add_hook_arguments, ring_codex, run_hook
 from ..messages import MessageBus
 from ..project_registry import (
     COMMON_SCOPE_ID,
@@ -671,7 +672,12 @@ def messages_list_command(args: argparse.Namespace) -> int:
     recipient = getattr(args, "to", None)
     if recipient:
         entries = bus.inbox(
-            recipient, include_done=bool(getattr(args, "include_done", False)), limit=args.limit
+            recipient,
+            agent_name=args.agent,
+            msg_type=args.type,
+            topic=args.topic,
+            include_done=bool(getattr(args, "include_done", False)),
+            limit=args.limit,
         )
         if args.json:
             print(json.dumps(entries, indent=2))
@@ -732,11 +738,43 @@ def messages_send_command(args: argparse.Namespace) -> int:
         scope_id=args.scope,
         reply_to=getattr(args, "reply_to", None),
     )
+    ring: dict[str, Any] | None = None
+    if getattr(args, "ring", False):
+        ring = ring_codex(bus, message, resume=bool(getattr(args, "ring_resume", False)))
     if args.json:
-        print(json.dumps(message.to_dict(), indent=2))
+        result = message.to_dict()
+        if ring is not None:
+            result["ring"] = ring
+        print(json.dumps(result, indent=2))
     else:
         print(f"sent: {message.id}")
         print(f"scope_id: {message.scope_id}")
+        if ring is not None:
+            detail = ring.get("thread") or ring.get("reason", "")
+            if ring.get("stderr") or ring.get("error"):
+                detail = f"{detail} ({ring.get('stderr') or ring.get('error')})"
+            print(f"ring: {ring['status']} {detail}".rstrip())
+    return 0
+
+
+def messages_hook_command(args: argparse.Namespace) -> int:
+    return run_hook(args.host, event=args.event, path=args.path, config=args.config)
+
+
+def messages_sessions_command(args: argparse.Namespace) -> int:
+    bus = _message_bus(args)
+    hosts = [args.host] if args.host else list(HOOK_HOSTS)
+    sessions = [record for host in hosts for record in bus.live_sessions(host)]
+    if args.json:
+        print(json.dumps(sessions, indent=2))
+    elif not sessions:
+        print("no recorded sessions")
+    else:
+        for record in sessions:
+            print(
+                f"{str(record.get('registered_at', ''))[:19]}  {record.get('host')}  "
+                f"{record.get('session_id')}  {record.get('cwd', '')}"
+            )
     return 0
 
 
@@ -992,6 +1030,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Create and follow immutable cross-session handoff threads.",
     )
     handoff_commands = handoff.add_subparsers(dest="handoff_command")
+    from .commitments import register_handoff_parser
+
+    register_handoff_parser(handoff_commands)
 
     def add_handoff_content(parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--title", required=True, help="Readable handoff title.")
@@ -1146,8 +1187,36 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Expiry. Directed messages default to no expiry; broadcasts use the config default.",
     )
     send.add_argument("--scope", help="Destination scope (default: current project).")
+    send.add_argument(
+        "--ring",
+        action="store_true",
+        help="After sending a request or blocker to codex, queue a pointer on the newest "
+        "recorded Codex thread (codex queue). Other types wait for the next hook. Claude "
+        "sessions get messages through the hook instead.",
+    )
+    send.add_argument(
+        "--ring-resume",
+        action="store_true",
+        help="With --ring, also pass --resume so an unloaded thread resumes on the local "
+        "daemon. Avoid for threads open in the Codex desktop app.",
+    )
     send.add_argument("--json", action="store_true")
     send.set_defaults(func=messages_send_command)
+
+    hook = message_commands.add_parser(
+        "hook",
+        help="Lifecycle hook: deliver new messages to a Claude or Codex session (reads stdin).",
+    )
+    add_hook_arguments(hook)
+    hook.set_defaults(func=messages_hook_command)
+
+    sessions = message_commands.add_parser(
+        "sessions", help="List host sessions recorded by the message hook."
+    )
+    add_message_context(sessions)
+    sessions.add_argument("--host", choices=HOOK_HOSTS)
+    sessions.add_argument("--json", action="store_true")
+    sessions.set_defaults(func=messages_sessions_command)
 
     ack = message_commands.add_parser("ack", help="Mark a message read or done for one agent.")
     add_message_context(ack)

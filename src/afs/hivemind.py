@@ -13,6 +13,7 @@ from typing import Any
 
 from .agent_scope import assert_mount_allowed
 from .atomic_io import atomic_write_text as _atomic_write_text
+from .atomic_io import exclusive_create_text
 from .config import load_config_model
 from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_paths import resolve_mount_root
@@ -61,6 +62,7 @@ def _validate_agent_name(agent_name: str) -> str:
 
 BROADCAST_RECIPIENTS = frozenset({"all", "*", "everyone"})
 ACK_STATUSES = ("read", "done")
+SESSION_RETENTION_DAYS = 14
 _RECIPIENT_SEPARATORS = re.compile(r"[,/;]+")
 
 
@@ -355,11 +357,16 @@ class HivemindBus:
         self,
         recipient: str,
         *,
+        agent_name: str | None = None,
         since: datetime | None = None,
+        msg_type: str | None = None,
+        topic: str | None = None,
         limit: int = 50,
     ) -> list[HivemindMessage]:
         """Read messages addressed to a specific agent (see ``recipient_matches``)."""
-        all_msgs = self.read(since=since, limit=0)
+        all_msgs = self.read(
+            agent_name=agent_name, since=since, msg_type=msg_type, topic=topic, limit=0
+        )
         matched = [m for m in all_msgs if recipient_matches(m.to, recipient)]
         matched.sort(key=lambda m: m.timestamp)
         return matched[-limit:] if len(matched) > limit else matched
@@ -368,18 +375,31 @@ class HivemindBus:
         self,
         recipient: str,
         *,
+        agent_name: str | None = None,
+        msg_type: str | None = None,
+        topic: str | None = None,
         include_done: bool = False,
         include_broadcasts: bool = True,
+        since: datetime | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         """Return messages for *recipient* with that recipient's ack state.
 
         Each entry is the message dict plus ``state`` (``unread``, ``read``
-        or ``done``). The recipient's own messages are excluded.
+        or ``done``). The recipient's own messages are excluded. Sender
+        (*agent_name*), *msg_type* and *topic* filters apply before *limit*.
+        ``since`` skips older messages before their ack state is read.
         """
         me = normalize_agent_name(recipient)
         entries: list[dict[str, Any]] = []
-        for message in self.read_for(recipient, limit=0):
+        for message in self.read_for(
+            recipient,
+            agent_name=agent_name,
+            since=since,
+            msg_type=msg_type,
+            topic=topic,
+            limit=0,
+        ):
             if normalize_agent_name(message.from_agent) == me:
                 continue
             if message.to is None and not include_broadcasts:
@@ -471,6 +491,127 @@ class HivemindBus:
             metadata={"status": status},
         )
         return {**message.to_dict(), "acks": records}
+
+    def _sessions_dir(self, host: str) -> Path:
+        sessions_dir = self._root / ".sessions" / _validate_agent_name(normalize_agent_name(host))
+        self._safe_path(sessions_dir)
+        return sessions_dir
+
+    def register_session(
+        self,
+        host: str,
+        session_id: str,
+        *,
+        scope_id: str | None = None,
+        cwd: str = "",
+        source: str = "",
+    ) -> dict[str, str]:
+        """Record a live host session (Claude session, Codex thread) for this queue.
+
+        Re-registering the same session (resume, compact) moves ``registered_at``
+        forward; push delivery only covers messages newer than that time.
+        Records idle for ``SESSION_RETENTION_DAYS`` are pruned here.
+        """
+        sessions_dir = self._sessions_dir(host)
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._safe_path(sessions_dir, allow_missing=False)
+        self._prune_sessions(sessions_dir)
+        record = {
+            "host": normalize_agent_name(host),
+            "session_id": _validate_agent_name(session_id),
+            "scope_id": (scope_id or "").strip(),
+            "cwd": cwd,
+            "source": source,
+            "registered_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._write_json(sessions_dir / f"{session_id}.json", record)
+        return record
+
+    def session_record(self, host: str, session_id: str) -> dict[str, Any] | None:
+        path = self._sessions_dir(host) / f"{_validate_agent_name(session_id)}.json"
+        self._safe_path(path)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except json.JSONDecodeError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def update_session(
+        self, host: str, session_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Merge *fields* into an existing session record; ``None`` when there is none."""
+        record = self.session_record(host, session_id)
+        if record is None:
+            return None
+        record.update(fields)
+        path = self._sessions_dir(host) / f"{_validate_agent_name(session_id)}.json"
+        self._write_json(path, record)
+        return record
+
+    def live_sessions(self, host: str, *, scope_id: str | None = None) -> list[dict[str, Any]]:
+        """Return recorded sessions for *host*, most recently registered first."""
+        sessions_dir = self._sessions_dir(host)
+        if not sessions_dir.is_dir():
+            return []
+        records: list[dict[str, Any]] = []
+        for path in sessions_dir.glob("*.json"):
+            self._safe_path(path)
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(data, dict) or not data.get("session_id"):
+                continue
+            if scope_id is not None and data.get("scope_id", "") != scope_id:
+                continue
+            records.append(data)
+        records.sort(key=lambda record: str(record.get("registered_at", "")), reverse=True)
+        return records
+
+    def _claims_dir(self, host: str, session_id: str) -> Path:
+        claims_dir = self._sessions_dir(host) / f"{_validate_agent_name(session_id)}.delivered"
+        self._safe_path(claims_dir)
+        return claims_dir
+
+    def delivered_ids(self, host: str, session_id: str) -> set[str]:
+        """Return the message ids already claimed for one session."""
+        try:
+            return {claim.name for claim in self._claims_dir(host, session_id).iterdir()}
+        except FileNotFoundError:
+            return set()
+
+    def claim_delivery(self, host: str, session_id: str, msg_id: str) -> bool:
+        """Claim one message for one session; only the first claim returns True."""
+        claims_dir = self._claims_dir(host, session_id)
+        claims_dir.mkdir(parents=True, exist_ok=True)
+        self._safe_path(claims_dir, allow_missing=False)
+        claim = claims_dir / _validate_agent_name(msg_id)
+        self._safe_path(claim)
+        try:
+            exclusive_create_text(claim, datetime.now(timezone.utc).isoformat())
+        except FileExistsError:
+            return False
+        return True
+
+    def _prune_sessions(self, sessions_dir: Path) -> None:
+        cutoff = datetime.now(timezone.utc).timestamp() - SESSION_RETENTION_DAYS * 86400
+        for record in sessions_dir.glob("*.json"):
+            self._safe_path(record)
+            try:
+                if record.stat().st_mtime >= cutoff:
+                    continue
+            except FileNotFoundError:
+                continue
+            claims_dir = record.with_suffix(".delivered")
+            self._safe_path(claims_dir)
+            if claims_dir.is_dir():
+                for claim in claims_dir.iterdir():
+                    self._safe_path(claim)
+                    claim.unlink(missing_ok=True)
+                claims_dir.rmdir()
+            record.unlink(missing_ok=True)
 
     def _subscriptions_dir(self) -> Path:
         sub_dir = self._root / ".subscriptions"
