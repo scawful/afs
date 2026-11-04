@@ -248,7 +248,7 @@ def write_config(path: Path, config: AFSConfig) -> None:
     if path.exists():
         try:
             doc = tomlkit.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+        except tomlkit.exceptions.ParseError:
             doc = tomlkit.document()
     else:
         doc = tomlkit.document()
@@ -266,19 +266,8 @@ def write_config(path: Path, config: AFSConfig) -> None:
         agents_aot = tomlkit.aot()
         for agent in agents:
             a_table = tomlkit.table()
-            a_table["name"] = agent.name
-            a_table["role"] = agent.role
-            a_table["backend"] = agent.backend
-            a_table["description"] = agent.description
-            a_table["tags"] = list(agent.tags)
-            a_table["auto_start"] = agent.auto_start
-            a_table["triggers"] = list(agent.triggers)
-            a_table["schedule"] = agent.schedule
-            a_table["module"] = agent.module
-            a_table["watch_paths"] = [str(p) for p in agent.watch_paths]
-            a_table["allowed_mounts"] = list(agent.allowed_mounts)
-            a_table["allowed_tools"] = list(agent.allowed_tools)
-            a_table["workspace_isolated"] = agent.workspace_isolated
+            for field_key, value in agent.to_dict().items():
+                a_table[field_key] = value
             agents_aot.append(a_table)
         parent[key] = agents_aot
 
