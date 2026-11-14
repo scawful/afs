@@ -17,12 +17,14 @@ afs skills list --profile work
 afs skills match "rebuild a stale context index"
 ```
 
-MCP tools (in the default slim catalog):
+MCP tools (full catalog; not in the default slim surface):
 
 - `skill.match` — rank skills against a task or intent description; set
   `include_bodies: true` to get bounded instructions inline.
 - `skill.read` — load one skill's `SKILL.md` body plus metadata by name.
   Reads are root-contained: only files under resolved skill roots are served.
+
+Start the MCP server with `AFS_MCP_TOOL_CATALOG=full` when a host needs these.
 
 Both MCP tools preserve valid results when another configured skill entry is
 malformed or unreadable. Their success payloads include bounded

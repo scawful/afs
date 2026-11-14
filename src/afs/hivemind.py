@@ -1,4 +1,9 @@
-"""Hivemind message bus for inter-agent communication."""
+"""Inter-agent message bus.
+
+Messages, recipient matches, and ack labels live in SQLite
+(``messages.sqlite3`` on the hivemind mount). Scratchpad documents stay
+files. Legacy per-message JSON is imported once and not written again.
+"""
 
 from __future__ import annotations
 
@@ -12,11 +17,10 @@ from pathlib import Path
 from typing import Any
 
 from .agent_scope import assert_mount_allowed
-from .atomic_io import atomic_write_text as _atomic_write_text
-from .atomic_io import exclusive_create_text
 from .config import load_config_model
 from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_paths import resolve_mount_root
+from .message_store import MessageStore
 from .models import MountType
 from .path_safety import assert_no_linklike_components
 
@@ -198,7 +202,7 @@ class HivemindSubscription:
 
 
 class HivemindBus:
-    """File-based message bus using the hivemind mount directory."""
+    """SQLite message bus rooted at the hivemind mount directory."""
 
     def __init__(self, context_path: Path, *, config: Any = None) -> None:
         assert_mount_allowed(MountType.HIVEMIND, operation="access")
@@ -214,6 +218,26 @@ class HivemindBus:
         )
         self._safe_path(self._root)
 
+    def _store(self) -> MessageStore:
+        self._reject_linked_queue_entries()
+        return MessageStore(self._root)
+
+    def _reject_linked_queue_entries(self) -> None:
+        """Refuse a symlinked queue root or agent directory before opening SQLite."""
+        self._safe_path(self._root)
+        if not self._root.exists():
+            return
+        self._safe_path(self._root, allow_missing=False)
+        for child in self._root.iterdir():
+            if child.name.startswith("."):
+                continue
+            if child.name == "messages.sqlite3" or child.name.startswith("messages.sqlite3-"):
+                continue
+            self._safe_path(child)
+
+    def _load(self, row: dict[str, Any]) -> HivemindMessage:
+        return HivemindMessage.from_dict(row)
+
     def _safe_path(self, path: Path, *, allow_missing: bool = True) -> Path:
         """Reject link-like v2 queue paths without changing v1 mount behavior."""
 
@@ -224,11 +248,6 @@ class HivemindBus:
             boundary=self._context_path,
             allow_missing=allow_missing,
         )
-
-    def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
-        self._safe_path(path.parent, allow_missing=False)
-        self._safe_path(path)
-        _atomic_write_text(path, json.dumps(payload, indent=2))
 
     def send(
         self,
@@ -276,12 +295,7 @@ class HivemindBus:
             reply_to=reply_to,
         )
 
-        agent_dir = self._root / safe_from_agent
-        self._safe_path(agent_dir)
-        agent_dir.mkdir(parents=True, exist_ok=True)
-        self._safe_path(agent_dir, allow_missing=False)
-        msg_path = agent_dir / f"{msg_id}.json"
-        self._write_json(msg_path, message.to_dict())
+        self._store().insert(message)
         _record_history(
             "send",
             safe_from_agent,
@@ -306,52 +320,35 @@ class HivemindBus:
         msg_type: str | None = None,
         topic: str | None = None,
         limit: int = 50,
+        scope_ids: set[str] | None = None,
+        include_unscoped: bool = True,
+        require_scope: bool = False,
+        recipient: str | None = None,
+        include_broadcasts: bool = True,
+        exclude_from_norm: str | None = None,
     ) -> list[HivemindMessage]:
-        messages: list[HivemindMessage] = []
-        now = datetime.now(timezone.utc)
-
         if agent_name is not None:
-            agent_dir = self._root / _validate_agent_name(agent_name)
-            self._safe_path(agent_dir)
-            scan_dirs = [agent_dir]
-        else:
-            self._safe_path(self._root)
-            if not self._root.exists():
-                return []
-            self._safe_path(self._root, allow_missing=False)
-            scan_dirs = []
-            for candidate in sorted(self._root.iterdir()):
-                if candidate.name.startswith("."):
-                    continue
-                self._safe_path(candidate)
-                if candidate.is_dir():
-                    scan_dirs.append(candidate)
-
-        for agent_dir in scan_dirs:
-            self._safe_path(agent_dir)
-            if not agent_dir.exists():
-                continue
-            self._safe_path(agent_dir)
-            for msg_file in sorted(agent_dir.glob("*.json")):
-                self._safe_path(msg_file)
-                try:
-                    data = json.loads(msg_file.read_text(encoding="utf-8"))
-                    msg = HivemindMessage.from_dict(data)
-                except (json.JSONDecodeError, OSError):
-                    continue
-                if _message_is_expired(msg, now):
-                    continue
-
-                if since and msg.timestamp < since.isoformat():
-                    continue
-                if msg_type and msg.msg_type != msg_type:
-                    continue
-                if topic and msg.topic != topic:
-                    continue
-                messages.append(msg)
-
-        messages.sort(key=lambda m: m.timestamp)
-        return messages[-limit:] if len(messages) > limit else messages
+            _validate_agent_name(agent_name)
+        if not self._root.exists():
+            return []
+        store = self._store()
+        store.ensure_imported()
+        recipient_norm = normalize_agent_name(recipient) if recipient else None
+        rows = store.query(
+            from_agent=agent_name,
+            msg_type=msg_type,
+            topic=topic,
+            since_iso=since.isoformat() if since is not None else None,
+            scope_ids=scope_ids,
+            include_unscoped=include_unscoped,
+            require_scope=require_scope,
+            recipient_norm=recipient_norm or None,
+            recipient_family=_agent_family(recipient_norm) if recipient_norm else None,
+            include_broadcasts=include_broadcasts,
+            exclude_from_norm=exclude_from_norm,
+            limit=limit,
+        )
+        return [self._load(row) for row in rows]
 
     def read_for(
         self,
@@ -364,12 +361,14 @@ class HivemindBus:
         limit: int = 50,
     ) -> list[HivemindMessage]:
         """Read messages addressed to a specific agent (see ``recipient_matches``)."""
-        all_msgs = self.read(
-            agent_name=agent_name, since=since, msg_type=msg_type, topic=topic, limit=0
+        return self.read(
+            agent_name=agent_name,
+            since=since,
+            msg_type=msg_type,
+            topic=topic,
+            limit=limit,
+            recipient=recipient,
         )
-        matched = [m for m in all_msgs if recipient_matches(m.to, recipient)]
-        matched.sort(key=lambda m: m.timestamp)
-        return matched[-limit:] if len(matched) > limit else matched
 
     def inbox(
         self,
@@ -391,75 +390,63 @@ class HivemindBus:
         ``since`` skips older messages before their ack state is read.
         """
         me = normalize_agent_name(recipient)
-        entries: list[dict[str, Any]] = []
-        for message in self.read_for(
-            recipient,
-            agent_name=agent_name,
-            since=since,
+        if not me or not self._root.exists():
+            return []
+        store = self._store()
+        store.ensure_imported()
+        rows = store.query(
+            from_agent=_validate_agent_name(agent_name) if agent_name is not None else None,
             msg_type=msg_type,
             topic=topic,
-            limit=0,
-        ):
-            if normalize_agent_name(message.from_agent) == me:
-                continue
-            if message.to is None and not include_broadcasts:
-                continue
-            state = self.ack_state(message.id, recipient)
-            if state == "done" and not include_done:
-                continue
-            entries.append({**message.to_dict(), "state": state})
-        return entries[-limit:] if limit and len(entries) > limit else entries
+            since_iso=since.isoformat() if since is not None else None,
+            recipient_norm=me,
+            recipient_family=_agent_family(me),
+            include_broadcasts=include_broadcasts,
+            exclude_from_norm=me,
+            exclude_done_for=None if include_done else me,
+            limit=limit,
+            **self._scope_kwargs(),
+        )
+        states = store.states_for([str(row["id"]) for row in rows], me)
+        return [
+            {**self._load(row).to_dict(), "state": states.get(str(row["id"]), "unread")}
+            for row in rows
+        ]
 
-    def _acks_dir(self) -> Path:
-        ack_dir = self._root / ".acks"
-        self._safe_path(ack_dir)
-        return ack_dir
+    def _scope_kwargs(self) -> dict[str, Any]:
+        allowed = getattr(self, "allowed_scope_ids", None)
+        if allowed is None:
+            return {}
+        all_projects = bool(getattr(self, "all_projects", False))
+        include_legacy = bool(getattr(self, "include_legacy", False))
+        return {
+            "scope_ids": None if all_projects else set(allowed),
+            "include_unscoped": include_legacy,
+            "require_scope": all_projects and not include_legacy,
+        }
 
     def _find_message(self, msg_id: str) -> HivemindMessage | None:
         safe_id = _validate_agent_name(msg_id)
-        self._safe_path(self._root)
         if not self._root.exists():
             return None
-        for agent_dir in sorted(self._root.iterdir()):
-            if agent_dir.name.startswith(".") or not agent_dir.is_dir():
-                continue
-            candidate = agent_dir / f"{safe_id}.json"
-            self._safe_path(candidate)
-            if not candidate.is_file():
-                continue
-            try:
-                return HivemindMessage.from_dict(
-                    json.loads(candidate.read_text(encoding="utf-8"))
-                )
-            except (json.JSONDecodeError, OSError):
-                return None
-        return None
+        store = self._store()
+        store.ensure_imported()
+        row = store.get(safe_id)
+        if row is None:
+            return None
+        return self._load(row)
 
     def acks(self, msg_id: str) -> list[dict[str, str]]:
         """Return the ack records for one message, oldest first."""
-        path = self._acks_dir() / f"{_validate_agent_name(msg_id)}.json"
-        self._safe_path(path)
-        if not path.is_file():
+        if not self._root.exists():
             return []
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return []
-        records = data.get("acks") if isinstance(data, dict) else None
-        if not isinstance(records, list):
-            return []
-        return [r for r in records if isinstance(r, dict)]
+        return self._store().acks(_validate_agent_name(msg_id))
 
     def ack_state(self, msg_id: str, recipient: str) -> str:
         me = normalize_agent_name(recipient)
-        state = "unread"
-        for record in self.acks(msg_id):
-            if normalize_agent_name(str(record.get("by", ""))) != me:
-                continue
-            if record.get("status") == "done":
-                return "done"
-            state = "read"
-        return state
+        if not me or not self._root.exists():
+            return "unread"
+        return self._store().ack_state(_validate_agent_name(msg_id), me)
 
     def ack(self, msg_id: str, by: str, *, status: str = "read", note: str = "") -> dict[str, Any]:
         """Record that *by* read or finished a message. Returns the message with acks."""
@@ -471,18 +458,13 @@ class HivemindBus:
         message = self._find_message(msg_id)
         if message is None:
             raise KeyError(f"message not found: {msg_id}")
-        ack_dir = self._acks_dir()
-        ack_dir.mkdir(parents=True, exist_ok=True)
-        records = self.acks(message.id)
-        record: dict[str, str] = {
-            "by": actor,
-            "status": status,
-            "at": datetime.now(timezone.utc).isoformat(),
-        }
-        if note:
-            record["note"] = note
-        records.append(record)
-        self._write_json(ack_dir / f"{message.id}.json", {"msg_id": message.id, "acks": records})
+        records = self._store().add_ack(
+            message.id,
+            actor,
+            status=status,
+            note=note,
+            at=datetime.now(timezone.utc).isoformat(),
+        )
         _record_history(
             "ack",
             actor,
@@ -491,11 +473,6 @@ class HivemindBus:
             metadata={"status": status},
         )
         return {**message.to_dict(), "acks": records}
-
-    def _sessions_dir(self, host: str) -> Path:
-        sessions_dir = self._root / ".sessions" / _validate_agent_name(normalize_agent_name(host))
-        self._safe_path(sessions_dir)
-        return sessions_dir
 
     def register_session(
         self,
@@ -512,10 +489,9 @@ class HivemindBus:
         forward; push delivery only covers messages newer than that time.
         Records idle for ``SESSION_RETENTION_DAYS`` are pruned here.
         """
-        sessions_dir = self._sessions_dir(host)
-        sessions_dir.mkdir(parents=True, exist_ok=True)
-        self._safe_path(sessions_dir, allow_missing=False)
-        self._prune_sessions(sessions_dir)
+        store = self._store()
+        store.ensure_imported()
+        store.prune_sessions(retention_days=SESSION_RETENTION_DAYS)
         record = {
             "host": normalize_agent_name(host),
             "session_id": _validate_agent_name(session_id),
@@ -524,19 +500,15 @@ class HivemindBus:
             "source": source,
             "registered_at": datetime.now(timezone.utc).isoformat(),
         }
-        self._write_json(sessions_dir / f"{session_id}.json", record)
-        return record
+        return store.upsert_session(record)
 
     def session_record(self, host: str, session_id: str) -> dict[str, Any] | None:
-        path = self._sessions_dir(host) / f"{_validate_agent_name(session_id)}.json"
-        self._safe_path(path)
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return None
-        except json.JSONDecodeError:
-            return None
-        return data if isinstance(data, dict) else None
+        store = self._store()
+        store.ensure_imported()
+        return store.get_session(
+            normalize_agent_name(host),
+            _validate_agent_name(session_id),
+        )
 
     def update_session(
         self, host: str, session_id: str, fields: dict[str, Any]
@@ -546,79 +518,33 @@ class HivemindBus:
         if record is None:
             return None
         record.update(fields)
-        path = self._sessions_dir(host) / f"{_validate_agent_name(session_id)}.json"
-        self._write_json(path, record)
-        return record
+        return self._store().upsert_session(record)
 
     def live_sessions(self, host: str, *, scope_id: str | None = None) -> list[dict[str, Any]]:
         """Return recorded sessions for *host*, most recently registered first."""
-        sessions_dir = self._sessions_dir(host)
-        if not sessions_dir.is_dir():
-            return []
-        records: list[dict[str, Any]] = []
-        for path in sessions_dir.glob("*.json"):
-            self._safe_path(path)
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                continue
-            if not isinstance(data, dict) or not data.get("session_id"):
-                continue
-            if scope_id is not None and data.get("scope_id", "") != scope_id:
-                continue
-            records.append(data)
-        records.sort(key=lambda record: str(record.get("registered_at", "")), reverse=True)
-        return records
-
-    def _claims_dir(self, host: str, session_id: str) -> Path:
-        claims_dir = self._sessions_dir(host) / f"{_validate_agent_name(session_id)}.delivered"
-        self._safe_path(claims_dir)
-        return claims_dir
+        store = self._store()
+        store.ensure_imported()
+        return store.list_sessions(normalize_agent_name(host), scope_id=scope_id)
 
     def delivered_ids(self, host: str, session_id: str) -> set[str]:
         """Return the message ids already claimed for one session."""
-        try:
-            return {claim.name for claim in self._claims_dir(host, session_id).iterdir()}
-        except FileNotFoundError:
-            return set()
+        store = self._store()
+        store.ensure_imported()
+        return store.delivered_ids(
+            normalize_agent_name(host),
+            _validate_agent_name(session_id),
+        )
 
     def claim_delivery(self, host: str, session_id: str, msg_id: str) -> bool:
         """Claim one message for one session; only the first claim returns True."""
-        claims_dir = self._claims_dir(host, session_id)
-        claims_dir.mkdir(parents=True, exist_ok=True)
-        self._safe_path(claims_dir, allow_missing=False)
-        claim = claims_dir / _validate_agent_name(msg_id)
-        self._safe_path(claim)
-        try:
-            exclusive_create_text(claim, datetime.now(timezone.utc).isoformat())
-        except FileExistsError:
-            return False
-        return True
-
-    def _prune_sessions(self, sessions_dir: Path) -> None:
-        cutoff = datetime.now(timezone.utc).timestamp() - SESSION_RETENTION_DAYS * 86400
-        for record in sessions_dir.glob("*.json"):
-            self._safe_path(record)
-            try:
-                if record.stat().st_mtime >= cutoff:
-                    continue
-            except FileNotFoundError:
-                continue
-            claims_dir = record.with_suffix(".delivered")
-            self._safe_path(claims_dir)
-            if claims_dir.is_dir():
-                for claim in claims_dir.iterdir():
-                    self._safe_path(claim)
-                    claim.unlink(missing_ok=True)
-                claims_dir.rmdir()
-            record.unlink(missing_ok=True)
-
-    def _subscriptions_dir(self) -> Path:
-        sub_dir = self._root / ".subscriptions"
-        self._safe_path(sub_dir)
-        sub_dir.mkdir(parents=True, exist_ok=True)
-        self._safe_path(sub_dir, allow_missing=False)
-        return sub_dir
+        store = self._store()
+        store.ensure_imported()
+        return store.claim_delivery(
+            normalize_agent_name(host),
+            _validate_agent_name(session_id),
+            _validate_agent_name(msg_id),
+            claimed_at=datetime.now(timezone.utc).isoformat(),
+        )
 
     def subscribe(
         self,
@@ -627,28 +553,34 @@ class HivemindBus:
         *,
         ttl_hours: int | None = None,
     ) -> HivemindSubscription:
-        """Merge topics into an agent's subscription file."""
+        """Merge topics into an agent's subscription."""
         safe_agent_name = _validate_agent_name(agent_name)
         now = datetime.now(timezone.utc).isoformat()
+        store = self._store()
+        store.ensure_imported()
         existing = self.get_subscriptions(safe_agent_name)
         normalized_topics = _merge_topics(existing.topics if existing else [], topics)
         normalized_ttl = _normalize_ttl_hours(ttl_hours)
         if existing:
-            existing.topics = normalized_topics
-            existing.updated_at = now
-            if normalized_ttl is not None:
-                existing.ttl_hours = normalized_ttl
-            sub = existing
+            created_at = existing.created_at
+            effective_ttl = existing.ttl_hours if normalized_ttl is None else normalized_ttl
         else:
-            sub = HivemindSubscription(
-                agent_name=safe_agent_name,
-                topics=normalized_topics,
-                created_at=now,
-                updated_at=now,
-                ttl_hours=normalized_ttl,
-            )
-        sub_path = self._subscriptions_dir() / f"{safe_agent_name}.json"
-        self._write_json(sub_path, sub.to_dict())
+            created_at = now
+            effective_ttl = normalized_ttl
+        store.upsert_subscription(
+            safe_agent_name,
+            normalized_topics,
+            created_at=created_at,
+            updated_at=now,
+            ttl_hours=effective_ttl,
+        )
+        sub = HivemindSubscription(
+            agent_name=safe_agent_name,
+            topics=normalized_topics,
+            created_at=created_at,
+            updated_at=now,
+            ttl_hours=effective_ttl,
+        )
         _record_history(
             "subscribe",
             safe_agent_name,
@@ -661,20 +593,26 @@ class HivemindBus:
         """Remove topics from an agent's subscription."""
         safe_agent_name = _validate_agent_name(agent_name)
         now = datetime.now(timezone.utc).isoformat()
+        store = self._store()
+        store.ensure_imported()
         existing = self.get_subscriptions(safe_agent_name)
-        if existing:
-            existing.topics = [t for t in existing.topics if t not in set(topics)]
-            existing.updated_at = now
-            sub = existing
-        else:
-            sub = HivemindSubscription(
-                agent_name=safe_agent_name,
-                topics=[],
-                created_at=now,
-                updated_at=now,
-            )
-        sub_path = self._subscriptions_dir() / f"{safe_agent_name}.json"
-        self._write_json(sub_path, sub.to_dict())
+        remaining = [t for t in (existing.topics if existing else []) if t not in set(topics)]
+        created_at = existing.created_at if existing else now
+        ttl_hours = existing.ttl_hours if existing else None
+        store.upsert_subscription(
+            safe_agent_name,
+            remaining,
+            created_at=created_at,
+            updated_at=now,
+            ttl_hours=ttl_hours,
+        )
+        sub = HivemindSubscription(
+            agent_name=safe_agent_name,
+            topics=remaining,
+            created_at=created_at,
+            updated_at=now,
+            ttl_hours=ttl_hours,
+        )
         _record_history(
             "unsubscribe",
             safe_agent_name,
@@ -684,18 +622,12 @@ class HivemindBus:
         return sub
 
     def get_subscriptions(self, agent_name: str) -> HivemindSubscription | None:
-        """Read an agent's subscription file."""
+        """Read an agent's subscription."""
         safe_agent_name = _validate_agent_name(agent_name)
-        sub_path = self._subscriptions_dir() / f"{safe_agent_name}.json"
-        self._safe_path(sub_path)
-        if not sub_path.exists():
-            return None
-        self._safe_path(sub_path)
-        try:
-            data = json.loads(sub_path.read_text(encoding="utf-8"))
-            return HivemindSubscription.from_dict(data)
-        except (json.JSONDecodeError, OSError):
-            return None
+        store = self._store()
+        store.ensure_imported()
+        data = store.get_subscription(safe_agent_name)
+        return HivemindSubscription.from_dict(data) if data is not None else None
 
     def read_subscribed(
         self,
@@ -747,102 +679,28 @@ class HivemindBus:
 
     def cleanup_stats(self, *, max_age_hours: int = 24, dry_run: bool = False) -> dict[str, Any]:
         """Cleanup with detailed statistics. Returns removal breakdown."""
-        self._safe_path(self._root)
-        if not self._root.exists():
-            return {
-                "removed_count": 0,
-                "remaining_count": 0,
-                "expired_count": 0,
-                "aged_out_count": 0,
-                "oldest_remaining": None,
-                "per_agent": {},
-            }
-        self._safe_path(self._root, allow_missing=False)
-        cutoff = datetime.now(timezone.utc).timestamp() - (max_age_hours * 3600)
-        now = datetime.now(timezone.utc)
-        removed_count = 0
-        remaining_count = 0
-        expired_count = 0
-        aged_out_count = 0
-        oldest_remaining: float | None = None
-        per_agent: dict[str, dict[str, int]] = {}
-        for agent_dir in self._root.iterdir():
-            if agent_dir.name.startswith("."):
-                continue
-            self._safe_path(agent_dir)
-            if not agent_dir.is_dir():
-                continue
-            agent_name = agent_dir.name
-            agent_stats = {"removed": 0, "remaining": 0, "expired": 0, "aged_out": 0}
-            for msg_file in agent_dir.glob("*.json"):
-                self._safe_path(msg_file)
-                try:
-                    mtime = msg_file.stat().st_mtime
-                except OSError:
-                    continue
-                expired = False
-                awaiting_recipient = False
-                try:
-                    msg = HivemindMessage.from_dict(
-                        json.loads(msg_file.read_text(encoding="utf-8"))
-                    )
-                    expired = _message_is_expired(msg, now)
-                    awaiting_recipient = msg.to is not None and not any(
-                        record.get("status") == "done" for record in self.acks(msg.id)
-                    )
-                except (json.JSONDecodeError, OSError):
-                    pass
-                aged_out = mtime < cutoff and not awaiting_recipient
-                if expired or aged_out:
-                    if not dry_run:
-                        try:
-                            self._safe_path(msg_file)
-                            msg_file.unlink()
-                        except OSError:
-                            continue
-                        ack_file = self._acks_dir() / msg_file.name
-                        self._safe_path(ack_file)
-                        ack_file.unlink(missing_ok=True)
-                    agent_stats["removed"] += 1
-                    removed_count += 1
-                    if expired:
-                        agent_stats["expired"] += 1
-                        expired_count += 1
-                    if aged_out:
-                        agent_stats["aged_out"] += 1
-                        aged_out_count += 1
-                else:
-                    agent_stats["remaining"] += 1
-                    remaining_count += 1
-                    if oldest_remaining is None or mtime < oldest_remaining:
-                        oldest_remaining = mtime
-            per_agent[agent_name] = agent_stats
-            if not dry_run and agent_dir.exists() and not any(agent_dir.iterdir()):
-                try:
-                    self._safe_path(agent_dir)
-                    agent_dir.rmdir()
-                except OSError:
-                    pass
-        oldest_iso = None
-        if oldest_remaining is not None:
-            oldest_iso = datetime.fromtimestamp(oldest_remaining, tz=timezone.utc).isoformat()
-        summary = {
-            "removed_count": removed_count,
-            "remaining_count": remaining_count,
-            "expired_count": expired_count,
-            "aged_out_count": aged_out_count,
-            "oldest_remaining": oldest_iso,
-            "per_agent": per_agent,
+        empty = {
+            "removed_count": 0,
+            "remaining_count": 0,
+            "expired_count": 0,
+            "aged_out_count": 0,
+            "oldest_remaining": None,
+            "per_agent": {},
         }
-        if removed_count > 0 and not dry_run:
+        if not self._root.exists():
+            return empty
+        store = self._store()
+        store.ensure_imported()
+        summary = store.cleanup_stats(max_age_hours=max_age_hours, dry_run=dry_run)
+        if summary["removed_count"] > 0 and not dry_run:
             _record_history(
                 "reap",
                 "system",
                 self._context_path,
                 metadata={
-                    "removed_count": removed_count,
-                    "expired_count": expired_count,
-                    "aged_out_count": aged_out_count,
+                    "removed_count": summary["removed_count"],
+                    "expired_count": summary["expired_count"],
+                    "aged_out_count": summary["aged_out_count"],
                 },
             )
         return summary
@@ -854,19 +712,6 @@ def _normalize_ttl_hours(value: Any) -> int | None:
     if isinstance(value, (int, float)) and int(value) > 0:
         return int(value)
     return None
-
-
-def _message_is_expired(message: HivemindMessage, now: datetime | None = None) -> bool:
-    if not message.expires_at:
-        return False
-    current = now or datetime.now(timezone.utc)
-    try:
-        expires_at = datetime.fromisoformat(message.expires_at.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    return expires_at <= current.astimezone(timezone.utc)
 
 
 def _merge_topics(existing: list[str], updates: list[str]) -> list[str]:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -26,11 +25,9 @@ def test_message_topic_field(tmp_path: Path) -> None:
     bus = HivemindBus(ctx)
     msg = bus.send("agent-a", "finding", {"key": "value"}, topic="context:repair")
     assert msg.topic == "context:repair"
-    # Verify persisted
-    agent_dir = ctx / "hivemind" / "agent-a"
-    files = list(agent_dir.glob("*.json"))
-    data = json.loads(files[0].read_text(encoding="utf-8"))
-    assert data["topic"] == "context:repair"
+    stored = bus.read(topic="context:repair")
+    assert stored[0].id == msg.id
+    assert stored[0].topic == "context:repair"
 
 
 def test_message_topic_none_by_default(tmp_path: Path) -> None:
@@ -67,7 +64,7 @@ def test_read_filters_by_topic(tmp_path: Path) -> None:
     assert len(all_msgs) == 3
 
 
-def test_subscribe_creates_file(tmp_path: Path) -> None:
+def test_subscribe_persists_in_sqlite(tmp_path: Path) -> None:
     ctx = tmp_path / ".context"
     ctx.mkdir()
     (ctx / "hivemind").mkdir()
@@ -75,36 +72,22 @@ def test_subscribe_creates_file(tmp_path: Path) -> None:
     sub = bus.subscribe("agent-a", ["context:repair", "task:completed"])
     assert set(sub.topics) == {"context:repair", "task:completed"}
     assert sub.agent_name == "agent-a"
-    sub_path = ctx / "hivemind" / ".subscriptions" / "agent-a.json"
-    assert sub_path.exists()
+    assert (ctx / "hivemind" / "messages.sqlite3").is_file()
+    assert bus.get_subscriptions("agent-a") is not None
+    assert set(bus.get_subscriptions("agent-a").topics) == {
+        "context:repair",
+        "task:completed",
+    }
 
 
-def test_subscription_updates_publish_with_atomic_replace(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
+def test_subscription_updates_round_trip(tmp_path: Path) -> None:
     ctx = tmp_path / ".context"
     ctx.mkdir()
     (ctx / "hivemind").mkdir()
-    original_replace = os.replace
-    publishes: list[tuple[Path, Path]] = []
-
-    def _track_replace(source, target) -> None:
-        source_path = Path(source)
-        target_path = Path(target)
-        if target_path.parent.name == ".subscriptions":
-            assert source_path.exists()
-            assert source_path.suffix == ".tmp"
-            publishes.append((source_path, target_path))
-        original_replace(source, target)
-
-    monkeypatch.setattr(os, "replace", _track_replace)
     bus = HivemindBus(ctx)
     bus.subscribe("agent-a", ["topic-a"])
     bus.unsubscribe("agent-a", ["topic-a"])
-
-    assert len(publishes) == 2
-    assert all(not source.exists() and target.exists() for source, target in publishes)
+    assert bus.get_subscriptions("agent-a").topics == []
 
 
 def test_subscribe_merges_topics(tmp_path: Path) -> None:
@@ -184,9 +167,8 @@ def test_v2_hivemind_rejects_linked_subscriptions_directory(
     assert list(outside.iterdir()) == []
 
 
-def test_v2_hivemind_rejects_linked_subscription_leaf_for_read_and_write(
+def test_v2_hivemind_rejects_linked_subscription_leaf_on_import(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ctx = tmp_path / ".context"
     scaffold_v2(ctx)
@@ -209,12 +191,5 @@ def test_v2_hivemind_rejects_linked_subscription_leaf_for_read_and_write(
 
     with pytest.raises(ValueError, match="symbolic link or reparse point"):
         bus.get_subscriptions("agent-a")
-    # Bypass the normal read-before-write so this also pins the final publish
-    # guard rather than passing only because the linked read was rejected.
-    monkeypatch.setattr(bus, "get_subscriptions", lambda _agent_name: None)
-    with pytest.raises(ValueError, match="symbolic link or reparse point"):
-        bus.subscribe("agent-a", ["private-topic"])
-    with pytest.raises(ValueError, match="symbolic link or reparse point"):
-        bus.unsubscribe("agent-a", ["outside"])
 
     assert json.loads(outside.read_text(encoding="utf-8"))["topics"] == ["outside"]

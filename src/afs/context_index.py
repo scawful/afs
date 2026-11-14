@@ -744,6 +744,34 @@ class ContextSQLiteIndex:
             errors=[],
         )
 
+    def file_counts_by_mount(
+        self,
+        *,
+        scoped: ResolvedScope | None = None,
+    ) -> dict[str, int]:
+        """Count indexed files (not directories), optionally limited to one scope."""
+
+        where = ["context_path = ?", "is_dir = 0"]
+        params: list[Any] = [str(self._context_path)]
+        prefix_clause = ""
+        if scoped is not None and scoped.layout_version == LAYOUT_VERSION:
+            prefix_clause, prefix_params = _relative_prefix_sql(
+                visible_scope_prefixes(scoped),
+                leading_and=True,
+            )
+            params.extend(prefix_params)
+        query = (
+            "SELECT mount_type, COUNT(1) AS cnt FROM file_index "
+            f"WHERE {' AND '.join(where)}{prefix_clause} GROUP BY mount_type"
+        )
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return {
+            str(row["mount_type"]): int(row["cnt"])
+            for row in rows
+            if int(row["cnt"]) > 0
+        }
+
     @property
     def total_entries(self) -> int:
         """Return total indexed entries for this context path."""

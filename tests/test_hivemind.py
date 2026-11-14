@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -19,7 +18,7 @@ def _symlink_or_skip(link: Path, target: Path, *, directory: bool = False) -> No
         pytest.skip(f"symlinks unavailable: {exc}")
 
 
-def test_hivemind_send_creates_file(tmp_path: Path) -> None:
+def test_hivemind_send_persists_in_sqlite(tmp_path: Path) -> None:
     ctx = tmp_path / ".context"
     ctx.mkdir()
     (ctx / "hivemind").mkdir()
@@ -28,40 +27,30 @@ def test_hivemind_send_creates_file(tmp_path: Path) -> None:
     assert msg.from_agent == "agent-a"
     assert msg.msg_type == "finding"
     assert msg.payload == {"key": "value"}
-    # File should exist
-    agent_dir = ctx / "hivemind" / "agent-a"
-    assert agent_dir.exists()
-    files = list(agent_dir.glob("*.json"))
-    assert len(files) == 1
+    assert (ctx / "hivemind" / "messages.sqlite3").is_file()
+    assert list((ctx / "hivemind").glob("agent-a/*.json")) == []
+    assert bus.read(agent_name="agent-a")[0].id == msg.id
 
 
-def test_hivemind_send_publishes_final_file_with_atomic_replace(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    ctx = tmp_path / ".context"
-    ctx.mkdir()
-    (ctx / "hivemind").mkdir()
-    original_replace = os.replace
-    publishes: list[tuple[Path, Path]] = []
-
-    def _track_replace(source, target) -> None:
-        source_path = Path(source)
-        target_path = Path(target)
-        if target_path.parent.name == "agent-a" and target_path.suffix == ".json":
-            assert source_path.exists()
-            assert source_path.suffix == ".tmp"
-            assert not target_path.exists()
-            publishes.append((source_path, target_path))
-        original_replace(source, target)
-
-    monkeypatch.setattr(os, "replace", _track_replace)
-    HivemindBus(ctx).send("agent-a", "status", {})
-
-    assert len(publishes) == 1
-    source, target = publishes[0]
-    assert not source.exists()
-    assert target.exists()
+def test_legacy_json_messages_import_once(tmp_path: Path) -> None:
+    ctx = tmp_path / ".context" / "hivemind" / "agent-a"
+    ctx.mkdir(parents=True)
+    message = {
+        "id": "20260101T000000-legacy01",
+        "from": "agent-a",
+        "to": "agent-b",
+        "type": "request",
+        "payload": {"task": "imported"},
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "topic": "legacy",
+    }
+    (ctx / "20260101T000000-legacy01.json").write_text(json.dumps(message), encoding="utf-8")
+    bus = HivemindBus(tmp_path / ".context")
+    imported = bus.read_for("agent-b")
+    assert len(imported) == 1
+    assert imported[0].payload == {"task": "imported"}
+    bus.send("agent-a", "status", {"fresh": True}, to="agent-b")
+    assert list(ctx.glob("*.json")) == [ctx / "20260101T000000-legacy01.json"]
 
 
 def test_hivemind_read_filters_by_agent(tmp_path: Path) -> None:
@@ -147,7 +136,8 @@ def test_hivemind_uses_remapped_mount(tmp_path: Path) -> None:
     bus = HivemindBus(ctx)
     msg = bus.send("agent-a", "status", {"state": "ok"})
 
-    assert (hive_root / "agent-a" / f"{msg.id}.json").exists()
+    assert (hive_root / "messages.sqlite3").is_file()
+    assert bus.read()[0].id == msg.id
 
 
 def test_hivemind_rejects_unsafe_agent_path_names(tmp_path: Path) -> None:

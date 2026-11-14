@@ -1781,7 +1781,9 @@ def _query_sections(
     )
     if settings.enabled:
         stale_mounts: list[MountType] = []
-        if settings.auto_refresh and has_entries:
+        # Packs assemble a coherent snapshot. Always absorb drifted search mounts
+        # here even when context.query leaves auto_refresh off for cheap reads.
+        if has_entries:
             stale_mounts = (
                 index.stale_mounts_scoped(scoped, mount_types=mount_types)
                 if is_scoped_v2

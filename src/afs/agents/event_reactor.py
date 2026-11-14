@@ -1290,6 +1290,7 @@ class _HivemindFile:
     path: Path
     signature: str
     mtime_ns: int
+    store_id: str = ""
 
 
 def _hivemind_file_signature(stat: os.stat_result) -> str:
@@ -1355,7 +1356,52 @@ def _hivemind_inventory(root: Path) -> dict[str, dict[str, _HivemindFile]]:
         raise ReactorStateError(
             f"could not inventory hivemind message files under {root}: {exc}"
         ) from exc
+    _merge_sqlite_messages(root, inventory)
     return inventory
+
+
+def _merge_sqlite_messages(root: Path, inventory: dict[str, dict[str, _HivemindFile]]) -> None:
+    """Add SQLite messages that no longer have a JSON twin."""
+    database = root / "messages.sqlite3"
+    if not database.exists():
+        return
+    from ..message_store import MessageStore, MessageStoreError
+
+    try:
+        rows = MessageStore(root).iter_inventory()
+    except MessageStoreError as exc:
+        raise ReactorStateError(
+            f"could not inventory message database under {root}: {exc}"
+        ) from exc
+    for row in rows:
+        directory = str(row["from_agent"])
+        filename = f"{row['id']}.json"
+        if not _utf8_checkpoint_name(directory) or not _utf8_checkpoint_name(filename):
+            raise ReactorStateError(
+                "message database contains a name that cannot be represented "
+                f"safely in reactor state: {directory}/{filename}"
+            )
+        files = inventory.setdefault(directory, {})
+        if filename in files:
+            continue
+        files[filename] = _HivemindFile(
+            directory=directory,
+            filename=filename,
+            path=database,
+            signature=f"0:0:{int(row['nbytes'])}:0:{int(row['revision'])}",
+            mtime_ns=_message_timestamp_ns(str(row["timestamp"])),
+            store_id=str(row["id"]),
+        )
+
+
+def _message_timestamp_ns(value: str) -> int:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp() * 1_000_000_000)
 
 
 def _hivemind_signature_snapshot(
@@ -1737,9 +1783,22 @@ def _hivemind_events_since(
         if is_retry(item):
             pending_retry_cursor = candidate_key(item)
         try:
-            with item.path.open("rb") as handle:
-                raw = handle.read(MAX_HIVEMIND_RECORD_BYTES + 1)
-            current_stat = os.stat(item.path, follow_symlinks=False)
+            if item.store_id:
+                from ..message_store import MessageStore
+
+                loaded = MessageStore(root).message_json_bytes(item.store_id)
+                if loaded is None:
+                    raise OSError(f"message row missing: {item.store_id}")
+                raw = loaded
+            else:
+                with item.path.open("rb") as handle:
+                    raw = handle.read(MAX_HIVEMIND_RECORD_BYTES + 1)
+                current_stat = os.stat(item.path, follow_symlinks=False)
+                if _hivemind_file_signature(current_stat) != item.signature:
+                    truncated = True
+                    pending_discovery.get(item.directory, {}).pop(item.filename, None)
+                    pending_retry.get(item.directory, {}).pop(item.filename, None)
+                    continue
         except OSError as exc:
             # The directory inventory raced a copy/rename/permission change.
             # Nothing about this file is acknowledged; retry a later cycle.
@@ -1747,11 +1806,6 @@ def _hivemind_events_since(
             pending_discovery.get(item.directory, {}).pop(item.filename, None)
             pending_retry.setdefault(item.directory, {})[item.filename] = item.signature
             _log.debug("Transient hivemind read failure for %s: %s", item.path, exc)
-            continue
-        if _hivemind_file_signature(current_stat) != item.signature:
-            truncated = True
-            pending_discovery.get(item.directory, {}).pop(item.filename, None)
-            pending_retry.get(item.directory, {}).pop(item.filename, None)
             continue
         pending_retry.get(item.directory, {}).pop(item.filename, None)
         if len(raw) > MAX_HIVEMIND_RECORD_BYTES:

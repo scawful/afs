@@ -42,7 +42,7 @@ def normalize_scope_id(value: str) -> str:
 
 
 class MessageBus(HivemindBus):
-    """Project-scoped view over the durable file message queue.
+    """Project-scoped view over the SQLite message queue.
 
     ``scope_id`` is an authorization boundary, not only a ranking hint.  The
     default view may read its own scope and ``common``.  Reading every project
@@ -143,16 +143,23 @@ class MessageBus(HivemindBus):
         msg_type: str | None = None,
         topic: str | None = None,
         limit: int = 50,
+        recipient: str | None = None,
+        include_broadcasts: bool = True,
+        exclude_from_norm: str | None = None,
     ) -> list[Message]:
-        messages = super().read(
+        return super().read(
             agent_name=agent_name,
             since=since,
             msg_type=msg_type,
             topic=topic,
-            limit=0,
+            limit=limit,
+            recipient=recipient,
+            include_broadcasts=include_broadcasts,
+            exclude_from_norm=exclude_from_norm,
+            scope_ids=None if self.all_projects else self.allowed_scope_ids,
+            include_unscoped=self.include_legacy,
+            require_scope=self.all_projects and not self.include_legacy,
         )
-        visible = [message for message in messages if self._scope_allowed(message)]
-        return visible[-limit:] if limit and len(visible) > limit else visible
 
 
 __all__ = [

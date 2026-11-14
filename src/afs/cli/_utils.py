@@ -475,6 +475,9 @@ def write_config(path: Path, config: AFSConfig) -> None:
     context_index_table["auto_index"] = config.context_index.auto_index
     context_index_table["auto_refresh"] = config.context_index.auto_refresh
     context_index_table["include_content"] = config.context_index.include_content
+    context_index_table["mutation_include_content"] = (
+        config.context_index.mutation_include_content
+    )
     context_index_table["max_file_size_bytes"] = config.context_index.max_file_size_bytes
     context_index_table["max_content_chars"] = config.context_index.max_content_chars
     context_index_table["decay_hours"] = config.context_index.decay_hours

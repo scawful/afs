@@ -5,6 +5,7 @@ import os
 import re
 import time
 import unicodedata
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -264,14 +265,16 @@ COMPATIBILITY_FILE_TOOL_ALIASES = {
     "fs.list",
 }
 
-PLAIN_SCOPED_TOOLS = {
-    "context.search",
+# Oracle-hot coordination surface kept in the default slim catalog.
+SLIM_COORDINATION_TOOLS = {
     "messages.send",
     "messages.read",
     "messages.ack",
     "note.create",
     "note.read",
     "note.list",
+    "skill.match",
+    "skill.read",
     "handoff.create",
     "handoff.read",
     "handoff.list",
@@ -288,13 +291,10 @@ def test_tools_list_defaults_to_slim_catalog(tmp_path: Path, monkeypatch) -> Non
     assert response is not None
     tools = response["result"]["tools"]
     names = {tool["name"] for tool in tools}
-    assert names == DEFAULT_MCP_TOOL_CATALOG | {
-        "skill.match",
-        "skill.read",
-        *PLAIN_SCOPED_TOOLS,
-    }
+    assert names == DEFAULT_MCP_TOOL_CATALOG | SLIM_COORDINATION_TOOLS
     assert "context.repair" not in names
     assert "agent.spawn" not in names
+    assert "context.search" not in names
     assert not COMPATIBILITY_FILE_TOOL_ALIASES.intersection(names)
 
 
@@ -324,15 +324,14 @@ def test_claude_tool_name_style_lists_safe_aliases_and_accepts_calls(
         "context_read",
         "context_list",
         "context_write",
-        "context_search",
-        "skill_match",
-        "skill_read",
         "messages_send",
         "messages_read",
         "messages_ack",
         "note_create",
         "note_read",
         "note_list",
+        "skill_match",
+        "skill_read",
         "handoff_create",
         "handoff_read",
         "handoff_list",
@@ -345,8 +344,8 @@ def test_claude_tool_name_style_lists_safe_aliases_and_accepts_calls(
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "skill_match",
-                "arguments": {"prompt": "write an implementation plan"},
+                "name": "context_status",
+                "arguments": {},
             },
         },
         manager,
@@ -355,7 +354,7 @@ def test_claude_tool_name_style_lists_safe_aliases_and_accepts_calls(
     assert call_response is not None
     assert "result" in call_response
     content = call_response["result"]["content"][0]
-    assert "implementation-planning" in content["text"]
+    assert "context_path" in content["text"]
 
 
 def test_hidden_extension_cannot_steal_core_safe_alias(
@@ -370,7 +369,7 @@ def test_hidden_extension_cannot_steal_core_safe_alias(
     registry = build_mcp_registry(manager)
     registry.add_tool(
         MCPToolDefinition(
-            name="skill_match",
+            name="messages_send",
             description="Collision probe.",
             input_schema={"type": "object"},
             handler=lambda _arguments, _manager: {"extension_called": True},
@@ -385,8 +384,8 @@ def test_hidden_extension_cannot_steal_core_safe_alias(
         registry=registry,
     )
     names = {tool["name"] for tool in listed["result"]["tools"]}
-    assert "skill_match" in names
-    assert "skill_match_2" not in names
+    assert "messages_send" in names
+    assert "messages_send_2" not in names
 
     called = _handle_request(
         {
@@ -394,15 +393,15 @@ def test_hidden_extension_cannot_steal_core_safe_alias(
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "skill_match",
-                "arguments": {"prompt": "write an implementation plan"},
+                "name": "messages_send",
+                "arguments": {"from": "codex", "text": "alias stays on core"},
             },
         },
         manager,
         registry=registry,
     )
-    assert "implementation-planning" in called["result"]["content"][0]["text"]
     assert "extension_called" not in called["result"]["content"][0]["text"]
+    assert "codex" in called["result"]["content"][0]["text"]
 
     monkeypatch.setenv(MCP_TOOL_CATALOG_ENV, "full")
     full = _handle_request(
@@ -411,7 +410,7 @@ def test_hidden_extension_cannot_steal_core_safe_alias(
         registry=registry,
     )
     full_names = {tool["name"] for tool in full["result"]["tools"]}
-    assert {"skill_match", "skill_match_2"}.issubset(full_names)
+    assert {"messages_send", "messages_send_2"}.issubset(full_names)
 
 
 def test_tools_list_can_expose_full_catalog(tmp_path: Path, monkeypatch) -> None:
@@ -1501,6 +1500,7 @@ def test_v2_context_query_filters_scope_before_ranking(tmp_path: Path) -> None:
             "mount_types": ["scratchpad"],
             "query": "scope-token",
             "all_projects": True,
+            "refresh": True,
             "limit": 10,
         },
     )
@@ -1971,12 +1971,16 @@ def test_v2_legacy_hivemind_reap_requires_literal_all_projects(
         )
         assert "result" in response
 
-    queue_root = manager.resolve_mount_root(context_root, MountType.HIVEMIND)
-    message_files = sorted(queue_root.glob("*/*.json"))
-    assert len(message_files) == 2
-    old_timestamp = time.time() - (2 * 3600)
-    for path in message_files:
-        os.utime(path, (old_timestamp, old_timestamp))
+    from afs.hivemind import HivemindBus
+
+    bus = HivemindBus(context_root, config=manager.config)
+    message_ids = [message.id for message in bus.read(limit=0)]
+    assert len(message_ids) == 2
+    old_timestamp = (
+        datetime.now(timezone.utc) - timedelta(hours=2)
+    ).isoformat()
+    for message_id in message_ids:
+        bus._store().update_fields(message_id, timestamp=old_timestamp)
 
     base_arguments: dict[str, object] = {
         "context_path": str(context_root),
@@ -1991,7 +1995,7 @@ def test_v2_legacy_hivemind_reap_requires_literal_all_projects(
         refused = _call_tool(manager, "hivemind.reap", arguments)
         assert "error" in refused
         assert "all_projects=true" in refused["error"]["message"]
-        assert all(path.exists() for path in message_files)
+        assert len(bus.read(limit=0)) == 2
 
     applied = _call_tool(
         manager,
@@ -1999,7 +2003,7 @@ def test_v2_legacy_hivemind_reap_requires_literal_all_projects(
         {**base_arguments, "all_projects": True},
     )["result"]["structuredContent"]
     assert applied["removed_count"] == 2
-    assert not any(path.exists() for path in message_files)
+    assert bus.read(limit=0) == []
 
     schema = build_mcp_registry(manager).tools["hivemind.reap"].input_schema
     assert schema["properties"]["all_projects"]["type"] == "boolean"
@@ -2022,10 +2026,14 @@ def test_v1_legacy_hivemind_reap_keeps_omitted_gate_compatibility(
         },
     )
     assert "result" in sent
-    queue_root = manager.resolve_mount_root(context_root, MountType.HIVEMIND)
-    message_file = next(queue_root.glob("*/*.json"))
-    old_timestamp = time.time() - (2 * 3600)
-    os.utime(message_file, (old_timestamp, old_timestamp))
+    from afs.hivemind import HivemindBus
+
+    bus = HivemindBus(context_root, config=manager.config)
+    message = bus.read(limit=0)[0]
+    bus._store().update_fields(
+        message.id,
+        timestamp=(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+    )
 
     applied = _call_tool(
         manager,
@@ -2038,7 +2046,7 @@ def test_v1_legacy_hivemind_reap_keeps_omitted_gate_compatibility(
     )["result"]["structuredContent"]
 
     assert applied["removed_count"] == 1
-    assert not message_file.exists()
+    assert bus.read(limit=0) == []
 
 
 def test_v2_note_and_handoff_tools_create_readable_scoped_artifacts(tmp_path: Path) -> None:
@@ -2547,6 +2555,8 @@ def test_context_query_indexes_symlink_mount_content(tmp_path: Path) -> None:
 
 def test_context_write_keeps_context_query_fresh_without_rebuild(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
+    # Content FTS on mutation is opt-in; default sync is path/hash only.
+    manager.config.context_index.mutation_include_content = True
     context_root = manager.config.general.context_root
     target = context_root / "scratchpad" / "state.md"
     target.write_text("initial context", encoding="utf-8")
@@ -2607,6 +2617,44 @@ def test_context_write_keeps_context_query_fresh_without_rebuild(tmp_path: Path)
     structured = query_response["result"]["structuredContent"]
     assert any(entry["relative_path"] == "state.md" for entry in structured["entries"])
     assert "index_rebuild" not in structured
+
+
+def test_context_write_default_syncs_path_without_body(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    target = context_root / "scratchpad" / "path-only.md"
+    _call_tool(
+        manager,
+        "context.write",
+        {"path": str(target), "content": "body should stay out of default mutation sync"},
+        request_id=80,
+    )
+    structured = _call_tool(
+        manager,
+        "context.query",
+        {
+            "context_path": str(context_root),
+            "mount_types": ["scratchpad"],
+            "query": "path-only",
+            "auto_index": False,
+            "auto_refresh": False,
+        },
+        request_id=81,
+    )["result"]["structuredContent"]
+    assert any(entry["relative_path"] == "path-only.md" for entry in structured["entries"])
+    missing = _call_tool(
+        manager,
+        "context.query",
+        {
+            "context_path": str(context_root),
+            "mount_types": ["scratchpad"],
+            "query": "body should stay out",
+            "auto_index": False,
+            "auto_refresh": False,
+        },
+        request_id=82,
+    )["result"]["structuredContent"]
+    assert missing["count"] == 0
 
 
 def test_context_write_reports_best_effort_index_sync_failure(
@@ -2829,7 +2877,7 @@ def test_context_move_updates_context_index(tmp_path: Path) -> None:
                 "arguments": {
                     "context_path": str(context_root),
                     "mount_types": ["scratchpad"],
-                    "query": "moved content marker",
+                    "query": "after.md",
                     "auto_index": False,
                 },
             },
@@ -2895,7 +2943,7 @@ def test_context_move_directory_updates_nested_context_index_entries(tmp_path: P
                 "arguments": {
                     "context_path": str(context_root),
                     "mount_types": ["scratchpad"],
-                    "query": "moved directory marker",
+                    "query": "after/guide.md",
                     "auto_index": False,
                 },
             },
@@ -2945,6 +2993,7 @@ def test_context_query_auto_refreshes_after_external_write(tmp_path: Path) -> No
                     "mount_types": ["scratchpad"],
                     "query": "external edit",
                     "auto_index": True,
+                    "auto_refresh": True,
                 },
             },
         },
@@ -2954,6 +3003,32 @@ def test_context_query_auto_refreshes_after_external_write(tmp_path: Path) -> No
     structured = query_response["result"]["structuredContent"]
     assert any(entry["relative_path"] == "external.md" for entry in structured["entries"])
     assert "index_rebuild" in structured
+
+
+def test_context_query_skips_auto_refresh_by_default(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    context_root = manager.config.general.context_root
+    target = context_root / "scratchpad" / "external.md"
+    target.write_text("before external edit", encoding="utf-8")
+    _call_tool(
+        manager,
+        "context.index.rebuild",
+        {"context_path": str(context_root), "mount_types": ["scratchpad"]},
+        request_id=90,
+    )
+    target.write_text("after external edit", encoding="utf-8")
+    structured = _call_tool(
+        manager,
+        "context.query",
+        {
+            "context_path": str(context_root),
+            "mount_types": ["scratchpad"],
+            "query": "after external edit",
+        },
+        request_id=91,
+    )["result"]["structuredContent"]
+    assert "index_rebuild" not in structured
+    assert structured["count"] == 0
 
 
 def test_context_query_auto_refreshes_after_external_rename(tmp_path: Path) -> None:
@@ -2994,6 +3069,7 @@ def test_context_query_auto_refreshes_after_external_rename(tmp_path: Path) -> N
                     "mount_types": ["scratchpad"],
                     "query": "rename freshness marker",
                     "auto_index": True,
+                    "auto_refresh": True,
                 },
             },
         },
@@ -3022,6 +3098,7 @@ def test_context_query_history_self_writes_do_not_retrigger_rebuild(
         "mount_types": ["scratchpad", "history"],
         "query": "self-write marker",
         "auto_index": True,
+        "auto_refresh": True,
     }
 
     def query(request_id: int) -> dict[str, Any]:
@@ -4044,6 +4121,7 @@ def test_prompts_get_query_search_supports_context_path_and_auto_refresh(
                     "context_path": str(context_root),
                     "query": "prompt rename marker",
                     "mount_types": "scratchpad",
+                    "auto_refresh": "true",
                 },
             },
         },
@@ -4823,7 +4901,7 @@ def test_hivemind_task_and_agent_logs_tools_use_context_path(tmp_path: Path) -> 
     assert send_response is not None
     send_payload = send_response["result"]["structuredContent"]
     assert send_payload["from"] == "agent-a"
-    assert list((context_path / "bus").glob("agent-a/*.json"))
+    assert (context_path / "bus" / "messages.sqlite3").is_file()
 
     read_response = _handle_request(
         {

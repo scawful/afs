@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -349,7 +350,8 @@ def test_resolve_message_bus_uses_project_context(tmp_path) -> None:
 
     assert bus.scope_id == "common"
     bus.register_session("claude", "sess-1", cwd=str(project))
-    assert (project / ".context" / "hivemind" / ".sessions" / "claude" / "sess-1.json").is_file()
+    assert bus.session_record("claude", "sess-1") is not None
+    assert (project / ".context" / "hivemind" / "messages.sqlite3").is_file()
 
 
 @pytest.mark.parametrize("session_id", ["../escape", "a/b", ".", ""])
@@ -384,15 +386,19 @@ def test_register_session_prunes_stale_records_and_claims(tmp_path) -> None:
     bus = _bus(tmp_path)
     bus.register_session("codex", "stale")
     bus.claim_delivery("codex", "stale", "m-1")
-    sessions_dir = tmp_path / ".context" / "hivemind" / ".sessions" / "codex"
-    old = time.time() - 15 * 86400
-    os.utime(sessions_dir / "stale.json", (old, old))
+    old = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
+    bus._store().upsert_session(
+        {
+            **bus.session_record("codex", "stale"),
+            "registered_at": old,
+        }
+    )
 
     bus.register_session("codex", "fresh")
 
-    assert not (sessions_dir / "stale.json").exists()
-    assert not (sessions_dir / "stale.delivered").exists()
-    assert (sessions_dir / "fresh.json").is_file()
+    assert bus.session_record("codex", "stale") is None
+    assert bus.delivered_ids("codex", "stale") == set()
+    assert bus.session_record("codex", "fresh") is not None
 
 
 @pytest.mark.parametrize(

@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import json
-import os
-import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
@@ -24,18 +20,14 @@ def hivemind_context(tmp_path, monkeypatch):
     return context
 
 
-def _write_message_field(msg_path: Path, **updates: str) -> None:
-    data = json.loads(msg_path.read_text(encoding="utf-8"))
-    data.update(updates)
-    msg_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+def _age_message(bus: HivemindBus, message_id: str, *, age_hours: int) -> None:
+    old_timestamp = (datetime.now(timezone.utc) - timedelta(hours=age_hours)).isoformat()
+    bus._store().update_fields(message_id, timestamp=old_timestamp)
 
 
 def _create_old_message(bus: HivemindBus, agent: str, *, age_hours: int = 48) -> None:
-    bus.send(agent, "status", {"info": "old"}, ttl_hours=age_hours * 2)
-    agent_dir = bus._root / agent
-    for f in agent_dir.glob("*.json"):
-        old_time = time.time() - (age_hours * 3600)
-        os.utime(f, (old_time, old_time))
+    message = bus.send(agent, "status", {"info": "old"}, ttl_hours=age_hours * 2)
+    _age_message(bus, message.id, age_hours=age_hours)
 
 
 def test_send_sets_expires_at_when_ttl_enabled(hivemind_context):
@@ -55,9 +47,8 @@ def test_read_skips_expired_messages(hivemind_context):
         config=AFSConfig(hivemind=HivemindConfig(default_ttl_hours=12)),
     )
     msg = bus.send("agent-a", "status", {"info": "old"})
-    msg_path = bus._root / "agent-a" / f"{msg.id}.json"
     expired_at = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-    _write_message_field(msg_path, expires_at=expired_at)
+    bus._store().update_fields(msg.id, expires_at=expired_at)
 
     messages = bus.read(limit=10)
     assert messages == []
@@ -69,10 +60,9 @@ def test_read_subscribed_uses_subscription_ttl_window(hivemind_context):
         config=AFSConfig(hivemind=HivemindConfig(default_ttl_hours=72)),
     )
     msg = bus.send("agent-a", "status", {"info": "old"}, topic="repair")
-    msg_path = bus._root / "agent-a" / f"{msg.id}.json"
     old_timestamp = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
     future_expiry = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
-    _write_message_field(msg_path, timestamp=old_timestamp, expires_at=future_expiry)
+    bus._store().update_fields(msg.id, timestamp=old_timestamp, expires_at=future_expiry)
 
     sub = bus.subscribe("agent-b", ["repair"], ttl_hours=12)
     assert sub.ttl_hours == 12
@@ -87,9 +77,8 @@ def test_cleanup_stats_counts_expired_and_aged_out(hivemind_context):
         config=AFSConfig(hivemind=HivemindConfig(default_ttl_hours=24)),
     )
     expired = bus.send("agent-a", "status", {"info": "expired"}, ttl_hours=24)
-    expired_path = bus._root / "agent-a" / f"{expired.id}.json"
-    _write_message_field(
-        expired_path,
+    bus._store().update_fields(
+        expired.id,
         expires_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
     )
 
@@ -112,7 +101,7 @@ def test_reap_dry_run_preserves_files(hivemind_context):
 
     stats = bus.reap(max_age_hours=24, dry_run=True)
     assert stats["removed_count"] == 1
-    assert len(list((bus._root / "agent-a").glob("*.json"))) == 1
+    assert len(bus.read(agent_name="agent-a")) == 1
 
 
 def test_subscription_ttl_hours_roundtrip():

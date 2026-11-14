@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import os
-import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -119,12 +118,12 @@ def test_reap_keeps_unfinished_directed_messages(tmp_path: Path) -> None:
     open_ask = bus.send("codex", "request", {}, to="cursor")
     finished = bus.send("codex", "request", {}, to="cursor")
     bus.ack(finished.id, "cursor", status="done")
-    old = time.time() - 72 * 3600
+    old = (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()
     for msg in (open_ask, finished):
-        os.utime(bus._root / "codex" / f"{msg.id}.json", (old, old))
+        bus._store().update_fields(msg.id, timestamp=old)
 
     stats = bus.cleanup_stats(max_age_hours=24)
 
     assert stats["removed_count"] == 1
-    assert (bus._root / "codex" / f"{open_ask.id}.json").exists()
-    assert not (bus._root / ".acks" / f"{finished.id}.json").exists()
+    assert bus._store().get(open_ask.id) is not None
+    assert bus._store().get(finished.id) is None

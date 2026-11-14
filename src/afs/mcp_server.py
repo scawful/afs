@@ -798,7 +798,7 @@ def _sync_context_index_for_path(
                     if scoped is not None and scoped.context_root == context_path
                     else None
                 ),
-                include_content=settings.include_content,
+                include_content=settings.mutation_include_content,
                 max_file_size_bytes=settings.max_file_size_bytes,
                 max_content_chars=settings.max_content_chars,
             ):
@@ -3880,7 +3880,7 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                     "limit": {"type": "integer", "default": 25},
                     "include_content": {"type": "boolean", "default": False},
                     "auto_index": {"type": "boolean", "default": True},
-                    "auto_refresh": {"type": "boolean", "default": True},
+                    "auto_refresh": {"type": "boolean", "default": False},
                     "refresh": {"type": "boolean", "default": False},
                     "max_file_size_bytes": {
                         "type": "integer",
@@ -3918,7 +3918,6 @@ def _builtin_tool_definitions() -> list[MCPToolDefinition]:
                 "additionalProperties": False,
             },
             handler=_tool_context_search,
-            catalog="slim",
         ),
         MCPToolDefinition(
             name="context.diff",

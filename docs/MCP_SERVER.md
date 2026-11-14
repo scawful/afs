@@ -202,21 +202,19 @@ hints, or an explicit full-catalog/debug launch:
 
 - `context.status`
 - `context.query`
-- `context.search`
 - `context.read`
 - `context.write`
 - `context.list`
 - `messages.send`
 - `messages.read`
 - `messages.ack`
-- `note.create`
-- `note.read`
-- `note.list`
-- `handoff.create`
-- `handoff.read`
-- `handoff.list`
-- `skill.match`
-- `skill.read`
+
+Full-catalog companions for less frequent workflows:
+
+- `context.search`
+- `note.create` / `note.read` / `note.list`
+- `handoff.create` / `handoff.read` / `handoff.list`
+- `skill.match` / `skill.read`
 
 `messages.read` with `to` returns that agent's inbox: directed messages plus
 broadcasts (`to` of `all`, `*` or `everyone`), each with a `state` of

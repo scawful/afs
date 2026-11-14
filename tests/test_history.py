@@ -14,6 +14,7 @@ from afs.history import (
     iter_history_events,
     log_cli_invocation,
     log_event,
+    log_mcp_tool_call,
     log_session_event,
     prepare_history_reactor_root,
     read_recent_history_events,
@@ -65,6 +66,40 @@ def test_log_event_writes_payload_file(tmp_path, monkeypatch) -> None:
 
 def test_history_config_defaults_disable_payloads() -> None:
     assert HistoryConfig().include_payloads is False
+
+
+def test_log_mcp_tool_call_redacts_bodies(tmp_path, monkeypatch) -> None:
+    context_root = tmp_path / "context"
+    config_path = tmp_path / "afs.toml"
+    _write_config(config_path, context_root, include_payloads=True)
+
+    monkeypatch.setenv("AFS_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("AFS_CONTEXT_ROOT", str(context_root))
+    monkeypatch.delenv("AFS_HISTORY_DISABLED", raising=False)
+
+    event_id = log_mcp_tool_call(
+        "context.write",
+        {
+            "path": "scratchpad/note.md",
+            "content": "secret body " * 40,
+            "mkdirs": True,
+        },
+        {"path": "scratchpad/note.md", "bytes": 12, "sha256": "abc", "content": "nope"},
+        duration_ms=4,
+        context_root=context_root,
+    )
+    assert event_id
+
+    event = json.loads(
+        next((context_root / "history").glob("events_*.jsonl")).read_text(encoding="utf-8").splitlines()[-1]
+    )
+    assert event["metadata"]["arguments"]["path"] == "scratchpad/note.md"
+    assert event["metadata"]["arguments"]["content_chars"] == len("secret body " * 40)
+    assert "content" not in event["metadata"]["arguments"]
+    assert event["metadata"]["bytes"] == 12
+    assert event["metadata"]["sha256"] == "abc"
+    assert "payload" not in event
+    assert "payload_ref" not in event
 
 
 def test_log_cli_invocation_redacts(tmp_path, monkeypatch) -> None:

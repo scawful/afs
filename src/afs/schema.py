@@ -822,9 +822,13 @@ class CognitiveConfig:
 class ContextIndexConfig:
     enabled: bool = True
     db_filename: str = "context_index.sqlite3"
+    # Empty indexes still build on the first query. Drifted mounts do not;
+    # callers pass refresh=true or run context.index.rebuild.
     auto_index: bool = True
-    auto_refresh: bool = True
+    auto_refresh: bool = False
     include_content: bool = True
+    # Mutation sync keeps path/hash rows cheap. Full body indexing stays on rebuild.
+    mutation_include_content: bool = False
     max_file_size_bytes: int = 256 * 1024
     max_content_chars: int = 12000
     decay_hours: float = 168.0
@@ -849,8 +853,9 @@ class ContextIndexConfig:
             enabled=bool(data.get("enabled", True)),
             db_filename=db_filename.strip(),
             auto_index=bool(data.get("auto_index", True)),
-            auto_refresh=bool(data.get("auto_refresh", True)),
+            auto_refresh=bool(data.get("auto_refresh", False)),
             include_content=bool(data.get("include_content", True)),
+            mutation_include_content=bool(data.get("mutation_include_content", False)),
             max_file_size_bytes=max_file_size_bytes,
             max_content_chars=max_content_chars,
             decay_hours=float(decay_hours),

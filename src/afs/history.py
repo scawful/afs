@@ -1091,6 +1091,75 @@ def query_events(
     return results
 
 
+_MCP_ARG_REDACT_KEYS = frozenset(
+    {
+        "content",
+        "text",
+        "body",
+        "payload",
+        "prompt",
+        "message",
+        "data",
+        "preview",
+    }
+)
+_MCP_ARG_KEEP_KEYS = frozenset(
+    {
+        "path",
+        "source",
+        "destination",
+        "context_path",
+        "project_path",
+        "scope_id",
+        "query",
+        "mount_types",
+        "limit",
+        "from",
+        "to",
+        "topic",
+        "type",
+        "message_id",
+        "by",
+        "done",
+        "reply_to",
+        "if_match",
+        "append",
+        "mkdirs",
+        "recursive",
+        "auto_index",
+        "auto_refresh",
+        "refresh",
+        "include_content",
+        "agent",
+        "name",
+        "identifier",
+        "title",
+    }
+)
+
+
+def _summarize_mcp_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Keep call identity without storing message/file bodies in history."""
+    summary: dict[str, Any] = {}
+    for key, value in arguments.items():
+        if key in _MCP_ARG_REDACT_KEYS:
+            if isinstance(value, str):
+                summary[f"{key}_chars"] = len(value)
+            elif isinstance(value, dict):
+                summary[f"{key}_keys"] = sorted(str(item) for item in value)[:32]
+            else:
+                summary[f"{key}_type"] = type(value).__name__
+            continue
+        if key not in _MCP_ARG_KEEP_KEYS:
+            summary[f"{key}_present"] = True
+            continue
+        if isinstance(value, str) and len(value) > 256:
+            summary[key] = value[:253] + "..."
+        else:
+            summary[key] = value
+    return summary
+
+
 def log_mcp_tool_call(
     tool_name: str,
     arguments: dict[str, Any] | None = None,
@@ -1098,23 +1167,26 @@ def log_mcp_tool_call(
     duration_ms: int | None = None,
     context_root: Path | None = None,
 ) -> str | None:
-    """Log an MCP tool call event."""
+    """Log an MCP tool call event without retaining request/response bodies."""
     metadata: dict[str, Any] = {"tool_name": tool_name}
     if duration_ms is not None:
         metadata["duration_ms"] = duration_ms
     if arguments:
-        metadata["arguments"] = arguments
+        metadata["arguments"] = _summarize_mcp_arguments(arguments)
     if isinstance(result, dict):
         has_error = "error" in result or result.get("ok") is False or result.get("isError") is True
         metadata["ok"] = not has_error
         if has_error:
-            metadata["error"] = str(result.get("error", "tool call failed"))
+            metadata["error"] = str(result.get("error", "tool call failed"))[:512]
+        for key in ("path", "bytes", "sha256", "index_updated", "count"):
+            if key in result:
+                metadata[key] = result[key]
     return log_event(
         EVENT_MCP_TOOL,
         "afs.mcp",
         op="call",
         metadata=metadata,
-        payload=result,
+        payload=None,
         context_root=context_root,
     )
 

@@ -210,23 +210,7 @@ def collect_context_status(
 
     mount_counts: dict[str, int] = {}
     total_files = 0
-    for mount_type in MountType:
-        mount_dir = manager.resolve_mount_root(context_path, mount_type)
-        if not mount_dir.exists():
-            continue
-        count = sum(
-            count_mount_files(root)
-            for root in visible_mount_roots(
-                mount_dir,
-                mount_type=mount_type,
-                scoped=scope,
-            )
-            if root.exists()
-        )
-        if count > 0:
-            mount_counts[mount_type.value] = count
-            total_files += count
-
+    counts_from_index = False
     index_info: dict[str, Any] = {"enabled": settings.enabled}
     if settings.enabled:
         db_path = manager.resolve_mount_root(context_path, MountType.GLOBAL) / settings.db_filename
@@ -247,24 +231,49 @@ def collect_context_status(
                 index_info["built"] = True
                 index_info["has_entries"] = has_entries
                 index_info["total_entries"] = total_entries
+                # Health mounts exclude scratchpad/history so status stays cheap
+                # on large agent workspaces.
                 index_info["stale"] = (
-                    bool(
-                        index.diff(
+                    (
+                        index.needs_refresh_scoped(
+                            scope,
                             mount_types=index.health_mount_types(),
-                            relative_prefixes=prefixes,
-                            scoped=scope if scope.layout_version == LAYOUT_VERSION else None,
-                        )["total_changes"]
+                        )
+                        if scope.layout_version == LAYOUT_VERSION
+                        else index.needs_health_refresh()
                     )
                     if has_entries
                     else False
                 )
                 index_info["db_size_bytes"] = db_path.stat().st_size
                 index_info["db_path"] = str(db_path)
+                if has_entries:
+                    mount_counts = index.file_counts_by_mount(scoped=scope)
+                    total_files = sum(mount_counts.values())
+                    counts_from_index = True
             except Exception:  # noqa: BLE001 - status collection must tolerate index failures.
                 logger.debug("Unable to read context index status", exc_info=True)
                 index_info["error"] = "failed to read index"
         else:
             index_info["built"] = False
+
+    if not counts_from_index:
+        for mount_type in MountType:
+            mount_dir = manager.resolve_mount_root(context_path, mount_type)
+            if not mount_dir.exists():
+                continue
+            count = sum(
+                count_mount_files(root)
+                for root in visible_mount_roots(
+                    mount_dir,
+                    mount_type=mount_type,
+                    scoped=scope,
+                )
+                if root.exists()
+            )
+            if count > 0:
+                mount_counts[mount_type.value] = count
+                total_files += count
 
     suggested_actions = mount_health.get("suggested_actions")
     actions = list(suggested_actions) if isinstance(suggested_actions, list) else []
@@ -275,6 +284,7 @@ def collect_context_status(
         "profile": manager.config.profiles.active_profile,
         "mount_counts": mount_counts,
         "total_files": total_files,
+        "mount_counts_source": "index" if counts_from_index else "filesystem",
         "mount_health": mount_health,
         "actions": actions,
         "index": index_info,

@@ -487,10 +487,7 @@ def test_build_session_bootstrap_does_not_mutate_hivemind_or_memory(
 
     bus = HivemindBus(context_root, config=config)
     message = bus.send("tester", "status", {"detail": "expired soon"}, ttl_hours=1)
-    msg_path = context_root / "hivemind" / "tester" / f"{message.id}.json"
-    data = json.loads(msg_path.read_text(encoding="utf-8"))
-    data["expires_at"] = "2000-01-01T00:00:00+00:00"
-    msg_path.write_text(json.dumps(data), encoding="utf-8")
+    bus._store().update_fields(message.id, expires_at="2000-01-01T00:00:00+00:00")
 
     checkpoint_dir = context_root / "scratchpad" / "afs_agents"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -503,7 +500,7 @@ def test_build_session_bootstrap_does_not_mutate_hivemind_or_memory(
     summary = build_session_bootstrap(manager, context_root)
 
     assert isinstance(summary["memory"]["status"].get("stale"), bool)
-    assert msg_path.exists()
+    assert bus._store().get(message.id) is not None
     assert not (context_root / "memory" / "entries.jsonl").exists()
 
 
