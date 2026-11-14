@@ -456,11 +456,33 @@ Index behavior can be tuned in `afs.toml`:
 enabled = true
 db_filename = "context_index.sqlite3"
 auto_index = true
-auto_refresh = true
+# Cheap default: do not rebuild on every query. Pass refresh/auto_refresh when
+# files changed outside AFS tools.
+auto_refresh = false
 include_content = true
+# Mutations keep path/hash rows; full body indexing stays on rebuild.
+mutation_include_content = false
 max_file_size_bytes = 262144
 max_content_chars = 12000
 ```
+
+### Performance defaults (Oracle hot path)
+
+- `context.write` / move / delete sync the index without embedding full file
+  bodies by default (`mutation_include_content = false`).
+- `context.query` leaves `auto_refresh` off unless the caller opts in.
+- `context.status` prefers SQLite file counts over walking mounts.
+- `messages.*` stores mail in `hivemind/messages.sqlite3` (sessions, acks,
+  subscriptions, claims). Legacy per-agent JSON files are imported on first
+  open; pass `include_legacy=true` on `messages.read` only when you need a
+  forced re-scan.
+- Default `tools/list` is the slim catalog (context + messages + notes +
+  handoffs + skills). Use `AFS_MCP_TOOL_CATALOG=full` for the full surface.
+
+After upgrading AFS, restart the MCP client process so it loads the new server
+code. Cursor uses `afs mcp serve` via `~/.cursor/mcp.json`; the `afs` wrapper
+defaults to `$HOME/src/runtime/afs`, so update that checkout (or set
+`AFS_ROOT`) before reload.
 
 Extensions can extend the MCP surface via `extension.toml`.
 

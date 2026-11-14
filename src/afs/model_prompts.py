@@ -87,7 +87,19 @@ def build_model_system_prompt(
     if mode not in {"minimal", "full"}:
         raise ValueError("AFS prompt scaffolding must be minimal or full")
     if native_skills is None:
-        native_skills = os.getenv("AFS_NATIVE_SKILLS") == "1"
+        # Explicit matched-skill payloads win over the host-native env default.
+        # Session/bootstrap paths that want native mode pass mode="native" or
+        # native_skills=True; bare AFS_NATIVE_SKILLS=1 must not erase fixtures.
+        explicit = skills_state if isinstance(skills_state, dict) else None
+        diagnostic_count = explicit.get("diagnostic_count", 0) if explicit else 0
+        if not isinstance(diagnostic_count, int) or isinstance(diagnostic_count, bool):
+            diagnostic_count = 0
+        if explicit is not None and explicit.get("mode") != "native" and (
+            explicit.get("matches") or diagnostic_count > 0
+        ):
+            native_skills = False
+        else:
+            native_skills = os.getenv("AFS_NATIVE_SKILLS") == "1"
     sections: list[PromptSection] = []
 
     # --- Static section: base prompt (highest priority, cacheable) ---

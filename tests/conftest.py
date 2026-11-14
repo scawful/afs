@@ -26,6 +26,17 @@ def _isolated_approval_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     )
 
 
+@pytest.fixture(autouse=True)
+def _clear_native_skills_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep host ``AFS_NATIVE_SKILLS=1`` from collapsing matched-skill fixtures.
+
+    Cursor/agent shells often export native skills for production prompts.
+    Unit tests that assert Relevant Skills / Skill Enforcement payloads need
+    the matched-skill renderer unless they opt in with ``native_skills=True``.
+    """
+    monkeypatch.delenv("AFS_NATIVE_SKILLS", raising=False)
+
+
 @pytest.fixture
 def temp_dir() -> Path:
     """Create a temporary directory for test outputs."""
