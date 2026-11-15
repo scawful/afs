@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..feature_gates import gated_cli
+
 if TYPE_CHECKING:
     from ..manager import AFSManager
 
@@ -951,7 +953,10 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     # =========================================================================
     # Training
     # =========================================================================
-    training_parser = subparsers.add_parser("training", help="Training data utilities.")
+    training_parser = subparsers.add_parser(
+        "training",
+        help="Training utilities (optional; requires AFS_ENABLE_TRAINING or afs[training]).",
+    )
     training_sub = training_parser.add_subparsers(dest="training_command")
 
     # training prepare
@@ -964,7 +969,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     train_prepare.add_argument("--stratify-by", default="domain", help="Field to stratify by.")
     train_prepare.add_argument("--no-shuffle", action="store_true", help="Don't shuffle data.")
     train_prepare.add_argument("--seed", type=int, default=42, help="Random seed.")
-    train_prepare.set_defaults(func=training_prepare_command)
+    train_prepare.set_defaults(func=gated_cli("training")(training_prepare_command))
 
     # training convert
     train_convert = training_sub.add_parser("convert", help="Convert to training format.")
@@ -981,14 +986,14 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         choices=["separate", "embedded"],
         help="CoT mode.",
     )
-    train_convert.set_defaults(func=training_convert_command)
+    train_convert.set_defaults(func=gated_cli("training")(training_convert_command))
 
     # training registry-list
     train_reg_list = training_sub.add_parser("registry-list", help="List experiments.")
     train_reg_list.add_argument("--status", help="Filter by status.")
     train_reg_list.add_argument("--ab-group", help="Filter by A/B group.")
     train_reg_list.add_argument("--framework", help="Filter by framework.")
-    train_reg_list.set_defaults(func=training_registry_list_command)
+    train_reg_list.set_defaults(func=gated_cli("training")(training_registry_list_command))
 
     # training registry-create
     train_reg_create = training_sub.add_parser("registry-create", help="Create experiment.")
@@ -1000,12 +1005,12 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     train_reg_create.add_argument("--ab-variant", help="A/B variant (a or b).")
     train_reg_create.add_argument("--tag", action="append", help="Experiment tags.")
     train_reg_create.add_argument("--notes", help="Experiment notes.")
-    train_reg_create.set_defaults(func=training_registry_create_command)
+    train_reg_create.set_defaults(func=gated_cli("training")(training_registry_create_command))
 
     # training registry-compare
     train_reg_compare = training_sub.add_parser("registry-compare", help="Compare experiments.")
     train_reg_compare.add_argument("experiments", nargs="+", help="Experiment IDs to compare.")
-    train_reg_compare.set_defaults(func=training_registry_compare_command)
+    train_reg_compare.set_defaults(func=gated_cli("training")(training_registry_compare_command))
 
     # training memory-export
     train_memory = training_sub.add_parser(
@@ -1086,7 +1091,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         type=int,
         help="Maximum number of exported samples.",
     )
-    train_memory.set_defaults(func=training_memory_export_command)
+    train_memory.set_defaults(func=gated_cli("training")(training_memory_export_command))
 
     # training history-export
     train_history = training_sub.add_parser(
@@ -1156,7 +1161,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Disable secret redaction.",
     )
-    train_history.set_defaults(func=training_history_export_command)
+    train_history.set_defaults(func=gated_cli("training")(training_history_export_command))
 
     # training antigravity-export
     train_antigravity = training_sub.add_parser(
@@ -1222,7 +1227,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Disable secret redaction.",
     )
-    train_antigravity.set_defaults(func=training_antigravity_export_command)
+    train_antigravity.set_defaults(func=gated_cli("training")(training_antigravity_export_command))
 
     train_antigravity_status = training_sub.add_parser(
         "antigravity-status",
@@ -1240,7 +1245,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     train_antigravity_status.add_argument(
         "--json", action="store_true", help="Output JSON."
     )
-    train_antigravity_status.set_defaults(func=training_antigravity_status_command)
+    train_antigravity_status.set_defaults(func=gated_cli("training")(training_antigravity_status_command))
 
     # training gemini-export
     train_gemini = training_sub.add_parser(
@@ -1320,7 +1325,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Disable secret redaction.",
     )
-    train_gemini.set_defaults(func=training_gemini_export_command)
+    train_gemini.set_defaults(func=gated_cli("training")(training_gemini_export_command))
 
     # training claude-export
     train_claude = training_sub.add_parser(
@@ -1395,7 +1400,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Disable secret redaction.",
     )
-    train_claude.set_defaults(func=training_claude_export_command)
+    train_claude.set_defaults(func=gated_cli("training")(training_claude_export_command))
 
     # training codex-export
     train_codex = training_sub.add_parser(
@@ -1475,7 +1480,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Disable secret redaction.",
     )
-    train_codex.set_defaults(func=training_codex_export_command)
+    train_codex.set_defaults(func=gated_cli("training")(training_codex_export_command))
 
     # training codex-history-import
     train_codex_history = training_sub.add_parser(
@@ -1526,7 +1531,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Disable secret redaction.",
     )
-    train_codex_history.set_defaults(func=training_codex_history_import_command)
+    train_codex_history.set_defaults(func=gated_cli("training")(training_codex_history_import_command))
 
     # training toolbench-export
     train_toolbench = training_sub.add_parser(
@@ -1554,7 +1559,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         type=int,
         help="Maximum number of samples to export (default: all).",
     )
-    train_toolbench.set_defaults(func=training_toolbench_export_command)
+    train_toolbench.set_defaults(func=gated_cli("training")(training_toolbench_export_command))
 
     # training rebalance
     train_rebalance = training_sub.add_parser(
@@ -1615,7 +1620,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         action="append",
         help="Append JSONL files without rebalancing.",
     )
-    train_rebalance.set_defaults(func=training_rebalance_command)
+    train_rebalance.set_defaults(func=gated_cli("training")(training_rebalance_command))
 
     # =========================================================================
     # Phase 2 Training Integrations
@@ -1655,7 +1660,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Warn on stale mounts but don't fail.",
     )
     training_freshness.add_argument("--json", action="store_true", help="Output JSON.")
-    training_freshness.set_defaults(func=training_freshness_gate_command)
+    training_freshness.set_defaults(func=gated_cli("training")(training_freshness_gate_command))
 
     training_extract = training_sub.add_parser(
         "extract-sessions",
@@ -1680,7 +1685,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Minimum quality score (default: 0.6).",
     )
     training_extract.add_argument("--json", action="store_true", help="Output JSON.")
-    training_extract.set_defaults(func=training_extract_sessions_command)
+    training_extract.set_defaults(func=gated_cli("training")(training_extract_sessions_command))
 
     training_router = training_sub.add_parser(
         "generate-router-data",
@@ -1705,7 +1710,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Include agents without declared capabilities.",
     )
     training_router.add_argument("--json", action="store_true", help="Output JSON.")
-    training_router.set_defaults(func=training_generate_router_command)
+    training_router.set_defaults(func=gated_cli("training")(training_generate_router_command))
 
     training_dataset = training_sub.add_parser(
         "dataset",
@@ -1721,7 +1726,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     training_dataset_stats.add_argument("dataset", help="Dataset directory or JSONL file.")
     training_dataset_stats.add_argument("--name", help="Dataset id override for artifact paths.")
     training_dataset_stats.add_argument("--json", action="store_true", help="Output JSON.")
-    training_dataset_stats.set_defaults(func=training_dataset_stats_command)
+    training_dataset_stats.set_defaults(func=gated_cli("training")(training_dataset_stats_command))
 
     training_dataset_outliers = training_dataset_sub.add_parser(
         "outliers",
@@ -1732,7 +1737,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     training_dataset_outliers.add_argument("--name", help="Dataset id override for artifact paths.")
     training_dataset_outliers.add_argument("--limit", type=int, default=10, help="Rows to report.")
     training_dataset_outliers.add_argument("--json", action="store_true", help="Output JSON.")
-    training_dataset_outliers.set_defaults(func=training_dataset_outliers_command)
+    training_dataset_outliers.set_defaults(func=gated_cli("training")(training_dataset_outliers_command))
 
     training_run = training_sub.add_parser(
         "run",
@@ -1747,7 +1752,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     add_context_args(training_run_start)
     training_run_start.add_argument("spec", help="Path to a JSON or TOML run spec.")
     training_run_start.add_argument("--json", action="store_true", help="Output JSON.")
-    training_run_start.set_defaults(func=training_run_start_command)
+    training_run_start.set_defaults(func=gated_cli("training")(training_run_start_command))
 
     training_run_status = training_run_sub.add_parser(
         "status",
@@ -1756,7 +1761,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     add_context_args(training_run_status)
     training_run_status.add_argument("run_id", help="Run id or run artifact directory.")
     training_run_status.add_argument("--json", action="store_true", help="Output JSON.")
-    training_run_status.set_defaults(func=training_run_status_command)
+    training_run_status.set_defaults(func=gated_cli("training")(training_run_status_command))
 
     training_run_stop = training_run_sub.add_parser(
         "stop",
@@ -1766,4 +1771,4 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     training_run_stop.add_argument("run_id", help="Run id or run artifact directory.")
     training_run_stop.add_argument("--force", action="store_true", help="Send SIGKILL if SIGTERM does not stop the run.")
     training_run_stop.add_argument("--json", action="store_true", help="Output JSON.")
-    training_run_stop.set_defaults(func=training_run_stop_command)
+    training_run_stop.set_defaults(func=gated_cli("training")(training_run_stop_command))

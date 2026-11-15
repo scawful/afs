@@ -29,4 +29,9 @@ fi
 export AFS_ROOT
 export PYTHONPATH="${AFS_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
+# Repo wrapper opts into optional surfaces so local checkout workflows keep
+# working; plain `python -m afs` / pip installs stay fail-closed without these.
+export AFS_ENABLE_TRAINING="${AFS_ENABLE_TRAINING:-1}"
+export AFS_ENABLE_EMBEDDINGS="${AFS_ENABLE_EMBEDDINGS:-1}"
+
 exec "$PYTHON_BIN" -m afs "$@"

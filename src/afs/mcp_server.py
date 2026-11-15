@@ -2461,6 +2461,9 @@ def _tool_messages_clean(arguments: dict[str, Any], manager: AFSManager) -> dict
 
 def _tool_embeddings_index(arguments: dict[str, Any], manager: AFSManager) -> dict[str, Any]:
     from .embeddings import build_embedding_index
+    from .feature_gates import require_feature
+
+    require_feature("embeddings")
 
     sources_raw = arguments.get("sources", [])
     if not isinstance(sources_raw, list) or not sources_raw:

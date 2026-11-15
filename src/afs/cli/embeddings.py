@@ -10,23 +10,16 @@ from ..config import load_config_model
 from ..context_layout import LAYOUT_VERSION, detect_layout_version
 from ..context_paths import resolve_mount_root
 from ..core import resolve_context_root
-from ..embeddings import (
-    DEFAULT_GEMINI_DIMENSION,
-    DEFAULT_GEMINI_MODEL,
-    build_embedding_index,
-    create_embed_fn,
-    create_query_embed_fn_from_index,
-    default_text_instructions,
-    evaluate_embedding_index,
-    load_embedding_eval_cases,
-    search_embedding_index_detailed,
-)
+from ..feature_gates import gated_cli
 from ..models import MountType
 from ..sensitivity import matches_path_rules
 
 
+@gated_cli("embeddings")
 def embeddings_index_command(args: argparse.Namespace) -> int:
     """Build an embedding index for a source path."""
+    from ..embeddings import build_embedding_index
+
     config_path = Path(args.config) if args.config else None
     config = load_config_model(config_path=config_path, merge_user=True)
     try:
@@ -96,8 +89,11 @@ def embeddings_index_command(args: argparse.Namespace) -> int:
     return 0
 
 
+@gated_cli("embeddings")
 def embeddings_search_command(args: argparse.Namespace) -> int:
     """Search an embedding index."""
+    from ..embeddings import search_embedding_index_detailed
+
     config_path = Path(args.config) if args.config else None
     config = load_config_model(config_path=config_path, merge_user=True)
     try:
@@ -148,8 +144,15 @@ def embeddings_search_command(args: argparse.Namespace) -> int:
     return 0
 
 
+@gated_cli("embeddings")
 def embeddings_eval_command(args: argparse.Namespace) -> int:
     """Evaluate embedding retrieval quality."""
+    from ..embeddings import (
+        create_query_embed_fn_from_index,
+        evaluate_embedding_index,
+        load_embedding_eval_cases,
+    )
+
     config_path = Path(args.config) if args.config else None
     config = load_config_model(config_path=config_path, merge_user=True)
     try:
@@ -245,12 +248,15 @@ def _resolve_sources(args: argparse.Namespace, index_root: Path) -> list[Path]:
     return sources
 
 
-_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
-    "ollama": "nomic-embed-text",
-    "hf": "nomic-embed-text",
-    "openai": "text-embedding-3-small",
-    "gemini": DEFAULT_GEMINI_MODEL,
-}
+def _provider_default_models() -> dict[str, str]:
+    from ..embeddings import DEFAULT_GEMINI_MODEL
+
+    return {
+        "ollama": "nomic-embed-text",
+        "hf": "nomic-embed-text",
+        "openai": "text-embedding-3-small",
+        "gemini": DEFAULT_GEMINI_MODEL,
+    }
 
 
 def _resolve_embed_fn(args: argparse.Namespace, *, mode: str = "index"):
@@ -262,12 +268,19 @@ def _resolve_embed_fn(args: argparse.Namespace, *, mode: str = "index"):
               For Gemini, this switches between RETRIEVAL_DOCUMENT and
               RETRIEVAL_QUERY task types (asymmetric retrieval).
     """
+    from ..embeddings import (
+        DEFAULT_GEMINI_DIMENSION,
+        create_embed_fn,
+        default_text_instructions,
+    )
+
     if args.provider == "none":
         return None
 
+    provider_defaults = _provider_default_models()
     model = args.model
-    if model == "nomic-embed-text" and args.provider in _PROVIDER_DEFAULT_MODELS:
-        model = _PROVIDER_DEFAULT_MODELS[args.provider]
+    if model == "nomic-embed-text" and args.provider in provider_defaults:
+        model = provider_defaults[args.provider]
     kwargs: dict[str, object] = {"model": model}
 
     if args.provider in {"ollama", "openai"}:
@@ -311,7 +324,8 @@ def _resolve_embed_fn(args: argparse.Namespace, *, mode: str = "index"):
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register embeddings command parsers."""
     emb_parser = subparsers.add_parser(
-        "embeddings", help="Embedding index management."
+        "embeddings",
+        help="Embedding index management (optional; requires AFS_ENABLE_EMBEDDINGS or afs[embeddings]).",
     )
     emb_sub = emb_parser.add_subparsers(dest="embeddings_command")
 

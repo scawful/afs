@@ -30,6 +30,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Optional surfaces outside afs-lite. CLI/MCP entry points also honor
+# AFS_ENABLE_EMBEDDINGS=1 / AFS_ENABLE_TRAINING=1 for local overrides.
 embeddings = [
     "httpx>=0.24.0",
 ]

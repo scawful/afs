@@ -7,6 +7,10 @@
 
 AFS is an orchestration layer for managing multi-agent systems and context directly within the filesystem. It treats documentation, tools, and memory as mountable context nodes, providing a structured surface for AI agents to operate within a repository.
 
+**afs-lite:** the default product is a small context OS for agents (files, mail,
+status, handoffs, skill roots). Training, embeddings, and personal/operator
+tools are optional extras—see [docs/AFS_LITE_BOUNDARY.md](docs/AFS_LITE_BOUNDARY.md).
+
 AFS is an independent implementation and extension of the agentic file system abstraction from ["Everything is Context" (arXiv:2512.05470)](https://arxiv.org/abs/2512.05470) — see [docs/LINEAGE.md](docs/LINEAGE.md) for the concept mapping and where AFS goes beyond the paper.
 
 ## Install

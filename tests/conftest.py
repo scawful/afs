@@ -37,6 +37,13 @@ def _clear_native_skills_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AFS_NATIVE_SKILLS", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _enable_optional_feature_gates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep training/embeddings CLI tests usable under afs-lite fail-closed gates."""
+    monkeypatch.setenv("AFS_ENABLE_TRAINING", "1")
+    monkeypatch.setenv("AFS_ENABLE_EMBEDDINGS", "1")
+
+
 @pytest.fixture
 def temp_dir() -> Path:
     """Create a temporary directory for test outputs."""
