@@ -185,11 +185,17 @@ def events_replay_command(args: argparse.Namespace) -> int:
 
 def events_archive_command(args: argparse.Namespace) -> int:
     """Gzip daily event logs older than the retention window."""
-    _manager, _context_path, history_root = _resolve_manager_context_history(args)
+    manager, _context_path, history_root = _resolve_manager_context_history(args)
+    keep_days = args.keep_days
+    if keep_days is None:
+        keep_days = int(getattr(manager.config.history, "retention_days", DEFAULT_HISTORY_KEEP_DAYS))
+    if not bool(getattr(manager.config.history, "gzip_older", True)):
+        print("history.gzip_older is disabled in config; nothing to archive.")
+        return 0
     try:
         report = archive_history_events(
             history_root,
-            keep_days=args.keep_days,
+            keep_days=keep_days,
             dry_run=args.dry_run,
         )
     except ValueError as exc:
@@ -280,8 +286,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     archive_parser.add_argument(
         "--keep-days",
         type=int,
-        default=DEFAULT_HISTORY_KEEP_DAYS,
-        help=f"Uncompressed days to keep (default {DEFAULT_HISTORY_KEEP_DAYS}).",
+        default=None,
+        help=(
+            "Uncompressed days to keep "
+            f"(default from history.retention_days, else {DEFAULT_HISTORY_KEEP_DAYS})."
+        ),
     )
     archive_parser.add_argument(
         "--dry-run", action="store_true", help="List files and sizes without writing."

@@ -1478,3 +1478,217 @@ def _archive_history_file(
     finally:
         temp_path.unlink(missing_ok=True)
     return entry
+
+
+DEFAULT_SCRATCHPAD_KEEP_DAYS = 14
+DEFAULT_SCRATCHPAD_PROTECT = frozenset(
+    {"state.md", "deferred.md", "handoffs", "common", "plans"}
+)
+_DATED_SESSION_DIR = re.compile(r"(?:^|[-_])(\d{8})(?:$|[-_])")
+
+
+@dataclass
+class ScratchpadReapEntry:
+    """One scratchpad path selected for age-out."""
+
+    path: Path
+    kind: str
+    bytes_before: int
+    skipped: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": str(self.path),
+            "kind": self.kind,
+            "bytes_before": self.bytes_before,
+            "skipped": self.skipped,
+        }
+
+
+@dataclass
+class StorageReapReport:
+    """Combined history archive + scratchpad hygiene outcome."""
+
+    dry_run: bool
+    history_keep_days: int
+    scratchpad_keep_days: int
+    history: HistoryArchiveReport | None = None
+    scratchpad: list[ScratchpadReapEntry] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "dry_run": self.dry_run,
+            "history_keep_days": self.history_keep_days,
+            "scratchpad_keep_days": self.scratchpad_keep_days,
+            "history": self.history.to_dict() if self.history is not None else None,
+            "scratchpad": [entry.to_dict() for entry in self.scratchpad],
+            "scratchpad_candidates": sum(
+                1 for entry in self.scratchpad if entry.skipped is None
+            ),
+            "history_candidates": (
+                0
+                if self.history is None
+                else sum(1 for entry in self.history.entries if entry.skipped is None)
+            ),
+        }
+
+
+def _path_byte_size(path: Path) -> int:
+    try:
+        if path.is_symlink():
+            return 0
+        if path.is_file():
+            return path.stat().st_size
+        if path.is_dir():
+            total = 0
+            for child in path.rglob("*"):
+                try:
+                    if child.is_file() and not child.is_symlink():
+                        total += child.stat().st_size
+                except OSError:
+                    continue
+            return total
+    except OSError:
+        return 0
+    return 0
+
+
+def _mtime_date(path: Path) -> date | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).date()
+    except OSError:
+        return None
+
+
+def _is_dated_session_dir(name: str) -> bool:
+    return _DATED_SESSION_DIR.search(name) is not None
+
+
+def reap_scratchpad(
+    scratchpad_root: Path,
+    *,
+    keep_days: int = DEFAULT_SCRATCHPAD_KEEP_DAYS,
+    protect: Iterable[str] | None = None,
+    dry_run: bool = False,
+    today: date | None = None,
+) -> list[ScratchpadReapEntry]:
+    """Age out ``afs_agents`` clutter and dated session dirs under scratchpad.
+
+    Retains ``state.md``, ``deferred.md``, ``handoffs/``, and other protected
+    top-level names. Never follows symlinks.
+    """
+
+    if keep_days < 1:
+        raise ValueError("keep_days must be at least 1")
+    current = today or datetime.now(timezone.utc).date()
+    cutoff = current - timedelta(days=keep_days)
+    protected = {
+        name.strip()
+        for name in (protect if protect is not None else DEFAULT_SCRATCHPAD_PROTECT)
+        if str(name).strip()
+    }
+    entries: list[ScratchpadReapEntry] = []
+
+    if not scratchpad_root.is_dir() or scratchpad_root.is_symlink():
+        return entries
+
+    agents_root = scratchpad_root / "afs_agents"
+    if agents_root.is_dir() and not agents_root.is_symlink():
+        for child in sorted(agents_root.iterdir(), key=lambda p: p.name):
+            if child.name.startswith("."):
+                continue
+            mtime = _mtime_date(child)
+            if mtime is None or mtime > cutoff:
+                continue
+            entries.append(
+                _reap_scratchpad_path(
+                    child,
+                    kind="afs_agents",
+                    dry_run=dry_run,
+                )
+            )
+
+    for child in sorted(scratchpad_root.iterdir(), key=lambda p: p.name):
+        if child.name.startswith(".") or child.name in protected:
+            continue
+        if child.name == "afs_agents":
+            continue
+        if not child.is_dir() or child.is_symlink():
+            continue
+        if not _is_dated_session_dir(child.name):
+            continue
+        mtime = _mtime_date(child)
+        if mtime is None or mtime > cutoff:
+            continue
+        entries.append(
+            _reap_scratchpad_path(
+                child,
+                kind="dated_session",
+                dry_run=dry_run,
+            )
+        )
+    return entries
+
+
+def _reap_scratchpad_path(
+    path: Path,
+    *,
+    kind: str,
+    dry_run: bool,
+) -> ScratchpadReapEntry:
+    entry = ScratchpadReapEntry(
+        path=path,
+        kind=kind,
+        bytes_before=_path_byte_size(path),
+    )
+    if path.is_symlink():
+        entry.skipped = "symlink"
+        return entry
+    if dry_run:
+        return entry
+    try:
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.is_file():
+            path.unlink()
+        else:
+            entry.skipped = "not a regular file or directory"
+    except OSError as exc:
+        entry.skipped = str(exc)
+    return entry
+
+
+def reap_storage(
+    *,
+    history_root: Path | None = None,
+    scratchpad_root: Path | None = None,
+    history_keep_days: int = DEFAULT_HISTORY_KEEP_DAYS,
+    scratchpad_keep_days: int = DEFAULT_SCRATCHPAD_KEEP_DAYS,
+    scratchpad_protect: Iterable[str] | None = None,
+    gzip_history: bool = True,
+    dry_run: bool = True,
+    today: date | None = None,
+) -> StorageReapReport:
+    """Dry-run or apply history gzip retention plus scratchpad hygiene."""
+
+    report = StorageReapReport(
+        dry_run=dry_run,
+        history_keep_days=history_keep_days,
+        scratchpad_keep_days=scratchpad_keep_days,
+    )
+    if history_root is not None and gzip_history:
+        report.history = archive_history_events(
+            history_root,
+            keep_days=history_keep_days,
+            dry_run=dry_run,
+            today=today,
+        )
+    if scratchpad_root is not None:
+        report.scratchpad = reap_scratchpad(
+            scratchpad_root,
+            keep_days=scratchpad_keep_days,
+            protect=scratchpad_protect,
+            dry_run=dry_run,
+            today=today,
+        )
+    return report

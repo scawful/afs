@@ -410,6 +410,78 @@ def check_embedding_indexes(config_path: Path | None = None) -> DiagnosticResult
     )
 
 
+def check_storage_retention(config_path: Path | None = None) -> DiagnosticResult:
+    """Dry-run history/scratchpad retention and suggest ``afs history reap``."""
+    try:
+        config, manager, context_root = _load_runtime(config_path)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must report loader failures.
+        return DiagnosticResult(
+            name="storage_retention",
+            status="warn",
+            message=f"Cannot resolve retention state: {exc}",
+        )
+
+    if not context_root.exists():
+        return DiagnosticResult(
+            name="storage_retention",
+            status="ok",
+            message="Context root missing; retention check skipped",
+        )
+
+    try:
+        from .context_paths import resolve_mount_root
+        from .history import reap_storage
+
+        history_root = resolve_mount_root(
+            context_root, MountType.HISTORY, config=manager.config
+        )
+        scratchpad_root = resolve_mount_root(
+            context_root, MountType.SCRATCHPAD, config=manager.config
+        )
+        report = reap_storage(
+            history_root=history_root,
+            scratchpad_root=scratchpad_root,
+            history_keep_days=int(getattr(config.history, "retention_days", 30)),
+            scratchpad_keep_days=int(getattr(config.scratchpad, "retention_days", 14)),
+            scratchpad_protect=list(getattr(config.scratchpad, "protect", [])),
+            gzip_history=bool(getattr(config.history, "gzip_older", True)),
+            dry_run=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - retention probe is advisory.
+        return DiagnosticResult(
+            name="storage_retention",
+            status="warn",
+            message=f"Retention dry-run failed: {exc}",
+        )
+
+    payload = report.to_dict()
+    hist_n = int(payload.get("history_candidates") or 0)
+    pad_n = int(payload.get("scratchpad_candidates") or 0)
+    if hist_n == 0 and pad_n == 0:
+        return DiagnosticResult(
+            name="storage_retention",
+            status="ok",
+            message=(
+                f"No retention candidates "
+                f"(history_keep_days={payload['history_keep_days']}, "
+                f"scratchpad_keep_days={payload['scratchpad_keep_days']})"
+            ),
+            details=[payload],
+        )
+
+    return DiagnosticResult(
+        name="storage_retention",
+        status="warn",
+        message=(
+            f"{hist_n} history file(s) and {pad_n} scratchpad path(s) exceed retention; "
+            "preview with `afs history reap --dry-run`, apply with `--apply`"
+        ),
+        fix_available=False,
+        fix_description="afs history reap --apply",
+        details=[payload],
+    )
+
+
 def check_context_index(config_path: Path | None = None) -> DiagnosticResult:
     """Check whether the active context index exists and matches filesystem state."""
     try:
@@ -926,6 +998,7 @@ def run_all_checks(
         ("extensions", lambda: check_extensions(config_path)),
         ("skills", lambda: check_skills(config_path)),
         ("context_index", lambda: check_context_index(config_path)),
+        ("storage_retention", lambda: check_storage_retention(config_path)),
         ("mcp_server", lambda: check_mcp_server(config_path)),
     ]
     return _run_checks(checks, auto_fix=auto_fix)

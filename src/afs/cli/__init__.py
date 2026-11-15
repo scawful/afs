@@ -320,6 +320,11 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
     # Register events commands
     events.register_parsers(subparsers)
 
+    # Register history retention commands
+    from . import history as history_cli
+
+    history_cli.register_parsers(subparsers)
+
     # Register claude commands
     claude.register_parsers(subparsers)
 

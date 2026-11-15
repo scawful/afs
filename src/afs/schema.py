@@ -584,16 +584,47 @@ class HistoryConfig:
     max_inline_chars: int = 4000
     payload_dir_name: str = "payloads"
     redact_sensitive: bool = True
+    # Keep this many days of uncompressed daily event logs; older days gzip.
+    retention_days: int = 30
+    gzip_older: bool = True
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> HistoryConfig:
+        retention_days = data.get("retention_days", cls().retention_days)
+        if not isinstance(retention_days, int) or retention_days < 1:
+            retention_days = cls().retention_days
         return cls(
             enabled=bool(data.get("enabled", True)),
             include_payloads=bool(data.get("include_payloads", False)),
             max_inline_chars=int(data.get("max_inline_chars", cls().max_inline_chars)),
             payload_dir_name=str(data.get("payload_dir_name", cls().payload_dir_name)),
             redact_sensitive=bool(data.get("redact_sensitive", True)),
+            retention_days=retention_days,
+            gzip_older=bool(data.get("gzip_older", True)),
         )
+
+
+@dataclass
+class ScratchpadConfig:
+    """Scratchpad hygiene defaults for operator reap / doctor suggestions."""
+
+    retention_days: int = 14
+    # Always retain these top-level names under the scratchpad mount.
+    protect: list[str] = field(
+        default_factory=lambda: ["state.md", "deferred.md", "handoffs", "common", "plans"]
+    )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ScratchpadConfig:
+        retention_days = data.get("retention_days", cls().retention_days)
+        if not isinstance(retention_days, int) or retention_days < 1:
+            retention_days = cls().retention_days
+        protect_raw = data.get("protect")
+        if isinstance(protect_raw, list):
+            protect = [str(item) for item in protect_raw if isinstance(item, str) and item.strip()]
+        else:
+            protect = list(cls().protect)
+        return cls(retention_days=retention_days, protect=protect)
 
 
 @dataclass
@@ -1252,6 +1283,7 @@ class AFSConfig:
     # Keep newly added fields at the end so existing positional constructors
     # retain their pre-0.3 meaning.
     agents: AgentsConfig = field(default_factory=AgentsConfig)
+    scratchpad: ScratchpadConfig = field(default_factory=ScratchpadConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> AFSConfig:
@@ -1279,6 +1311,7 @@ class AFSConfig:
         hivemind = HivemindConfig.from_dict(data.get("hivemind", {}))
         session_pack_cache = SessionPackCacheConfig.from_dict(data.get("session_pack_cache", {}))
         verification = VerificationConfig.from_dict(data.get("verification", {}))
+        scratchpad = ScratchpadConfig.from_dict(data.get("scratchpad", {}))
         return cls(
             general=general,
             plugins=plugins,
@@ -1298,6 +1331,7 @@ class AFSConfig:
             hivemind=hivemind,
             session_pack_cache=session_pack_cache,
             verification=verification,
+            scratchpad=scratchpad,
         )
 
 
