@@ -418,7 +418,7 @@ def check_mcp_slim_census(config_path: Path | None = None) -> DiagnosticResult:
 
         _config, manager, _context_root = _load_runtime(config_path)
         registry = build_mcp_registry(manager)
-        all_names = {tool.name for tool in registry.list_tools()}
+        all_names = set(registry.tools)
         extras = sorted(all_names - set(FROZEN_SLIM_MCP_TOOLS))
     except Exception as exc:  # noqa: BLE001 - census is advisory.
         return DiagnosticResult(
