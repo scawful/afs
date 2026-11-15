@@ -41,7 +41,11 @@ Candidates for an `afs-scawful` / work extension later:
 |---|---|
 | `fs.*` MCP aliases | Soft-deprecated; removal in **0.3** |
 | `afs.search` / `afs.codebase.*` | Legacy full-catalog only; prefer `context.query` / scoped `context.search` |
-| Physical move of `training/` / embeddings stacks | Follow-on PR after this gate lands |
+| Physical move of `training/` / embeddings stacks | **In progress:** `afs-scawful` now hosts extracted
+  `gateway/`, `generators/` (incl. CoT), and `training/lifecycle.py` copies with local imports.
+  Core `afs.training` / `generators` / `tokenizer` / `gateway` remain for compatibility until a
+  cutover shim PR lands (blocked on making `afs_scawful.training` lazy w.r.t. optional deps).
+  Hard-remove of MCP `fs.*` stays scheduled for **0.3**. |
 
 ## Retention defaults
 
