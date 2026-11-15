@@ -178,22 +178,14 @@ def test_tools_list_defaults_to_slim_catalog_without_profile(
     tools = response["result"]["tools"]
     tool_names = {t["name"] for t in tools}
 
-    assert tool_names == DEFAULT_MCP_TOOL_CATALOG | {
-        "handoff.create",
-        "handoff.list",
-        "handoff.read",
-        "messages.ack",
-        "messages.read",
-        "messages.send",
-        "note.create",
-        "note.list",
-        "note.read",
-        "skill.match",
-        "skill.read",
-    }
+    from afs.mcp.catalog import FROZEN_SLIM_MCP_TOOLS
+
+    # Growing slim requires CHANGELOG + FROZEN_SLIM_MCP_TOOLS update.
+    assert tool_names == FROZEN_SLIM_MCP_TOOLS
     assert "context.search" not in tool_names
     assert "context.repair" not in tool_names
     assert "session.pack" not in tool_names
+    assert "fs.read" not in tool_names
 
 
 def test_tools_list_full_catalog_without_profile(tmp_path: Path, monkeypatch) -> None:

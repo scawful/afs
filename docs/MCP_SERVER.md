@@ -288,13 +288,17 @@ Preferred agent-facing file operations:
 - `context.move`
 - `context.list`
 
-Legacy compatibility aliases:
+Legacy compatibility aliases (deprecated; removal scheduled for 0.3):
 
-- `fs.read`
-- `fs.write`
-- `fs.delete`
-- `fs.move`
-- `fs.list`
+- `fs.read` → `context.read`
+- `fs.write` → `context.write`
+- `fs.delete` → `context.delete`
+- `fs.move` → `context.move`
+- `fs.list` → `context.list`
+
+Tool descriptions mark these as deprecated aliases. Prefer `context.*` in new
+agent configs. The slim default catalog omits `fs.*`; they remain available
+under `AFS_MCP_TOOL_CATALOG=full`.
 
 Optional tools for explicit workflows:
 
@@ -477,7 +481,14 @@ max_content_chars = 12000
   open; pass `include_legacy=true` on `messages.read` only when you need a
   forced re-scan.
 - Default `tools/list` is the slim catalog (context + messages + notes +
-  handoffs + skills). Use `AFS_MCP_TOOL_CATALOG=full` for the full surface.
+  handoffs + skills). The exact set is frozen as
+  `afs.mcp.catalog.FROZEN_SLIM_MCP_TOOLS` and guarded in CI—growing slim
+  requires a CHANGELOG note plus an allowlist update. Use
+  `AFS_MCP_TOOL_CATALOG=full` for the full surface (including deprecated
+  `fs.*` and legacy `afs.search` / `afs.codebase.*`).
+- Legacy unscoped search tools (`afs.search`, `afs.codebase.symbols`,
+  `afs.codebase.index`) stay in the full catalog only; prefer
+  `context.query` / scoped `context.search`.
 
 After upgrading AFS, restart the MCP client process so it loads the new server
 code. Cursor uses `afs mcp serve` via `~/.cursor/mcp.json`; the `afs` wrapper

@@ -42,3 +42,4 @@ personas/
 
 # Documentation build output
 /site/
+.codex/
