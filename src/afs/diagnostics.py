@@ -410,6 +410,35 @@ def check_embedding_indexes(config_path: Path | None = None) -> DiagnosticResult
     )
 
 
+def check_mcp_slim_census(config_path: Path | None = None) -> DiagnosticResult:
+    """Report full-catalog MCP tools outside the frozen slim allowlist."""
+    try:
+        from .mcp.catalog import FROZEN_SLIM_MCP_TOOLS
+        from .mcp_server import build_mcp_registry
+
+        _config, manager, _context_root = _load_runtime(config_path)
+        registry = build_mcp_registry(manager)
+        all_names = {tool.name for tool in registry.list_tools()}
+        extras = sorted(all_names - set(FROZEN_SLIM_MCP_TOOLS))
+    except Exception as exc:  # noqa: BLE001 - census is advisory.
+        return DiagnosticResult(
+            name="mcp_slim_census",
+            status="warn",
+            message=f"Unable to census MCP tools: {exc}",
+        )
+
+    return DiagnosticResult(
+        name="mcp_slim_census",
+        status="ok",
+        message=(
+            f"slim={len(FROZEN_SLIM_MCP_TOOLS)} full={len(all_names)} "
+            f"outside_slim={len(extras)} "
+            "(set AFS_MCP_TOOL_CATALOG=full to expose non-slim tools)"
+        ),
+        details=[{"outside_slim": extras[:50], "outside_slim_truncated": max(0, len(extras) - 50)}],
+    )
+
+
 def check_storage_retention(config_path: Path | None = None) -> DiagnosticResult:
     """Dry-run history/scratchpad retention and suggest ``afs history reap``."""
     try:
@@ -999,6 +1028,7 @@ def run_all_checks(
         ("skills", lambda: check_skills(config_path)),
         ("context_index", lambda: check_context_index(config_path)),
         ("storage_retention", lambda: check_storage_retention(config_path)),
+        ("mcp_slim_census", lambda: check_mcp_slim_census(config_path)),
         ("mcp_server", lambda: check_mcp_server(config_path)),
     ]
     return _run_checks(checks, auto_fix=auto_fix)

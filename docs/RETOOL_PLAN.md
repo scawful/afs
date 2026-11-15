@@ -1,20 +1,32 @@
 # AFS Retool Plan (2026-10-27)
 
-Status: in progress. Built from a read-only audit of `src/afs/` (333 files, ~132K LOC)
+Status: in progress → **afs-lite waves landed on `main` (2026-11-14)**. See
+[AFS_LITE_BOUNDARY.md](AFS_LITE_BOUNDARY.md) for the current product boundary.
+
+Built from a read-only audit of `src/afs/` (333 files, ~132K LOC)
 and the live context roots. Numbers marked (verified) were re-checked by hand;
 the rest come from the audit with file:line references below.
 
-Progress (2026-10-27):
+Progress (2026-10-27 → 2026-11-14):
 
 - Prerequisite: done. The dirty BLE001 cleanup landed as #125; `49ab30d`
   (`--request-id`) landed inside #124.
-- Phase 1 (approvals → SQLite): code merged as #124; Barista reader merged as
-  barista#37. Live once the runtime checkout is updated.
-- Phase 2 (storage hygiene): code merged as #123. The live DB compaction,
-  registry reap, and events archive still need an owner go-ahead.
-- Phase 3, first step (dead packages): merged as #122. The remaining Phase 3
-  rows are open.
+- Phase 1 (approvals → SQLite): **done** (#124 + Barista#37). Agent gates and
+  work approvals are SQLite-backed.
+- Phase 2 (storage hygiene): index exclusions for `embeddings/` / `*.bak*` are
+  in core; history gzip + scratchpad age-out ship as `afs history reap` /
+  `afs events archive` with doctor dry-run suggestions. Live DB VACUUM and
+  deleting empty embedding JSON blobs still need an owner go-ahead.
+- Phase 3 dead packages: **done** for zero-ref trees (benchmark*, evaluation,
+  quality, deployment, comparison, pretraining, moe, registry, notifications).
+  `health/` kept (gemini/antigravity). Training/embeddings **gated** (not yet
+  physically moved) behind extras / `AFS_ENABLE_*`.
+- MCP: schemas extracted to `afs.mcp.builtin_tools`; slim catalog frozen as
+  `FROZEN_SLIM_MCP_TOOLS`. `fs.*` soft-deprecated (removal in 0.3).
+- SQLite mail: **done** (`hivemind/messages.sqlite3`).
 - Decisions 1 and 3 below are resolved (land the cleanup; SQLite now).
+- Still open: physical training extract to `afs-scawful`, personal/work
+  extension split, layout v1/v2 hard delete, Phase 4 mega-db.
 
 ## Prerequisite: get `main` clean
 

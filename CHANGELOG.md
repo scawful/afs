@@ -6,6 +6,28 @@ All notable changes to AFS are documented here. AFS follows Semantic Versioning 
 
 ### Added
 
+- **afs-lite boundary** ([docs/AFS_LITE_BOUNDARY.md](docs/AFS_LITE_BOUNDARY.md)):
+  core agent surface is files, mail, status, handoffs, and skill roots.
+  Training and embeddings CLI/MCP entry points fail closed unless
+  `afs[training]` / `afs[embeddings]` (or provider SDKs) are present or
+  `AFS_ENABLE_TRAINING=1` / `AFS_ENABLE_EMBEDDINGS=1` is set. The repo
+  `./scripts/afs` wrapper enables both by default.
+- History / scratchpad retention defaults (`history.retention_days=30`,
+  `scratchpad.retention_days=14`) with `afs history reap --dry-run|--apply`
+  and an `afs doctor` dry-run suggestion. Daily event logs still gzip via
+  `afs events archive`; indexers continue to exclude `embeddings/` and `*.bak*`.
+- Frozen slim MCP catalog (`afs.mcp.catalog.FROZEN_SLIM_MCP_TOOLS`) guarded in
+  CI; builtin tool schemas live in `afs.mcp.builtin_tools`.
+
+### Changed
+
+- Soft-deprecate MCP `fs.*` aliases (removal scheduled for 0.3) and mark
+  legacy `afs.search` / `afs.codebase.*` as prefer-`context.query` surfaces.
+- Removed unreachable packages: benchmark(s), evaluation, quality, deployment,
+  comparison, pretraining, moe, registry, notifications (health retained).
+
+### Added (earlier)
+
 - Compact, read-only session startup with native skill roots and optional full
   prompt scaffolding. Task constraints, schemas, and approval guidance remain.
 - SHA-256 conditional text writes shared by CLI and MCP, plus single-file SSH
