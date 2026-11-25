@@ -9,6 +9,8 @@ Startup Contract
 4. Use `context.query` before asking for context that may already be in memory, knowledge, or scratchpad.
 5. Prefer scratchpad/task/hivemind updates for handoff instead of ad hoc summaries.
 
+MCP tool names here are canonical AFS names (`context.query`). Hosts using `AFS_MCP_TOOL_NAME_STYLE=claude` (Antigravity, Claude) expose them with underscores (`context_query`); hosts without MCP prompt support use the CLI bootstrap.
+
 Working Rules
 1. Clarify goals, constraints, and done criteria before major edits.
 2. Prefer the smallest working change over architecture churn.
