@@ -1,72 +1,53 @@
-# Agent harness kit
+# Agent Harness Kit
 
-Shared rules, skills, instruction templates and hooks used by the Claude,
-Codex and Gemini/Antigravity agents that run on top of AFS. This folder is
-a snapshot taken on 2026-11-04 from the personal Mac, where the canonical
-copies live in `~/src/docs/guides/ai-coder/`, `~/.codex/skills/`,
-`~/src/scripts/` and each agent's home config. Refresh it from those copies;
-do not fork the rules here.
+Portable shared rules, skills, instruction templates, and hooks used by Claude Code, OpenAI Codex, Cursor, and Antigravity (`agy`) / Gemini SDK agents running on top of AFS. Refreshed on 2026-11-26 from the canonical cross-harness setup; zero personal paths or credentials are checked into this directory.
 
 ## Contents
 
 | Path | Purpose |
 | --- | --- |
-| `AGENT_HARNESS_CONTRACT.md` | One contract for every agent: act-and-finish, domain language and debugging, handoffs, messaging, tool selection, usage checkpoints. |
-| `AGENT_COMMUNICATION_STANDARD.md` | Response shape, parallel lists, judgment calls, exact-text exceptions, handoff payload. |
-| `ENGINEERING_PRACTICE_SOURCES.md` | Provenance for the domain-modeling, systematic-debugging and Ponytail adaptations, with upstream MIT notices. |
+| `AGENT_HARNESS_CONTRACT.md` | Shared contract for all harnesses: act-and-finish, debugging, handoffs, messaging, tool selection, usage checkpoints. |
+| `AGENT_COMMUNICATION_STANDARD.md` | Response shape, parallel items, judgment calls, exact-text exceptions, handoff payload. |
+| `ENGINEERING_PRACTICE_SOURCES.md` | Provenance and upstream notices for domain-modeling, debugging, and verification rules. |
 | `REASONING_EFFORT.md` | Task-based reasoning effort guide. |
-| `AGENT_STORAGE_HYGIENE.md` | Pre-authorized build-output cleanup and the worktree preservation gate. |
-| `AGENT_AUTOMATION_PLAYBOOK.md` | Host entry points referenced by the contract (some scripts are personal-Mac only). |
-| `skills/focused-verification/`, `skills/handoff-writer/` | Codex-format skills (`SKILL.md` + `agents/openai.yaml`); Claude and Gemini read the same `SKILL.md`. |
-| `instructions/` | Templates for `~/.claude/CLAUDE.md`, `~/.gemini/GEMINI.md`, `~/.codex/AGENTS.md` and `~/AGENTS.md`. |
-| `hooks/` | Claude Code hooks, Gemini CLI SessionStart hook, Antigravity AFS MCP config (slim tool catalog). |
-| `../../scripts/harness/` | `afs-session-start` (SessionStart briefing), `agent-pr-gate` (PR approval gate), `worktree-preserve` (+ its unittest). |
+| `AGENT_STORAGE_HYGIENE.md` | Pre-authorized build-artifact cleanup (`agent-delete`) and worktree preservation rules. |
+| `AGENT_AUTOMATION_PLAYBOOK.md` | Host entry points and runtime automation patterns. |
+| `skills/` | Six portable `SKILL.md` skills (`focused-verification`, `handoff-writer`, `code-review-findings`, `config-change-safety`, `stale-knowledge-auditor`, `skill-maintainer`). |
+| `instructions/` | Global templates: `CLAUDE.md`, `CODEX_AGENTS.md`, `GEMINI.md` (Antigravity `agy` + Gemini SDK), `CURSOR_RULES.mdc`, `HOME_AGENTS.md`. |
+| `hooks/` | Hook and MCP config templates: `claude-settings.hooks.json`, `codex-config.toml.snippet`, `cursor-hooks.json`, `cursor-mcp.json`, `antigravity-mcp_config.json`, `gemini-settings.hooks.json`, `gemini-afs_start.sh`. |
+| `../../scripts/harness/` | `install-harness-kit.sh`, `afs-session-start`, `agent-pr-gate`, `worktree-preserve`. |
 
-## Install on another machine
+See [`docs/AFS_BEST_PRACTICES.md`](../AFS_BEST_PRACTICES.md) for the full cross-harness integration guide and work-machine upgrade playbook.
+
+## Install on Another Machine
 
 `<AFS_ROOT>` is this checkout (for example `~/src/lab/afs`).
 
-1. Pull and set up the runtime:
+1. Pull and refresh the Python environment:
 
    ```sh
    cd <AFS_ROOT> && git pull && ./scripts/afs-venv
    ```
 
-2. Point the doc paths the instruction templates use at this folder, if that
-   path does not already exist:
+2. Run the portable installer (dry-run first, then `--apply`):
 
    ```sh
-   mkdir -p ~/src/docs/guides && ln -s <AFS_ROOT>/docs/agent-harness ~/src/docs/guides/ai-coder
+   ./scripts/harness/install-harness-kit.sh --render-configs /tmp/afs-rendered
+   ./scripts/harness/install-harness-kit.sh --apply --skills --instructions --render-configs /tmp/afs-rendered
    ```
 
-3. Copy the instruction templates you want, after reviewing any existing file:
+   This links `<AFS_ROOT>/docs/agent-harness` to `~/src/docs/guides/ai-coder`, installs the 6 portable skills into `~/.agents/skills/` with symlinks into `~/.codex/skills/`, `~/.claude/skills/`, and `~/.gemini/config/skills/`, copies instruction files cleanly (without clobbering existing files unless `--force` is passed), and renders path-substituted hook/MCP snippets into `/tmp/afs-rendered/`.
+
+3. Merge rendered hook/MCP configs into your client configs (`~/.claude/settings.json`, `~/.codex/config.toml`, `~/.cursor/mcp.json`, `~/.cursor/hooks.json`, `~/.gemini/config/mcp_config.json`), then verify:
 
    ```sh
-   cp docs/agent-harness/instructions/CLAUDE.md ~/.claude/CLAUDE.md
-   cp docs/agent-harness/instructions/GEMINI.md ~/.gemini/GEMINI.md
-   cp docs/agent-harness/instructions/CODEX_AGENTS.md ~/.codex/AGENTS.md
+   <AFS_ROOT>/scripts/afs doctor
+   <AFS_ROOT>/scripts/afs embeddings probe
    ```
-
-4. Merge the `hooks` block from `hooks/claude-settings.hooks.json` into
-   `~/.claude/settings.json`, and the one from `hooks/gemini-settings.hooks.json`
-   into `~/.gemini/settings.json`. Replace `<AFS_ROOT>` and `<HOME>` with
-   absolute paths. Install `hooks/gemini-afs_start.sh` as
-   `~/.gemini/hooks/afs_start.sh`.
-
-5. For Antigravity, merge `hooks/antigravity-mcp_config.json` into
-   `~/.gemini/config/mcp_config.json` (same `<AFS_ROOT>` replacement).
-
-6. Copy the skills into each host's skill root (for example
-   `~/.codex/skills/`, `~/.claude/skills/`).
-
-Verify with `<AFS_ROOT>/scripts/afs session bootstrap --short --path "$PWD"`
-and one Claude or Gemini session start: the first turn shows
-"AFS short bootstrap for …".
 
 ## Notes
 
 - `agent-pr-gate` only gates repos under `~/src/hobby`; elsewhere it is a no-op.
-- `worktree-preserve` targets Codex desktop chat/worktree archives. Run its
-  tests with `python3 scripts/harness/test_worktree_preserve.py`.
-- Never copy host credentials (`~/.gemini/oauth_creds.json` and similar) into
-  this repo; templates carry paths and tool lists only.
+- `worktree-preserve` targets Codex desktop chat/worktree archives. Run its tests with `python3 scripts/harness/test_worktree_preserve.py`.
+- Legacy `gemini-cli` (`gemini`) is deprecated; prefer Antigravity (`agy`) and shared `~/.agents/skills/` links.
+- Never copy host credentials (`~/.gemini/oauth_creds.json`, tokens, API keys) into git.

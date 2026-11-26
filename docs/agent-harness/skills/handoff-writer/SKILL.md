@@ -26,7 +26,7 @@ Follow the [shared transfer and usage rules](../../AGENT_HARNESS_CONTRACT.md#han
 5. If the user asked for an AFS handoff, write the actual file before final response.
 
 ## Output Shape
-Use the shared compact payload headings unless the task has an established handoff format.
+Use the shared compact payload headings (`State`, `Action`, `Result`, `Blocker`, `Next`) unless the task has an established handoff format.
 
 ## Guardrails
 - Do not update `memory` or `knowledge` mounts unless explicitly requested.

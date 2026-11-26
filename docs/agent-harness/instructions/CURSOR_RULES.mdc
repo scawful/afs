@@ -1,0 +1,23 @@
+---
+description: Shared AFS harness contract, slim MCP workflow, communication standard, and storage hygiene across workspaces.
+alwaysApply: true
+---
+
+# Global Cursor Agent Rules (AFS)
+
+Follow `~/src/docs/guides/ai-coder/AGENT_HARNESS_CONTRACT.md`,
+`~/src/docs/guides/ai-coder/AGENT_COMMUNICATION_STANDARD.md`, and
+`~/src/docs/guides/ai-coder/AGENT_STORAGE_HYGIENE.md`. Project `AGENTS.md`
+files add local constraints and take precedence.
+
+## AFS Context & Slim Tool Surface
+- Rely on the `SessionStart` bootstrap packet or run `<AFS_ROOT>/scripts/afs session bootstrap --short --path <workspace> --json` once at startup.
+- Use the frozen 16-tool slim AFS MCP catalog (`context.status`, `context.query`, `context.read`, `context.list`, `context.write`, `messages.*`, `note.*`, `handoff.*`, `skill.*`); avoid deprecated `fs.*` aliases.
+- Store shared handoffs and evidence in `scratchpad/`, durable discoveries only in `note.*` / `handoff.*`, and update `memory/` or `knowledge/` only on user request.
+- Use `afs search --semantic --provider auto "<query>"` (run `afs embeddings probe` to verify local LM Studio / Ollama / MLX backends before falling back to cloud).
+
+## Communication & Judgment Calls
+1. Put the result or next action first; preserve exact commands, paths, identifiers, and errors.
+2. Decide mechanical and low-stakes reversible calls yourself in one line.
+3. For judgment calls (architecture, design, priority, taste), lead with your pick, give 2–4 numbered options with costs, ask one question, and state disagreements before acting.
+4. Report changed files, verification commands run with observed outcomes, and remaining limitations.

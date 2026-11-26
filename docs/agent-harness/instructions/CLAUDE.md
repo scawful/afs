@@ -27,6 +27,25 @@ run, which fix makes the build pass); keep recommending on those.
 5. When you disagree with my plan or stated preference, say so before acting
    and make the strongest case against it. Do not silently do something else.
 
+### When to ask
+
+1. Decide mechanical and low-stakes calls yourself and state the choice in one
+   line. Low-stakes means inside the task's scope and reversible in a few
+   minutes.
+2. Ask only for real judgment calls, and for actions that need approval
+   (destructive, outward-facing, security, sudo).
+3. Big design questions have more than 4 real options, or an open premise.
+   For these, write the trade-offs in prose and ask an open question. Do not
+   use buttons or `AskUserQuestion` for them.
+4. Do not end a turn with a question just to offer the next step. Name the
+   next step in one line. Ask only when the work waits on a user answer.
+
+### Rejections become skill lessons
+
+When a user rejects a design, add the portable lesson to the canonical skill in
+`~/.agents/skills/` (show the diff, record the before hash, keep a rollback
+copy). Keep project-specific details in the project's AFS notes.
+
 The `i-have-adhd` plugin is installed. Its always-on flag is
 `~/.claude/.i-have-adhd-always`. System instructions, safety, correctness, and
 the requested task take priority. The judgment-call rules above match the

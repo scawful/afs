@@ -30,4 +30,12 @@ Prove the task-relevant behavior with the cheapest trustworthy check.
 - Avoid tests that merely mirror implementation or reversible trivial edits. Preserve meaningful regression coverage and required repo checks.
 - Report known baseline failures and unrun checks honestly. Don't claim full coverage from a smoke test.
 
+## Process Cost
+Process that does not catch bugs costs the effort that hard bugs need.
+- Diff the output (compiled bytes, generated files) before running anything live; run live checks only for behavior the diff cannot show.
+- Find regressions with git history (`git log -S`, `git bisect`), not with saved copies of every build.
+- Overwrite test artifacts in place; keep one previous copy.
+- A feature flag is temporary: the commit that ships the feature deletes the flag.
+- The commit message is the record for a routine fix; no separate evidence folder.
+
 Read [adaptation provenance](../../ENGINEERING_PRACTICE_SOURCES.md) only when reviewing the source decisions.

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "<AFS_ROOT>/.venv/bin/python <AFS_ROOT>/scripts/harness/afs-session-start --host cursor",
+        "timeout": 15
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "<AFS_ROOT>/scripts/harness/agent-pr-gate hook --host cursor-shell",
+        "matcher": "gh|agent-pr-gate",
+        "timeout": 5
+      }
+    ],
+    "beforeMCPExecution": [
+      {
+        "command": "<AFS_ROOT>/scripts/harness/agent-pr-gate hook --host cursor-mcp",
+        "timeout": 5
+      }
+    ]
+  }
+}

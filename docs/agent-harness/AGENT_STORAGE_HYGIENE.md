@@ -14,16 +14,39 @@ Clean up resources created or used by the task before declaring it complete.
 Review older agent-generated output in that same project when building or
 deploying again. Do not turn an ordinary task into a whole-home cleanup.
 
-Source code, Git metadata/worktrees, uncommitted changes, models, datasets,
+Unmerged Git worktrees, uncommitted changes, source code, models, datasets,
 ROMs, saves, recordings, sample libraries, credentials, user backups, and agent
 session history are outside this automatic deletion policy. Preserve those
 even when an agent created them or they are inside an ignored directory.
-Archiving unique data needs its own task authorization and verified copies.
+Deleting **clean, merged Git worktrees** (`git worktree remove` + `git branch -d`)
+is pre-authorized immediately after merge once all commits are merged into the
+target branch, `git status --short` is empty, and `git status --ignored --short`
+contains only regenerable caches or build outputs. Archiving unique data needs
+its own task authorization and verified copies.
 
-## Before archiving a chat or worktree
+## Worktree cleanup and chat archiving
 
-Chat archiving can remove attached managed worktrees. Git recovery snapshots
-omit ignored files. Before any chat/worktree archive or managed-checkout removal:
+Choose the path that matches worktree risk:
+
+### 1. Clean merged worktrees (default fast path)
+
+Do **not** run `~/src/scripts/worktree-preserve` or hold merged worktrees on disk.
+Immediately after merge into the target branch:
+
+1. Verify all commits are landed (`git merge-base --is-ancestor HEAD <target>` passes).
+2. Verify `git status --short` is empty (no uncommitted edits or untracked files).
+3. Check `git status --ignored --short` to confirm ignored entries are only
+   regenerable caches or build outputs (no unique ROMs, saves, states, or
+   evidence).
+4. Delete the worktree and branch immediately via `git worktree remove <path>`
+   and `git branch -d <branch>`.
+
+### 2. At-risk worktrees and uninspected chat archives (preservation gate)
+
+Run `~/src/scripts/worktree-preserve` **only** when removing or archiving an
+**unmerged**, **dirty**, or **unique-data** worktree (holds untracked or ignored
+ROMs, saves, states, profiles, helpers, or uncopied runtime evidence), or when a
+chat archive could remove uninspected attached checkouts:
 
 1. Run `python3 ~/src/scripts/worktree-preserve inventory --thread <exact-chat-id>`
    and save its complete output outside every checkout. It must cover every
@@ -50,14 +73,16 @@ The tool never archives or deletes originals. It fails closed on incomplete insp
 insufficient capacity, unstable reads or failed verification.
 
 The Codex automatic-cleanup toggle controls age/count cleanup only. Explicit
-chat archives still remove worktrees, and direct UI/API archives can bypass this
-guard. Do not use those archive paths before this preservation gate passes.
-This is a required agent procedure, not an interception installed in the app.
+chat archives can still remove uninspected attached worktrees, and direct UI/API
+archives bypass this guard. Do not archive a thread with uninspected, unmerged,
+or dirty attached worktrees before this preservation gate passes. This is a
+required agent procedure, not an interception installed in the app.
 
 ## Retention defaults
 
 | Artifact | Keep | Cleanup point |
 | --- | --- | --- |
+| Merged clean task worktrees | None | Delete immediately after merge via `git worktree remove` + `git branch -d` |
 | Reusable build output | One directory per active checkout and required toolchain/configuration; reuse it instead of timestamping copies | Remove superseded configurations when no task needs them |
 | Disposable task/worktree builds | Only output needed for an active task, pending acceptance, or a specific reproduction | Remove bulk output when the task completes; review inactive output older than 7 days on the next project task |
 | Application rollback copies | The 2 newest verified working rollback copies per app, plus any explicitly required recovery copy | Prune older generated backups only after the replacement passes launch and task-relevant checks |
@@ -123,4 +148,9 @@ locations, not blanket deletion commands.
 Close build/deployment work with one storage status: what was removed, approximate
 space reclaimed, and which rollback copies or pending-task artifacts remain.
 If no generated output was created or made obsolete, no storage report is needed.
-This policy is an instruction for agents; it does not install a scheduled cleaner.
+
+Supported entrypoint: `~/src/scripts/agent-storage-reaper` (`dry-run`, `apply`,
+`weekly`). Weekly LaunchAgent `com.scawful.agent-storage-reaper` inventories on
+Sunday 12:05 and applies eligible build/ccache/merged cleanup only when free
+space is under 200 GiB. Agents may run `agent-storage-reaper dry-run` after a
+swarm consolidate pass; do not invent ad-hoc `rm` of build trees.

@@ -20,6 +20,12 @@ Follow `~/src/docs/guides/ai-coder/AGENT_HARNESS_CONTRACT.md` and
    the communication standard's `Judgment Calls` section: lead with your pick,
    give 2–4 numbered options with costs, ask one question, and argue
    disagreements before acting.
+9. Decide mechanical and low-stakes calls yourself and state the choice in one
+   line; ask only for genuine judgment calls or approval-gated actions. Do not
+   end a turn with a question just to offer the next step.
+10. When a design is rejected, capture the portable lesson in the canonical
+    skill under `~/.agents/skills/` and store project-specific details in AFS
+    notes (`note.create`).
 
 The `i-have-adhd` plugin is available as `$i-have-adhd`. Apply its response
 shape by default. System instructions, safety, correctness, and the requested
