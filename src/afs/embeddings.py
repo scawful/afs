@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import logging
 import math
 import os
+import platform
+import sys
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,9 +38,142 @@ EMBEDDING_BUILD_LOCK = ".embedding-build.lock"
 EMBEDDING_PUBLICATION_LOCK = ".embedding-publication.lock"
 EMBEDDING_GENERATIONS_DIR = "generations"
 DEFAULT_OLLAMA_HOST = "http://localhost:11435"
+STANDARD_OLLAMA_HOST = "http://localhost:11434"
+DEFAULT_LMSTUDIO_BASE_URL = "http://localhost:1234/v1"
+DEFAULT_LMSTUDIO_MODEL = "text-embedding-nomic-embed-text-v1.5"
+DEFAULT_FASTEMBED_MODEL = "BAAI/bge-small-en-v1.5"
+DEFAULT_MLX_EMBEDDING_MODEL = "mlx-community/all-MiniLM-L6-v2-4bit"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 NOMIC_DOCUMENT_INSTRUCTION = "search_document:"
 NOMIC_QUERY_INSTRUCTION = "search_query:"
+QWEN3_QUERY_INSTRUCTION = (
+    "Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery:"
+)
+EMBEDDINGGEMMA_DOCUMENT_INSTRUCTION = "title: none | text:"
+EMBEDDINGGEMMA_QUERY_INSTRUCTION = "task: search result | query:"
+BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages:"
+
+
+@dataclass(frozen=True)
+class EmbeddingModelProfile:
+    """Recommended embedding model metadata and prompt instructions."""
+
+    key: str
+    model: str
+    provider: str
+    context_tokens: int
+    dimensions: tuple[int, ...]
+    document_instruction: str = ""
+    query_instruction: str = ""
+    local: bool = True
+    notes: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "model": self.model,
+            "provider": self.provider,
+            "context_tokens": self.context_tokens,
+            "dimensions": list(self.dimensions),
+            "document_instruction": self.document_instruction,
+            "query_instruction": self.query_instruction,
+            "local": self.local,
+            "notes": self.notes,
+        }
+
+
+EMBEDDING_MODEL_PROFILES: dict[str, EmbeddingModelProfile] = {
+    "gemini-embedding-2": EmbeddingModelProfile(
+        key="gemini-embedding-2",
+        model="gemini-embedding-2",
+        provider="gemini",
+        context_tokens=8192,
+        dimensions=(768, 1536, 3072),
+        document_instruction=EMBEDDINGGEMMA_DOCUMENT_INSTRUCTION,
+        query_instruction=EMBEDDINGGEMMA_QUERY_INSTRUCTION,
+        local=False,
+        notes="Multimodal + MRL embeddings via Google GenAI SDK (default 768 dims in AFS)",
+    ),
+    "gemini-embedding-001": EmbeddingModelProfile(
+        key="gemini-embedding-001",
+        model="gemini-embedding-001",
+        provider="gemini",
+        context_tokens=2048,
+        dimensions=(768, 1536, 3072),
+        document_instruction=GEMINI_DOCUMENT_TASK,
+        query_instruction=GEMINI_QUERY_TASK,
+        local=False,
+        notes="Text-only Gemini embeddings using legacy task_type config",
+    ),
+    "qwen3-embedding": EmbeddingModelProfile(
+        key="qwen3-embedding",
+        model="qwen3-embedding-0.6b",
+        provider="lmstudio",
+        context_tokens=32768,
+        dimensions=(1024,),
+        document_instruction="",
+        query_instruction=QWEN3_QUERY_INSTRUCTION,
+        local=True,
+        notes="Top local retrieval accuracy with 32K context and MRL across LM Studio / Ollama / MLX",
+    ),
+    "embeddinggemma": EmbeddingModelProfile(
+        key="embeddinggemma",
+        model="embeddinggemma",
+        provider="ollama",
+        context_tokens=2048,
+        dimensions=(768,),
+        document_instruction=EMBEDDINGGEMMA_DOCUMENT_INSTRUCTION,
+        query_instruction=EMBEDDINGGEMMA_QUERY_INSTRUCTION,
+        local=True,
+        notes="~300M on-device model (~500 MB unified memory) tuned for local code & doc RAG",
+    ),
+    "nomic-embed-text": EmbeddingModelProfile(
+        key="nomic-embed-text",
+        model=DEFAULT_LMSTUDIO_MODEL,
+        provider="lmstudio",
+        context_tokens=8192,
+        dimensions=(768,),
+        document_instruction=NOMIC_DOCUMENT_INSTRUCTION,
+        query_instruction=NOMIC_QUERY_INSTRUCTION,
+        local=True,
+        notes="Permissive MIT 137M local model; low memory overhead in LM Studio or Ollama",
+    ),
+    "bge-small": EmbeddingModelProfile(
+        key="bge-small",
+        model=DEFAULT_FASTEMBED_MODEL,
+        provider="fastembed",
+        context_tokens=512,
+        dimensions=(384,),
+        document_instruction="",
+        query_instruction=BGE_QUERY_INSTRUCTION,
+        local=True,
+        notes="Zero-daemon local ONNX runtime via FastEmbed",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class EmbeddingProviderProbe:
+    """Read-only availability probe for an embedding backend."""
+
+    provider: str
+    available: bool
+    local: bool
+    endpoint: str = ""
+    recommended_model: str = ""
+    detected_models: tuple[str, ...] = ()
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "available": self.available,
+            "local": self.local,
+            "endpoint": self.endpoint,
+            "recommended_model": self.recommended_model,
+            "detected_models": list(self.detected_models),
+            "reason": self.reason,
+        }
 
 
 @dataclass(frozen=True)
@@ -199,21 +335,39 @@ def create_embed_fn(provider: str, **kwargs) -> Callable[[str], list[float]]:
     if not factory:
         raise ValueError(f"Unknown embedding provider: {provider}")
     query_task_type = kwargs.pop("query_task_type", None)
-    embed_fn = factory(**kwargs)
     provider_defaults: dict[str, tuple[str, str, int | None]] = {
         "gemini": (DEFAULT_GEMINI_MODEL, GEMINI_DOCUMENT_TASK, DEFAULT_GEMINI_DIMENSION),
         "ollama": ("nomic-embed-text", "", None),
+        "lmstudio": (DEFAULT_LMSTUDIO_MODEL, "", None),
+        "fastembed": (DEFAULT_FASTEMBED_MODEL, "", None),
+        "mlx": (DEFAULT_MLX_EMBEDDING_MODEL, "", None),
     }
     default_model, default_task, default_dimension = provider_defaults.get(
         normalized, ("", "", None)
     )
     model = str(kwargs.get("model") or default_model)
+    if (
+        normalized in {"ollama", "openai", "lmstudio"}
+        and "task_type" not in kwargs
+        and query_task_type is None
+        and model
+    ):
+        default_doc, default_query = default_text_instructions(model)
+        if default_doc:
+            kwargs["task_type"] = default_doc
+        if default_query:
+            query_task_type = default_query
+    embed_fn = factory(**kwargs)
     task_type = str(kwargs.get("task_type") or default_task)
     dimension = _coerce_positive_int(
         kwargs.get("output_dimensionality") or kwargs.get("dimension"),
         default=default_dimension,
     )
-    endpoint_defaults = {"ollama": DEFAULT_OLLAMA_HOST, "openai": DEFAULT_OPENAI_BASE_URL}
+    endpoint_defaults = {
+        "ollama": DEFAULT_OLLAMA_HOST,
+        "openai": DEFAULT_OPENAI_BASE_URL,
+        "lmstudio": DEFAULT_LMSTUDIO_BASE_URL,
+    }
     endpoint = str(
         kwargs.get("host") or kwargs.get("base_url") or endpoint_defaults.get(normalized, "")
     )
@@ -233,19 +387,51 @@ def create_embed_fn(provider: str, **kwargs) -> Callable[[str], list[float]]:
             setattr(embed_fn, name, value)
     except (AttributeError, TypeError):
         backend = embed_fn
+        batch_backend = getattr(backend, "_afs_embed_batch", None)
 
         def embed_fn(text: str) -> list[float]:
             return backend(text)
 
+        if callable(batch_backend):
+            embed_fn._afs_embed_batch = batch_backend  # type: ignore[attr-defined]
         for name, value in annotations.items():
             setattr(embed_fn, name, value)
     return embed_fn
 
 
+def embed_texts(
+    embed_fn: Callable[[str], list[float]],
+    texts: Sequence[str],
+    *,
+    batch_size: int = 32,
+) -> list[list[float]]:
+    """Embed a sequence of texts, using native batching when the backend exposes it."""
+    items = list(texts)
+    if not items:
+        return []
+    batch_fn = getattr(embed_fn, "_afs_embed_batch", None)
+    if not callable(batch_fn):
+        return [embed_fn(text) for text in items]
+    step = max(1, int(batch_size))
+    vectors: list[list[float]] = []
+    for offset in range(0, len(items), step):
+        chunk = items[offset : offset + step]
+        batch_out = batch_fn(chunk)
+        vectors.extend(batch_out)
+    return vectors
+
+
 def default_text_instructions(model: str) -> tuple[str, str]:
     """Return (document, query) text prefixes a model was trained with."""
-    if "nomic-embed" in model.lower():
+    lowered = model.lower()
+    if "nomic-embed" in lowered:
         return NOMIC_DOCUMENT_INSTRUCTION, NOMIC_QUERY_INSTRUCTION
+    if "embeddinggemma" in lowered:
+        return EMBEDDINGGEMMA_DOCUMENT_INSTRUCTION, EMBEDDINGGEMMA_QUERY_INSTRUCTION
+    if "qwen3-embedding" in lowered:
+        return "", QWEN3_QUERY_INSTRUCTION
+    if any(token in lowered for token in ("mxbai-embed", "snowflake-arctic-embed", "bge-")):
+        return "", BGE_QUERY_INSTRUCTION
     return "", ""
 
 
@@ -276,9 +462,11 @@ def create_ollama_embed_fn(
     except ImportError as exc:
         raise RuntimeError("httpx not installed") from exc
 
+    base_host = host.rstrip("/")
+
     def embed(text: str) -> list[float]:
         response = httpx.post(
-            f"{host}/api/embeddings",
+            f"{base_host}/api/embeddings",
             json={"model": model, "prompt": _apply_text_instruction(task_type, text)},
             timeout=30.0,
         )
@@ -287,6 +475,30 @@ def create_ollama_embed_fn(
         embedding = data.get("embedding", [])
         return [float(value) for value in embedding]
 
+    def embed_batch(texts: Sequence[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        prepared = [_apply_text_instruction(task_type, item) for item in texts]
+        try:
+            response = httpx.post(
+                f"{base_host}/api/embed",
+                json={"model": model, "input": prepared},
+                timeout=60.0,
+            )
+            if getattr(response, "status_code", 200) == 404:
+                return [embed(item) for item in texts]
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                return [embed(item) for item in texts]
+            raise
+        embeddings = data.get("embeddings")
+        if not isinstance(embeddings, list):
+            return [embed(item) for item in texts]
+        return [[float(value) for value in row] for row in embeddings]
+
+    embed._afs_embed_batch = embed_batch  # type: ignore[attr-defined]
     return embed
 
 
@@ -331,6 +543,143 @@ def create_openai_embed_fn(
         embedding = rows[0].get("embedding", [])
         return [float(value) for value in embedding]
 
+    def embed_batch(texts: Sequence[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        prepared = [_apply_text_instruction(task_type, item) for item in texts]
+        response = httpx.post(
+            url,
+            json={"model": model, "input": prepared},
+            headers=headers,
+            timeout=max(timeout, 60.0),
+        )
+        response.raise_for_status()
+        data = response.json()
+        rows = data.get("data", [])
+        if not isinstance(rows, list):
+            return []
+        ordered = sorted(
+            enumerate(rows),
+            key=lambda pair: int(pair[1].get("index", pair[0])) if isinstance(pair[1], dict) else pair[0],
+        )
+        return [
+            [float(value) for value in row.get("embedding", [])]
+            if isinstance(row, dict)
+            else []
+            for _idx, row in ordered
+        ]
+
+    embed._afs_embed_batch = embed_batch  # type: ignore[attr-defined]
+    return embed
+
+
+def create_lmstudio_embed_fn(
+    model: str = DEFAULT_LMSTUDIO_MODEL,
+    base_url: str = DEFAULT_LMSTUDIO_BASE_URL,
+    *,
+    api_key: str | None = None,
+    timeout: float = 30.0,
+    task_type: str = "",
+) -> Callable[[str], list[float]]:
+    """Create a local-first LM Studio OpenAI-compatible embeddings backend."""
+    return create_openai_embed_fn(
+        model,
+        base_url=base_url,
+        api_key=api_key,
+        timeout=timeout,
+        task_type=task_type,
+    )
+
+
+def create_fastembed_embed_fn(
+    model: str = DEFAULT_FASTEMBED_MODEL,
+    *,
+    task_type: str = "",
+    cache_dir: str | None = None,
+    threads: int | None = None,
+) -> Callable[[str], list[float]]:
+    """Create a zero-daemon local ONNX embeddings backend via FastEmbed."""
+    try:
+        from fastembed import TextEmbedding  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError("fastembed not installed; pip install fastembed") from exc
+
+    init_kwargs: dict[str, Any] = {}
+    if cache_dir:
+        init_kwargs["cache_dir"] = cache_dir
+    if threads is not None:
+        init_kwargs["threads"] = threads
+    engine = TextEmbedding(model_name=model, **init_kwargs)
+
+    def embed(text: str) -> list[float]:
+        prepared = _apply_text_instruction(task_type, text)
+        vectors = list(engine.embed([prepared]))
+        if not vectors:
+            return []
+        return [float(value) for value in vectors[0]]
+
+    def embed_batch(texts: Sequence[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        prepared = [_apply_text_instruction(task_type, item) for item in texts]
+        return [[float(value) for value in vec] for vec in engine.embed(prepared)]
+
+    embed._afs_embed_batch = embed_batch  # type: ignore[attr-defined]
+    return embed
+
+
+def create_mlx_embed_fn(
+    model: str = DEFAULT_MLX_EMBEDDING_MODEL,
+    *,
+    task_type: str = "",
+    max_length: int = 512,
+) -> Callable[[str], list[float]]:
+    """Create an Apple Silicon native MLX embeddings backend via ``mlx-embeddings``."""
+    try:
+        import mlx_embeddings  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError("mlx-embeddings not installed; pip install mlx-embeddings") from exc
+
+    mlx_model, tokenizer = mlx_embeddings.load(model)
+
+    def _extract_vectors(output: Any) -> list[list[float]]:
+        embeds = getattr(output, "text_embeds", None)
+        if embeds is None and isinstance(output, dict):
+            embeds = output.get("text_embeds") or output.get("embeddings")
+        if embeds is None:
+            embeds = output
+        if hasattr(embeds, "tolist"):
+            raw_list = embeds.tolist()
+        else:
+            raw_list = list(embeds)
+        if raw_list and not isinstance(raw_list[0], (list, tuple)):
+            return [[float(v) for v in raw_list]]
+        return [[float(v) for v in row] for row in raw_list]
+
+    def embed(text: str) -> list[float]:
+        prepared = _apply_text_instruction(task_type, text)
+        output = mlx_embeddings.generate(
+            mlx_model,
+            tokenizer,
+            texts=[prepared],
+            max_length=max_length,
+        )
+        rows = _extract_vectors(output)
+        return rows[0] if rows else []
+
+    def embed_batch(texts: Sequence[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        prepared = [_apply_text_instruction(task_type, item) for item in texts]
+        output = mlx_embeddings.generate(
+            mlx_model,
+            tokenizer,
+            texts=prepared,
+            max_length=max_length,
+        )
+        return _extract_vectors(output)
+
+    embed._afs_embed_batch = embed_batch  # type: ignore[attr-defined]
     return embed
 
 
@@ -366,23 +715,41 @@ def create_gemini_embed_fn(
 
         client = genai.Client(api_key=resolved_key)
 
-        def _embed_sdk(text: str) -> list[float]:
-            prepared_text = (
-                _prepare_gemini_embedding_text(text, task_type) if uses_embedding_2 else text
-            )
+        def _sdk_config() -> dict[str, Any]:
             embed_config: dict[str, Any] = {
                 "output_dimensionality": output_dimensionality,
             }
             if not uses_embedding_2:
                 embed_config["task_type"] = task_type
+            return embed_config
+
+        def _embed_sdk(text: str) -> list[float]:
+            prepared_text = (
+                _prepare_gemini_embedding_text(text, task_type) if uses_embedding_2 else text
+            )
             result = client.models.embed_content(
                 model=qualified_model,
                 contents=prepared_text,
-                config=embed_config,
+                config=_sdk_config(),
             )
             values = result.embeddings[0].values
             return [float(v) for v in values]
 
+        def _embed_batch_sdk(texts: Sequence[str]) -> list[list[float]]:
+            if not texts:
+                return []
+            prepared = [
+                _prepare_gemini_embedding_text(item, task_type) if uses_embedding_2 else item
+                for item in texts
+            ]
+            result = client.models.embed_content(
+                model=qualified_model,
+                contents=prepared,
+                config=_sdk_config(),
+            )
+            return [[float(v) for v in item.values] for item in result.embeddings]
+
+        _embed_sdk._afs_embed_batch = _embed_batch_sdk  # type: ignore[attr-defined]
         return _embed_sdk
     except ImportError:
         pass
@@ -425,6 +792,10 @@ def create_gemini_embed_fn(
         values = data.get("embedding", {}).get("values", [])
         return [float(v) for v in values]
 
+    def _embed_batch_http(texts: Sequence[str]) -> list[list[float]]:
+        return [_embed_http(item) for item in texts]
+
+    _embed_http._afs_embed_batch = _embed_batch_http  # type: ignore[attr-defined]
     return _embed_http
 
 
@@ -597,9 +968,270 @@ def _create_query_embed_fn_from_metadata(
         kwargs["api_key"] = api_key
     if metadata.endpoint and metadata.provider == "ollama":
         kwargs["host"] = metadata.endpoint
-    elif metadata.endpoint and metadata.provider == "openai":
+    elif metadata.endpoint and metadata.provider in {"openai", "lmstudio"}:
         kwargs["base_url"] = metadata.endpoint
     return create_embed_fn(metadata.provider, **kwargs)
+
+
+_EMBEDDING_MODEL_HINTS = (
+    "qwen3-embedding",
+    "embeddinggemma",
+    "nomic-embed",
+    "embed",
+    "bge-",
+    "mxbai",
+    "arctic-embed",
+)
+
+
+def _rank_embedding_models(model_ids: Iterable[str]) -> list[str]:
+    """Filter and prioritize embedding-capable model identifiers."""
+    candidates: list[str] = []
+    for raw in model_ids:
+        name = str(raw).strip()
+        if not name:
+            continue
+        lowered = name.lower()
+        if any(hint in lowered for hint in _EMBEDDING_MODEL_HINTS):
+            candidates.append(name)
+
+    def _priority(name: str) -> tuple[int, str]:
+        lowered = name.lower()
+        if "qwen3-embedding" in lowered:
+            return (0, lowered)
+        if "embeddinggemma" in lowered:
+            return (1, lowered)
+        if "nomic-embed-text" in lowered:
+            return (2, lowered)
+        if "nomic-embed" in lowered:
+            return (3, lowered)
+        if "mxbai" in lowered or "bge-" in lowered or "arctic-embed" in lowered:
+            return (4, lowered)
+        if lowered == "text-embedding-embeddings":
+            return (6, lowered)
+        return (5, lowered)
+
+    deduped = sorted(set(candidates), key=_priority)
+    return deduped
+
+
+def _module_available(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
+
+
+def _probe_lmstudio(*, timeout: float) -> EmbeddingProviderProbe:
+    base_url = os.getenv("AFS_LMSTUDIO_BASE_URL", DEFAULT_LMSTUDIO_BASE_URL).strip()
+    base = base_url.rstrip("/")
+    url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
+    try:
+        import httpx
+    except ImportError:
+        return EmbeddingProviderProbe(
+            provider="lmstudio",
+            available=False,
+            local=True,
+            endpoint=base_url,
+            reason="httpx not installed",
+        )
+    try:
+        resp = httpx.get(url, timeout=timeout)
+        resp.raise_for_status()
+        payload = resp.json()
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as exc:
+        return EmbeddingProviderProbe(
+            provider="lmstudio",
+            available=False,
+            local=True,
+            endpoint=base_url,
+            reason=f"endpoint unreachable ({type(exc).__name__})",
+        )
+    rows = payload.get("data", []) if isinstance(payload, dict) else []
+    model_ids = [
+        str(row.get("id", "")).strip()
+        for row in rows
+        if isinstance(row, dict) and row.get("id")
+    ]
+    embed_models = _rank_embedding_models(model_ids)
+    if not embed_models:
+        return EmbeddingProviderProbe(
+            provider="lmstudio",
+            available=False,
+            local=True,
+            endpoint=base_url,
+            reason="no embedding model loaded in LM Studio",
+        )
+    return EmbeddingProviderProbe(
+        provider="lmstudio",
+        available=True,
+        local=True,
+        endpoint=base_url,
+        recommended_model=embed_models[0],
+        detected_models=tuple(embed_models),
+        reason="ready (OpenAI-compatible loopback)",
+    )
+
+
+def _probe_ollama(*, timeout: float) -> EmbeddingProviderProbe:
+    try:
+        import httpx
+    except ImportError:
+        return EmbeddingProviderProbe(
+            provider="ollama",
+            available=False,
+            local=True,
+            endpoint=STANDARD_OLLAMA_HOST,
+            reason="httpx not installed",
+        )
+
+    hosts = [
+        os.getenv("AFS_OLLAMA_HOST", "").strip(),
+        STANDARD_OLLAMA_HOST,
+        DEFAULT_OLLAMA_HOST,
+    ]
+    checked: list[str] = []
+    last_reason = "endpoint unreachable"
+    for host in hosts:
+        if not host or host in checked:
+            continue
+        checked.append(host)
+        try:
+            resp = httpx.get(f"{host.rstrip('/')}/api/tags", timeout=timeout)
+            resp.raise_for_status()
+            payload = resp.json()
+        except (httpx.HTTPError, OSError, ValueError, RuntimeError) as exc:
+            last_reason = f"{host} unreachable ({type(exc).__name__})"
+            continue
+        rows = payload.get("models", []) if isinstance(payload, dict) else []
+        model_ids = [
+            str(row.get("name", "") or row.get("model", "")).strip()
+            for row in rows
+            if isinstance(row, dict)
+        ]
+        embed_models = _rank_embedding_models(model_ids)
+        if embed_models:
+            return EmbeddingProviderProbe(
+                provider="ollama",
+                available=True,
+                local=True,
+                endpoint=host,
+                recommended_model=embed_models[0],
+                detected_models=tuple(embed_models),
+                reason="ready (Ollama local daemon)",
+            )
+        last_reason = f"{host} reachable but no embedding models pulled (try: ollama pull embeddinggemma)"
+    return EmbeddingProviderProbe(
+        provider="ollama",
+        available=False,
+        local=True,
+        endpoint=checked[0] if checked else STANDARD_OLLAMA_HOST,
+        reason=last_reason,
+    )
+
+
+def probe_embedding_providers(*, timeout: float = 1.5) -> list[EmbeddingProviderProbe]:
+    """Probe local-first and cloud embedding providers without making billable API calls."""
+    probes: list[EmbeddingProviderProbe] = []
+    probes.append(_probe_lmstudio(timeout=timeout))
+    probes.append(_probe_ollama(timeout=timeout))
+
+    is_apple_silicon = sys.platform == "darwin" and platform.machine() == "arm64"
+    has_mlx_embed = _module_available("mlx_embeddings")
+    has_mlx = _module_available("mlx")
+    if has_mlx_embed and is_apple_silicon:
+        probes.append(
+            EmbeddingProviderProbe(
+                provider="mlx",
+                available=True,
+                local=True,
+                recommended_model=DEFAULT_MLX_EMBEDDING_MODEL,
+                detected_models=(DEFAULT_MLX_EMBEDDING_MODEL,),
+                reason="Apple Silicon MLX embeddings installed",
+            )
+        )
+    else:
+        reason = (
+            "mlx present; install mlx-embeddings for in-process Apple Silicon vectors"
+            if (has_mlx and is_apple_silicon)
+            else "mlx-embeddings not installed"
+        )
+        probes.append(
+            EmbeddingProviderProbe(
+                provider="mlx",
+                available=False,
+                local=True,
+                recommended_model=DEFAULT_MLX_EMBEDDING_MODEL,
+                reason=reason,
+            )
+        )
+
+    if _module_available("fastembed"):
+        probes.append(
+            EmbeddingProviderProbe(
+                provider="fastembed",
+                available=True,
+                local=True,
+                recommended_model=DEFAULT_FASTEMBED_MODEL,
+                detected_models=(DEFAULT_FASTEMBED_MODEL,),
+                reason="zero-daemon ONNX runtime installed",
+            )
+        )
+    else:
+        probes.append(
+            EmbeddingProviderProbe(
+                provider="fastembed",
+                available=False,
+                local=True,
+                recommended_model=DEFAULT_FASTEMBED_MODEL,
+                reason="fastembed not installed",
+            )
+        )
+
+    has_gemini_key = bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+    probes.append(
+        EmbeddingProviderProbe(
+            provider="gemini",
+            available=has_gemini_key,
+            local=False,
+            recommended_model=DEFAULT_GEMINI_MODEL,
+            detected_models=(DEFAULT_GEMINI_MODEL, "gemini-embedding-001") if has_gemini_key else (),
+            reason="GEMINI_API_KEY configured" if has_gemini_key else "GEMINI_API_KEY not set",
+        )
+    )
+
+    has_openai_key = bool(os.getenv("OPENAI_API_KEY") or os.getenv("LITELLM_API_KEY"))
+    probes.append(
+        EmbeddingProviderProbe(
+            provider="openai",
+            available=has_openai_key,
+            local=False,
+            endpoint=DEFAULT_OPENAI_BASE_URL,
+            recommended_model="text-embedding-3-small",
+            detected_models=("text-embedding-3-small", "text-embedding-3-large") if has_openai_key else (),
+            reason="OPENAI_API_KEY configured" if has_openai_key else "OPENAI_API_KEY not set",
+        )
+    )
+    return probes
+
+
+def select_auto_embedding_provider(
+    probes: Sequence[EmbeddingProviderProbe] | None = None,
+    *,
+    prefer_local: bool = True,
+    timeout: float = 1.5,
+) -> EmbeddingProviderProbe | None:
+    """Select the highest-priority available embedding provider."""
+    candidates = list(probes) if probes is not None else probe_embedding_providers(timeout=timeout)
+    available = [probe for probe in candidates if probe.available]
+    if not available:
+        return None
+    if prefer_local:
+        for probe in available:
+            if probe.local:
+                return probe
+    return available[0]
 
 
 def _record_embedding_index(path: Path, found: dict[str, Path]) -> None:
@@ -1771,6 +2403,39 @@ register_embedding_backend(
             api_key=api_key,
             task_type=task_type,
             output_dimensionality=output_dimensionality,
+        )
+    ),
+)
+register_embedding_backend(
+    "lmstudio",
+    lambda model=DEFAULT_LMSTUDIO_MODEL, base_url=DEFAULT_LMSTUDIO_BASE_URL, api_key=None, timeout=30.0, task_type="", **_: (
+        create_lmstudio_embed_fn(
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            task_type=task_type,
+        )
+    ),
+)
+register_embedding_backend(
+    "fastembed",
+    lambda model=DEFAULT_FASTEMBED_MODEL, task_type="", cache_dir=None, threads=None, **_: (
+        create_fastembed_embed_fn(
+            model=model,
+            task_type=task_type,
+            cache_dir=cache_dir,
+            threads=threads,
+        )
+    ),
+)
+register_embedding_backend(
+    "mlx",
+    lambda model=DEFAULT_MLX_EMBEDDING_MODEL, task_type="", max_length=512, **_: (
+        create_mlx_embed_fn(
+            model=model,
+            task_type=task_type,
+            max_length=max_length,
         )
     ),
 )

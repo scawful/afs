@@ -25,9 +25,12 @@ import numpy as np
 
 from .embeddings import (
     DEFAULT_GEMINI_DIMENSION,
+    DEFAULT_LMSTUDIO_BASE_URL,
     GEMINI_QUERY_TASK,
+    STANDARD_OLLAMA_HOST,
     EmbeddingCollectionMetadata,
     create_embed_fn,
+    embed_texts,
 )
 from .index_policy import ignore_matches, load_ignore_file
 from .index_storage import (
@@ -406,6 +409,7 @@ class HybridSearchEngine:
         for source in registered_sources:
             _scope_budget(source, budgets)
 
+        pending_embeds: list[tuple[int, Path, int, str]] = []
         for source in registered_sources:
             budget = budgets[source.project_id or source.scope_id]
             for root, path, relative_path in _iter_safe_source_files(
@@ -447,39 +451,8 @@ class HybridSearchEngine:
                     prefixes=source.policy.sensitivity_prefixes,
                 )
                 for chunk_index, (line_start, line_end, chunk_text) in enumerate(chunks):
-                    vector_row: int | None = None
-                    if source.embed_allowed and embed_path_allowed and embed_fn is not None:
-                        semantic_attempts += 1
-                        try:
-                            raw_vector = embed_fn(chunk_text)
-                            vector = _normalize_vector(raw_vector)
-                        except Exception as exc:  # noqa: BLE001 - extension callback boundary
-                            result.errors.append(
-                                f"{path} chunk {chunk_index}: embed failed ({exc})"
-                            )
-                            semantic_failures += 1
-                            vector = None
-                        if vector is None:
-                            if not result.errors or "embed failed" not in result.errors[-1]:
-                                result.errors.append(
-                                    f"{path} chunk {chunk_index}: embedder returned an empty vector"
-                                )
-                                semantic_failures += 1
-                        elif expected_dimension is None:
-                            expected_dimension = int(vector.shape[0])
-                        elif int(vector.shape[0]) != expected_dimension:
-                            result.errors.append(
-                                f"{path} chunk {chunk_index}: embedding dimension "
-                                f"{vector.shape[0]} != collection dimension {expected_dimension}"
-                            )
-                            semantic_failures += 1
-                            vector = None
-                        if vector is not None:
-                            vector_row = len(vectors)
-                            vectors.append(vector)
-                            embedded_scope_ids.add(source.scope_id)
-
                     doc_id = _document_id(source, root, relative_path, chunk_index)
+                    row_pos = len(documents)
                     documents.append(
                         _DocumentRow(
                             row_id=next_row_id,
@@ -496,14 +469,73 @@ class HybridSearchEngine:
                             chunk_index=chunk_index,
                             line_start=line_start,
                             line_end=line_end,
-                            vector_row=vector_row,
+                            vector_row=None,
                         )
                     )
+                    if source.embed_allowed and embed_path_allowed and embed_fn is not None:
+                        pending_embeds.append((row_pos, path, chunk_index, chunk_text))
                     next_row_id += 1
                     result.chunks_written += 1
                     file_had_row = True
                 if file_had_row:
                     result.indexed_files += 1
+
+        if embed_fn is not None and pending_embeds:
+            has_batch = callable(getattr(embed_fn, "_afs_embed_batch", None))
+            batch_size = 32 if has_batch else 1
+            for offset in range(0, len(pending_embeds), batch_size):
+                batch_items = pending_embeds[offset : offset + batch_size]
+                batch_vectors: list[list[float]] | None = None
+                if has_batch and len(batch_items) > 1:
+                    try:
+                        candidate = embed_texts(
+                            embed_fn,
+                            [item[3] for item in batch_items],
+                            batch_size=len(batch_items),
+                        )
+                        if len(candidate) == len(batch_items):
+                            batch_vectors = candidate
+                    except Exception:  # noqa: BLE001 - fall back to per-chunk error attribution
+                        batch_vectors = None
+
+                for idx_in_batch, (doc_pos, path, chunk_index, chunk_text) in enumerate(
+                    batch_items
+                ):
+                    semantic_attempts += 1
+                    vector: np.ndarray | None = None
+                    embed_error_recorded = False
+                    try:
+                        raw_vector = (
+                            batch_vectors[idx_in_batch]
+                            if batch_vectors is not None
+                            else embed_fn(chunk_text)
+                        )
+                        vector = _normalize_vector(raw_vector)
+                    except Exception as exc:  # noqa: BLE001 - extension callback boundary
+                        result.errors.append(
+                            f"{path} chunk {chunk_index}: embed failed ({exc})"
+                        )
+                        semantic_failures += 1
+                        embed_error_recorded = True
+                        vector = None
+                    if vector is None and not embed_error_recorded:
+                        result.errors.append(
+                            f"{path} chunk {chunk_index}: embedder returned an empty vector"
+                        )
+                        semantic_failures += 1
+                    elif vector is not None and expected_dimension is None:
+                        expected_dimension = int(vector.shape[0])
+                    elif vector is not None and int(vector.shape[0]) != expected_dimension:
+                        result.errors.append(
+                            f"{path} chunk {chunk_index}: embedding dimension "
+                            f"{vector.shape[0]} != collection dimension {expected_dimension}"
+                        )
+                        semantic_failures += 1
+                        vector = None
+                    if vector is not None:
+                        documents[doc_pos].vector_row = len(vectors)
+                        vectors.append(vector)
+                        embedded_scope_ids.add(documents[doc_pos].scope_id)
 
         if embed_fn is None or semantic_attempts == 0:
             semantic_status = "disabled"
@@ -1384,14 +1416,18 @@ def _collection_metadata(
         )
     provider = str(getattr(embed_fn, "_afs_embedding_provider", "custom"))
     instruction = str(getattr(embed_fn, "_afs_embedding_instruction", ""))
+    query_instruction = getattr(embed_fn, "_afs_embedding_query_instruction", None)
+    if query_instruction is None:
+        query_instruction = GEMINI_QUERY_TASK if provider == "gemini" else instruction
     return EmbeddingCollectionMetadata(
         provider=provider,
         model=str(getattr(embed_fn, "_afs_embedding_model", "callable")),
         dimension=dimension,
         document_instruction=instruction,
-        query_instruction=GEMINI_QUERY_TASK if provider == "gemini" else instruction,
+        query_instruction=str(query_instruction),
         normalized=True,
         health=health,
+        endpoint=str(getattr(embed_fn, "_afs_embedding_endpoint", "")),
     )
 
 
@@ -1415,6 +1451,12 @@ def _create_query_embedder(
             task_type=collection.query_instruction or GEMINI_QUERY_TASK,
             output_dimensionality=collection.dimension or DEFAULT_GEMINI_DIMENSION,
         )
+    elif collection.provider == "lmstudio":
+        kwargs["base_url"] = collection.endpoint or DEFAULT_LMSTUDIO_BASE_URL
+    elif collection.provider == "openai" and collection.endpoint:
+        kwargs["base_url"] = collection.endpoint
+    elif collection.provider == "ollama":
+        kwargs["host"] = collection.endpoint or STANDARD_OLLAMA_HOST
     return create_embed_fn(collection.provider, **kwargs)
 
 

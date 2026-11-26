@@ -34,8 +34,23 @@ def embeddings_index_command(args: argparse.Namespace) -> int:
         return 1
 
     if args.provider == "auto":
-        print("--provider auto only applies to search; pick a provider to build an index.")
-        return 1
+        from ..embeddings import select_auto_embedding_provider
+
+        probe = select_auto_embedding_provider(prefer_local=True)
+        if probe is None:
+            print(
+                "No local or cloud embedding provider detected; "
+                "run `afs embeddings probe` or pass --provider none."
+            )
+            return 1
+        args.provider = probe.provider
+        if args.model == "nomic-embed-text" and probe.recommended_model:
+            args.model = probe.recommended_model
+        if probe.endpoint:
+            if probe.provider == "ollama":
+                args.host = probe.endpoint
+            elif probe.provider in {"lmstudio", "openai"}:
+                args.openai_base_url = probe.endpoint
     embed_fn = _resolve_embed_fn(args)
     if embed_fn is None and args.provider != "none":
         return 1
@@ -249,10 +264,18 @@ def _resolve_sources(args: argparse.Namespace, index_root: Path) -> list[Path]:
 
 
 def _provider_default_models() -> dict[str, str]:
-    from ..embeddings import DEFAULT_GEMINI_MODEL
+    from ..embeddings import (
+        DEFAULT_FASTEMBED_MODEL,
+        DEFAULT_GEMINI_MODEL,
+        DEFAULT_LMSTUDIO_MODEL,
+        DEFAULT_MLX_EMBEDDING_MODEL,
+    )
 
     return {
         "ollama": "nomic-embed-text",
+        "lmstudio": DEFAULT_LMSTUDIO_MODEL,
+        "fastembed": DEFAULT_FASTEMBED_MODEL,
+        "mlx": DEFAULT_MLX_EMBEDDING_MODEL,
         "hf": "nomic-embed-text",
         "openai": "text-embedding-3-small",
         "gemini": DEFAULT_GEMINI_MODEL,
@@ -270,6 +293,8 @@ def _resolve_embed_fn(args: argparse.Namespace, *, mode: str = "index"):
     """
     from ..embeddings import (
         DEFAULT_GEMINI_DIMENSION,
+        DEFAULT_LMSTUDIO_BASE_URL,
+        DEFAULT_OPENAI_BASE_URL,
         create_embed_fn,
         default_text_instructions,
     )
@@ -283,7 +308,7 @@ def _resolve_embed_fn(args: argparse.Namespace, *, mode: str = "index"):
         model = provider_defaults[args.provider]
     kwargs: dict[str, object] = {"model": model}
 
-    if args.provider in {"ollama", "openai"}:
+    if args.provider in {"ollama", "openai", "lmstudio"}:
         default_document, default_query = default_text_instructions(model)
         document_instruction = getattr(args, "document_instruction", None)
         query_instruction = getattr(args, "query_instruction", None)
@@ -304,6 +329,12 @@ def _resolve_embed_fn(args: argparse.Namespace, *, mode: str = "index"):
     elif args.provider == "openai":
         kwargs["base_url"] = args.openai_base_url
         kwargs["api_key"] = args.openai_api_key
+    elif args.provider == "lmstudio":
+        base_url = getattr(args, "openai_base_url", DEFAULT_OPENAI_BASE_URL)
+        kwargs["base_url"] = (
+            DEFAULT_LMSTUDIO_BASE_URL if base_url == DEFAULT_OPENAI_BASE_URL else base_url
+        )
+        kwargs["api_key"] = args.openai_api_key
     elif args.provider == "gemini":
         kwargs["api_key"] = args.gemini_api_key
         kwargs["output_dimensionality"] = DEFAULT_GEMINI_DIMENSION
@@ -321,6 +352,57 @@ def _resolve_embed_fn(args: argparse.Namespace, *, mode: str = "index"):
         return None
 
 
+@gated_cli("embeddings")
+def embeddings_probe_command(args: argparse.Namespace) -> int:
+    """Inspect available local & cloud embedding backends and recommended models."""
+    from ..embeddings import (
+        EMBEDDING_MODEL_PROFILES,
+        probe_embedding_providers,
+        select_auto_embedding_provider,
+    )
+
+    timeout = float(getattr(args, "timeout", 1.5))
+    probes = probe_embedding_providers(timeout=timeout)
+    recommended = select_auto_embedding_provider(probes, prefer_local=True)
+    if args.json:
+        payload = {
+            "recommended": recommended.to_dict() if recommended else None,
+            "providers": [probe.to_dict() for probe in probes],
+            "profiles": [profile.to_dict() for profile in EMBEDDING_MODEL_PROFILES.values()],
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print("Embedding Providers (local-first order):")
+    for probe in probes:
+        status = "READY" if probe.available else "unavailable"
+        locality = "local" if probe.local else "cloud"
+        endpoint = f" endpoint={probe.endpoint}" if probe.endpoint else ""
+        model = f" model={probe.recommended_model}" if probe.recommended_model else ""
+        print(f"  {probe.provider:10s} [{status:11s}] ({locality}){model}{endpoint} — {probe.reason}")
+        if probe.detected_models:
+            print(f"    detected: {', '.join(probe.detected_models)}")
+    print("\nRecommended 2026 Embedding Profiles:")
+    for profile in EMBEDDING_MODEL_PROFILES.values():
+        locality = "local" if profile.local else "cloud"
+        dims = "/".join(str(d) for d in profile.dimensions)
+        print(
+            f"  {profile.key:20s} provider={profile.provider:9s} "
+            f"ctx={profile.context_tokens:<5d} dims={dims:12s} ({locality}) — {profile.notes}"
+        )
+    if recommended is not None:
+        model_flag = (
+            f" --model {recommended.recommended_model}"
+            if recommended.recommended_model
+            else ""
+        )
+        print(
+            f"\nQuickstart:\n"
+            f"  afs search --semantic --rebuild --provider {recommended.provider}{model_flag} \"<query>\""
+        )
+    return 0
+
+
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register embeddings command parsers."""
     emb_parser = subparsers.add_parser(
@@ -332,11 +414,21 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     def add_provider_args(parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
             "--provider",
-            choices=["none", "auto", "ollama", "hf", "openai", "gemini"],
+            choices=[
+                "none",
+                "auto",
+                "lmstudio",
+                "ollama",
+                "hf",
+                "openai",
+                "gemini",
+                "fastembed",
+                "mlx",
+            ],
             default="none",
             help=(
-                "Embedding provider. For search, 'auto' recreates the query "
-                "embedder recorded in the collection metadata."
+                "Embedding provider. 'auto' prefers local backends for indexing and "
+                "recreates collection embedders for search."
             ),
         )
         parser.add_argument(
@@ -489,3 +581,16 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     emb_eval.add_argument("--json", action="store_true", help="Output JSON.")
     emb_eval.set_defaults(func=embeddings_eval_command)
+
+    emb_probe = emb_sub.add_parser(
+        "probe",
+        help="Probe available local and cloud embedding backends and recommended models.",
+    )
+    emb_probe.add_argument(
+        "--timeout",
+        type=float,
+        default=1.5,
+        help="HTTP probe timeout in seconds (default 1.5).",
+    )
+    emb_probe.add_argument("--json", action="store_true", help="Output JSON.")
+    emb_probe.set_defaults(func=embeddings_probe_command)

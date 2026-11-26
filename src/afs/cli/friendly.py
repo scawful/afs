@@ -10,7 +10,12 @@ from typing import Any
 
 from ..context_layout import LAYOUT_VERSION, detect_layout_version
 from ..hivemind import message_summary, normalize_agent_name
-from ..message_doorbell import HOOK_HOSTS, add_hook_arguments, ring_codex, run_hook
+from ..message_doorbell import (
+    HOOK_HOSTS,
+    add_hook_arguments,
+    ring_recipients,
+    run_hook,
+)
 from ..messages import MessageBus
 from ..project_registry import (
     COMMON_SCOPE_ID,
@@ -739,12 +744,18 @@ def messages_send_command(args: argparse.Namespace) -> int:
         reply_to=getattr(args, "reply_to", None),
     )
     ring: dict[str, Any] | None = None
+    rings: list[dict[str, Any]] = []
     if getattr(args, "ring", False):
-        ring = ring_codex(bus, message, resume=bool(getattr(args, "ring_resume", False)))
+        ring, rings = ring_recipients(
+            bus,
+            message,
+            resume=bool(getattr(args, "ring_resume", False)),
+        )
     if args.json:
         result = message.to_dict()
         if ring is not None:
             result["ring"] = ring
+            result["rings"] = rings
         print(json.dumps(result, indent=2))
     else:
         print(f"sent: {message.id}")
@@ -883,8 +894,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     search.add_argument(
         "--provider",
         default="gemini",
-        choices=["gemini", "ollama"],
-        help="Embedding provider used only with --semantic (default: gemini).",
+        choices=["auto", "lmstudio", "ollama", "gemini", "openai", "fastembed", "mlx"],
+        help=(
+            "Embedding provider used with --semantic (default: gemini; "
+            "'auto' prefers local LM Studio / Ollama / MLX / FastEmbed)."
+        ),
     )
     search.add_argument(
         "--model",

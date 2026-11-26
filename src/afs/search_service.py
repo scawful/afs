@@ -14,7 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from .context_layout import LAYOUT_VERSION, detect_layout_version, resolve_system_path
-from .embeddings import DEFAULT_GEMINI_MODEL
+from .embeddings import (
+    DEFAULT_FASTEMBED_MODEL,
+    DEFAULT_GEMINI_MODEL,
+    DEFAULT_LMSTUDIO_MODEL,
+    DEFAULT_MLX_EMBEDDING_MODEL,
+    default_text_instructions,
+)
 from .hybrid_search import (
     HybridBuildResult,
     HybridSearchEngine,
@@ -275,8 +281,32 @@ def search_scoped(
     index_root = resolve_system_path(context, "search")
     engine = HybridSearchEngine(index_root)
     has_index = engine.current_path.is_file() or engine.metadata_path.is_file()
-    requested_model = request.embedding_model or (
-        DEFAULT_GEMINI_MODEL if request.embedding_provider == "gemini" else "nomic-embed-text"
+    resolved_provider = request.embedding_provider
+    resolved_endpoint = ""
+    if resolved_provider == "auto" and request.semantic:
+        from .embeddings import select_auto_embedding_provider
+
+        probe = select_auto_embedding_provider(prefer_local=True)
+        if probe is None:
+            raise RuntimeError(
+                "No local or cloud embedding provider is available. "
+                "Start LM Studio/Ollama or run `afs embeddings probe`."
+            )
+        resolved_provider = probe.provider
+        resolved_endpoint = probe.endpoint
+        auto_model = probe.recommended_model
+    else:
+        auto_model = ""
+    default_models = {
+        "gemini": DEFAULT_GEMINI_MODEL,
+        "lmstudio": DEFAULT_LMSTUDIO_MODEL,
+        "ollama": "nomic-embed-text",
+        "openai": "text-embedding-3-small",
+        "fastembed": DEFAULT_FASTEMBED_MODEL,
+        "mlx": DEFAULT_MLX_EMBEDDING_MODEL,
+    }
+    requested_model = request.embedding_model or auto_model or default_models.get(
+        resolved_provider, "nomic-embed-text"
     )
 
     previous_metadata = _read_metadata(engine) if has_index else {}
@@ -285,7 +315,7 @@ def search_scoped(
     if (
         request.semantic
         and isinstance(collection, dict)
-        and collection.get("provider") == request.embedding_provider
+        and collection.get("provider") == resolved_provider
         and collection.get("model") == requested_model
     ):
         previously_consented_scopes = _scope_coverage(
@@ -317,7 +347,7 @@ def search_scoped(
     semantic_index_ready = _semantic_index_ready(
         previous_metadata,
         requested=request.semantic and has_index,
-        provider=request.embedding_provider,
+        provider=resolved_provider,
         model=requested_model,
         required_scopes=required_semantic_scopes,
     )
@@ -331,9 +361,19 @@ def search_scoped(
         # selection patchable by library consumers and tests.
         from .embeddings import create_embed_fn
 
+        embed_kwargs: dict[str, Any] = {"model": requested_model}
+        if resolved_provider in {"lmstudio", "ollama", "openai"}:
+            doc_inst, query_inst = default_text_instructions(requested_model)
+            if doc_inst:
+                embed_kwargs["task_type"] = doc_inst
+            if query_inst:
+                embed_kwargs["query_task_type"] = query_inst
+            if resolved_endpoint:
+                key = "host" if resolved_provider == "ollama" else "base_url"
+                embed_kwargs[key] = resolved_endpoint
         embed_fn = create_embed_fn(
-            request.embedding_provider,
-            model=requested_model,
+            resolved_provider,
+            **embed_kwargs,
         )
     build: HybridBuildResult | None = None
     if (
@@ -377,7 +417,7 @@ def search_scoped(
         project_id=scoped.project_id,
         index_root=index_root,
         semantic_requested=request.semantic,
-        embedding_provider=request.embedding_provider,
+        embedding_provider=resolved_provider,
         embedding_model=requested_model,
         build=build,
     )
