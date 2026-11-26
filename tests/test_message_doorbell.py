@@ -15,7 +15,14 @@ import pytest
 import afs.cli.friendly as friendly
 import afs.message_doorbell as doorbell
 from afs.cli import main as cli_main
-from afs.message_doorbell import addresses_host, hook_main, resolve_message_bus, ring_codex
+from afs.message_doorbell import (
+    addresses_host,
+    hook_main,
+    resolve_message_bus,
+    ring_agy,
+    ring_codex,
+    ring_recipients,
+)
 from afs.messages import MessageBus
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -565,3 +572,45 @@ def test_sessions_cli_lists_recorded_sessions(tmp_path, monkeypatch, capsys) -> 
 
     listed = json.loads(capsys.readouterr().out)
     assert [record["session_id"] for record in listed] == ["thread-x"]
+
+
+def test_ask_type_rings_and_agy_cursor_hooks_deliver(tmp_path, monkeypatch, capsys) -> None:
+    _wire(monkeypatch, tmp_path)
+    bus = _bus(tmp_path)
+    assert _hook(monkeypatch, capsys, "agy", _event("SessionStart", "agy-1")) is None
+    assert _hook(monkeypatch, capsys, "cursor", _event("SessionStart", "cur-1")) is None
+
+    bus.register_session("codex", "thread-ask")
+    ask_msg = bus.send("scawful", "ask", {"text": "check mobile chat"}, to="codex")
+    script, _args = _fake_codex(tmp_path)
+    assert ring_codex(bus, ask_msg, codex_bin=str(script))["status"] == "rang"
+
+    msg_agy = bus.send("scawful", "ask", {"text": "ping agy"}, to="agy")
+    emitted_agy = _hook(monkeypatch, capsys, "agy", _event("PostToolUse", "agy-1"))
+    assert emitted_agy is not None
+    assert msg_agy.id in emitted_agy["hookSpecificOutput"]["additionalContext"]
+
+    msg_cur = bus.send("scawful", "ask", {"text": "ping cursor"}, to="cursor")
+    emitted_cur = _hook(monkeypatch, capsys, "cursor", _event("UserPromptSubmit", "cur-1"))
+    assert emitted_cur is not None
+    assert msg_cur.id in emitted_cur["hookSpecificOutput"]["additionalContext"]
+
+
+def test_ring_agy_and_ring_recipients(tmp_path) -> None:
+    bus = _bus(tmp_path)
+    bus.register_session("agy", "conv-agy-99")
+    agy_bin = tmp_path / "bin" / "agy"
+    agy_bin.parent.mkdir(exist_ok=True)
+    agy_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    agy_bin.chmod(0o755)
+
+    msg = bus.send("scawful", "ask", {"text": "review viewer"}, to="agy")
+    res = ring_agy(bus, msg, agy_bin=str(agy_bin), spawn=False)
+    assert res["status"] == "rang"
+    assert res["thread"] == "conv-agy-99"
+    assert res["command"][:3] == [str(agy_bin), "-r", "conv-agy-99"]
+
+    broadcast = bus.send("scawful", "ask", {"text": "hello all"}, to="all")
+    primary, rings = ring_recipients(bus, broadcast, agy_bin=str(agy_bin), spawn_agy=False)
+    assert primary["status"] == "broadcast_queued"
+    assert rings[0]["host"] == "all"

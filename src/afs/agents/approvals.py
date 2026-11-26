@@ -52,26 +52,102 @@ ALWAYS_APPROVE = frozenset(
     }
 )
 
-# Actions that can be auto-approved for background agents
+# Actions that can be auto-approved for background agents.
+# Cross-agent coordination actions are included here so swarm/barista patterns
+# can write status, notes, and messages without blocking on a human checkpoint.
+# Outward-facing or destructive actions stay in ALWAYS_APPROVE.
 AUTO_APPROVE = frozenset(
     {
+        # --- local reads (never destructive) ---
         "file_read",
-        "file_write_scratchpad",
         "git_status",
         "git_diff",
         "git_log",
         "context_read",
+        # --- local writes (reversible, intra-session) ---
+        "file_write_scratchpad",
         "context_write",
         "run_tests",
         "run_build",
         "embedding_update",
+        # --- cross-agent coordination (low-stakes, internal bus) ---
+        "hivemind_message_send",
+        "task_create",
+        "task_update",
+        "memory_write",
+        "knowledge_write",
+        "scratchpad_note",
     }
 )
+
+
+def _normalize_action_list(raw: Any) -> set[str]:
+    if not isinstance(raw, list):
+        return set()
+    return {
+        item.strip()
+        for item in raw
+        if isinstance(item, str) and item.strip()
+    }
+
+
+def _read_approvals_toml(path: Path) -> tuple[set[str], set[str]]:
+    from ..toml_compat import tomllib
+
+    if not path.is_file():
+        return set(), set()
+    try:
+        with open(path, "rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, ValueError) as exc:
+        logger.warning("Ignoring unreadable approvals config %s: %s", path, exc)
+        return set(), set()
+    section = data.get("approvals")
+    if not isinstance(section, dict):
+        return set(), set()
+    return (
+        _normalize_action_list(section.get("auto_approve")),
+        _normalize_action_list(section.get("always_approve")),
+    )
+
+
+def load_approval_sets(
+    config_path: Path | None = None,
+    *,
+    start_dir: Path | None = None,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Return effective ``(auto_approve, always_approve)`` action sets.
+
+    Merges module defaults with optional ``[approvals]`` ``auto_approve`` and
+    ``always_approve`` lists from user ``config.toml`` and repo ``afs.toml``
+    (or ``AFS_CONFIG_PATH`` / explicit ``config_path``). ``always_approve``
+    always takes precedence over ``auto_approve``.
+    """
+    from ..config import resolve_runtime_config_path
+    from ..runtime_paths import default_config_root
+
+    configured_auto: set[str] = set()
+    configured_always: set[str] = set()
+
+    user_cfg = default_config_root() / "config.toml"
+    user_auto, user_always = _read_approvals_toml(user_cfg)
+    configured_auto.update(user_auto)
+    configured_always.update(user_always)
+
+    runtime_cfg = resolve_runtime_config_path(config_path, start_dir=start_dir)
+    if runtime_cfg is not None and runtime_cfg != user_cfg:
+        repo_auto, repo_always = _read_approvals_toml(runtime_cfg)
+        configured_auto.update(repo_auto)
+        configured_always.update(repo_always)
+
+    always = frozenset(ALWAYS_APPROVE | configured_always)
+    auto = frozenset((AUTO_APPROVE | configured_auto) - always)
+    return auto, always
 
 DEFAULT_TTL_HOURS = 72.0
 SYSTEM_RETENTION_DAYS = 30.0
 MAX_PAYLOAD_CHARS = 64 * 1024
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 PENDING = "pending"
 HUMAN_DECISIONS = ("approved", "rejected")
@@ -80,7 +156,27 @@ SCOPES = ("once", "standing")
 
 _DB_SUFFIXES = (".sqlite3", ".sqlite", ".db")
 
-_SCHEMA = """
+_AUDIT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS approval_audit_log (
+    audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    action TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    run_id TEXT NOT NULL DEFAULT '',
+    decision TEXT NOT NULL,
+    request_id TEXT NOT NULL DEFAULT '',
+    payload_sha256 TEXT NOT NULL DEFAULT '',
+    payload_preview TEXT NOT NULL DEFAULT ''
+);
+"""
+_AUDIT_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_approval_audit_recorded
+    ON approval_audit_log(recorded_at DESC);
+"""
+
+_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS approval_requests (
     request_id TEXT PRIMARY KEY,
     agent TEXT NOT NULL,
@@ -90,6 +186,7 @@ CREATE TABLE IF NOT EXISTS approval_requests (
     run_id TEXT NOT NULL DEFAULT '',
     scope TEXT NOT NULL DEFAULT 'standing',
     payload TEXT NOT NULL DEFAULT '',
+    payload_sha256 TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL DEFAULT '',
@@ -114,6 +211,8 @@ CREATE TABLE IF NOT EXISTS approval_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+{_AUDIT_TABLE_SQL}
+{_AUDIT_INDEX_SQL}
 """
 
 _COLUMNS = (
@@ -125,6 +224,7 @@ _COLUMNS = (
     "run_id",
     "scope",
     "payload",
+    "payload_sha256",
     "status",
     "created_at",
     "expires_at",
@@ -187,6 +287,22 @@ def _encode_payload(payload: Any) -> str:
     return text
 
 
+def _payload_sha256(encoded_payload: str) -> str:
+    """Return SHA-256 hex digest of an encoded payload, or empty string when blank."""
+    if not encoded_payload:
+        return ""
+    return hashlib.sha256(encoded_payload.encode("utf-8")).hexdigest()
+
+
+def _payload_preview(encoded_payload: str, limit: int = 512) -> str:
+    """Truncate encoded payload text for compact audit ledger inspection."""
+    if not encoded_payload:
+        return ""
+    if len(encoded_payload) <= limit:
+        return encoded_payload
+    return encoded_payload[: max(0, limit - 3)] + "..."
+
+
 def db_path_for(path: Path) -> Path:
     """Map a configured store path to the database file.
 
@@ -246,6 +362,7 @@ class ApprovalRequest:
     consumed_by_run: str = ""
     revoked_at: str = ""
     revoked_reason: str = ""
+    payload_sha256: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -266,6 +383,7 @@ class ApprovalRequest:
             "run_id": self.run_id,
             "scope": self.scope,
             "payload": self.payload,
+            "payload_sha256": self.payload_sha256,
             "expires_at": self.expires_at,
             "superseded_by": self.superseded_by,
             "consumed_at": self.consumed_at,
@@ -280,6 +398,7 @@ class ApprovalStateError(RuntimeError):
 
 
 def _row_to_request(row: sqlite3.Row) -> ApprovalRequest:
+    row_keys = row.keys()
     return ApprovalRequest(
         agent=row["agent"],
         action=row["action"],
@@ -304,6 +423,7 @@ def _row_to_request(row: sqlite3.Row) -> ApprovalRequest:
         consumed_by_run=row["consumed_by_run"],
         revoked_at=row["revoked_at"],
         revoked_reason=row["revoked_reason"],
+        payload_sha256=row["payload_sha256"] if "payload_sha256" in row_keys else "",
     )
 
 
@@ -355,6 +475,7 @@ def _legacy_row(item: Any, ttl: timedelta, now: datetime) -> dict[str, Any] | No
         "run_id": "",
         "scope": "standing",
         "payload": "",
+        "payload_sha256": "",
         "status": status,
         "created_at": created,
         "expires_at": expires_at,
@@ -410,12 +531,22 @@ class ApprovalGate:
         path: Path | None = None,
         *,
         ttl_hours: float = DEFAULT_TTL_HOURS,
+        config_path: Path | None = None,
+        start_dir: Path | None = None,
     ):
         self._path = db_path_for(path) if path is not None else default_db_path()
         self._legacy_json = self._path.with_suffix(".json")
         self._legacy_history = self._path.with_name(f"{self._path.stem}.history.jsonl")
         self._ttl = timedelta(hours=ttl_hours)
         self._schema_ready = False
+        try:
+            self._auto_approve, self._always_approve = load_approval_sets(
+                config_path, start_dir=start_dir
+            )
+        except (OSError, ValueError, RuntimeError) as exc:  # pragma: no cover - defensive fallback
+            logger.debug("Falling back to default approval sets: %s", exc)
+            self._auto_approve = AUTO_APPROVE
+            self._always_approve = ALWAYS_APPROVE
 
     @property
     def path(self) -> Path:
@@ -490,12 +621,30 @@ class ApprovalGate:
                 f"approval store at {self._path} has schema v{version}; "
                 f"this AFS understands v{SCHEMA_VERSION}"
             )
-        if version < SCHEMA_VERSION:
+        if version == 0:
             # One IMMEDIATE transaction (it waits on busy_timeout), so
             # processes opening a new store together create it exactly once.
             conn.executescript(
                 f"BEGIN IMMEDIATE;{_SCHEMA}PRAGMA user_version={SCHEMA_VERSION};COMMIT;"
             )
+        elif version < SCHEMA_VERSION:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                cols = {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(approval_requests)").fetchall()
+                }
+                if "payload_sha256" not in cols:
+                    conn.execute(
+                        "ALTER TABLE approval_requests ADD COLUMN payload_sha256 TEXT NOT NULL DEFAULT ''"
+                    )
+                conn.execute(_AUDIT_TABLE_SQL)
+                conn.execute(_AUDIT_INDEX_SQL)
+                conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
         # Switching to WAL needs an exclusive lock, and SQLite reports
         # "database is locked" at once instead of waiting on busy_timeout
         # when another process holds one, so a first open retries briefly.
@@ -712,6 +861,7 @@ class ApprovalGate:
             "schema_version": SCHEMA_VERSION,
             "pending": 0,
             "legacy_skipped": 0,
+            "audit_entries": 0,
         }
         if not self._store_exists():
             return report
@@ -723,8 +873,90 @@ class ApprovalGate:
                 int(self._meta(conn, f"{key}_skipped") or 0)
                 for key in ("legacy_active", "legacy_history")
             )
+            report["audit_entries"] = conn.execute(
+                "SELECT COUNT(*) FROM approval_audit_log"
+            ).fetchone()[0]
         report["exists"] = True
         return report
+
+    @staticmethod
+    def _record_audit(
+        conn: sqlite3.Connection,
+        *,
+        agent: str,
+        action: str,
+        detail: str,
+        source: str,
+        run_id: str,
+        decision: str,
+        request_id: str = "",
+        encoded_payload: str = "",
+        payload_hash: str = "",
+    ) -> None:
+        conn.execute(
+            "INSERT INTO approval_audit_log ("
+            "recorded_at, agent, action, detail, source, run_id, decision, "
+            "request_id, payload_sha256, payload_preview"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                _iso(_now()),
+                agent,
+                action,
+                detail,
+                source,
+                run_id,
+                decision,
+                request_id,
+                payload_hash,
+                _payload_preview(encoded_payload),
+            ),
+        )
+
+    def audit_log(
+        self,
+        *,
+        limit: int = 50,
+        agent: str = "",
+        action: str = "",
+        decision: str = "",
+    ) -> list[dict[str, Any]]:
+        """Return newest-first approval check audit entries."""
+        if limit <= 0 or not self._store_exists():
+            return []
+        sql = "SELECT * FROM approval_audit_log"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if agent:
+            clauses.append("agent=?")
+            params.append(agent)
+        if action:
+            clauses.append("action=?")
+            params.append(action)
+        if decision:
+            clauses.append("decision=?")
+            params.append(decision)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY audit_id DESC LIMIT ?"
+        params.append(int(limit))
+        with self._transaction() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        return [
+            {
+                "audit_id": row["audit_id"],
+                "recorded_at": row["recorded_at"],
+                "agent": row["agent"],
+                "action": row["action"],
+                "detail": row["detail"],
+                "source": row["source"],
+                "run_id": row["run_id"],
+                "decision": row["decision"],
+                "request_id": row["request_id"],
+                "payload_sha256": row["payload_sha256"],
+                "payload_preview": row["payload_preview"],
+            }
+            for row in rows
+        ]
 
     # -- requests ----------------------------------------------------------
 
@@ -745,9 +977,26 @@ class ApprovalGate:
         ``source`` names the requester (``mission:<name>``) so a newer request
         from it supersedes its older pending ones; ``run_id`` ties a ``once``
         approval to the run that consumed it. ``force`` gates an action even
-        when it is in :data:`AUTO_APPROVE`.
+        when it is in :data:`AUTO_APPROVE` (or configured ``[approvals].auto_approve``).
         """
-        if action in AUTO_APPROVE and not force:
+        encoded_payload = _encode_payload(payload)
+        payload_hash = _payload_sha256(encoded_payload)
+        if action in self._auto_approve and action not in self._always_approve and not force:
+            try:
+                with self._transaction() as conn:
+                    self._record_audit(
+                        conn,
+                        agent=agent,
+                        action=action,
+                        detail=detail,
+                        source=source,
+                        run_id=run_id,
+                        decision="auto_approved",
+                        encoded_payload=encoded_payload,
+                        payload_hash=payload_hash,
+                    )
+            except (OSError, sqlite3.Error, ValueError) as exc:  # pragma: no cover - read-only / unavailable store fallback
+                logger.debug("Skipping auto_approved audit log write: %s", exc)
             return True
         if scope not in SCOPES:
             raise ValueError(f"scope must be one of {SCOPES}, got {scope!r}")
@@ -761,7 +1010,38 @@ class ApprovalGate:
                 key,
             ).fetchall()
             for row in approved:
+                bound_hash = (
+                    row["payload_sha256"]
+                    if "payload_sha256" in row.keys() and row["payload_sha256"]
+                    else _payload_sha256(row["payload"])
+                )
+                if bound_hash != payload_hash:
+                    self._record_audit(
+                        conn,
+                        agent=agent,
+                        action=action,
+                        detail=detail,
+                        source=source,
+                        run_id=run_id,
+                        decision="payload_mismatch",
+                        request_id=row["request_id"],
+                        encoded_payload=encoded_payload,
+                        payload_hash=payload_hash,
+                    )
+                    continue
                 if row["scope"] != "once":
+                    self._record_audit(
+                        conn,
+                        agent=agent,
+                        action=action,
+                        detail=detail,
+                        source=source,
+                        run_id=run_id,
+                        decision="human_authorized",
+                        request_id=row["request_id"],
+                        encoded_payload=encoded_payload,
+                        payload_hash=payload_hash,
+                    )
                     return True
                 if not row["consumed_at"]:
                     conn.execute(
@@ -769,8 +1049,32 @@ class ApprovalGate:
                         "WHERE request_id=?",
                         (_iso(now), run_id, row["request_id"]),
                     )
+                    self._record_audit(
+                        conn,
+                        agent=agent,
+                        action=action,
+                        detail=detail,
+                        source=source,
+                        run_id=run_id,
+                        decision="human_authorized",
+                        request_id=row["request_id"],
+                        encoded_payload=encoded_payload,
+                        payload_hash=payload_hash,
+                    )
                     return True
                 if run_id and row["consumed_by_run"] == run_id:
+                    self._record_audit(
+                        conn,
+                        agent=agent,
+                        action=action,
+                        detail=detail,
+                        source=source,
+                        run_id=run_id,
+                        decision="human_authorized",
+                        request_id=row["request_id"],
+                        encoded_payload=encoded_payload,
+                        payload_hash=payload_hash,
+                    )
                     return True
             if run_id and conn.execute(
                 "SELECT 1 FROM approval_requests WHERE agent=? AND action=? AND detail=? "
@@ -801,7 +1105,8 @@ class ApprovalGate:
                 "source": source,
                 "run_id": run_id,
                 "scope": scope,
-                "payload": _encode_payload(payload),
+                "payload": encoded_payload,
+                "payload_sha256": payload_hash,
                 "status": PENDING,
                 "created_at": _iso(now),
                 "expires_at": _iso(now + self._ttl),

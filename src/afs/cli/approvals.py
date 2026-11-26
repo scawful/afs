@@ -218,6 +218,8 @@ def approvals_show_command(args: argparse.Namespace) -> int:
         rows.append(("revoked", f"{request.revoked_at}: {request.revoked_reason}"))
     if request.superseded_by:
         rows.append(("superseded by", request.superseded_by))
+    if request.payload_sha256:
+        rows.append(("payload sha256", request.payload_sha256))
     for label, value in rows:
         print(f"{label + ':':<14} {value}")
     if request.payload:
@@ -450,6 +452,51 @@ def approvals_history_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def approvals_audit_command(args: argparse.Namespace) -> int:
+    """Inspect recent approval check decisions from the audit log."""
+    gate = _load_gate(args)
+    entries = gate.audit_log(
+        limit=getattr(args, "limit", 50),
+        agent=getattr(args, "agent", None) or "",
+        action=getattr(args, "action", None) or "",
+        decision=getattr(args, "decision", None) or "",
+    )
+
+    if getattr(args, "json", False):
+        print(json.dumps(entries, indent=2))
+        return 0
+
+    if not entries:
+        print("No approval audit entries.")
+        return 0
+
+    agent_w = max(len("AGENT"), *(len(e["agent"]) for e in entries))
+    action_w = max(len("ACTION"), *(len(e["action"]) for e in entries))
+    decision_w = max(len("DECISION"), *(len(e["decision"]) for e in entries))
+    header = (
+        f"{'RECORDED AT':<19}  {'DECISION':<{decision_w}}  "
+        f"{'AGENT':<{agent_w}}  {'ACTION':<{action_w}}  {'REQUEST':<17}  SHA256"
+    )
+    print(header)
+    print("-" * len(header))
+    for entry in entries:
+        ts = entry["recorded_at"][:19]
+        req = entry["request_id"] or "-"
+        sha = entry["payload_sha256"][:12] if entry["payload_sha256"] else "-"
+        print(
+            f"{ts:<19}  {entry['decision']:<{decision_w}}  "
+            f"{entry['agent']:<{agent_w}}  {entry['action']:<{action_w}}  {req:<17}  {sha}"
+        )
+        if entry["detail"]:
+            print(f"  detail: {entry['detail']}")
+        if entry["payload_preview"]:
+            print(f"  payload: {entry['payload_preview']}")
+
+    print()
+    print(f"{len(entries)} audit entry/entries")
+    return 0
+
+
 _STORE_HELP = (
     "Path to the approvals store (.sqlite3). A legacy approvals.json path "
     "maps to the .sqlite3 file beside it."
@@ -555,3 +602,24 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     _add_store_arg(history_parser)
     history_parser.add_argument("--json", action="store_true", help="Output JSON.")
     history_parser.set_defaults(func=approvals_history_command)
+
+    # audit
+    audit_parser = approvals_sub.add_parser(
+        "audit", help="Inspect approval check audit ledger entries."
+    )
+    _add_store_arg(audit_parser)
+    audit_parser.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Maximum newest audit entries to return (default 50).",
+    )
+    audit_parser.add_argument("--agent", default="", help="Filter by agent name.")
+    audit_parser.add_argument("--action", default="", help="Filter by action name.")
+    audit_parser.add_argument(
+        "--decision",
+        default="",
+        help="Filter by decision (auto_approved, human_authorized, payload_mismatch).",
+    )
+    audit_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    audit_parser.set_defaults(func=approvals_audit_command)

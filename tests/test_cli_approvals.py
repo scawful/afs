@@ -11,6 +11,7 @@ from afs.agents.guardrails import ApprovalGate, ApprovalRequest
 from afs.cli import approvals as cli_approvals
 from afs.cli.approvals import (
     approvals_approve_command,
+    approvals_audit_command,
     approvals_clear_command,
     approvals_history_command,
     approvals_list_command,
@@ -679,3 +680,206 @@ def test_revoke_stops_a_standing_approval(tmp_path: Path, capsys, monkeypatch) -
         == 1
     )
     assert "already revoked" in capsys.readouterr().out
+
+
+def test_coordination_actions_auto_approved_and_toml_overrides(tmp_path: Path, monkeypatch) -> None:
+    from afs.agents.approvals import ALWAYS_APPROVE, AUTO_APPROVE
+
+    coordination = (
+        "hivemind_message_send",
+        "task_create",
+        "task_update",
+        "memory_write",
+        "knowledge_write",
+        "scratchpad_note",
+    )
+    for action in coordination:
+        assert action in AUTO_APPROVE
+
+    cfg_home = tmp_path / "cfg"
+    cfg_home.mkdir()
+    monkeypatch.setenv("AFS_CONFIG_HOME", str(cfg_home))
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "afs.toml").write_text(
+        '[approvals]\n'
+        'auto_approve = ["custom_note_sync", "git_push"]\n'
+        'always_approve = ["context_write"]\n',
+        encoding="utf-8",
+    )
+
+    gate = ApprovalGate(path=tmp_path / "approvals.sqlite3", start_dir=repo)
+    assert gate.check("agy", "hivemind_message_send", "ping") is True
+    assert gate.check("agy", "custom_note_sync", "sync") is True
+    # ALWAYS_APPROVE defaults and configured always_approve must stay gated.
+    assert "git_push" in ALWAYS_APPROVE
+    assert gate.check("agy", "git_push", "origin/main") is False
+    assert gate.check("agy", "context_write", "restricted") is False
+
+
+# ---------------------------------------------------------------------------
+# Guarded Commits audit ledger + Loopjacking use-time payload binding
+# ---------------------------------------------------------------------------
+
+
+def test_v1_to_v2_migration_preserves_requests_and_adds_audit(tmp_path: Path) -> None:
+    import sqlite3
+
+    db_path = tmp_path / "legacy_v1.sqlite3"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE approval_requests (
+            request_id TEXT PRIMARY KEY,
+            agent TEXT NOT NULL,
+            action TEXT NOT NULL,
+            detail TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            run_id TEXT NOT NULL DEFAULT '',
+            scope TEXT NOT NULL DEFAULT 'standing',
+            payload TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL DEFAULT '',
+            reviewed_by TEXT NOT NULL DEFAULT '',
+            reviewed_at TEXT NOT NULL DEFAULT '',
+            reviewed_via TEXT NOT NULL DEFAULT '',
+            reviewer_subject TEXT NOT NULL DEFAULT '',
+            identity_authenticated INTEGER NOT NULL DEFAULT 0,
+            human_confirmed INTEGER NOT NULL DEFAULT 0,
+            rationale TEXT NOT NULL DEFAULT '',
+            superseded_by TEXT NOT NULL DEFAULT '',
+            consumed_at TEXT NOT NULL DEFAULT '',
+            consumed_by_run TEXT NOT NULL DEFAULT '',
+            revoked_at TEXT NOT NULL DEFAULT '',
+            revoked_reason TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE approval_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO approval_requests (
+            request_id, agent, action, detail, payload, status, created_at, expires_at
+        ) VALUES (
+            'gate_v1row000001', 'scout', 'deploy', 'staging', '{"target":"staging"}',
+            'pending', '2026-11-25T00:00:00+00:00', '2099-01-01T00:00:00+00:00'
+        );
+        PRAGMA user_version = 1;
+        """
+    )
+    conn.close()
+
+    gate = ApprovalGate(path=db_path)
+    reqs = gate.pending_requests()
+    assert [r.request_id for r in reqs] == ["gate_v1row000001"]
+    assert reqs[0].payload == '{"target":"staging"}'
+    assert gate.health()["schema_version"] == 2
+    assert gate.audit_log() == []
+
+    check_conn = sqlite3.connect(db_path)
+    try:
+        assert check_conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        cols = {
+            row[1]
+            for row in check_conn.execute("PRAGMA table_info(approval_requests)").fetchall()
+        }
+        assert "payload_sha256" in cols
+        tbls = {
+            row[0]
+            for row in check_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "approval_audit_log" in tbls
+    finally:
+        check_conn.close()
+
+
+def test_auto_approve_appends_audit_log_with_payload_hash(tmp_path: Path) -> None:
+    db_path = tmp_path / "approvals.sqlite3"
+    gate = ApprovalGate(path=db_path)
+    payload = {"topic": "afs-barista-coordination", "text": "sync status"}
+
+    assert gate.check("agy", "hivemind_message_send", "send ping", payload=payload) is True
+
+    entries = gate.audit_log(decision="auto_approved")
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["agent"] == "agy"
+    assert entry["action"] == "hivemind_message_send"
+    assert entry["detail"] == "send ping"
+    assert len(entry["payload_sha256"]) == 64
+    assert "afs-barista-coordination" in entry["payload_preview"]
+    assert gate.health()["audit_entries"] == 1
+
+
+def test_loopjacking_payload_swap_rejected_and_logged(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "approvals.sqlite3"
+    gate = ApprovalGate(path=db_path)
+    payload_a = {"cmd": "deploy_staging", "env": "staging"}
+    payload_b = {"cmd": "drop_prod", "env": "production"}
+
+    assert gate.check("deployer", "deploy", "release", payload=payload_a) is False
+    req_a = gate.pending_requests()[0]
+    assert len(req_a.payload_sha256) == 64
+
+    monkeypatch.setattr(cli_approvals, "_TTY_READER", lambda prompt: "deployer:deploy")
+    assert (
+        approvals_approve_command(
+            _ns(db_path, agent=None, action=None, request_id=req_a.request_id, because="staging ok")
+        )
+        == 0
+    )
+
+    # Matching payload A succeeds and logs human_authorized.
+    assert gate.check("deployer", "deploy", "release", payload=payload_a) is True
+    # Swapping to payload B fails closed, logs payload_mismatch, and queues req_B.
+    assert gate.check("deployer", "deploy", "release", payload=payload_b) is False
+
+    mismatches = gate.audit_log(decision="payload_mismatch")
+    assert len(mismatches) == 1
+    assert mismatches[0]["request_id"] == req_a.request_id
+    assert "drop_prod" in mismatches[0]["payload_preview"]
+    assert mismatches[0]["payload_sha256"] != req_a.payload_sha256
+
+    authorized = gate.audit_log(decision="human_authorized")
+    assert len(authorized) == 1
+    assert authorized[0]["request_id"] == req_a.request_id
+    assert authorized[0]["payload_sha256"] == req_a.payload_sha256
+
+    pending = gate.pending_requests()
+    assert len(pending) == 1
+    assert pending[0].payload_sha256 == mismatches[0]["payload_sha256"]
+    assert "drop_prod" in pending[0].payload
+
+
+def test_audit_log_filters_and_cli_json(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "approvals.sqlite3"
+    gate = ApprovalGate(path=db_path)
+    assert gate.check("agy", "file_read", "a.py") is True
+    assert gate.check("codex", "context_read", "b.md", payload={"doc": "b.md"}) is True
+
+    assert len(gate.audit_log(agent="agy")) == 1
+    assert len(gate.audit_log(action="context_read")) == 1
+    assert gate.audit_log(decision="payload_mismatch") == []
+
+    exit_code = approvals_audit_command(
+        _ns(db_path, limit=10, agent="codex", action="", decision="auto_approved", json=True)
+    )
+    assert exit_code == 0
+    parsed = json.loads(capsys.readouterr().out)
+    assert len(parsed) == 1
+    assert parsed[0]["agent"] == "codex"
+    assert parsed[0]["action"] == "context_read"
+
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    register_parsers(parser.add_subparsers(dest="command"))
+    parsed_args = parser.parse_args(
+        ["approvals", "audit", "--limit", "5", "--decision", "auto_approved", "--json"]
+    )
+    assert parsed_args.approvals_command == "audit"
+    assert parsed_args.limit == 5
+    assert parsed_args.decision == "auto_approved"
+    assert parsed_args.json is True

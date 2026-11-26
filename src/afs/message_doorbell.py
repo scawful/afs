@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -39,11 +40,11 @@ from .scopes import resolve_scope
 
 logger = logging.getLogger(__name__)
 
-HOOK_HOSTS = ("claude", "codex")
+HOOK_HOSTS = ("claude", "codex", "agy", "cursor")
 HOOK_EVENTS = ("SessionStart", "PostToolUse", "UserPromptSubmit", "Stop")
-# Message types that may block a turn from ending or ring a Codex thread.
+# Message types that may block a turn from ending or ring a live agent thread.
 # Everything else (status, finding, ack, fyi, ...) waits for a digest.
-URGENT_TYPES = frozenset({"request", "blocker"})
+URGENT_TYPES = frozenset({"request", "blocker", "ask"})
 MAX_MESSAGES_PER_DELIVERY = 10
 MAX_STOP_BLOCKS_PER_TURN = 1
 MESSAGE_BODY_CHARS = 1200
@@ -330,6 +331,152 @@ def ring_codex(
         "returncode": completed.returncode,
         "stderr": completed.stderr.strip()[-500:],
     }
+
+
+def _default_agy_binary(explicit: str | None = None) -> str | None:
+    if explicit:
+        return explicit
+    on_path = shutil.which("agy")
+    if on_path:
+        return on_path
+    candidates = [
+        Path.home() / "src" / "config" / "dotfiles" / "bin" / "agy",
+        Path.home() / ".gemini" / "antigravity" / "bin" / "agy",
+        Path("/opt/homebrew/bin/agy"),
+        Path("/usr/local/bin/agy"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def _latest_agy_conversation_id(summary_db: Path | None = None) -> str | None:
+    db_path = (
+        summary_db
+        if summary_db is not None
+        else Path.home() / ".gemini" / "antigravity" / "conversation_summaries.db"
+    )
+    if not db_path.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.5)
+        try:
+            row = conn.execute(
+                """
+                SELECT conversation_id
+                FROM conversation_summaries
+                WHERE COALESCE(parent_conversation_id, '') = ''
+                  AND COALESCE(nesting_depth, 0) = 0
+                  AND COALESCE(killed, 0) = 0
+                ORDER BY last_modified_time DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            return str(row[0]) if row and row[0] else None
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return None
+
+
+def ring_agy(
+    bus: MessageBus,
+    message: Message,
+    *,
+    agy_bin: str | None = None,
+    summary_db: Path | None = None,
+    spawn: bool = True,
+) -> dict[str, Any]:
+    """Wake an active agy conversation with *message* via detached ``agy -r``."""
+    if message.msg_type not in URGENT_TYPES:
+        return {
+            "status": "skipped",
+            "host": "agy",
+            "reason": f"message type {message.msg_type} does not ring (request, blocker, or ask only)",
+        }
+    if not (addresses_host(message.to, "agy") or addresses_host(message.to, "antigravity")):
+        return {"status": "skipped", "host": "agy", "reason": "message is not addressed to agy"}
+
+    sessions = bus.live_sessions("agy")
+    thread = str(sessions[0]["session_id"]) if sessions else (_latest_agy_conversation_id(summary_db) or "")
+    if not thread:
+        return {"status": "skipped", "host": "agy", "reason": "no active agy conversation recorded"}
+
+    binary = _default_agy_binary(agy_bin)
+    if not binary:
+        return {"status": "skipped", "host": "agy", "reason": "agy CLI not found on PATH", "thread": thread}
+
+    prompt = (
+        f"AFS message {message.id} from {message.from_agent}: {_first_line(message.payload)}\n"
+        f"(Read & ack with: afs messages list --to agy)"
+    )
+    command = [binary, "-r", thread, "-p", prompt, "--mode", "auto"]
+    if not spawn:
+        return {"status": "rang", "host": "agy", "thread": thread, "command": command}
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return {"status": "failed", "host": "agy", "thread": thread, "error": str(exc)}
+    return {"status": "rang", "host": "agy", "thread": thread, "pid": proc.pid}
+
+
+def ring_recipients(
+    bus: MessageBus,
+    message: Message,
+    *,
+    codex_bin: str | None = None,
+    agy_bin: str | None = None,
+    resume: bool = False,
+    spawn_agy: bool = True,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Ring targeted agent harnesses and return (primary_ring, all_rings)."""
+    primary_codex = ring_codex(bus, message, codex_bin=codex_bin, resume=resume)
+    rings: list[dict[str, Any]] = []
+
+    if addresses_host(message.to, "codex"):
+        rings.append({"host": "codex", **primary_codex})
+    if addresses_host(message.to, "agy") or addresses_host(message.to, "antigravity"):
+        rings.append(ring_agy(bus, message, agy_bin=agy_bin, spawn=spawn_agy))
+    for hook_host in ("claude", "cursor"):
+        if addresses_host(message.to, hook_host):
+            live_count = len(bus.live_sessions(hook_host))
+            rings.append(
+                {
+                    "host": hook_host,
+                    "status": "queued_for_hook",
+                    "live_sessions": live_count,
+                    "reason": f"queued for next {hook_host} hook digest ({live_count} recorded session(s))",
+                }
+            )
+
+    is_broadcast = (normalize_agent_name(message.to or "") in BROADCAST_RECIPIENTS) or (
+        (message.to or "").strip().lower() in BROADCAST_RECIPIENTS
+    )
+    if is_broadcast and not rings:
+        counts = {host: len(bus.live_sessions(host)) for host in HOOK_HOSTS}
+        rings.append(
+            {
+                "host": "all",
+                "status": "broadcast_queued",
+                "sessions": counts,
+                "reason": "broadcast saved; delivered via next hook/list check across agents",
+            }
+        )
+
+    primary = primary_codex
+    if primary_codex.get("status") == "skipped":
+        for candidate in rings:
+            if candidate.get("status") != "skipped":
+                primary = candidate
+                break
+    return primary, rings
 
 
 def _first_line(payload: Any) -> str:
