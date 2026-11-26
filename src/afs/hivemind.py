@@ -679,7 +679,7 @@ class HivemindBus:
 
     def cleanup_stats(self, *, max_age_hours: int = 24, dry_run: bool = False) -> dict[str, Any]:
         """Cleanup with detailed statistics. Returns removal breakdown."""
-        empty = {
+        empty: dict[str, Any] = {
             "removed_count": 0,
             "remaining_count": 0,
             "expired_count": 0,

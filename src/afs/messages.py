@@ -135,7 +135,7 @@ class MessageBus(HivemindBus):
             return None
         return message
 
-    def read(
+    def read(  # type: ignore[override]  # Scoped view intentionally omits scope override kwargs.
         self,
         *,
         agent_name: str | None = None,

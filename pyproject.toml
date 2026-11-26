@@ -123,8 +123,6 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/agents/mission_runner.py" = ["BLE001"]
 "src/afs/agents/supervisor.py" = ["BLE001", "S110"]
 "src/afs/agents/tether_bridge.py" = ["BLE001"]
-"src/afs/benchmarks/quality.py" = ["BLE001"]
-"src/afs/benchmarks/resources.py" = ["BLE001"]
 "src/afs/bundler.py" = ["BLE001", "S112"]
 "src/afs/calibration.py" = ["BLE001", "S110"]
 "src/afs/cli/_help.py" = ["BLE001"]
@@ -136,8 +134,6 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/cli/sources.py" = ["BLE001"]
 "src/afs/cli/watch.py" = ["BLE001", "S110", "S112"]
 "src/afs/codebase_index.py" = ["BLE001"]
-"src/afs/deployment/cli.py" = ["BLE001", "S110"]
-"src/afs/deployment/validator.py" = ["BLE001"]
 "src/afs/gateway/backends.py" = ["BLE001"]
 "src/afs/generators/__init__.py" = ["BLE001", "S110"]
 "src/afs/generators/cot/generator.py" = ["BLE001"]
@@ -154,11 +150,6 @@ ignore = ["E501", "B008", "C901"]
 "src/afs/manager_gui.py" = ["BLE001"]
 "src/afs/missions.py" = ["BLE001", "S110"]
 "src/afs/next_action.py" = ["BLE001"]
-"src/afs/notifications/desktop.py" = ["BLE001"]
-"src/afs/notifications/discord.py" = ["BLE001"]
-"src/afs/notifications/email.py" = ["BLE001"]
-"src/afs/notifications/slack.py" = ["BLE001"]
-"src/afs/registry/cli.py" = ["BLE001"]
 "src/afs/services/manager.py" = ["BLE001", "S110"]
 "src/afs/workspace_sync.py" = ["BLE001"]
 "tests/test_agent_jobs.py" = ["BLE001"]
@@ -246,7 +237,6 @@ module = [
     "afs.cli.training",
     "afs.cli.verify",
     "afs.codebase_explorer",
-    "afs.config_loader",
     "afs.embeddings",
     "afs.event_log",
     "afs.extensions",

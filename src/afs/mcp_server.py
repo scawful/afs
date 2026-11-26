@@ -31,11 +31,7 @@ from .codebase_explorer import (
     render_codebase_summary,
 )
 from .config import load_config_model
-from .context_index import (
-    DEFAULT_MAX_CONTENT_CHARS,
-    DEFAULT_MAX_FILE_SIZE_BYTES,
-    ContextSQLiteIndex,
-)
+from .context_index import ContextSQLiteIndex
 from .context_layout import LAYOUT_VERSION, detect_layout_version
 from .context_pack import build_context_pack, render_context_pack
 from .context_paths import load_context_metadata
@@ -44,7 +40,7 @@ from .discovery import discover_contexts
 from .event_log import read_agent_events
 from .file_io import read_text_snapshot, write_text_checked
 from .manager import AFSManager
-from .mcp.catalog import DEFAULT_MCP_TOOL_CATALOG, FROZEN_SLIM_MCP_TOOLS
+from .mcp.catalog import DEFAULT_MCP_TOOL_CATALOG
 from .mcp.registry import (
     CORE_PROMPT_NAMES as _CORE_PROMPT_NAMES_NEW,
 )
@@ -78,7 +74,7 @@ from .mcp.transport import (
     write_message as _write_message_fn,
 )
 from .models import ContextCategory, MountType
-from .operator_digests import KIND_CHOICES, digest_operator_output
+from .operator_digests import digest_operator_output
 from .path_safety import (
     assert_no_linklike_components,
     is_linklike,

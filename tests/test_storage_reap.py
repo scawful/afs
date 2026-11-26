@@ -6,7 +6,6 @@ from pathlib import Path
 from afs.history import reap_scratchpad, reap_storage
 from afs.schema import HistoryConfig, ScratchpadConfig
 
-
 TODAY = date(2026, 11, 14)
 
 

@@ -832,6 +832,12 @@ def default_memory_export_routes() -> list[MemoryExportRoute]:
 
 @dataclass
 class CognitiveConfig:
+    """Legacy pre-frontier cognitive telemetry toggles.
+
+    Retained with opt-in ``False`` defaults solely for backwards compatibility
+    with older ``emotions.json`` / ``metacognition.json`` workflows.
+    """
+
     enabled: bool = False
     record_emotions: bool = False
     record_metacognition: bool = False

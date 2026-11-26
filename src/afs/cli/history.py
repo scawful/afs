@@ -82,10 +82,10 @@ def history_reap_command(args: argparse.Namespace) -> int:
                 label = "skip" if entry.skipped else "history"
                 detail = f" ({entry.skipped})" if entry.skipped else ""
                 print(f"  [{label}] {entry.path}{detail}")
-        for entry in report.scratchpad:
-            label = "skip" if entry.skipped else entry.kind
-            detail = f" ({entry.skipped})" if entry.skipped else ""
-            print(f"  [{label}] {entry.path}{detail}")
+        for scratch_entry in report.scratchpad:
+            label = "skip" if scratch_entry.skipped else scratch_entry.kind
+            detail = f" ({scratch_entry.skipped})" if scratch_entry.skipped else ""
+            print(f"  [{label}] {scratch_entry.path}{detail}")
     skipped = False
     if report.history is not None:
         skipped = any(entry.skipped for entry in report.history.entries)

@@ -164,6 +164,13 @@ def _confirm_outcome_score(
 
 def calibration_score_command(args: argparse.Namespace) -> int:
     context_path, config = _context_path(args)
+    if args.outcome not in VALID_OUTCOMES:
+        expected = ", ".join(VALID_OUTCOMES)
+        print(
+            f"invalid outcome {args.outcome!r}; expected one of: {expected}",
+            file=sys.stderr,
+        )
+        return 2
     authorization = _confirm_outcome_score(
         context_path,
         args.ref,

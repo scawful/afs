@@ -9,7 +9,6 @@ import pytest
 from afs.agent_scope import allowed_tools, assert_tool_allowed, is_tool_allowed
 from afs.manager import AFSManager
 from afs.mcp_server import (
-    DEFAULT_MCP_TOOL_CATALOG,
     MCP_TOOL_CATALOG_ENV,
     _handle_request,
     build_mcp_registry,
