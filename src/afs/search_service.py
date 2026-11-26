@@ -362,13 +362,13 @@ def search_scoped(
         from .embeddings import create_embed_fn
 
         embed_kwargs: dict[str, Any] = {"model": requested_model}
-        if resolved_provider in {"lmstudio", "ollama", "openai"}:
+        if resolved_provider in {"lmstudio", "ollama", "openai", "mlx", "fastembed"}:
             doc_inst, query_inst = default_text_instructions(requested_model)
             if doc_inst:
                 embed_kwargs["task_type"] = doc_inst
             if query_inst:
                 embed_kwargs["query_task_type"] = query_inst
-            if resolved_endpoint:
+            if resolved_endpoint and resolved_provider in {"lmstudio", "ollama", "openai"}:
                 key = "host" if resolved_provider == "ollama" else "base_url"
                 embed_kwargs[key] = resolved_endpoint
         embed_fn = create_embed_fn(

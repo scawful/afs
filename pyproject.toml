@@ -35,6 +35,9 @@ dependencies = [
 embeddings = [
     "httpx>=0.24.0",
 ]
+mlx = [
+    "mlx-embeddings>=0.1.0",
+]
 gemini = [
     "google-genai>=1.0.0",
 ]

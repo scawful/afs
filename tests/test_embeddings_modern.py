@@ -322,3 +322,90 @@ def test_search_scoped_auto_provider_and_cli_probe(
     assert result.embedding_provider == "lmstudio"
     assert result.embedding_model == "text-embedding-nomic-embed-text-v1.5"
     assert result.response.semantic_status == "ready"
+
+
+def test_mlx_backend_local_resolution_batching_and_instructions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    local_dir = tmp_path / "Qwen3-Embedding-0.6B-4bit-DWQ"
+    local_dir.mkdir()
+    (local_dir / "config.json").write_text('{"model_type": "qwen3"}', encoding="utf-8")
+    monkeypatch.setenv("AFS_MLX_EMBEDDINGS_DIR", str(tmp_path))
+
+    load_calls: list[str] = []
+    generate_calls: list[dict] = []
+
+    class _FakeArray:
+        def __init__(self, rows: list[list[float]]) -> None:
+            self._rows = rows
+
+        def tolist(self) -> list[list[float]]:
+            return self._rows
+
+    def fake_load(ref: str):
+        load_calls.append(ref)
+        return ("fake-model", "fake-tok")
+
+    def fake_generate(model, tok, *, texts, max_length=1024):
+        generate_calls.append({"texts": list(texts), "max_length": max_length})
+        return SimpleNamespace(
+            text_embeds=_FakeArray([[float(idx + 1), 0.25] for idx in range(len(texts))])
+        )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "mlx_embeddings",
+        SimpleNamespace(load=fake_load, generate=fake_generate),
+    )
+
+    doc_embed = create_embed_fn("mlx", model="mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ")
+    assert load_calls == [str(local_dir)]
+    assert getattr(doc_embed, "_afs_embedding_query_instruction", "") == QWEN3_QUERY_INSTRUCTION
+    assert doc_embed("   ") == []
+    assert doc_embed("doc alpha") == [1.0, 0.25]
+    assert embed_texts(doc_embed, ["first", "second"], batch_size=2) == [
+        [1.0, 0.25],
+        [2.0, 0.25],
+    ]
+    assert generate_calls[-1] == {"texts": ["first", "second"], "max_length": 1024}
+
+    query_embed = create_embed_fn(
+        "mlx",
+        model="mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
+        task_type=QWEN3_QUERY_INSTRUCTION,
+    )
+    assert query_embed("lookup") == [1.0, 0.25]
+    assert generate_calls[-1]["texts"] == [f"{QWEN3_QUERY_INSTRUCTION} lookup"]
+
+
+def test_probe_embedding_providers_discovers_local_mlx_and_preserves_ollama_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import platform
+    import sys
+
+    local_dir = tmp_path / "Qwen3-Embedding-0.6B-4bit-DWQ"
+    local_dir.mkdir()
+    (local_dir / "config.json").write_text('{"model_type": "qwen3"}', encoding="utf-8")
+    monkeypatch.setenv("AFS_MLX_EMBEDDINGS_DIR", str(tmp_path))
+    monkeypatch.delenv("AFS_MLX_EMBEDDING_MODEL", raising=False)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(platform, "machine", lambda: "arm64")
+    monkeypatch.setattr("afs.embeddings._module_available", lambda name: name in {"mlx_embeddings", "mlx"})
+
+    def fake_get(url: str, timeout: float = 1.5):
+        if "11434" in url:
+            return _FakeHttpResponse({"models": [{"name": "llama3.2:latest"}]})
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    probes = probe_embedding_providers(timeout=0.5)
+    by_name = {probe.provider: probe for probe in probes}
+
+    assert by_name["ollama"].available is False
+    assert "11434 reachable" in by_name["ollama"].reason
+    assert by_name["mlx"].available is True
+    assert by_name["mlx"].recommended_model == str(local_dir)
+    assert by_name["mlx"].detected_models == (str(local_dir),)

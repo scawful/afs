@@ -124,13 +124,13 @@ def _resolve_retrieval_engine(
         embed_fn = None
         if needs_semantic and provider != "none":
             embed_kwargs: dict[str, Any] = {"model": resolved_model}
-            if provider in {"lmstudio", "ollama", "openai"}:
+            if provider in {"lmstudio", "ollama", "openai", "mlx", "fastembed"}:
                 doc_inst, query_inst = default_text_instructions(resolved_model)
                 if doc_inst:
                     embed_kwargs["task_type"] = doc_inst
                 if query_inst:
                     embed_kwargs["query_task_type"] = query_inst
-                if endpoint:
+                if endpoint and provider in {"lmstudio", "ollama", "openai"}:
                     embed_kwargs["host" if provider == "ollama" else "base_url"] = endpoint
             embed_fn = create_embed_fn(provider, **embed_kwargs)
         scoped = build_scoped_sources(

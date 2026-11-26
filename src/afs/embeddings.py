@@ -42,7 +42,8 @@ STANDARD_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_LMSTUDIO_BASE_URL = "http://localhost:1234/v1"
 DEFAULT_LMSTUDIO_MODEL = "text-embedding-nomic-embed-text-v1.5"
 DEFAULT_FASTEMBED_MODEL = "BAAI/bge-small-en-v1.5"
-DEFAULT_MLX_EMBEDDING_MODEL = "mlx-community/all-MiniLM-L6-v2-4bit"
+DEFAULT_MLX_EMBEDDING_MODEL = "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ"
+DEFAULT_MLX_EMBEDDINGS_DIR = "~/models/mlx/embeddings"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 NOMIC_DOCUMENT_INSTRUCTION = "search_document:"
 NOMIC_QUERY_INSTRUCTION = "search_query:"
@@ -115,6 +116,17 @@ EMBEDDING_MODEL_PROFILES: dict[str, EmbeddingModelProfile] = {
         query_instruction=QWEN3_QUERY_INSTRUCTION,
         local=True,
         notes="Top local retrieval accuracy with 32K context and MRL across LM Studio / Ollama / MLX",
+    ),
+    "qwen3-embedding-mlx": EmbeddingModelProfile(
+        key="qwen3-embedding-mlx",
+        model=DEFAULT_MLX_EMBEDDING_MODEL,
+        provider="mlx",
+        context_tokens=32768,
+        dimensions=(1024,),
+        document_instruction="",
+        query_instruction=QWEN3_QUERY_INSTRUCTION,
+        local=True,
+        notes="Apple Silicon native 4-bit MLX Qwen3 embeddings (zero-daemon via mlx-embeddings)",
     ),
     "embeddinggemma": EmbeddingModelProfile(
         key="embeddinggemma",
@@ -347,7 +359,7 @@ def create_embed_fn(provider: str, **kwargs) -> Callable[[str], list[float]]:
     )
     model = str(kwargs.get("model") or default_model)
     if (
-        normalized in {"ollama", "openai", "lmstudio"}
+        normalized in {"ollama", "openai", "lmstudio", "mlx", "fastembed"}
         and "task_type" not in kwargs
         and query_task_type is None
         and model
@@ -628,36 +640,93 @@ def create_fastembed_embed_fn(
     return embed
 
 
+def _mlx_embeddings_dir() -> Path:
+    raw = os.getenv("AFS_MLX_EMBEDDINGS_DIR", "").strip() or DEFAULT_MLX_EMBEDDINGS_DIR
+    return Path(raw).expanduser()
+
+
+def _discover_local_mlx_embedding_models() -> list[str]:
+    """Return local MLX embedding model directories containing config.json, ranked best-first."""
+    root = _mlx_embeddings_dir()
+    if not root.is_dir():
+        return []
+    candidates: list[str] = []
+    try:
+        children = sorted(root.iterdir(), key=lambda path: path.name)
+    except OSError:
+        return []
+    for child in children:
+        if child.is_dir() and (child / "config.json").is_file():
+            candidates.append(str(child))
+    ranked = _rank_embedding_models(candidates)
+    remainder = [item for item in candidates if item not in ranked]
+    return ranked + remainder
+
+
+def _resolve_mlx_model_ref(model: str) -> str:
+    """Resolve an MLX model reference to a local directory under ``~/models/mlx/embeddings`` when present."""
+    raw = (model or "").strip() or DEFAULT_MLX_EMBEDDING_MODEL
+    expanded = Path(raw).expanduser()
+    if expanded.is_dir() and (expanded / "config.json").is_file():
+        return str(expanded)
+    root = _mlx_embeddings_dir()
+    short_name = raw.split("/")[-1]
+    for candidate in (root / raw, root / short_name):
+        if candidate.is_dir() and (candidate / "config.json").is_file():
+            return str(candidate)
+    return raw
+
+
 def create_mlx_embed_fn(
     model: str = DEFAULT_MLX_EMBEDDING_MODEL,
     *,
     task_type: str = "",
-    max_length: int = 512,
+    max_length: int = 1024,
 ) -> Callable[[str], list[float]]:
     """Create an Apple Silicon native MLX embeddings backend via ``mlx-embeddings``."""
+    if max_length <= 0:
+        raise ValueError("max_length must be positive")
     try:
         import mlx_embeddings  # type: ignore[import-not-found]
     except ImportError as exc:
         raise RuntimeError("mlx-embeddings not installed; pip install mlx-embeddings") from exc
 
-    mlx_model, tokenizer = mlx_embeddings.load(model)
+    try:
+        import mlx.core as mx  # type: ignore[import-not-found]
+    except ImportError:
+        mx = None
+
+    resolved_model = _resolve_mlx_model_ref(model)
+    mlx_model, tokenizer = mlx_embeddings.load(resolved_model)
 
     def _extract_vectors(output: Any) -> list[list[float]]:
         embeds = getattr(output, "text_embeds", None)
         if embeds is None and isinstance(output, dict):
-            embeds = output.get("text_embeds") or output.get("embeddings")
+            embeds = output.get("text_embeds")
+            if embeds is None:
+                embeds = output.get("embeddings")
         if embeds is None:
             embeds = output
+        if mx is not None and hasattr(embeds, "astype") and hasattr(embeds, "dtype"):
+            try:
+                embeds = embeds.astype(mx.float32)
+                mx.eval(embeds)
+            except (TypeError, ValueError, RuntimeError):
+                pass
         if hasattr(embeds, "tolist"):
             raw_list = embeds.tolist()
         else:
             raw_list = list(embeds)
-        if raw_list and not isinstance(raw_list[0], (list, tuple)):
+        if not raw_list:
+            return []
+        if not isinstance(raw_list[0], (list, tuple)):
             return [[float(v) for v in raw_list]]
         return [[float(v) for v in row] for row in raw_list]
 
     def embed(text: str) -> list[float]:
         prepared = _apply_text_instruction(task_type, text)
+        if not prepared.strip():
+            return []
         output = mlx_embeddings.generate(
             mlx_model,
             tokenizer,
@@ -1093,6 +1162,7 @@ def _probe_ollama(*, timeout: float) -> EmbeddingProviderProbe:
     ]
     checked: list[str] = []
     last_reason = "endpoint unreachable"
+    reachable_reason: str | None = None
     for host in hosts:
         if not host or host in checked:
             continue
@@ -1121,13 +1191,13 @@ def _probe_ollama(*, timeout: float) -> EmbeddingProviderProbe:
                 detected_models=tuple(embed_models),
                 reason="ready (Ollama local daemon)",
             )
-        last_reason = f"{host} reachable but no embedding models pulled (try: ollama pull embeddinggemma)"
+        reachable_reason = f"{host} reachable but no embedding models pulled (try: ollama pull embeddinggemma)"
     return EmbeddingProviderProbe(
         provider="ollama",
         available=False,
         local=True,
         endpoint=checked[0] if checked else STANDARD_OLLAMA_HOST,
-        reason=last_reason,
+        reason=reachable_reason or last_reason,
     )
 
 
@@ -1140,15 +1210,29 @@ def probe_embedding_providers(*, timeout: float = 1.5) -> list[EmbeddingProvider
     is_apple_silicon = sys.platform == "darwin" and platform.machine() == "arm64"
     has_mlx_embed = _module_available("mlx_embeddings")
     has_mlx = _module_available("mlx")
+    local_mlx_models = _discover_local_mlx_embedding_models()
+    env_mlx_model = os.getenv("AFS_MLX_EMBEDDING_MODEL", "").strip()
     if has_mlx_embed and is_apple_silicon:
+        if env_mlx_model:
+            recommended_mlx = _resolve_mlx_model_ref(env_mlx_model)
+            detected_mlx = tuple(dict.fromkeys([recommended_mlx, *local_mlx_models]))
+            mlx_reason = "Apple Silicon MLX embeddings ready (AFS_MLX_EMBEDDING_MODEL)"
+        elif local_mlx_models:
+            recommended_mlx = local_mlx_models[0]
+            detected_mlx = tuple(local_mlx_models)
+            mlx_reason = "Apple Silicon MLX embeddings ready (local weights on disk)"
+        else:
+            recommended_mlx = DEFAULT_MLX_EMBEDDING_MODEL
+            detected_mlx = (DEFAULT_MLX_EMBEDDING_MODEL,)
+            mlx_reason = "Apple Silicon MLX embeddings installed (downloads on first use)"
         probes.append(
             EmbeddingProviderProbe(
                 provider="mlx",
                 available=True,
                 local=True,
-                recommended_model=DEFAULT_MLX_EMBEDDING_MODEL,
-                detected_models=(DEFAULT_MLX_EMBEDDING_MODEL,),
-                reason="Apple Silicon MLX embeddings installed",
+                recommended_model=recommended_mlx,
+                detected_models=detected_mlx,
+                reason=mlx_reason,
             )
         )
     else:
@@ -1162,7 +1246,8 @@ def probe_embedding_providers(*, timeout: float = 1.5) -> list[EmbeddingProvider
                 provider="mlx",
                 available=False,
                 local=True,
-                recommended_model=DEFAULT_MLX_EMBEDDING_MODEL,
+                recommended_model=local_mlx_models[0] if local_mlx_models else DEFAULT_MLX_EMBEDDING_MODEL,
+                detected_models=tuple(local_mlx_models),
                 reason=reason,
             )
         )
@@ -2431,7 +2516,7 @@ register_embedding_backend(
 )
 register_embedding_backend(
     "mlx",
-    lambda model=DEFAULT_MLX_EMBEDDING_MODEL, task_type="", max_length=512, **_: (
+    lambda model=DEFAULT_MLX_EMBEDDING_MODEL, task_type="", max_length=1024, **_: (
         create_mlx_embed_fn(
             model=model,
             task_type=task_type,

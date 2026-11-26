@@ -308,7 +308,7 @@ def _resolve_embed_fn(args: argparse.Namespace, *, mode: str = "index"):
         model = provider_defaults[args.provider]
     kwargs: dict[str, object] = {"model": model}
 
-    if args.provider in {"ollama", "openai", "lmstudio"}:
+    if args.provider in {"ollama", "openai", "lmstudio", "mlx", "fastembed"}:
         default_document, default_query = default_text_instructions(model)
         document_instruction = getattr(args, "document_instruction", None)
         query_instruction = getattr(args, "query_instruction", None)
