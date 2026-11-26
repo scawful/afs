@@ -36,6 +36,7 @@ from . import (
     core,
     doctor,
     embeddings,
+    evals,
     events,
     execution,
     friendly,
@@ -267,6 +268,9 @@ def build_parser(argv: Iterable[str] | None = None) -> argparse.ArgumentParser:
 
     # Register embedding commands
     embeddings.register_parsers(subparsers)
+
+    # Register agentic evaluation commands
+    evals.register_parsers(subparsers)
 
     # Register Gemini/Antigravity integration commands
     gemini.register_parsers(subparsers)
